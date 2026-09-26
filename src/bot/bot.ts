@@ -571,6 +571,8 @@ const CLIP_SEVERITY = 250;
 const CLIP_SEVERITY_BY_KIND: Record<string, number> = { "self-freeze": 180, "chased-into-freeze": 180, "goto-into-freeze": 180 };
 const DEFAULT_CLIP_DIR = "runs/clips";
 
+const CROSS_CLIP_COOLDOWN_TICKS = 60 * 50;
+
 const CLIP_KEEP = 24;
 const CLIP_KEEP_PER_KIND = 16;
 
@@ -825,6 +827,8 @@ export class DdnetBot {
   private readonly clipRing = new RingRecorder(CLIP_SECONDS * SNAPSHOTS_PER_SECOND);
   private clipMapSet = false;
   private lastClipTick = -Infinity;
+
+  private lastCrossClipTick = -Infinity;
   private framesSinceScan = 0;
   private lastKillTick = -Infinity;
   private lastEmoteMs = 0;
@@ -1248,6 +1252,7 @@ export class DdnetBot {
     this.dullSinceTick = -1;
     this.idleSinceTick = -1;
     this.lastClipTick = -Infinity;
+    this.lastCrossClipTick = -Infinity;
     this.path = null;
     if (this.trek !== null) this.endTrek();
     this.frozenSinceById.clear();
@@ -1935,6 +1940,7 @@ export class DdnetBot {
     for (const note of nav.takeNotes()) {
       if (following) this.log(`goto: ${note}`);
       else this.emit("event", `goto: ${note}`);
+      if (/; trying again from the spawn$|^no way through /.test(note)) this.clipCrossFail(note);
     }
 
     if (nav.takeKill()) {
@@ -3097,6 +3103,15 @@ export class DdnetBot {
       this.framesSinceScan = 0;
       this.maybeClip(self.id);
     }
+  }
+
+  private clipCrossFail(note: string): void {
+    if (this.ownId < 0 || this.world.tick - this.lastCrossClipTick < CROSS_CLIP_COOLDOWN_TICKS) return;
+    const rec = this.clipRing.toRecording({ map: this.mapName(), controller: this.brainName(), selfId: this.ownId });
+    if (rec === null || rec.frames.length < 50) return;
+    this.lastCrossClipTick = this.world.tick;
+    const file = this.writeClip(rec, `cross-fail-${this.world.tick}`);
+    if (file !== null) this.emit("event", `clip saved: cross-fail (${note}) -> ${file}`);
   }
 
   private maybeClip(selfId: number): void {
