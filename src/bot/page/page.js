@@ -1,6 +1,24 @@
 const STREAM=(()=>{try{return location.pathname==='/stream'||/[?&]view=stream(&|$)/.test(location.search)}catch{return false}})();
 if(STREAM)document.documentElement.classList.add('stream');
 
+const NICKS=(()=>{if(!STREAM)return '';try{const v=new URLSearchParams(location.search).get('nicks');return v==='on'?'':v==='off'?'off':'id'}catch{return 'id'}})();
+const nickIds=new Map();
+
+let nicksChanged=false;
+const nickLabel=(id)=>NICKS==='id'?'#'+id:'';
+function hideNicks(f){
+ if(!NICKS)return;
+ for(const t of [...(f.tees||[]),...(f.players||[])]){if(t.id===f.selfId||typeof t.name!=='string')continue;if(t.name.length>1&&nickIds.get(t.name)!==t.id){nickIds.set(t.name,t.id);nicksChanged=true}t.name=nickLabel(t.id);t.clan=''}
+}
+function hideNicksIn(text){
+ if(!NICKS)return text;
+
+ text=text.replace(/(called (?:for )?vote to .*?) ?\((.*)\)$/i,'$1');
+ if(!nickIds.size)return text;
+ const names=[...nickIds.keys()].sort((a,b)=>b.length-a.length).map((n)=>n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+ return text.replace(new RegExp('(?<![\\p{L}\\p{N}_])(?:'+names.join('|')+')(?![\\p{L}\\p{N}_])','gu'),(m)=>nickLabel(nickIds.get(m))||'…');
+}
+
 {const mini=()=>{try{document.documentElement.classList.toggle('mini',STREAM||/[?&]view=mini(&|$)/.test(location.search)||location.hash==='#mini')}catch{}};mini();try{addEventListener('hashchange',mini)}catch{}}
 
 const embedded=(()=>{try{return window.self!==window.top}catch{return true}})();
@@ -570,7 +588,8 @@ function renderChat(force){
  const end=shown.length-(chatOpen?chatScroll:0);
  const rows=shown.slice(Math.max(0,end-N),end);
  const anyFading=rows.some((l)=>{const a=now-(seenAt.get(l.seq)||0);return a>15000&&a<18000});
- if(!force&&last===chatDrawnSeq&&chatOpen===chatDrawnOpen&&chatScroll===chatDrawnScroll&&!anyFading&&!chatIconsMissing)return;
+ if(!force&&!nicksChanged&&last===chatDrawnSeq&&chatOpen===chatDrawnOpen&&chatScroll===chatDrawnScroll&&!anyFading&&!chatIconsMissing)return;
+ nicksChanged=false;
  chatDrawnSeq=last;chatDrawnOpen=chatOpen;chatDrawnScroll=chatScroll;chatIconsMissing=false;
  const box=$('#chatlines');
  box.innerHTML=rows.map((l)=>{
@@ -579,7 +598,7 @@ function renderChat(force){
   if(op<=0)return '';
   let cls=l.kind==='whisper'?'wsp':l.kind==='log'?'me':'';
   let text=l.kind==='log'?tr(l.text||''):(l.text||'');
-  if(isSys(l))return '<div class="sys" style="opacity:'+op.toFixed(2)+'">*** '+esc(text)+'</div>';
+  if(isSys(l))return '<div class="sys" style="opacity:'+op.toFixed(2)+'">*** '+esc(hideNicksIn(text))+'</div>';
   if(l.kind==='chat'&&text.startsWith('(team) ')){cls='team';text=text.slice(7)}
   if(l.kind==='chat'&&text.startsWith('*')){cls='hl';text=text.slice(1)}
   let icon='';
@@ -834,6 +853,7 @@ async function pullFrame(){
  try{const f=await(await fetch('/api/live')).json();
   if(f&&f.tees){
    f._at=performance.now();
+   hideNicks(f);
    prevFrame=frame;sounds(frame,f);frame=f;view.pushFrame(f);fillSpec(f);renderPlayers(f);
 
    if(f.map&&(f.mapKey||f.map)!==mapKey)await pullMap(f.map,f.mapKey||f.map);
@@ -901,7 +921,7 @@ function saveView(){if(STREAM)return;try{localStorage.setItem(VIEW_KEY,JSON.stri
 const TOGGLES=[['#troute','route'],['#ttraps','traps'],['#tnames','names'],['#tcursor','cursor'],['#tboard','board']];
 (()=>{
  if(STREAM){
-  for(const [id,key] of TOGGLES){const on=key==='names';view.toggle(key,on);$(id).className='ghost'+(on?' on':'')}
+  for(const [id,key] of TOGGLES){const on=key==='names'&&NICKS!=='off';view.toggle(key,on);$(id).className='ghost'+(on?' on':'')}
   return;
  }
  let v=null;try{v=JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch{}
@@ -1068,7 +1088,8 @@ if(STREAM){
   box.hidden=!show;if(!show)return;
   box.classList.toggle('idle',!cur);
   $('#ss_me').textContent=cur?d.me:(last.by||d.me);
-  $('#ss_op').textContent=cur?cur.name:last.opponent;
+  const op=cur?cur.name:last.opponent;
+  $('#ss_op').textContent=NICKS&&op?(nickIds.has(op)?nickLabel(nickIds.get(op)):NICKS==='id'?'?':''):op;
   $('#ss_sc').textContent=(cur?cur.ours:last.ours)+' : '+(cur?cur.theirs:last.theirs);
   $('#ss_sub').textContent=cur?t('дуэль'):t('прошлая дуэль');
  };

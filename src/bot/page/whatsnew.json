@@ -1,5 +1,16 @@
 [
  {
+  "id": "2026.09.26p",
+  "ru": [
+   "Стрим (…/stream): чужие ники теперь по умолчанию заменены номерами (#12), и в строках сервера тоже, а причины голосований вырезаны: в них может быть что угодно, за что банит Twitch. …/stream?nicks=on покажет ники, ?nicks=off уберёт и номера. Ник самого бота остаётся.",
+   "Если бот не прошёл трубу к ВБ, он сам сохраняет клип cross-fail во вкладку «Записи», чтобы было видно, что пошло не так."
+  ],
+  "en": [
+   "Stream (…/stream): other players' nicks are now numbers by default (#12), in the server's lines too, and vote reasons are cut: they can hold anything Twitch bans for. …/stream?nicks=on shows the nicks, ?nicks=off hides the numbers too. The bot's own nick stays.",
+   "When the bot fails to get through the tube to the WB it saves a cross-fail clip to the Clips tab, so what went wrong can be seen."
+  ]
+ },
+ {
   "id": "2026.09.26o",
   "ru": [
    "Новый тур по окну, как на сайтах: окно затемняется, нужная кнопка подсвечена, рядом пояснение, что она делает. 14 шагов, открывается снова кнопкой «?».",
