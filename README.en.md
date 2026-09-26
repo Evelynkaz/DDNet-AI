@@ -168,6 +168,10 @@ Type the password at the first launch or in the settings. It is kept only on you
 
 </details>
 
+## License
+
+GPL-3.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). You may run, study and change the bot. Whoever publishes a version of it, changed or not, must name this project as the original and publish their source under the same license. The physics ported from DDNet stays under DDNet's license (zlib), the libraries under their own.
+
 ## Credits
 
 - [DDNet](https://ddnet.org) and Teeworlds: the bot's physics is ported from the DDNet 20 sources (zlib license), and the window takes the graphics and sounds from your install of the game. The screenshots show DDNet graphics (CC-BY-SA 3.0).

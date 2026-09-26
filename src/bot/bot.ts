@@ -918,7 +918,7 @@ export class DdnetBot {
     const ok = this.say(text);
     this.autoChat.sent(text, ok);
     if (ok) this.emit("event", `auto chat: ${text}`);
-    if (line === null || !/^\/accept\b/.test(text.trim().toLowerCase())) return;
+    if (line === null || !/^\/(?:accept|duel)\b/.test(text.trim().toLowerCase())) return;
     if (ok) {
       this.answeredInvitation(line);
       this.armAcceptUntil = 0;
@@ -929,9 +929,10 @@ export class DdnetBot {
   }
 
   private answeredInvitation(line: string): void {
-    if (!/\/accept/i.test(line)) return;
+    if (!/\/(?:accept|duel)\b/i.test(line)) return;
     this.duelAnsweredMs = Date.now();
-    const m = /^\s*(.+?)\s+(?:challenged|invited|invites|challenges|вызвал|вызывает|пригласил|приглашает)(?![\p{L}])/iu.exec(line) ?? /(?<![\p{L}\p{N}_])(?:from|от)\s+(\S+)/iu.exec(line);
+
+    const m = /^\s*'(.{1,40}?)'(?=\s)/u.exec(line) ?? /^\s*(.+?)\s+(?:challenged|invited|invites|challenges|вызвал|вызывает|пригласил|приглашает)(?![\p{L}])/iu.exec(line) ?? /(?<![\p{L}\p{N}_])(?:from|от)\s+(\S+)/iu.exec(line);
     this.duelChallenger = m === null ? "" : m[1].trim().toLowerCase().replace(/[\s,.!:;]+$/u, "");
   }
 
@@ -3941,10 +3942,14 @@ export class DdnetBot {
     const taken = (p: { tx: number; ty: number }): boolean =>
       this.world.allTees().some((t) => {
         if (t.id === ownId || !t.alive) return false;
-        if (this.isPartnerNow(t.id)) return onWbSpot({ tx: Math.trunc(t.pos.x / 32), ty: Math.trunc(t.pos.y / 32) }, p);
+
+        if (this.isPartnerNow(t.id) || (!t.frozen && this.isFriendId(t.id))) return onWbSpot({ tx: Math.trunc(t.pos.x / 32), ty: Math.trunc(t.pos.y / 32) }, p);
         return !t.frozen && Math.abs(t.pos.x - (p.tx * 32 + 16)) < 32 && Math.abs(t.pos.y - (p.ty * 32 + 16)) < 32;
       });
-    return spots.find((p) => (here !== undefined && onWbSpot(here, p)) || !taken(p)) ?? spots[0];
+
+    const friendHolds = (p: { tx: number; ty: number }): boolean =>
+      this.world.allTees().some((t) => t.id !== ownId && t.alive && !t.frozen && !this.isPartnerNow(t.id) && this.isFriendId(t.id) && onWbSpot({ tx: Math.trunc(t.pos.x / 32), ty: Math.trunc(t.pos.y / 32) }, p));
+    return spots.find((p) => (here !== undefined && onWbSpot(here, p)) || !taken(p)) ?? spots.find((p) => !friendHolds(p)) ?? (inside ? here : spots[0]);
   }
 
   private walkToWb(ownId: number, self: TeeState): void {

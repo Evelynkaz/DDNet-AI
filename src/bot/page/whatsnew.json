@@ -1,8 +1,21 @@
 [
  {
+  "id": "2026.09.26n",
+  "ru": [
+   "Дуэли на F-DDrace: автоответ «/duel {name}» на строку сервера «'Ник' has challenged you...» теперь подставляет ник того, кто вызвал. Раньше уходило пустое «/duel », и сервер отвечал «Invalid arguments». Ник с пробелом берётся в кавычки, а если в строке нет ника, бот ничего не отправляет. После такого ответа бот знает, что это его дуэль и с кем.",
+   "Друзья (!friend) на ВБ: если друг стоит на месте, где бот ждёт, бот не лезет к нему, а встаёт на другое место этой стороны (идея игрока).",
+   "У проекта появилась лицензия GPL-3.0. Бота можно запускать, изучать и переделывать, но кто выкладывает свою версию, обязан указать этот проект как исходный и открыть свой код."
+  ],
+  "en": [
+   "Duels on F-DDrace: an auto answer \"/duel {name}\" to the server's \"'Nick' has challenged you...\" now fills in the challenger's nick. It used to go out as a bare \"/duel \" and the server said \"Invalid arguments\". A nick with a space is quoted, and a line that names nobody gets no answer. After such an answer the bot knows it is in a duel, and with whom.",
+   "Friends (!friend) on the WB: when a friend stands on the spot the bot waits on, the bot does not crowd him but takes the side's other spot (a player's idea).",
+   "The project now has a license, GPL-3.0: you may run, study and change the bot, but whoever publishes a version of it must name this project as the original and publish their source."
+  ]
+ },
+ {
   "id": "2026.09.26m",
   "ru": [
-   "Бот больше не проскакивает с разбега во фриз туннеля на нижней полке правого ВБ: тормозит заранее, с учётом скорости и пинга. На твоём сервере за полчаса так было 5 раз. В симуляторе при пинге как у тебя бот на ВБ блокирует больше (62 против 47) и реже замерзает сам (27 против 37)."
+   "Бот больше не проскакивает с разбега во фриз туннеля на нижней полке правого ВБ: тормозит заранее, с учётом скорости и пинга. На сервере разработчика за полчаса так было 5 раз. В симуляторе при таком пинге бот на ВБ блокирует больше (62 против 47) и реже замерзает сам (27 против 37)."
   ],
   "en": [
    "The bot no longer runs on into the tunnel's freeze on the right WB's lower shelf: it brakes in time for its speed and ping. On the owner's server it did that five times in half an hour. In the simulator at his ping the bot on the WB blocks more (62 against 47) and freezes itself less (27 against 37)."

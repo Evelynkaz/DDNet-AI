@@ -58,10 +58,17 @@ function words(match: string): string[] {
 }
 
 function fill(reply: string, name: string, me: string): string {
-  const safeName = name.replace(/^[\s/\\]+/u, "");
+  let safeName = name.replace(/^[\s/\\]+/u, "");
+
+  if (reply.trimStart().startsWith("/") && /[\s"]/u.test(safeName)) safeName = `"${safeName.replace(/["\\]/g, "\\$&")}"`;
   let out = reply.replace(/\{name\}/g, () => safeName).replace(/\{me\}/g, () => me);
   if (!reply.trimStart().startsWith("/")) out = out.replace(/^[\s/\\]+/u, "");
   return out.slice(0, AUTOCHAT_MAX_TEXT);
+}
+
+function invitedBy(text: string): string {
+  const name = /'\/\S+ (.{1,40}?)(?: \d+)*'(?=[\s,.!;:?]|$)/u.exec(text)?.[1] ?? "";
+  return name !== "" && text.includes(`'${name}'`) ? name : "";
 }
 
 export class AutoChat {
@@ -106,8 +113,11 @@ export class AutoChat {
       if (!r.on || r.reply === "") continue;
       const ws = words(r.match);
       if (ws.length === 0 || !ws.some((w) => text.includes(w))) continue;
+      const from = line.server ? invitedBy(line.text) : line.from;
+
+      if (r.reply.includes("{name}") && from.replace(/^[\s/\\]+/u, "").trim() === "") continue;
       if (!this.ready(`k${i}:${r.match}`, nowMs, line.server ? AUTOCHAT_SERVER_COOLDOWN_MS : AUTOCHAT_RULE_COOLDOWN_MS)) return null;
-      return fill(r.reply, line.from, line.me);
+      return fill(r.reply, from, line.me);
     }
     if (!line.server && this.cfg.mention.on && this.cfg.mention.reply !== "" && line.me !== "" && text.includes(line.me.toLowerCase())) {
       const key = `mention:${line.from.toLowerCase()}`;

@@ -1,0 +1,43 @@
+DDNet AI
+Copyright (C) 2026 Wranked1 (https://github.com/Wranked1)
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, version 3 (see LICENSE). It comes WITHOUT ANY WARRANTY.
+Whoever passes it on, changed or not, must keep this notice, name the
+original project, and publish the source of their version under the same
+license.
+
+------------------------------------------------------------------------
+Third-party code
+------------------------------------------------------------------------
+
+The game physics in src/core (collision, character core, projectiles,
+tuning, world) is ported to TypeScript from the DDNet 20 C++ sources and
+altered for this bot; it is not the original DDNet software. The DDNet license applies to that part:
+
+Teeworlds Copyright (C) 2007-2014 Magnus Auvinen
+DDRace    Copyright (C) 2010-2011 Shereef Marzouk
+DDNet     Copyright (C)           Dennis Felsing
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+  claim that you wrote the original software. If you use this software
+  in a product, an acknowledgment in the product documentation would be
+  appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+  misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+
+The npm packages this program depends on (Electron, ink, react, teeworlds,
+typescript and others) keep their own licenses, found in each package.
+The icons are from Lucide (ISC license). The DDNet graphics and sounds the
+window uses are read from the player's own DDNet install and are not part
+of this program.
