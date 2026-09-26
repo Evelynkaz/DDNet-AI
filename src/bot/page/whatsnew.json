@@ -1,5 +1,14 @@
 [
  {
+  "id": "2026.09.27b",
+  "ru": [
+   "Во вкладке «Настройки» появился блок «Приказы в чате»: поле для ника хозяина и галочка «Нейросеть для непонятных фраз». Раньше это было только командами !owner и !llm on/off."
+  ],
+  "en": [
+   "The Settings tab has an \"Orders in the chat\" card: a field for the owner's nick and a switch for the language model that reads the phrases the bot does not. Before, only !owner and !llm on/off did that."
+  ]
+ },
+ {
   "id": "2026.09.27a",
   "ru": [
    "Приказы хозяина в чате: в консоли или окне бота напиши !owner ТвойНик, и бот будет слушаться тебя в игре. «бот иди ко мне», «бот за мной», «бот стой», «бот дерись», «бот вб слева», «бот убей Ник», «бот убейся», «бот дуэль» или то же шёпотом. Остальных игроков бот не слушает. Но ник не пароль: если кто-то займёт твой ник, пока тебя нет на сервере, бот будет слушаться и его. В чат он ничего не пишет: над ним появится «!», если понял, и «?», если нет.",
@@ -7,7 +16,7 @@
   ],
   "en": [
    "Orders from the owner in the chat: type !owner YourNick in the console or the bot's window and the bot takes your orders in the game: \"bot come here\", \"bot follow me\", \"bot stop\", \"bot fight\", \"bot wb left\", \"bot kill Nick\", \"bot kill yourself\", \"bot duel\", or the same whispered. Nobody else is heard, but a nick is no password: whoever takes yours while you are off the server is obeyed too. It writes nothing in the chat: a \"!\" over it when it understood, a \"?\" when not.",
-   "The usual phrases it reads by itself; one it does not understand goes, with the nicks on the server, to a free language model (LLM7, no key), which picks one of the same commands. A phrase with a \\\"don't\\\" goes to it too, so the bot does not read it the wrong way round. Your own model can be set in settings.json (\"llm\": url, key, model); \"llm\": \"off\" turns the model off."
+   "The usual phrases it reads by itself; one it does not understand goes, with the nicks on the server, to a free language model (LLM7, no key), which picks one of the same commands. A phrase with a \"don't\" goes to it too, so the bot does not read it the wrong way round. Your own model can be set in settings.json (\"llm\": url, key, model); \"llm\": \"off\" turns the model off."
   ]
  },
  {

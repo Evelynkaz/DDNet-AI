@@ -469,6 +469,9 @@ export type BotStatus = {
 
   lowCpu?: boolean;
 
+  owner?: string;
+  llm?: boolean;
+
   strong?: boolean;
   lag?: LagSummary;
 };
@@ -1196,6 +1199,8 @@ export class DdnetBot {
       stats: this.stats,
       lowCpu: this.lowCpu,
       strong: this.strong,
+      owner: this.owner,
+      llm: this.llm !== null,
       lag: this.lag.summary(),
     };
   }
@@ -1346,6 +1351,7 @@ export class DdnetBot {
           "  !low on|off            the mode for a weak PC: a shorter search, a new plan every 2 snapshots",
           "  !strong on|off         the strong mode: on the WB a search three times the size (more CPU)",
           "  !owner <nick>|off      take that player's orders in the chat: \"bot come here\", \"bot stop\", \"bot wb left\" (Russian too)",
+          "  !llm on|off            a language model reads the orders the bot cannot (free LLM7 unless settings.json names one)",
           "  !quit                  disconnect and exit",
           "",
           "  '?' works too. Neither prefix ever reaches the server.",
@@ -1508,6 +1514,16 @@ export class DdnetBot {
         this.saveLowCpu(this.lowCpu);
         if (this.lowCpu) this.saveStrong(false);
         return state(this.lowCpu);
+      }
+      case "llm": {
+        const want = arg.trim().toLowerCase();
+        if (want === "") return this.llm === null ? "model for chat orders: off; !llm on" : `model for chat orders: ${this.llm.url} (${this.llm.model}); !llm off`;
+        if (want !== "on" && want !== "off") return "!llm on | off";
+
+        this.saveSetting("llmOff", want === "off" ? true : undefined);
+        if (want === "off") this.llm = null;
+        else this.loadOwner();
+        return this.llm === null ? "model for chat orders: off -- only the orders it reads itself" : `model for chat orders: on (${this.llm.url})`;
       }
       case "owner": {
         const want = arg.trim();
@@ -3248,7 +3264,7 @@ export class DdnetBot {
 
   commandNames(): string[] {
     return [
-      "stop","go","war","friend","ignore","clanwar","clanfriend","home","wb","clip","log","mode","try","owner",
+      "stop","go","war","friend","ignore","clanwar","clanfriend","home","wb","clip","log","mode","try","owner","llm",
       "target","brain","goto","stats","where","emote","reset","kill","yes","no","votes","vote","spec","join","lang","quit","help","seek","say","duel","style","low","strong",
     ];
   }
@@ -3415,7 +3431,7 @@ export class DdnetBot {
     try {
       const cur = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as Record<string, unknown>;
       if (typeof cur.owner === "string") this.owner = cur.owner.trim();
-      this.llm = llmFrom(cur.llm);
+      this.llm = cur.llmOff === true ? null : llmFrom(cur.llm);
       if (cur.llm !== undefined && this.llm === null && cur.llm !== "off") this.log(`settings.json "llm" is not {url, model, key} with an http(s) url: no model for chat orders`);
     } catch {
 
@@ -3423,7 +3439,7 @@ export class DdnetBot {
     }
   }
 
-  private saveSetting(key: string, value: string | undefined): void {
+  private saveSetting(key: string, value: unknown): void {
     const file = this.cfg.settingsFile;
     if (file === undefined) return;
     try {

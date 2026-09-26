@@ -151,8 +151,19 @@ $('#ahome').addEventListener('click',()=>void botCmd(panel&&panel.home?'!home of
 $('#lowcpu').addEventListener('change',()=>void botCmd($('#lowcpu').checked?'!low on':'!low off',true));
 
 $('#strongcpu').addEventListener('change',()=>void botCmd($('#strongcpu').checked?'!strong on':'!strong off',true));
+
+$('#own_save').addEventListener('click',async()=>{
+ const v=$('#own_nick').value.trim();
+ const r=String(await botCmd(v===''?'!owner off':'!owner '+v,false)||'');
+ const m=/^owner: (.+?)(?: \(nobody| --|$)/.exec(r);
+ $('#own_note').textContent=v===''?t('никого не слушает'):t('хозяин: {name}',{name:m?m[1]:v})+(/nobody by that name/.test(r)?' '+t('(сейчас его нет на сервере)'):'');
+ $('#own_nick').blur();
+});
+$('#own_llm').addEventListener('change',()=>void botCmd($('#own_llm').checked?'!llm on':'!llm off',true));
 function renderPanel(s){
  panel=s.panel||null;
+ if(document.activeElement!==$('#own_nick')&&typeof s.owner==='string')$('#own_nick').value=s.owner;
+ $('#own_llm').checked=s.llm===true;
  $('#lowcpu').checked=s.lowCpu===true;
  $('#strongcpu').checked=s.strong===true;
 
