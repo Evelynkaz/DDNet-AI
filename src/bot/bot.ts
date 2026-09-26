@@ -71,6 +71,8 @@ import type { WbDef, WbSide } from "./wayblock.ts";
 import { installNetworkGuard, patchHuffman, patchRedirect, patchSnapshotDecoder } from "./netPatch.ts";
 import type { NetGuard } from "./netPatch.ts";
 import { AutoChat } from "./autoChat.ts";
+import { addressed, llmFrom, modelOrder, parseOrder } from "./ownerOrders.ts";
+import type { LlmConfig, Order } from "./ownerOrders.ts";
 import type { AutoChatConfig } from "./autoChat.ts";
 import type { MapClientLike, RawSnapItem, SnapshotSource } from "./liveWorld.ts";
 
@@ -571,6 +573,8 @@ const CLIP_SEVERITY = 250;
 const CLIP_SEVERITY_BY_KIND: Record<string, number> = { "self-freeze": 180, "chased-into-freeze": 180, "goto-into-freeze": 180 };
 const DEFAULT_CLIP_DIR = "runs/clips";
 
+const ORDER_MIN_INTERVAL_MS = 1000;
+
 const CROSS_CLIP_COOLDOWN_TICKS = 60 * 50;
 
 const CLIP_KEEP = 24;
@@ -829,6 +833,12 @@ export class DdnetBot {
   private lastClipTick = -Infinity;
 
   private lastCrossClipTick = -Infinity;
+
+  private owner = "";
+  private llm: LlmConfig | null = llmFrom(undefined);
+  private lastOrderMs = 0;
+
+  private orderSeq = 0;
   private framesSinceScan = 0;
   private lastKillTick = -Infinity;
   private lastEmoteMs = 0;
@@ -904,6 +914,7 @@ export class DdnetBot {
 
     this.world = new LiveWorld(new Collision(1, 1, new Uint8Array(1)));
     this.loadRelations();
+    this.loadOwner();
 
     this.autoChat = new AutoChat(join(dirname(this.cfg.relationsFile ?? RELATIONS_FILE), "autochat.json"));
   }
@@ -1334,6 +1345,7 @@ export class DdnetBot {
           "  !lang ru|en            the language of the console and the bot's window",
           "  !low on|off            the mode for a weak PC: a shorter search, a new plan every 2 snapshots",
           "  !strong on|off         the strong mode: on the WB a search three times the size (more CPU)",
+          "  !owner <nick>|off      take that player's orders in the chat: \"bot come here\", \"bot stop\", \"bot wb left\" (Russian too)",
           "  !quit                  disconnect and exit",
           "",
           "  '?' works too. Neither prefix ever reaches the server.",
@@ -1496,6 +1508,20 @@ export class DdnetBot {
         this.saveLowCpu(this.lowCpu);
         if (this.lowCpu) this.saveStrong(false);
         return state(this.lowCpu);
+      }
+      case "owner": {
+        const want = arg.trim();
+        const llm = this.llm === null ? "no model for the rest (settings.json \"llm\": \"off\")" : `the rest to ${this.llm.url} (${this.llm.model})`;
+        if (want === "") return this.owner === "" ? `owner: nobody; !owner <nick> -- that player's orders in the chat ("bot come here") are taken; ${llm}` : `owner: ${this.owner}; ${llm}; !owner off to stop`;
+
+        const live = (this.client?.SnapshotUnpacker?.AllObjClientInfo ?? []).map((c) => (c.name ?? "").trim()).filter((n) => n !== "");
+        const off = want.toLowerCase() === "off" || want === "-";
+        this.owner = off ? "" : (live.find((n) => n === want) ?? live.find((n) => n.toLowerCase() === want.toLowerCase()) ?? want);
+        this.saveSetting("owner", this.owner === "" ? undefined : this.owner);
+        const here = off || live.includes(this.owner) ? "" : " (nobody by that name is on the server now)";
+        return this.owner === ""
+          ? "owner: nobody, chat orders off"
+          : `owner: ${this.owner}${here} -- a whisper from him, or his line starting with "bot" or the bot's name (in Russian too), is an order: come here, stop, fight, wb left, kill yourself... A nick is no password: whoever takes it while he is away is obeyed too. Lines it cannot read itself go, with the nicks on the server, to ${this.llm === null ? "no model (off)" : this.llm.url}.`;
       }
       case "strong": {
         const want = arg.trim().toLowerCase();
@@ -2130,6 +2156,7 @@ export class DdnetBot {
     else this.emit("chat", `${msg.team === CHAT_TEAM ? "(team) " : ""}${mentioned ? "*" : ""}${msg.message}`, who);
 
     if (this.onList("ignore", who.trim().toLowerCase(), msg.client_id)) return;
+    if (this.ownerOrder(who, msg.message, whisper)) return;
     const answer = this.autoChat.onChat({ from: who, text: msg.message, server: false, me: this.cfg.name });
     if (answer !== null) this.autoSay(answer, whisper ? msg.message : null);
     if (whisper) this.maybeAcceptDuel(msg, who);
@@ -3221,7 +3248,7 @@ export class DdnetBot {
 
   commandNames(): string[] {
     return [
-      "stop","go","war","friend","ignore","clanwar","clanfriend","home","wb","clip","log","mode","try",
+      "stop","go","war","friend","ignore","clanwar","clanfriend","home","wb","clip","log","mode","try","owner",
       "target","brain","goto","stats","where","emote","reset","kill","yes","no","votes","vote","spec","join","lang","quit","help","seek","say","duel","style","low","strong",
     ];
   }
@@ -3330,6 +3357,82 @@ export class DdnetBot {
       const v = on ? "on" : "off";
       if ((cur as Record<string, unknown>).lowCpu === v) return;
       writeFileSync(file, JSON.stringify({ ...(cur as Record<string, unknown>), lowCpu: v }, null, 2));
+    } catch {
+
+    }
+  }
+
+  private ownerOrder(who: string, message: string, whisper: boolean): boolean {
+    if (this.owner === "" || who !== this.owner) return false;
+    const text = addressed(message, this.cfg.name, whisper);
+    if (text === null) return false;
+    const now = Date.now();
+    if (now - this.lastOrderMs < ORDER_MIN_INTERVAL_MS) {
+      this.tellOwner(false);
+      return true;
+    }
+    this.lastOrderMs = now;
+    const seq = ++this.orderSeq;
+    const players = (this.client?.SnapshotUnpacker?.AllObjClientInfo ?? []).map((c) => (c.name ?? "").trim()).filter((n) => n !== "" && n !== this.cfg.name);
+    const order = parseOrder(text, this.owner, players);
+    if (order !== null) {
+      this.runOrder(text, order);
+      return true;
+    }
+    if (this.llm === null) {
+      this.emit("event", `owner ${this.owner}: "${text}" -- not an order it knows (no model set up)`);
+      this.tellOwner(false);
+      return true;
+    }
+    const owner = this.owner;
+    void modelOrder(text, owner, players, this.llm)
+      .then((o) => {
+        if (this.stopping || this.owner !== owner || seq !== this.orderSeq) return;
+        if (o === null) {
+          this.emit("event", `owner ${owner}: "${text}" -- the model gave no order`);
+          this.tellOwner(false);
+        } else this.runOrder(text, o);
+      })
+      .catch((e: unknown) => this.emit("event", `owner order failed: ${e instanceof Error ? e.message : String(e)}`));
+    return true;
+  }
+
+  private runOrder(text: string, order: Order): void {
+    const reply = this.handleConsole(order.command).split("\n")[0];
+    this.emit("event", `owner ${this.owner}: "${text}" -> ${order.command}: ${reply} (${t(order.reply, order.args)})`);
+
+    this.tellOwner(!/cooldown|nobody|not connected|refused|not alive|no map|not in the game|no tee|unknown/i.test(reply));
+  }
+
+  private tellOwner(done: boolean): void {
+    this.lastEmoteMs = 0;
+    this.emote(done ? EMOTICON_EXCLAMATION : EMOTICON_QUESTION);
+  }
+
+  private loadOwner(): void {
+    const file = this.cfg.settingsFile;
+    if (file === undefined) return;
+    try {
+      const cur = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as Record<string, unknown>;
+      if (typeof cur.owner === "string") this.owner = cur.owner.trim();
+      this.llm = llmFrom(cur.llm);
+      if (cur.llm !== undefined && this.llm === null && cur.llm !== "off") this.log(`settings.json "llm" is not {url, model, key} with an http(s) url: no model for chat orders`);
+    } catch {
+
+      this.llm = llmFrom(undefined);
+    }
+  }
+
+  private saveSetting(key: string, value: string | undefined): void {
+    const file = this.cfg.settingsFile;
+    if (file === undefined) return;
+    try {
+      const cur = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as unknown;
+      if (cur === null || typeof cur !== "object" || Array.isArray(cur) || typeof (cur as Record<string, unknown>).server !== "string") return;
+      const next: Record<string, unknown> = { ...(cur as Record<string, unknown>) };
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+      writeFileSync(file, JSON.stringify(next, null, 2));
     } catch {
 
     }

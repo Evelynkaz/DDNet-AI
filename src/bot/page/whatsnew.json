@@ -1,5 +1,16 @@
 [
  {
+  "id": "2026.09.27a",
+  "ru": [
+   "Приказы хозяина в чате: в консоли или окне бота напиши !owner ТвойНик, и бот будет слушаться тебя в игре. «бот иди ко мне», «бот за мной», «бот стой», «бот дерись», «бот вб слева», «бот убей Ник», «бот убейся», «бот дуэль» или то же шёпотом. Остальных игроков бот не слушает. Но ник не пароль: если кто-то займёт твой ник, пока тебя нет на сервере, бот будет слушаться и его. В чат он ничего не пишет: над ним появится «!», если понял, и «?», если нет.",
+   "Обычные фразы бот понимает сам. Непонятную фразу он отдаёт бесплатной нейросети (LLM7, без ключа) вместе с никами игроков на сервере, и она выбирает одну из тех же команд. Фраза с «не» («не стой») тоже уходит ей, чтобы бот не понял наоборот. Свою модель можно указать в settings.json (\"llm\": url, key, model), а \"llm\": \"off\" выключает нейросеть."
+  ],
+  "en": [
+   "Orders from the owner in the chat: type !owner YourNick in the console or the bot's window and the bot takes your orders in the game: \"bot come here\", \"bot follow me\", \"bot stop\", \"bot fight\", \"bot wb left\", \"bot kill Nick\", \"bot kill yourself\", \"bot duel\", or the same whispered. Nobody else is heard, but a nick is no password: whoever takes yours while you are off the server is obeyed too. It writes nothing in the chat: a \"!\" over it when it understood, a \"?\" when not.",
+   "The usual phrases it reads by itself; one it does not understand goes, with the nicks on the server, to a free language model (LLM7, no key), which picks one of the same commands. A phrase with a \\\"don't\\\" goes to it too, so the bot does not read it the wrong way round. Your own model can be set in settings.json (\"llm\": url, key, model); \"llm\": \"off\" turns the model off."
+  ]
+ },
+ {
   "id": "2026.09.26p",
   "ru": [
    "Стрим (…/stream): чужие ники теперь по умолчанию заменены номерами (#12), и в строках сервера тоже, а причины голосований вырезаны: в них может быть что угодно, за что банит Twitch. …/stream?nicks=on покажет ники, ?nicks=off уберёт и номера. Ник самого бота остаётся.",
