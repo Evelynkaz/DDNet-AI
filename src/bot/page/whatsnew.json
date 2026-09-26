@@ -1,5 +1,18 @@
 [
  {
+  "id": "2026.09.27c",
+  "ru": [
+   "Приказы в чате теперь умеют всё, что можно набрать в консоли или строке команд: убрать из друзей или варов, сбросить цель, «второй бот держи левый вб» (!d), эмоции, голосования, клип, «скажи gg» и остальное. Нельзя только сменить хозяина, выключить бота и поменять нейросеть: иначе занявший твой ник забрал бы бота себе.",
+   "Нейросеть видит, кого бот сейчас бьёт и кто у него в друзьях и варах, поэтому понимает «перестань бить kkv» и «убери Chioma из друзей». Если бесплатная LLM7 упёрлась в лимит, фраза уходит второй бесплатной, ch.at.",
+   "В «Настройки» → «Какая нейросеть» можно выбрать любую: LLM7 и ch.at без ключа; Groq, Cerebras, Gemini, OpenRouter, Mistral, GitHub Models, SambaNova, NVIDIA с бесплатным ключом; OpenAI, Anthropic; Ollama на своём ПК или свой адрес. Ключ хранится только в settings.json и в лог не попадает."
+  ],
+  "en": [
+   "Chat orders can now do anything you can type at the console or in the command bar: take a player off the friends or war list, clear the target, \"second bot hold the left WB\" (!d), emotes, votes, a clip, \"say gg\" and the rest. Not changing the owner, quitting the bot or changing the model: whoever took your nick would get the bot.",
+   "The model sees whom the bot is fighting and who is on its friend and war lists, so it gets \"stop hitting kkv\" and \"take Chioma off the friends\". When the free LLM7 is at its limit, the line goes to a second free one, ch.at.",
+   "Settings → Which model picks any: LLM7 and ch.at without a key; Groq, Cerebras, Gemini, OpenRouter, Mistral, GitHub Models, SambaNova, NVIDIA with a free key; OpenAI, Anthropic; Ollama on your PC or an address of your own. The key stays in settings.json and never reaches the log."
+  ]
+ },
+ {
   "id": "2026.09.27b",
   "ru": [
    "Во вкладке «Настройки» появился блок «Приказы в чате»: поле для ника хозяина и галочка «Нейросеть для непонятных фраз». Раньше это было только командами !owner и !llm on/off."

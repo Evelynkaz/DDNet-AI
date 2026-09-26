@@ -71,7 +71,7 @@ import type { WbDef, WbSide } from "./wayblock.ts";
 import { installNetworkGuard, patchHuffman, patchRedirect, patchSnapshotDecoder } from "./netPatch.ts";
 import type { NetGuard } from "./netPatch.ts";
 import { AutoChat } from "./autoChat.ts";
-import { addressed, llmFrom, modelOrder, parseOrder } from "./ownerOrders.ts";
+import { FREE_LLM, LLM_PRESETS, addressed, llmChain, llmFrom, modelOrder, parseOrder } from "./ownerOrders.ts";
 import type { LlmConfig, Order } from "./ownerOrders.ts";
 import type { AutoChatConfig } from "./autoChat.ts";
 import type { MapClientLike, RawSnapItem, SnapshotSource } from "./liveWorld.ts";
@@ -578,6 +578,10 @@ const DEFAULT_CLIP_DIR = "runs/clips";
 
 const ORDER_MIN_INTERVAL_MS = 1000;
 
+const ORDER_EXCLUDED = new Set(["owner", "llm", "quit", "lang", "log", "help", "brain", "try", "seek"]);
+
+const ORDER_CLIP_MS = 60_000;
+
 const CROSS_CLIP_COOLDOWN_TICKS = 60 * 50;
 
 const CLIP_KEEP = 24;
@@ -842,6 +846,7 @@ export class DdnetBot {
   private lastOrderMs = 0;
 
   private orderSeq = 0;
+  private lastOrderClipMs = -Infinity;
   private framesSinceScan = 0;
   private lastKillTick = -Infinity;
   private lastEmoteMs = 0;
@@ -1352,6 +1357,7 @@ export class DdnetBot {
           "  !strong on|off         the strong mode: on the WB a search three times the size (more CPU)",
           "  !owner <nick>|off      take that player's orders in the chat: \"bot come here\", \"bot stop\", \"bot wb left\" (Russian too)",
           "  !llm on|off            a language model reads the orders the bot cannot (free LLM7 unless settings.json names one)",
+          "  !say <text>            say it in the game chat",
           "  !quit                  disconnect and exit",
           "",
           "  '?' works too. Neither prefix ever reaches the server.",
@@ -1619,6 +1625,13 @@ export class DdnetBot {
           return this.wbCommand("off");
         }
         return "!style default | wb | duel";
+      }
+
+      case "say": {
+        const text = arg.trim();
+        if (text === "") return "!say <text>";
+        if (/^[/\\]/.test(text)) return "!say: no /commands";
+        return this.say(text) ? `said: ${text}` : "not sent: chat cooldown, try again in a moment";
       }
       case "clip": {
 
@@ -3401,7 +3414,7 @@ export class DdnetBot {
       return true;
     }
     const owner = this.owner;
-    void modelOrder(text, owner, players, this.llm)
+    void modelOrder(text, owner, players, llmChain(this.llm), this.orderReference(), this.ownerCommands(), fetch, 8000, this.orderState())
       .then((o) => {
         if (this.stopping || this.owner !== owner || seq !== this.orderSeq) return;
         if (o === null) {
@@ -3413,11 +3426,48 @@ export class DdnetBot {
     return true;
   }
 
-  private runOrder(text: string, order: Order): void {
-    const reply = this.handleConsole(order.command).split("\n")[0];
-    this.emit("event", `owner ${this.owner}: "${text}" -> ${order.command}: ${reply} (${t(order.reply, order.args)})`);
+  private ownerCommands(): Set<string> {
+    const set = new Set(this.commandNames().filter((c) => !ORDER_EXCLUDED.has(c)));
+    set.add("d");
+    return set;
+  }
 
-    this.tellOwner(!/cooldown|nobody|not connected|refused|not alive|no map|not in the game|no tee|unknown/i.test(reply));
+  private orderState(): string {
+    const lists = this.relationsInfo();
+    const list = (k: "friend" | "war" | "ignore"): string => (lists[k].length === 0 ? "nobody" : lists[k].join(", "));
+    const target = this.targetId >= 0 ? this.nameOfLive(this.targetId) : "none, picks itself";
+    return `target ${target}; mode ${this.mode}; friends: ${list("friend")}; war: ${list("war")}; ignored: ${list("ignore")}; WB ${this.wbMode}; duel ${this.duelMode}.`;
+  }
+
+  private orderReference(): string {
+    const help = String(DdnetBot.prototype.handleConsole.call(this, "!help"));
+    return help
+      .split("\n")
+      .filter((l) => !/^\s*!(\w+)/.test(l) || !ORDER_EXCLUDED.has((/^\s*!(\w+)/.exec(l) as RegExpExecArray)[1].toLowerCase()))
+      .join("\n");
+  }
+
+  private runOrder(text: string, order: Order): void {
+    if (/^!(?:d\s+!?)?clip\b/i.test(order.command)) {
+      const now = Date.now();
+      if (now - this.lastOrderClipMs < ORDER_CLIP_MS) {
+        this.emit("event", `owner ${this.owner}: "${text}" -> ${order.command}: not again within a minute`);
+        this.tellOwner(false);
+        return;
+      }
+      this.lastOrderClipMs = now;
+    }
+
+    const out = (this.handleConsole as (line: string) => string | Promise<string>)(order.command);
+    void Promise.resolve(out)
+      .then((r) => {
+        const reply = String(r).split("\n")[0];
+        this.emit("event", `owner ${this.owner}: "${text}" -> ${order.command}: ${reply} (${t(order.reply, order.args)})`);
+
+        const said = /^!d\b/i.test(order.command) ? reply.replace(/^[^:]*:\s*/, "") : reply;
+        this.tellOwner(!/cooldown|nobody|not connected|refused|not alive|no map|not in the game|no tee|unknown|not running|no answer|not sent|^!\w+[ :]/i.test(said));
+      })
+      .catch((e: unknown) => this.emit("event", `owner order failed: ${e instanceof Error ? e.message : String(e)}`));
   }
 
   private tellOwner(done: boolean): void {
@@ -3436,6 +3486,42 @@ export class DdnetBot {
     } catch {
 
       this.llm = llmFrom(undefined);
+    }
+  }
+
+  llmInfo(): { off: boolean; url: string; model: string; hasKey: boolean; presets: typeof LLM_PRESETS } {
+    const l = this.llm;
+    return { off: l === null, url: l?.url ?? FREE_LLM.url, model: l?.model ?? FREE_LLM.model, hasKey: (l?.key ?? "") !== "", presets: LLM_PRESETS };
+  }
+
+  setLlm(raw: unknown): string {
+    if (raw === null) {
+      this.saveSetting("llm", undefined);
+      this.saveSetting("llmOff", undefined);
+      this.llm = llmFrom(undefined);
+      return `model for chat orders: ${FREE_LLM.url} (${FREE_LLM.model})`;
+    }
+    const o = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const url = typeof o.url === "string" ? o.url.trim() : "";
+
+    const saved = this.llm ?? this.savedLlm();
+    const keep = saved !== null && saved.url === url.replace(/\/+$/, "") ? saved.key : "";
+    const next = llmFrom({ url: url.replace(/\/+$/, ""), model: o.model, key: typeof o.key === "string" && o.key.trim() !== "" ? o.key : keep });
+    if (next === null) return "no: an http(s) address and a model name are needed";
+    this.saveSetting("llm", next);
+    this.saveSetting("llmOff", undefined);
+    this.llm = next;
+    return `model for chat orders: ${next.url} (${next.model})${next.key !== "" ? ", key saved" : ""}`;
+  }
+
+  private savedLlm(): LlmConfig | null {
+    const file = this.cfg.settingsFile;
+    if (file === undefined) return null;
+    try {
+      const cur = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as Record<string, unknown>;
+      return cur.llm !== undefined ? llmFrom(cur.llm) : null;
+    } catch {
+      return null;
     }
   }
 

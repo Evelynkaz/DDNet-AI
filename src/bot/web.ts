@@ -136,6 +136,8 @@ export type WebBot = {
   relationsInfo?: () => Record<string, string[]>;
   setRelation?: (list: "war" | "friend" | "ignore", name: string, on: boolean) => string;
 
+  llmInfo?: () => unknown;
+  setLlm?: (raw: unknown) => string;
   autoChatInfo?: () => unknown;
   setAutoChat?: (raw: unknown) => unknown;
   checkUpdate?: () => Promise<string>;
@@ -540,6 +542,8 @@ export function startWebUi(bot: WebBot, port: number, version: string): Promise<
       const cur = readLaunch();
       delete cur.password;
 
+      delete cur.llm;
+
       const typed = typeof cur.ddnetData === "string" ? typedDataDir(cur.ddnetData) : { dir: null, note: "" };
       cur.ddnetDataNote = typed.note;
       if (!cur.ddnetData || typed.dir === null) cur.ddnetDataFound = defaultAssetRoot() ?? "";
@@ -635,6 +639,30 @@ export function startWebUi(bot: WebBot, port: number, version: string): Promise<
         if (reply !== "") push({ kind: "log", text: reply });
         res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ reply, lists: bot.relationsInfo?.() ?? {} }));
+      });
+      return;
+    }
+    if (url.pathname === "/api/llm" && req.method !== "POST") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify(bot.llmInfo?.() ?? null));
+      return;
+    }
+
+    if (url.pathname === "/api/llm" && req.method === "POST") {
+      let raw = "";
+      req.on("data", (c) => {
+        raw += String(c);
+        if (raw.length > 4000) req.destroy();
+      });
+      req.on("end", () => {
+        let reply = "";
+        try {
+          reply = bot.setLlm?.(JSON.parse(raw)) ?? "";
+        } catch {
+          reply = "";
+        }
+        res.writeHead(reply === "" ? 400 : 200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ reply }));
       });
       return;
     }

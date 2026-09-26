@@ -179,8 +179,14 @@
  <div class="ac-row"><span class="ac-title">Хозяин (ник в игре)</span></div>
  <div class="ac-row"><input type="text" id="own_nick" maxlength="15" placeholder="пусто: никого не слушает" spellcheck="false" style="flex:1"><button id="own_save" type="button">Сохранить</button></div>
  <div class="hint">Его строка, начатая с «бот» или ника бота, или его шёпот боту, это приказ: «бот иди ко мне», «бот стой», «бот вб слева», «бот бей Ник». Остальных бот не слушает. Ник не пароль: занявшего твой ник, пока тебя нет, бот тоже послушает.</div>
- <div class="ac-row"><label class="check" title="Фразу, которую бот не понял сам, выбирает из тех же команд бесплатная нейросеть LLM7. Ей уходят эта фраза и ники игроков на сервере."><input type="checkbox" id="own_llm"> Нейросеть для непонятных фраз</label></div>
+ <div class="ac-row"><label class="check" title="Фразу, которую бот не понял сам, переводит в команду нейросеть (по умолчанию бесплатные LLM7, а за ней ch.at). Ей уходят эта фраза, ники игроков на сервере, цель бота и его списки друзей, варов и игнора."><input type="checkbox" id="own_llm"> Нейросеть для непонятных фраз</label></div>
  <span class="k" id="own_note" style="margin:0"></span>
+ <div class="ac-row"><span class="ac-title">Какая нейросеть</span></div>
+ <div class="ac-row"><select id="llm_preset" style="flex:1"></select></div>
+ <div class="ac-row"><input type="text" id="llm_url" placeholder="адрес, например https://api.groq.com/openai/v1" spellcheck="false" style="flex:2"><input type="text" id="llm_model" placeholder="модель" spellcheck="false" style="flex:1"></div>
+ <div class="ac-row"><input type="password" id="llm_key" placeholder="ключ (пусто: без ключа)" autocomplete="off" spellcheck="false" style="flex:1"><button id="llm_save" type="button">Сохранить</button></div>
+ <div class="hint" id="llm_hint"></div>
+ <span class="k" id="llm_note" style="margin:0"></span>
 </div>
 <div class="card" id="autochat">
  <div class="k">Автоматический чат</div>

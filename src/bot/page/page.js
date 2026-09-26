@@ -160,6 +160,37 @@ $('#own_save').addEventListener('click',async()=>{
  $('#own_nick').blur();
 });
 $('#own_llm').addEventListener('change',()=>void botCmd($('#own_llm').checked?'!llm on':'!llm off',true));
+
+const LLM_LABELS={llm7:t('LLM7: бесплатно, без ключа (10 в минуту, 60 в час), запасной ch.at'),chat:t('ch.at: бесплатно, без ключа'),mistral:t('Mistral: бесплатный ключ'),github:t('GitHub Models: бесплатно с токеном GitHub'),sambanova:t('SambaNova: бесплатный ключ'),nvidia:t('NVIDIA NIM: бесплатный ключ'),groq:t('Groq: бесплатный ключ (30 в минуту, 14 400 в день)'),cerebras:t('Cerebras: бесплатный ключ (30 в минуту, 14 400 в день)'),gemini:t('Google Gemini: бесплатный ключ'),openrouter:t('OpenRouter: бесплатный ключ, модели с :free'),openai:t('OpenAI: платный ключ'),anthropic:t('Anthropic Claude: платный ключ'),ollama:t('Ollama: нейросеть на этом ПК')};
+const LLM_KEYS={mistral:'console.mistral.ai/api-keys',github:'github.com/settings/personal-access-tokens',sambanova:'cloud.sambanova.ai/apis',nvidia:'build.nvidia.com',groq:'console.groq.com/keys',cerebras:'cloud.cerebras.ai',gemini:'aistudio.google.com/apikey',openrouter:'openrouter.ai/keys',openai:'platform.openai.com/api-keys',anthropic:'console.anthropic.com/settings/keys'};
+let llmPresets=[],llmSaved={url:'',hasKey:false};
+
+function llmKeyHint(url){$('#llm_key').placeholder=llmSaved.hasKey&&url===llmSaved.url?t('ключ сохранён; новый заменит его'):t('ключ (пусто: без ключа)')}
+function llmHint(id){$('#llm_hint').textContent=LLM_KEYS[id]?t('Ключ бесплатно или за деньги берётся на {site}',{site:LLM_KEYS[id]}):id==='ollama'?t('Нужна запущенная Ollama с этой моделью'):id==='llm7'||id==='chat'?t('Ничего не нужно'):''}
+async function pullLlm(){
+ let d=null;try{d=await(await fetch('/api/llm',{cache:'no-store'})).json()}catch{d=null}
+ if(!d||!Array.isArray(d.presets))return;
+ llmPresets=d.presets;
+ const sel=$('#llm_preset');sel.textContent='';
+ for(const p of llmPresets){const o=document.createElement('option');o.value=p.id;o.textContent=LLM_LABELS[p.id]||p.label;sel.appendChild(o)}
+ const own=document.createElement('option');own.value='custom';own.textContent=t('Свой адрес');sel.appendChild(own);
+ const cur=llmPresets.find((p)=>p.url===d.url);
+ sel.value=cur?cur.id:'custom';$('#llm_url').value=d.url;$('#llm_model').value=d.model;
+ llmSaved={url:d.url,hasKey:d.hasKey===true};
+ $('#llm_key').value='';llmKeyHint(d.url);
+ llmHint(sel.value);
+}
+$('#llm_preset').addEventListener('change',()=>{const p=llmPresets.find((x)=>x.id===$('#llm_preset').value);if(p){$('#llm_url').value=p.url;$('#llm_model').value=p.model}llmHint($('#llm_preset').value);llmKeyHint($('#llm_url').value.trim())});
+$('#llm_url').addEventListener('input',()=>llmKeyHint($('#llm_url').value.trim()));
+$('#llm_save').addEventListener('click',async()=>{
+ const id=$('#llm_preset').value;
+ const body=id==='llm7'?null:{url:$('#llm_url').value.trim(),model:$('#llm_model').value.trim(),key:$('#llm_key').value};
+ let r='';try{r=(await(await fetch('/api/llm',{method:'POST',body:JSON.stringify(body)})).json()).reply||''}catch{r=''}
+ $('#llm_note').textContent=r.startsWith('no:')||r===''?t('Не сохранено: нужны адрес http(s) и название модели'):t('Сохранено');
+ if(!r.startsWith('no:')&&r!=='')await botCmd('!llm on',false);
+ pullLlm();
+});
+pullLlm();
 function renderPanel(s){
  panel=s.panel||null;
  if(document.activeElement!==$('#own_nick')&&typeof s.owner==='string')$('#own_nick').value=s.owner;
