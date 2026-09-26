@@ -136,6 +136,7 @@
   <div class="k" style="margin:12px 0 6px">Дуэли <span id="dueln"></span></div>
   <div class="dlist" id="dlist"></div>
   <div class="hint">Счёт дуэли для стрима: в OBS добавь источник «Браузер» с адресом <code id="overlayurl">/overlay</code> (прозрачный фон; <code>?bg=1</code> добавляет тёмную подложку).</div>
+  <div class="hint">Игра целиком для стрима: <code id="streamurl">/stream</code> (экран бота на всё окно, счёт сверху, только строки сервера).</div>
  </div>
  <div class="card clipplayer">
   <div class="view"><canvas id="cv2"></canvas><div class="cempty" id="cempty">Выбери запись слева</div></div>
@@ -204,11 +205,7 @@
  <table id="knobs" class="ab" style="margin-top:8px"></table>
 </details>
 </section>
-<div class="tour" id="tour" hidden><div class="tour-box">
- <div class="tour-head"><b>Как пользоваться</b><button class="ghost mini" id="tourclose" type="button" title="Закрыть">✕</button></div>
- <div class="tour-card" data-card="0"><h3>Как играет бот</h3><p>Мозг бота, «Планировщик»: 25 раз в секунду он просчитывает настоящую физику DDNet на полсекунды вперёд и выбирает лучший ход. Он уже настроен, ничего крутить не надо. Если что-то сломал в настройках поиска: «Настройки» → «Сбросить всё по умолчанию».</p></div><div class="tour-card" data-card="1"><h3>Вкладка «Игра»</h3><p>Справа панель «Управление». Игра: дефолт (дерётся там, где игра), ВБ (держит вейблок и кидает входящих во фриз), дуэль (1 на 1, включается и сама, когда бот принял дуэль; счёт дуэли виден в «Состоянии», все дуэли во вкладке «Записи»). Режим: драться, не лезть, стоять. Ниже цель и быстрые кнопки: убиться, клип, наблюдать, дом, эмоция.</p></div><div class="tour-card" data-card="2"><h3>Игроки и чат</h3><p>Клик по нику в списке игроков: сделать целью, идти к нему, смотреть за ним, тима, вар, игнор, ник в чат. Тиму (друга) бот не трогает, первым бьёт того, кто лезет к нему, и вытаскивает его из фриза хуком и молотком (до 10 тайлов). Enter на экране открывает чат, Tab дописывает ник или команду, колесо и PageUp листают чат назад.</p></div><div class="tour-card" data-card="3"><h3>Команды</h3><p>В строке внизу: !help (все команды), !wb left или right (сторона ВБ), !duel on, !style wb, !goto x y или !goto @ник, !target ник, !kill. Второй бот слушается так же через !d, например !d wb left.</p></div><div class="tour-card" data-card="4"><h3>Настройки</h3><p>Автоматический чат: строка раз в N секунд, ответ на ник бота и ответы на слова, например «дуэль» → /accept. Второй бот (дамми) на том же сервере, в тиме с первым. Пинг 1000 и бот стоит: галочка «Режим для слабого ПК» на вкладке «Игра» (в окне ещё шестерёнка → «Запуск»). Всё это применяется сразу или после перезапуска, это написано рядом.</p></div>
- <div class="tour-foot"><span class="tour-dots" id="tourdots"></span><button class="ghost" id="tourprev" type="button">назад</button><button id="tournext" type="button">дальше</button></div>
-</div></div>
+<div class="spot-veil" id="spot" hidden><div class="spot-hole" id="spothole"></div><div class="spot-pop" id="spotpop" role="dialog"><div class="spot-h"><b id="spoth"></b><button class="ghost mini" id="spotx" type="button" title="Закрыть">✕</button></div><p id="spotp"></p><div class="spot-foot"><span id="spotn"></span><button class="ghost" id="spotprev" type="button">назад</button><button id="spotnext" type="button">дальше</button></div></div></div>
 <div class="tour" id="news" hidden><div class="tour-box">
  <div class="tour-head"><b>Что нового</b><button class="ghost mini" id="newsclose" type="button" title="Закрыть">✕</button></div>
  <div class="news-card"><h3 id="newsver"></h3><ul class="news-list" id="newslist"></ul></div>

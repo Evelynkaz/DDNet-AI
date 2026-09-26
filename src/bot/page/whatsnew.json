@@ -1,5 +1,18 @@
 [
  {
+  "id": "2026.09.26o",
+  "ru": [
+   "Новый тур по окну, как на сайтах: окно затемняется, нужная кнопка подсвечена, рядом пояснение, что она делает. 14 шагов, открывается снова кнопкой «?».",
+   "Подсказки при наведении теперь свои, в стиле окна, вместо серых системных подсказок Windows. И в окне бота, и в заголовке приложения.",
+   "Для стрима есть адрес …/stream (показан на вкладке «Записи»): экран игры бота на всё окно без кнопок, счёт дуэли крупно сверху и только строки сервера из чата. В OBS добавь его источником «Браузер». Адрес …/overlay с одним счётом тоже остался."
+  ],
+  "en": [
+   "A new tour of the window, as on websites: the window dims, the button in question lights up, and next to it is what it does. 14 steps; the \"?\" button opens it again.",
+   "The hover hints are now the window's own, in its style, instead of Windows' grey system tooltips, in the bot's window and in the app's title bar.",
+   "For a stream there is …/stream (shown on the Clips tab): the bot's game screen filling the window with no buttons, the duel's score big on top and only the server's lines from the chat. Add it in OBS as a \"Browser\" source. …/overlay with the score alone is still there."
+  ]
+ },
+ {
   "id": "2026.09.26n",
   "ru": [
    "Дуэли на F-DDrace: автоответ «/duel {name}» на строку сервера «'Ник' has challenged you...» теперь подставляет ник того, кто вызвал. Раньше уходило пустое «/duel », и сервер отвечал «Invalid arguments». Ник с пробелом берётся в кавычки, а если в строке нет ника, бот ничего не отправляет. После такого ответа бот знает, что это его дуэль и с кем.",

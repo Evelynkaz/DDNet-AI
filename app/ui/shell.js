@@ -10,6 +10,72 @@ document.documentElement.lang = LANG;
 I18N.translateDom(document.body, t, LANG);
 document.documentElement.classList.remove("i18n-wait");
 
+{
+  let tip = null;
+  let cur = null;
+  let timer = 0;
+  const hide = () => {
+    clearTimeout(timer);
+    cur = null;
+    if (tip) tip.hidden = true;
+  };
+
+  const moveTitle = (target) => {
+    const v = target.getAttribute("title") || "";
+    target.removeAttribute("title");
+    target.dataset.tip = v;
+    if (!target.textContent.trim()) target.setAttribute("aria-label", v);
+    return v;
+  };
+  const place = (target) => {
+    const r = target.getBoundingClientRect();
+    const w = tip.offsetWidth;
+    const h = tip.offsetHeight;
+    const x = Math.max(6, Math.min(innerWidth - w - 6, r.left + r.width / 2 - w / 2));
+    const y = r.bottom + 8 + h <= innerHeight - 6 ? r.bottom + 8 : Math.max(6, r.top - h - 8);
+    tip.style.left = `${x}px`;
+    tip.style.top = `${y}px`;
+  };
+  document.addEventListener("mouseover", (e) => {
+    const target = e.target instanceof Element ? e.target.closest("[title],[data-tip]") : null;
+    if (target && target.hasAttribute("title")) moveTitle(target);
+    if (target === cur) return;
+    hide();
+    if (!target || !target.dataset.tip) return;
+    cur = target;
+    timer = setTimeout(() => {
+      if (cur !== target || !target.isConnected) return;
+      if (!tip) {
+        tip = el("div", "tip");
+        document.body.appendChild(tip);
+      }
+      tip.textContent = target.dataset.tip;
+      tip.hidden = false;
+      place(target);
+
+      if (target.closest("#titlebar")) setTimeout(() => cur === target && hide(), 3000);
+    }, 350);
+  });
+  document.addEventListener("mouseout", (e) => {
+    if (!e.relatedTarget) hide();
+  });
+  for (const ev of ["mousedown", "keydown", "wheel"]) document.addEventListener(ev, hide, true);
+  addEventListener("blur", hide);
+
+  new MutationObserver((ms) => {
+    for (const m of ms) {
+      const target = m.target;
+      if (!target.hasAttribute("title") || !("tip" in target.dataset)) continue;
+      const v = moveTitle(target);
+      if (target !== cur || !tip || tip.hidden) continue;
+      if (v) {
+        tip.textContent = v;
+        place(target);
+      } else hide();
+    }
+  }).observe(document.documentElement, { subtree: true, attributes: true, attributeFilter: ["title"] });
+}
+
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;

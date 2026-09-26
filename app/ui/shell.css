@@ -347,3 +347,7 @@ html.i18n-wait body{visibility:hidden;animation:i18n-show 0s linear 1.5s forward
 .dummy-on input:focus-visible+.sw{box-shadow:0 0 0 3px rgba(127,176,224,.35)}
 
 #stage:has(> .screen:not([hidden])) > #bot{visibility:hidden}
+
+.tip{position:fixed;z-index:1000;max-width:320px;padding:7px 10px;border-radius:8px;background:rgba(24,29,42,.97);color:#eef3fa;font:500 12.5px/1.45 var(--font);text-shadow:none;box-shadow:0 8px 24px rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.1);pointer-events:none;white-space:pre-line;animation:tip-in .12s ease-out}
+.tip[hidden]{display:none}
+@keyframes tip-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}

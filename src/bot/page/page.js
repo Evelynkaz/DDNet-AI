@@ -1,7 +1,39 @@
-{const mini=()=>{try{document.documentElement.classList.toggle('mini',/[?&]view=mini(&|$)/.test(location.search)||location.hash==='#mini')}catch{}};mini();try{addEventListener('hashchange',mini)}catch{}}
+const STREAM=(()=>{try{return location.pathname==='/stream'||/[?&]view=stream(&|$)/.test(location.search)}catch{return false}})();
+if(STREAM)document.documentElement.classList.add('stream');
+
+{const mini=()=>{try{document.documentElement.classList.toggle('mini',STREAM||/[?&]view=mini(&|$)/.test(location.search)||location.hash==='#mini')}catch{}};mini();try{addEventListener('hashchange',mini)}catch{}}
 
 const embedded=(()=>{try{return window.self!==window.top}catch{return true}})();
 if(embedded)document.documentElement.classList.add('embedded');
+
+{
+ let tip=null,cur=null,timer=0;
+ const hide=()=>{clearTimeout(timer);cur=null;if(tip)tip.hidden=true};
+ const place=(el)=>{
+  const r=el.getBoundingClientRect(),w=tip.offsetWidth,h=tip.offsetHeight;
+  const x=Math.max(6,Math.min(innerWidth-w-6,r.left+r.width/2-w/2));
+  const y=r.bottom+8+h<=innerHeight-6?r.bottom+8:Math.max(6,r.top-h-8);
+  tip.style.left=x+'px';tip.style.top=y+'px';
+ };
+ document.addEventListener('mouseover',(e)=>{
+  const el=e.target instanceof Element?e.target.closest('[title],[data-tip]'):null;
+  if(el&&el.hasAttribute('title')){const v=el.getAttribute('title')||'';el.removeAttribute('title');el.dataset.tip=v;if(!el.textContent.trim())el.setAttribute('aria-label',v)}
+  if(el===cur)return;
+  hide();
+  if(!el||!el.dataset.tip)return;
+  cur=el;
+  timer=setTimeout(()=>{
+   if(cur!==el||!el.isConnected)return;
+   if(!tip){tip=document.createElement('div');tip.className='tip';document.body.appendChild(tip)}
+   tip.textContent=el.dataset.tip;tip.hidden=false;place(el);
+  },350);
+ });
+ document.addEventListener('mouseout',(e)=>{if(!e.relatedTarget)hide()});
+ for(const ev of ['mousedown','keydown','wheel'])document.addEventListener(ev,hide,true);
+ addEventListener('blur',hide);
+
+ try{new MutationObserver((ms)=>{for(const m of ms){const el=m.target;if(!el.hasAttribute('title')||!('tip' in el.dataset))continue;const v=el.getAttribute('title')||'';el.removeAttribute('title');el.dataset.tip=v;if(!el.textContent.trim())el.setAttribute('aria-label',v);if(el===cur&&tip&&!tip.hidden){if(v){tip.textContent=v;place(el)}else hide()}}}).observe(document.documentElement,{subtree:true,attributes:true,attributeFilter:['title']})}catch{}
+}
 const $=(s)=>document.querySelector(s);
 let stick=true,lastStatus=null,lastVersion='',boot='',logKey='';
 let map=null,mapName='',mapKey='',frame=null,prevFrame=null,view=null,dataFound=false;
@@ -186,6 +218,7 @@ const CLIP_KINDS={'self-freeze':t('сам замёрз'),'chased-into-freeze':t(
 function clipTitle(name){const m=name.match(/^([a-z]+(?:-[a-z]+)*)-\d/);return m&&CLIP_KINDS[m[1]]?CLIP_KINDS[m[1]]:name.replace(/\.json$/,'')}
 
 if($('#overlayurl'))$('#overlayurl').textContent=location.origin+'/overlay';
+if($('#streamurl'))$('#streamurl').textContent=location.origin+'/stream';
 async function pullDuels(){
  let got=null;try{got=await(await fetch('/api/duels')).json()}catch{got=null}
  const list=got&&Array.isArray(got.list)?got.list:[];
@@ -481,6 +514,8 @@ function openChat(pref){
 }
 function closeChat(){chatOpen=false;chatScroll=0;$('#chatin').hidden=true;$('#chatov').classList.remove('open');chatField.value='';$('#chattip').textContent='';chatField.blur();renderChat(true)}
 document.addEventListener('keydown',(e)=>{
+
+ if(STREAM)return;
  const onField=document.activeElement&&document.activeElement.tagName==='INPUT'&&document.activeElement!==chatField;
  if(onField)return;
  if(!chatOpen&&(e.key==='F3'||e.key==='F4')){e.preventDefault();botCmd(e.key==='F3'?'!yes':'!no');return}
@@ -529,7 +564,7 @@ function renderChat(force){
  if(seenAt.size>400){const keep=new Set(lines.map((l)=>l.seq));for(const k of seenAt.keys())if(!keep.has(k))seenAt.delete(k)}
  const last=lines.length?lines[lines.length-1].seq:-1;
 
- const shown=lines.filter((l)=>l.kind==='chat'||l.kind==='whisper'||(l.kind==='log'&&Date.now()-lastCmdAt<10000&&(seenAt.get(l.seq)||0)>=lastCmdAt-500));
+ const shown=STREAM?lines.filter((l)=>l.kind==='chat'&&isSys(l)):lines.filter((l)=>l.kind==='chat'||l.kind==='whisper'||(l.kind==='log'&&Date.now()-lastCmdAt<10000&&(seenAt.get(l.seq)||0)>=lastCmdAt-500));
  const N=chatOpen?14:9;
  if(chatScroll>Math.max(0,shown.length-N))chatScroll=Math.max(0,shown.length-N);
  const end=shown.length-(chatOpen?chatScroll:0);
@@ -813,7 +848,7 @@ try{const v=localStorage.getItem('ddai.fps');if(v==='30'||v==='60'||v==='0')fpsC
 function loop(now){
  requestAnimationFrame(loop);
  let mini=false;try{mini=document.documentElement.classList.contains('mini')}catch{}
- const cap=mini?Math.min(fpsCap||60,30):fpsCap;
+ const cap=mini&&!STREAM?Math.min(fpsCap||60,30):fpsCap;
  if(cap>0&&typeof now==='number'&&now-lastDraw<1000/cap-2)return;
  lastDraw=typeof now==='number'?now:0;
  try{view.draw()}catch(err){console.error(err)}
@@ -833,7 +868,7 @@ $('#logcopy').addEventListener('click',()=>{
 const dds=[];
 function ddSelect(sel){
  const wrap=document.createElement('span');wrap.className='dd';
- const btn=document.createElement('button');btn.type='button';btn.className='ghost dd-btn';btn.title=sel.title||'';
+ const btn=document.createElement('button');btn.type='button';btn.className='ghost dd-btn';btn.title=sel.title||sel.dataset.tip||'';
  const menu=document.createElement('div');menu.className='dd-menu';menu.hidden=true;
  sel.parentNode.insertBefore(wrap,sel);wrap.append(btn,menu,sel);sel.hidden=true;
  const label=()=>{const o=sel.options[sel.selectedIndex];const v=o?o.textContent:'';if(btn.textContent!==v)btn.textContent=v};
@@ -862,9 +897,13 @@ document.addEventListener('keydown',(e)=>{if(e.key==='Escape')for(const d of dds
 setInterval(()=>{for(const d of dds)d.label()},300);
 
 const VIEW_KEY='ddai.view';
-function saveView(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({mode:view.mode(),zoom:Number($('#zoom').value),sound:!muted,show:Object.fromEntries(TOGGLES.map(([id,key])=>[key,$(id).className.includes('on')])),tab:(document.querySelector('.tab.on')||{dataset:{}}).dataset.tab||'game'}))}catch{}}
+function saveView(){if(STREAM)return;try{localStorage.setItem(VIEW_KEY,JSON.stringify({mode:view.mode(),zoom:Number($('#zoom').value),sound:!muted,show:Object.fromEntries(TOGGLES.map(([id,key])=>[key,$(id).className.includes('on')])),tab:(document.querySelector('.tab.on')||{dataset:{}}).dataset.tab||'game'}))}catch{}}
 const TOGGLES=[['#troute','route'],['#ttraps','traps'],['#tnames','names'],['#tcursor','cursor'],['#tboard','board']];
 (()=>{
+ if(STREAM){
+  for(const [id,key] of TOGGLES){const on=key==='names';view.toggle(key,on);$(id).className='ghost'+(on?' on':'')}
+  return;
+ }
  let v=null;try{v=JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch{}
  if(!v||typeof v!=='object')return;
  if(v.mode==='map'||v.mode==='ent'||v.mode==='both'){view.setMode(v.mode);$('#tmode').textContent=modeNames[v.mode];$('#tmode').className='ghost'+(v.mode!=='map'?' on':'')}
@@ -919,27 +958,74 @@ $('#knobreset').addEventListener('click',async()=>{
  pullKnobs();setTimeout(()=>{$('#knobnote').textContent=''},3000);
 });
 
+const TOUR_KEY='ddai.tour.v2';
 {
- const cards=[...document.querySelectorAll('.tour-card')];
- let at=0;
- const show=(i)=>{
-  at=Math.max(0,Math.min(cards.length-1,i));
-  cards.forEach((c,k)=>{c.hidden=k!==at});
-  $('#tourdots').textContent=(at+1)+' / '+cards.length;
-  $('#tourprev').disabled=at===0;
-  $('#tournext').textContent=at===cards.length-1?t('понятно'):t('дальше');
+ const steps=[
+  {sel:'.game-grid>.card .view',h:t('Экран игры'),p:t('Так бот видит сервер. Колесо мыши меняет масштаб, клик по ти ставит камеру за ним. Enter открывает чат, Tab дописывает ник или команду.')},
+  {sel:'.viewbar .grp:first-child',h:t('Камера'),p:t('«следить» возвращает камеру к боту, в списке можно выбрать любого игрока. «вся карта» показывает карту целиком, ползунок меняет масштаб.')},
+  {sel:'#tmode',h:t('Вид'),p:t('Как в DDNet: обычная карта, сущности (где фриз и за что цепляется хук) или всё вместе.')},
+  {sel:'.viewbar .grp:last-child',h:t('Что показывать'),p:t('Ники над ти, прицел бота, его маршрут, ловушки (места, откуда не выбраться), табло (как удерживать Tab) и звук игры.')},
+  {sel:'#styleseg',h:t('Что делает бот'),p:t('дефолт: дерётся там, где игра. ВБ: держит вейблок и закидывает во фриз всех, кто идёт через него. дуэль: 1 на 1, включается и сама, когда бот принял дуэль.')},
+  {sel:'#modeseg',h:t('Режим'),p:t('драться: бьёт тех, кто рядом. не лезть: ходит, но никого не трогает. стоять: стоит на месте.')},
+  {sel:'.acts',h:t('Быстрые кнопки'),p:t('убиться: /kill за бота. клип: сохранить последние 30 секунд во вкладку «Записи». наблюдать: бот уходит в наблюдатели. дом: сюда бот вернётся, когда не с кем драться. И эмоция над головой.')},
+  {sel:'.ctl-low',h:t('Слабый ПК'),p:t('Огромный пинг и бот стоит на месте: включи. Бот считает короче и успевает за сервером, но играет чуть слабее.')},
+  {sel:'.card.players',h:t('Игроки'),p:t('Клик по нику: сделать целью, идти к нему, следить, тима, вар, игнор. Тиму (друга) бот не трогает, защищает и вытаскивает из фриза, вара бьёт первым.')},
+  {sel:'.logcard',h:t('Лог'),p:t('Всё, что бот слышит и делает: чат, события, личные сообщения. Есть поиск и кнопка «копировать», чтобы скинуть лог.')},
+  {sel:'#f',h:t('Команды'),p:t('Команды боту и текст в чат. !help покажет все команды. Например: !wb left, !duel on, !goto @ник, !target ник. Второму боту то же через !d, например !d wb right.')},
+  {sel:'.tab[data-tab="clips"]',h:t('Записи'),p:t('Клипы моментов игры и все дуэли со счётом. Там же адреса для стрима в OBS: /overlay (только счёт) и /stream (игра целиком).')},
+  {sel:'.tab[data-tab="cfg"]',h:t('Настройки'),p:t('Автоматический чат (например «duel» → /duel {name}), второй бот, списки вар и тимы, настройки поиска.')},
+  {sel:'#helpbtn',h:t('Всё'),p:t('Этот тур можно открыть снова кнопкой «?». Что нового в версии: клик по номеру версии рядом.')},
+ ];
+ const veil=$('#spot'),hole=$('#spothole'),pop=$('#spotpop');
+ let at=0,list=[];
+ const shown=(s)=>{const el=document.querySelector(s.sel);if(!el)return false;const r=el.getBoundingClientRect();return r.width>0&&r.height>0};
+ const place=()=>{
+  if(veil.hidden||!list.length)return;
+
+  if(document.documentElement.classList.contains('mini')){veil.hidden=true;return}
+  const el=document.querySelector(list[at].sel);if(!el)return;
+  const r=el.getBoundingClientRect(),pad=6;
+  const x=Math.max(4,r.left-pad),y=Math.max(4,r.top-pad),w=Math.min(innerWidth-4-x,r.width+pad*2),h=Math.min(innerHeight-4-y,r.height+pad*2);
+  Object.assign(hole.style,{left:x+'px',top:y+'px',width:w+'px',height:h+'px'});
+  const pw=pop.offsetWidth,ph=pop.offsetHeight,m=12,fit=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+
+  let px=fit(x+w/2-pw/2,8,innerWidth-pw-8),py;
+  if(y+h+m+ph<=innerHeight-8)py=y+h+m;
+  else if(y-m-ph>=8)py=y-m-ph;
+  else if(x+w+m+pw<=innerWidth-8){px=x+w+m;py=fit(y,8,innerHeight-ph-8)}
+  else if(x-m-pw>=8){px=x-m-pw;py=fit(y,8,innerHeight-ph-8)}
+  else py=fit(y+h-ph-m,8,innerHeight-ph-8);
+  pop.style.left=px+'px';pop.style.top=py+'px';
  };
- const open=()=>{$('#tour').hidden=false;show(0)};
- const close=()=>{$('#tour').hidden=true;try{localStorage.setItem('ddai.tour.v1','seen')}catch{}};
+ const show=(i)=>{
+  at=Math.max(0,Math.min(list.length-1,i));
+  const s=list[at],el=document.querySelector(s.sel);
+  if(el)el.scrollIntoView({block:'nearest',inline:'nearest'});
+  $('#spoth').textContent=s.h;$('#spotp').textContent=s.p;
+  $('#spotn').textContent=(at+1)+' / '+list.length;
+  $('#spotprev').disabled=at===0;
+  $('#spotnext').textContent=at===list.length-1?t('понятно'):t('дальше');
+  requestAnimationFrame(place);
+ };
+ const open=()=>{
+  const game=document.querySelector('.tab[data-tab="game"]');if(game&&!game.classList.contains('on'))game.click();
+  list=steps.filter(shown);if(!list.length)return;
+  veil.hidden=false;show(0);
+ };
+ const close=()=>{veil.hidden=true;try{localStorage.setItem(TOUR_KEY,'seen')}catch{}};
  $('#helpbtn').addEventListener('click',open);
- $('#tourclose').addEventListener('click',close);
- $('#tourprev').addEventListener('click',()=>show(at-1));
- $('#tournext').addEventListener('click',()=>{if(at===cards.length-1)close();else show(at+1)});
- $('#tour').addEventListener('click',(e)=>{if(e.target===$('#tour'))close()});
- document.addEventListener('keydown',(e)=>{if($('#tour').hidden)return;if(e.key==='Escape')close();else if(e.key==='ArrowRight')show(at+1);else if(e.key==='ArrowLeft')show(at-1)});
- let seen=true;try{seen=localStorage.getItem('ddai.tour.v1')==='seen'}catch{}
+ $('#spotx').addEventListener('click',close);
+ $('#spotprev').addEventListener('click',()=>show(at-1));
+ $('#spotnext').addEventListener('click',()=>{if(at===list.length-1)close();else show(at+1)});
+
+ document.addEventListener('keydown',(e)=>{if(veil.hidden!==false)return;e.stopPropagation();if(e.key==='Escape')close();else if(e.key==='ArrowRight')show(at+1);else if(e.key==='ArrowLeft')show(at-1);else return;e.preventDefault()},true);
+ addEventListener('resize',place);
+
+ setInterval(()=>{if(!veil.hidden)place()},400);
+ let seen=true;try{seen=localStorage.getItem(TOUR_KEY)==='seen'}catch{}
  let mini=false;try{mini=document.documentElement.classList.contains('mini')}catch{}
- if(!seen&&!mini)open();
+
+ if(!seen&&!mini)setTimeout(open,600);
 }
 
 {
@@ -959,7 +1045,7 @@ $('#knobreset').addEventListener('click',async()=>{
  $('#newsok').addEventListener('click',close);
  $('#news').addEventListener('click',(e)=>{if(e.target===$('#news'))close()});
  $('#ver').addEventListener('click',show);
- let seen=null,tour=null;try{seen=localStorage.getItem('ddai.news');tour=localStorage.getItem('ddai.tour.v1')}catch{}
+ let seen=null,tour=null;try{seen=localStorage.getItem('ddai.news');tour=localStorage.getItem(TOUR_KEY)}catch{}
  let mini=false;try{mini=document.documentElement.classList.contains('mini')}catch{}
  if(top&&seen!==top.id){
 
@@ -971,3 +1057,20 @@ $('#knobreset').addEventListener('click',async()=>{
 if($('#fpscap')){$('#fpscap').value=String(fpsCap);$('#fpscap').addEventListener('change',()=>{fpsCap=Number($('#fpscap').value);try{localStorage.setItem('ddai.fps',String(fpsCap))}catch{}})}
 
 for(const b of document.querySelectorAll('[data-dcmd]'))b.addEventListener('click',()=>void botCmd('!d '+b.dataset.dcmd,true));
+
+if(STREAM){
+ const box=document.createElement('div');box.id='streamscore';box.hidden=true;
+ box.innerHTML='<div class="row"><span class="n" id="ss_me"></span><span id="ss_sc"></span><span class="n" id="ss_op"></span></div><div id="ss_sub"></div>';
+ document.body.appendChild(box);
+ const pull=async()=>{
+  let d=null;try{d=await(await fetch('/api/duelnow',{cache:'no-store'})).json()}catch{d=null}
+  const cur=d&&d.now,last=d&&d.last,show=cur||last;
+  box.hidden=!show;if(!show)return;
+  box.classList.toggle('idle',!cur);
+  $('#ss_me').textContent=cur?d.me:(last.by||d.me);
+  $('#ss_op').textContent=cur?cur.name:last.opponent;
+  $('#ss_sc').textContent=(cur?cur.ours:last.ours)+' : '+(cur?cur.theirs:last.theirs);
+  $('#ss_sub').textContent=cur?t('дуэль'):t('прошлая дуэль');
+ };
+ pull();setInterval(pull,500);
+}
