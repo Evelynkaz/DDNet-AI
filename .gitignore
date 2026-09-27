@@ -70,3 +70,4 @@ secrets/
 
 # Local C++ oracle build output (tools/ddnet-oracle, added in a later task).
 tools/ddnet-oracle/build/
+__pycache__/
