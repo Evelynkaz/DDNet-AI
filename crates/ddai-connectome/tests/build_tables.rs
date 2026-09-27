@@ -21,7 +21,7 @@ use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
 
 use ddai_connectome::tables::{
     ANNOTATIONS_FILE_NAME, NEUROTRANSMITTERS_FILE_NAME, NtClass, WEIGHTS_FILE_NAME, build_tables_from_raw,
-    f64_to_exact_i64,
+    f64_to_exact_i16, f64_to_exact_i64,
 };
 
 /// Writes `batch` to `path` as an Arrow IPC (Feather v2) file with LZ4 frame compression, the
@@ -49,6 +49,8 @@ fn write_annotations(dir: &Path) {
         Field::new("subclass", DataType::Utf8, true),
         Field::new("somaSide", DataType::Utf8, true),
         Field::new("group", DataType::Float64, true),
+        Field::new("assignedOlHex1", DataType::Float64, true),
+        Field::new("assignedOlHex2", DataType::Float64, true),
     ]);
 
     // bodyId:   100            200            300               400                500      600            998   999
@@ -141,6 +143,28 @@ fn write_annotations(dir: &Path) {
         None::<f64>,
         None::<f64>,
     ]);
+    // Only body 100 has hex coordinates (mirrors the real data: only optic-lobe columnar
+    // neurons have them, everyone else is NaN/None).
+    let ol_hex1 = Float64Array::from(vec![
+        Some(12.0),
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+    ]);
+    let ol_hex2 = Float64Array::from(vec![
+        Some(26.0),
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+        None::<f64>,
+    ]);
 
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
@@ -154,6 +178,8 @@ fn write_annotations(dir: &Path) {
             Arc::new(subclass),
             Arc::new(soma_side),
             Arc::new(group),
+            Arc::new(ol_hex1),
+            Arc::new(ol_hex2),
         ],
     )
     .unwrap();
@@ -307,6 +333,11 @@ fn build_tables_matches_hand_computed_expectations() {
     let n300 = &tables.neurons.rows[idx_of(300)];
     assert_eq!(n300.group, None, "NaN group must convert to None, not an error or 0");
 
+    assert_eq!(n100.ol_hex1, Some(12), "body 100 is the only one with hex coordinates");
+    assert_eq!(n100.ol_hex2, Some(26));
+    assert_eq!(n300.ol_hex1, None, "NaN hex must convert to None, not an error or 0");
+    assert_eq!(n300.ol_hex2, None);
+
     let n400 = &tables.neurons.rows[idx_of(400)];
     assert_eq!(type_name(n400.type_id), None, "body 400 has no `type` in the source");
     assert_eq!(superclass_name(n400.superclass), Some("ascending_neuron"));
@@ -401,6 +432,8 @@ fn build_tables_rejects_a_fractional_group_value() {
         Field::new("subclass", DataType::Utf8, true),
         Field::new("somaSide", DataType::Utf8, true),
         Field::new("group", DataType::Float64, true),
+        Field::new("assignedOlHex1", DataType::Float64, true),
+        Field::new("assignedOlHex2", DataType::Float64, true),
     ]);
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
@@ -414,6 +447,8 @@ fn build_tables_rejects_a_fractional_group_value() {
             Arc::new(StringArray::from(vec![None::<&str>])),
             Arc::new(StringArray::from(vec![None::<&str>])),
             Arc::new(Float64Array::from(vec![Some(1.5)])),
+            Arc::new(Float64Array::from(vec![None::<f64>])),
+            Arc::new(Float64Array::from(vec![None::<f64>])),
         ],
     )
     .unwrap();
@@ -477,6 +512,8 @@ fn write_minimal_annotations(dir: &Path, rows: &[(i64, Option<&str>)]) {
         Field::new("subclass", DataType::Utf8, true),
         Field::new("somaSide", DataType::Utf8, true),
         Field::new("group", DataType::Float64, true),
+        Field::new("assignedOlHex1", DataType::Float64, true),
+        Field::new("assignedOlHex2", DataType::Float64, true),
     ]);
     let n = rows.len();
     let body_id = Int64Array::from(rows.iter().map(|(b, _)| *b).collect::<Vec<_>>());
@@ -493,6 +530,8 @@ fn write_minimal_annotations(dir: &Path, rows: &[(i64, Option<&str>)]) {
             Arc::new(none_str()),
             Arc::new(none_str()),
             Arc::new(none_str()),
+            Arc::new(Float64Array::from(vec![None::<f64>; n])),
+            Arc::new(Float64Array::from(vec![None::<f64>; n])),
             Arc::new(Float64Array::from(vec![None::<f64>; n])),
         ],
     )
@@ -611,4 +650,66 @@ fn f64_to_exact_i64_is_exposed_and_used_by_the_build() {
     // Direct check of the pure helper too (belt-and-suspenders with the end-to-end test above).
     assert_eq!(f64_to_exact_i64(10.0).unwrap(), Some(10));
     assert!(f64_to_exact_i64(10.5).is_err());
+}
+
+#[test]
+fn f64_to_exact_i16_is_exposed_and_rejects_fractional_and_out_of_range() {
+    assert_eq!(f64_to_exact_i16(12.0).unwrap(), Some(12));
+    assert_eq!(f64_to_exact_i16(f64::NAN).unwrap(), None);
+    assert!(
+        f64_to_exact_i16(12.5).is_err(),
+        "fractional hex coordinate is a hard error"
+    );
+    assert!(
+        f64_to_exact_i16(100_000.0).is_err(),
+        "value outside i16's range must be rejected, not silently truncated"
+    );
+}
+
+#[test]
+fn build_tables_rejects_an_out_of_range_hex_coordinate() {
+    // Same idea as `build_tables_rejects_a_fractional_group_value`, but for `assignedOlHex1`:
+    // a value that fits in f64-exact-integer range but not in i16 must be a hard error, not a
+    // silent truncation.
+    let dir = tempfile::tempdir().unwrap();
+    let schema = Schema::new(vec![
+        Field::new("bodyId", DataType::Int64, false),
+        Field::new("status", DataType::Utf8, true),
+        Field::new("type", DataType::Utf8, true),
+        Field::new("instance", DataType::Utf8, true),
+        Field::new("superclass", DataType::Utf8, true),
+        Field::new("class", DataType::Utf8, true),
+        Field::new("subclass", DataType::Utf8, true),
+        Field::new("somaSide", DataType::Utf8, true),
+        Field::new("group", DataType::Float64, true),
+        Field::new("assignedOlHex1", DataType::Float64, true),
+        Field::new("assignedOlHex2", DataType::Float64, true),
+    ]);
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(Int64Array::from(vec![1])),
+            Arc::new(StringArray::from(vec![Some("Traced")])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(Float64Array::from(vec![None::<f64>])),
+            Arc::new(Float64Array::from(vec![Some(100_000.0)])),
+            Arc::new(Float64Array::from(vec![None::<f64>])),
+        ],
+    )
+    .unwrap();
+    write_feather_lz4(&dir.path().join(ANNOTATIONS_FILE_NAME), &schema, &batch);
+    write_empty_neurotransmitters(dir.path());
+    write_minimal_weights(dir.path(), &[]);
+
+    let err = build_tables_from_raw(dir.path()).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("does not fit in i16"),
+        "expected an i16-range error, got: {message}"
+    );
 }

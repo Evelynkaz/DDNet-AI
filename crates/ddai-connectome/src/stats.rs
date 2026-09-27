@@ -462,6 +462,8 @@ mod tests {
                 subclass: None,
                 soma_side: None,
                 group: None,
+                ol_hex1: None,
+                ol_hex2: None,
             },
             NeuronRow {
                 body_id: 2,
@@ -473,6 +475,8 @@ mod tests {
                 subclass: None,
                 soma_side: None,
                 group: None,
+                ol_hex1: None,
+                ol_hex2: None,
             },
             NeuronRow {
                 body_id: 3,
@@ -484,6 +488,8 @@ mod tests {
                 subclass: None,
                 soma_side: None,
                 group: None,
+                ol_hex1: None,
+                ol_hex2: None,
             },
         ];
         let neuron_nt = vec![
@@ -603,6 +609,8 @@ mod tests {
                 subclass: None,
                 soma_side: None,
                 group: None,
+                ol_hex1: None,
+                ol_hex2: None,
             },
             NeuronRow {
                 body_id: 2,
@@ -614,6 +622,8 @@ mod tests {
                 subclass: None,
                 soma_side: None,
                 group: None,
+                ol_hex1: None,
+                ol_hex2: None,
             },
             NeuronRow {
                 body_id: 3,
@@ -625,6 +635,8 @@ mod tests {
                 subclass: None,
                 soma_side: None,
                 group: None,
+                ol_hex1: None,
+                ol_hex2: None,
             },
         ];
         let tables = ConnectomeTables {

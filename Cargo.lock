@@ -594,6 +594,7 @@ dependencies = [
  "arrow",
  "base64",
  "clap",
+ "ddai-flyg",
  "md-5",
  "postcard",
  "reqwest",
@@ -602,6 +603,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "zstd",
+]
+
+[[package]]
+name = "ddai-flyg"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "tempfile",
  "zstd",
 ]
 

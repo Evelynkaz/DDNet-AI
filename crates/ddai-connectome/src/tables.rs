@@ -43,7 +43,10 @@ use crate::hashing::hash_file;
 /// Bumped whenever the *meaning* of a stored field changes (not just its byte layout, which
 /// `postcard`/`serde` would already fail to decode mismatched). v2: `total_input`/`total_output`
 /// now include autapse weight (v1 excluded it, matching the edge list); see the module docs.
-pub const TABLES_FORMAT_VERSION: u32 = 2;
+/// v3 (task 6.3): `NeuronRow` gained `ol_hex1`/`ol_hex2` (the source `assignedOlHex1/2` columns)
+/// — the hex-grid column coordinates of optic-lobe columnar neurons, needed to compute visual
+/// receptive fields for the fly subgraph (`ddai-flyg`); every other neuron has both `None`.
+pub const TABLES_FORMAT_VERSION: u32 = 3;
 pub const TABLES_FILE_NAME: &str = "connectome.tables";
 
 pub const ANNOTATIONS_FILE_NAME: &str = "body-annotations-male-cns-v1.0-minconf-0.5.feather";
@@ -126,6 +129,15 @@ pub struct NeuronRow {
     /// Source `group` column, a `double` in the Feather file but integral by convention; see
     /// [`f64_to_exact_i64`]. `None` when the source value is missing (NaN).
     pub group: Option<i64>,
+    /// Source `assignedOlHex1`/`assignedOlHex2` columns (task 6.3): hex-grid column coordinates
+    /// of optic-lobe columnar neurons (observed range on the real data: roughly 1..=36 / 1..=39),
+    /// `double` in the Feather file but integral by convention; see [`f64_to_exact_i64`]. `None`
+    /// for the large majority of neurons that aren't optic-lobe columns (no hex position at
+    /// all). Used by `ddai-flyg`'s subgraph builder to compute visual receptive fields: a VPN
+    /// neuron's RF center is the synapse-weighted mean of its presynaptic partners' hex
+    /// coordinates (see `docs/FLY.md` §5, `crates/ddai-flyg/README.md`).
+    pub ol_hex1: Option<i16>,
+    pub ol_hex2: Option<i16>,
 }
 
 /// Per-neuron predicted NT, parallel to `neurons` (same length, same order/index).
@@ -235,6 +247,19 @@ pub fn f64_to_exact_i64(x: f64) -> Result<Option<i64>> {
     }
 }
 
+/// Like [`f64_to_exact_i64`], but additionally requires the value to fit in `i16` — used for
+/// `assignedOlHex1/2`, whose observed range on the real data (roughly 1..=36 / 1..=39) is nowhere
+/// near `i16`'s range, so a value outside it signals the source data no longer matches this
+/// assumption rather than a value to silently clamp.
+pub fn f64_to_exact_i16(x: f64) -> Result<Option<i16>> {
+    match f64_to_exact_i64(x)? {
+        None => Ok(None),
+        Some(v) => i16::try_from(v)
+            .map(Some)
+            .with_context(|| format!("value {v} does not fit in i16")),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Arrow column access helpers
 // ---------------------------------------------------------------------------------------------
@@ -315,6 +340,8 @@ struct RawAnnotationRow {
     subclass: Option<String>,
     soma_side: Option<String>,
     group: Option<f64>,
+    ol_hex1: Option<f64>,
+    ol_hex2: Option<f64>,
 }
 
 struct RawAnnotations {
@@ -346,6 +373,8 @@ fn read_annotations(path: &Path) -> Result<RawAnnotations> {
         let subclass_col = string_column(&batch, "subclass")?;
         let soma_side_col = string_column(&batch, "somaSide")?;
         let group_col = f64_column(&batch, "group")?;
+        let ol_hex1_col = f64_column(&batch, "assignedOlHex1")?;
+        let ol_hex2_col = f64_column(&batch, "assignedOlHex2")?;
 
         for i in 0..batch.num_rows() {
             if body_id_col.is_null(i) {
@@ -387,6 +416,8 @@ fn read_annotations(path: &Path) -> Result<RawAnnotations> {
                 subclass,
                 soma_side,
                 group: opt_f64(group_col, i),
+                ol_hex1: opt_f64(ol_hex1_col, i),
+                ol_hex2: opt_f64(ol_hex2_col, i),
             });
         }
     }
@@ -624,6 +655,20 @@ pub fn build_tables_from_raw(raw_dir: &Path) -> Result<ConnectomeTables> {
         let r = &raw.rows[src_i];
         let group = f64_to_exact_i64(r.group.unwrap_or(f64::NAN))
             .with_context(|| format!("{}: bodyId {} column `group`", annotations_path.display(), r.body_id))?;
+        let ol_hex1 = f64_to_exact_i16(r.ol_hex1.unwrap_or(f64::NAN)).with_context(|| {
+            format!(
+                "{}: bodyId {} column `assignedOlHex1`",
+                annotations_path.display(),
+                r.body_id
+            )
+        })?;
+        let ol_hex2 = f64_to_exact_i16(r.ol_hex2.unwrap_or(f64::NAN)).with_context(|| {
+            format!(
+                "{}: bodyId {} column `assignedOlHex2`",
+                annotations_path.display(),
+                r.body_id
+            )
+        })?;
         neuron_rows.push(NeuronRow {
             body_id: r.body_id,
             status: r.status.as_deref().and_then(|s| status_ids.get(s)).copied(),
@@ -634,6 +679,8 @@ pub fn build_tables_from_raw(raw_dir: &Path) -> Result<ConnectomeTables> {
             subclass: r.subclass.as_deref().and_then(|s| subclass_ids.get(s)).copied(),
             soma_side: r.soma_side.as_deref().and_then(|s| soma_side_ids.get(s)).copied(),
             group,
+            ol_hex1,
+            ol_hex2,
         });
         body_id_to_idx.insert(r.body_id, idx as u32);
     }
@@ -758,8 +805,15 @@ pub fn save_tables(tables: &ConnectomeTables, out_dir: &Path) -> Result<PathBuf>
 /// is specifically for cases where the bytes decode fine but *mean* something different now,
 /// e.g. v1's `total_input`/`total_output` excluded autapse weight and v2's don't).
 pub fn load_tables(out_dir: &Path) -> Result<ConnectomeTables> {
-    let path = tables_path(out_dir);
-    let compressed = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    load_tables_file(&tables_path(out_dir))
+}
+
+/// Like [`load_tables`], but takes the exact path to the tables file itself rather than its
+/// containing directory (used by `build-subgraph --tables <file>`, whose CLI contract — task
+/// 6.3's spec — names the file directly; see [`resolve_tables_file_path`] for the bit of both-ways
+/// compatibility that lets a caller pass either).
+pub fn load_tables_file(path: &Path) -> Result<ConnectomeTables> {
+    let compressed = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let bytes = zstd::stream::decode_all(compressed.as_slice())
         .with_context(|| format!("zstd-decompressing {}", path.display()))?;
     let tables: ConnectomeTables =
@@ -772,6 +826,17 @@ pub fn load_tables(out_dir: &Path) -> Result<ConnectomeTables> {
         );
     }
     Ok(tables)
+}
+
+/// Resolves a `--tables` argument that may be either a direct path to the tables file (task 6.3's
+/// documented CLI contract) or a directory containing [`TABLES_FILE_NAME`] (this crate's other
+/// commands' convention, e.g. `stats --tables <dir>`) to the exact file path either way.
+pub fn resolve_tables_file_path(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        tables_path(path)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 #[cfg(test)]

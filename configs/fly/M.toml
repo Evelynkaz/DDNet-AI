@@ -1,0 +1,185 @@
+# Selection config for the fly's connectome subgraph, size M (task 6.3).
+# Target: ~10-15k neurons, <=0.5M edges (task spec acceptance criterion 7).
+# Consumed by `ddai-connectome build-subgraph --config configs/fly/M.toml`.
+# See `configs/fly/S.toml` for the shared design notes (type-name verification, DN roster,
+# labeling convention); this file only comments on what differs for M.
+
+[selection]
+# FLY.md §3's M row: "пути <= 3 синапсов" — one more hop than S, reaching one layer deeper into
+# central-brain processing (e.g. central complex) without yet going to the "whole brain" L size.
+k = 3
+# Standard MaleCNS/FlyWire/Codex threshold (see S.toml) — M no longer needs the relaxed >= 3 path
+# threshold S uses, since the extra hop (k=3) already gives paths more chances to survive >= 5.
+theta_path = 5
+theta_edge = 5
+# Tuned empirically to land the total neuron count in the ~10-15k target band (see the build
+# report for the run that produced this value) — larger than S's both because there are more
+# input/AN/output seed types below and because k=3 reaches a much bigger candidate pool per seed.
+max_hidden = 5000
+weak_pair_threshold = 20
+# FLY.md §3's M row: "больше AN/DN" than S; picking more AN *types* here (S: 18) lets more of the
+# real AN neuron population participate, per the build report's AN neuron counts. Same accepted
+# deviation as S.toml's `an_top_n_types` (orchestrator, review round 1, F3): real per-type AN
+# populations don't line up neuron-for-neuron with FLY.md's phase-0 neuron-count estimate.
+an_top_n_types = 45
+
+[nt]
+sign_confidence_threshold = 0.5
+use_best_guess_when_uncertain = false
+ach_sign = 1
+gaba_sign = -1
+glu_sign = -1
+his_sign = -1
+modulatory_sign = 0
+
+[rf]
+# Same as S.toml's `[rf]` — see there for the full rationale.
+min_hex_support = 10
+
+[inputs]
+# FLY.md §3's M row: "+ все ~20 VPN-типов из §5.1" — the fuller visual-projection roster task spec
+# acceptance criterion 6 lists (LC10a, LC10d, LC9, LC4, LPLC2, LPLC1, LC16, LC6, LC11, LC18, LC12,
+# LC15, LC24/LC26, HS/VS/H2-type LPTCs, LLPC1-3), all verified exact names (see S.toml's note on
+# HS/VS/H2 -> HSE/HSN/HSS/VS/H2; LC24 and LC26 are two separate real type names, not one).
+visual_types = [
+    "LC10a", "LC10d", "LC9", "LC4", "LPLC2", "LPLC1", "LC16", "LC6",
+    "LC11", "LC18", "LC12", "LC15", "LC24", "LC26",
+    "HSE", "HSN", "HSS", "VS", "H2",
+    "LLPC1", "LLPC2", "LLPC3",
+]
+
+[outputs]
+# Same full DN roster as S.toml — see that file's comment for why (DN types are tiny; keeping the
+# whole roster at both sizes keeps every output_groups action populated at both sizes).
+dn_types = [
+    "DNa01", "DNa02", "DNg13", "DNp09", "MDN",
+    "DNp01", "DNp02", "DNp04", "DNp06", "DNp11",
+    "DNp07", "DNp10", "DNg11",
+    "DNg12_a", "DNg12_b", "DNg12_c", "DNg12_d", "DNg12_e", "DNg12_f", "DNg12_g", "DNg12_h",
+    "DNp67", "DNge079", "DNg105", "DNp103", "DNpe050",
+    "DNa03", "DNa06", "DNa13", "DNa15", "DNa16", "DNg04",
+]
+
+# Input channels (FLY.md §5): the S.toml set, plus the extra M-only visual types' channels.
+[[input_channels]]
+type = "LC10a"
+channels = ["opponent_position"]
+
+[[input_channels]] # С: соперник — где он (доп. LC10d)
+type = "LC10d"
+channels = ["opponent_position"]
+
+[[input_channels]] # Б: соперник — где он (доп. LC9)
+type = "LC9"
+channels = ["opponent_position"]
+
+[[input_channels]]
+type = "LC4"
+channels = ["opponent_approach"]
+
+[[input_channels]]
+type = "LPLC2"
+channels = ["opponent_approach"]
+
+[[input_channels]] # С: хук соперника (тонкий отрезок) — LC15, + стены (LC12/LC15 «бары»)
+type = "LC15"
+channels = ["opponent_hook", "walls"]
+
+[[input_channels]] # С/Б: другие игроки
+type = "LC11"
+channels = ["other_players"]
+
+[[input_channels]] # С/Б: другие игроки
+type = "LC18"
+channels = ["other_players"]
+
+[[input_channels]] # С: стены/препятствия
+type = "LPLC1"
+channels = ["walls"]
+
+[[input_channels]] # С: стены/препятствия (бары)
+type = "LC12"
+channels = ["walls"]
+
+[[input_channels]] # С: freeze/death-тайлы
+type = "LC16"
+channels = ["freeze_death_tiles"]
+
+[[input_channels]] # С: freeze/death-тайлы (доп. LC6, лупинг/прыжок)
+type = "LC6"
+channels = ["freeze_death_tiles"]
+
+[[input_channels]] # П: no-hook-тайлы (функция LC24 неизвестна)
+type = "LC24"
+channels = ["no_hook_tiles"]
+
+[[input_channels]] # П: no-hook-тайлы (функция LC26 неизвестна)
+type = "LC26"
+channels = ["no_hook_tiles"]
+
+[[input_channels]]
+type = "HSE"
+channels = ["self_velocity_x"]
+
+[[input_channels]]
+type = "HSN"
+channels = ["self_velocity_x"]
+
+[[input_channels]]
+type = "HSS"
+channels = ["self_velocity_x"]
+
+[[input_channels]]
+type = "VS"
+channels = ["self_velocity_y"]
+
+[[input_channels]] # Б: собственная скорость (поступательный поток) — LLPC1-3
+type = "LLPC1"
+channels = ["self_velocity_flow"]
+
+[[input_channels]]
+type = "LLPC2"
+channels = ["self_velocity_flow"]
+
+[[input_channels]]
+type = "LLPC3"
+channels = ["self_velocity_flow"]
+
+# Output groups: identical to S.toml (FLY.md §6's action set doesn't grow with subgraph size).
+[[output_groups]]
+action = "direction_left"
+types = ["DNa02", "DNa01", "DNg13", "DNp09"]
+side = "l"
+
+[[output_groups]]
+action = "direction_right"
+types = ["DNa02", "DNa01", "DNg13", "DNp09"]
+side = "r"
+
+[[output_groups]]
+action = "direction_stop"
+types = ["MDN"]
+side = "both"
+
+[[output_groups]]
+action = "jump"
+types = ["DNp01", "DNp02", "DNp04", "DNp11", "DNp06"]
+side = "both"
+
+[[output_groups]]
+action = "hook"
+types = [
+    "DNp07", "DNp10", "DNg11",
+    "DNg12_a", "DNg12_b", "DNg12_c", "DNg12_d", "DNg12_e", "DNg12_f", "DNg12_g", "DNg12_h",
+]
+side = "both"
+
+[[output_groups]]
+action = "fire"
+types = ["DNp67", "DNge079", "DNg105", "DNp103", "DNpe050"]
+side = "both"
+
+[[output_groups]]
+action = "aim"
+types = ["DNa02", "DNa03", "DNa06", "DNa13", "DNa15", "DNa16", "DNg04"]
+side = "both"

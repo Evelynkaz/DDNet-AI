@@ -14,4 +14,5 @@ pub mod verify;
 pub mod fetch;
 pub mod inspect;
 pub mod stats;
+pub mod subgraph;
 pub mod tables;

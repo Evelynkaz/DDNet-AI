@@ -1,0 +1,174 @@
+# Selection config for the fly's connectome subgraph, size S (task 6.3).
+# Target: ~2-3k neurons, <=0.2M edges (task spec acceptance criterion 7).
+# Consumed by `ddai-connectome build-subgraph --config configs/fly/S.toml`.
+# Every type name below is exact MaleCNS v1.0 spelling, verified against the real
+# `connectome.tables` (task 6.1's output) before being committed here — see the build report for
+# the verification run. Design reference throughout: docs/FLY.md §3 (subgraph), §5 (inputs), §6
+# (outputs).
+
+[selection]
+# Max path length (hops) from a seed input to a seed output a hidden neuron may lie on. FLY.md §3
+# says S uses "промежуточные на путях <= 2 синапсов" — 2 hops covers the direct VPN/AN -> central
+# (AOTU/PVLP/GNG) -> DN relay, without pulling in the much larger set reachable at 3+ hops.
+k = 2
+# Minimum synapse weight used while searching/ranking paths. FLY.md §7.1 recommends ">= 3" for S
+# ("для S можно >= 3, чтобы не рвать пути") specifically so weaker-but-real paths aren't cut before
+# they even get ranked; the *final* kept edges use the separate, standard >= 5 threshold below.
+theta_path = 3
+# Minimum synapse weight kept in the final induced subgraph. docs/research/fly-data.md §1.4/§6.1
+# and FLY.md §7.1 both use ">= 5" as the standard MaleCNS/FlyWire/Codex threshold.
+theta_edge = 5
+# Soft cap on the top-ranked hidden-neuron core (bilateral completion can push the final count
+# slightly above this — see the build report for the actual final count). Tuned empirically to
+# land the *total* neuron count (inputs + AN + hidden + outputs) in the ~2-3k target band; see the
+# build report for the run that produced this value.
+max_hidden = 700
+# Type pairs below this many total synapses (within the subgraph) share one learnable parameter
+# per (pre sign, pre superclass, post superclass) instead of getting their own — keeps the
+# trainable parameter count in flyvis's ballpark (FLY.md §4/§7.9: "~3-10 тыс." for S).
+weak_pair_threshold = 20
+# How many ascending (AN) types the data-driven rule (this crate's `subgraph::an_pick`) keeps.
+# FLY.md §3's S row estimates "~20-40 AN *neurons*"; the real per-type AN population is uneven
+# enough that 18 *types* actually resolves to ~82 AN *neurons* (see the build report) — about 2x
+# the estimate. Accepted deviation (orchestrator, review round 1, F3): FLY.md's number was a
+# phase-0 estimate before real per-type counts were known, and there is no over-target
+# constraint on AN count in the task spec's acceptance criteria (only total neurons/edges are
+# bounded, and S comfortably clears both at this value) — left as is rather than re-tuned down.
+an_top_n_types = 18
+
+[nt]
+# Defaults match FLY.md §4/§7.3 and D-013 exactly (ACh+, GABA/Glu/His-, DA/5-HT/OA excluded from
+# fast transmission) — listed explicitly here anyway so a reader doesn't have to know the code's
+# defaults to know what this config actually does.
+sign_confidence_threshold = 0.5
+use_best_guess_when_uncertain = false
+ach_sign = 1
+gaba_sign = -1
+glu_sign = -1
+his_sign = -1
+modulatory_sign = 0
+
+[rf]
+# Minimum synapse-weighted hex support (direct + one-hop-derived — see `subgraph::rf`'s module
+# docs) a visual-input neuron needs before its RF center is trusted; below this, the documented
+# fallback is used even though the raw signal is technically nonzero. Review round 1 (F2) found
+# several types (HSE/HSN/H2, most of VS, much of LC9) resting on 0-2 real synapses of *direct*
+# hex support — not enough to trust as a real retinotopic position even after one-hop
+# propagation substantially improves the typical case. 10 is a round, conservative floor (not
+# derived from further literature); see the build report's per-type hex-support table.
+min_hex_support = 10
+
+[inputs]
+# The "eyes": visual projection neuron (VPN) types, taken whole (both sides). FLY.md §3's S row:
+# "~8 VPN-типов целиком (LC10a, LC9, LC4, LPLC2, LPLC1, LC16, LC11, HS/VS/H2)". `HS`/`VS` are not
+# themselves MaleCNS v1.0 type names (see the build report's "Проверка имён типов"): the real HS
+# cells are typed `HSE`/`HSN`/`HSS` (matching known fly anatomy: 3 HS cells per side), `VS` is a
+# single type name covering all VS cells (not per-subtype `VS1..VS4` as some literature numbers
+# them), and `H2` is its own type — so "HS/VS/H2" expands to 5 exact type names below.
+visual_types = [
+    "LC10a", "LC9", "LC4", "LPLC2", "LPLC1", "LC16", "LC11",
+    "HSE", "HSN", "HSS", "VS", "H2",
+]
+
+[outputs]
+# The motor outputs: descending neuron (DN) types, taken whole (both sides). Same FULL list used
+# for both S and M, **not** a subset for S — accepted deviation from FLY.md §3's "S uses a subset"
+# phrasing (orchestrator, review round 1, F3): DN types are tiny (1-4 neurons each per FLY.md
+# §5.4/docs/research/fly-data.md §5), so keeping the *whole* output roster at S costs almost
+# nothing in neuron count (about 100 neurons total either way), and the alternative — a smaller
+# DN set for S — would mean the action decoder and any S-vs-M comparison see a *different* set of
+# output_groups actions/members depending on size, which is worse than the modest neuron-count
+# cost of keeping them identical. `DNg12` is not itself a MaleCNS v1.0 type name — real data
+# splits it into instance-lettered subtypes `DNg12_a`..`DNg12_h` (matches docs/research/fly-lit.md
+# §5.4's note "DNg12 (21/сторону в FW; DNg12_a-h)"); all 8 are listed below as the replacement.
+dn_types = [
+    "DNa01", "DNa02", "DNg13", "DNp09", "MDN",
+    "DNp01", "DNp02", "DNp04", "DNp06", "DNp11",
+    "DNp07", "DNp10", "DNg11",
+    "DNg12_a", "DNg12_b", "DNg12_c", "DNg12_d", "DNg12_e", "DNg12_f", "DNg12_g", "DNg12_h",
+    "DNp67", "DNge079", "DNg105", "DNp103", "DNpe050",
+    "DNa03", "DNa06", "DNa13", "DNa15", "DNa16", "DNg04",
+]
+
+# Input channel mapping (FLY.md §5's table): per visual-input type, which game ray-grid channels
+# feed it. Labels from FLY.md §5: Б = biologically motivated, С = semantic analogy, П = arbitrary.
+[[input_channels]] # Б: соперник — где он (LC10a → AOTU019/025 → DNa02 preyaxis)
+type = "LC10a"
+channels = ["opponent_position"]
+
+[[input_channels]] # Б: соперник приближается (LC4: dθ/dt looming; LPLC2: angular size)
+type = "LC4"
+channels = ["opponent_approach"]
+
+[[input_channels]] # Б: соперник приближается (LPLC2: угловой размер)
+type = "LPLC2"
+channels = ["opponent_approach"]
+
+[[input_channels]] # С: другие игроки (малые объекты)
+type = "LC11"
+channels = ["other_players"]
+
+[[input_channels]] # С: стены/препятствия (LPLC1: объект на курсе столкновения)
+type = "LPLC1"
+channels = ["walls"]
+
+[[input_channels]] # С: freeze/death-тайлы (отступление/побег)
+type = "LC16"
+channels = ["freeze_death_tiles"]
+
+[[input_channels]] # Б: собственная скорость vx (HS)
+type = "HSE"
+channels = ["self_velocity_x"]
+
+[[input_channels]] # Б: собственная скорость vx (HS)
+type = "HSN"
+channels = ["self_velocity_x"]
+
+[[input_channels]] # Б: собственная скорость vx (HS)
+type = "HSS"
+channels = ["self_velocity_x"]
+
+[[input_channels]] # Б: собственная скорость vy (VS)
+type = "VS"
+channels = ["self_velocity_y"]
+
+# Output groups (FLY.md §6): action name -> DN types (+ side filter where relevant). AN inputs
+# have no meaningful biological channel mapping (see the build report's AN section) and so are not
+# listed under [[input_channels]] at all — only visual types are (acceptance criterion 1).
+[[output_groups]] # Б: LC10a → AOTU019/025 → DNa02 = "вижу соперника → двигаюсь к нему"; L side.
+action = "direction_left"
+types = ["DNa02", "DNa01", "DNg13", "DNp09"]
+side = "l"
+
+[[output_groups]] # Б: same DN set, R side.
+action = "direction_right"
+types = ["DNa02", "DNa01", "DNg13", "DNp09"]
+side = "r"
+
+[[output_groups]] # Б: MDN = "назад" / "0" (Bidaye et al. 2014).
+action = "direction_stop"
+types = ["MDN"]
+side = "both"
+
+[[output_groups]] # Б: Giant Fiber DNp01 (moносинаптически LC4/LPLC2 → GF) + взлётный ансамбль.
+action = "jump"
+types = ["DNp01", "DNp02", "DNp04", "DNp11", "DNp06"]
+side = "both"
+
+[[output_groups]] # С/П: landing DNp07/DNp10 ("вытянуть ноги и зацепиться") + вспомогательный DNg11/DNg12.
+action = "hook"
+types = [
+    "DNp07", "DNp10", "DNg11",
+    "DNg12_a", "DNg12_b", "DNg12_c", "DNg12_d", "DNg12_e", "DNg12_f", "DNg12_g", "DNg12_h",
+]
+side = "both"
+
+[[output_groups]] # С/П: CL062 thrusting/выпад-мишени (Tao et al. 2024).
+action = "fire"
+types = ["DNp67", "DNge079", "DNg105", "DNp103", "DNpe050"]
+side = "both"
+
+[[output_groups]] # П с мотивацией: популяционный вектор по "вееру" AOTU019/025-мишеней.
+action = "aim"
+types = ["DNa02", "DNa03", "DNa06", "DNa13", "DNa15", "DNa16", "DNg04"]
+side = "both"

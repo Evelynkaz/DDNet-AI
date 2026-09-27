@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use ddai_connectome::fetch::{self, FetchAction, FetchOptions};
 use ddai_connectome::inspect;
 use ddai_connectome::stats;
+use ddai_connectome::subgraph;
 use ddai_connectome::tables;
 
 /// Fetch, verify and read the MaleCNS connectome (Arrow Feather) into compact internal tables.
@@ -57,6 +58,26 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Select the fly's connectome subgraph and compile it into a `.flyg` file (task 6.3).
+    BuildSubgraph {
+        /// Path to `connectome.tables` (or its containing directory).
+        #[arg(long)]
+        tables: PathBuf,
+        /// Path to a selection config (e.g. `configs/fly/S.toml`).
+        #[arg(long)]
+        config: PathBuf,
+        /// `.flyg` file to write.
+        #[arg(long)]
+        out: PathBuf,
+        /// Report path to write (Markdown).
+        #[arg(long)]
+        report: PathBuf,
+    },
+    /// Print a summary of a `.flyg` file (offline; validates it first).
+    FlygInfo {
+        /// Path to the `.flyg` file.
+        file: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -70,6 +91,13 @@ fn main() -> Result<()> {
         Command::Inspect { file } => cmd_inspect(&file),
         Command::BuildTables { raw, out } => cmd_build_tables(&raw, &out),
         Command::Stats { tables, out } => cmd_stats(&tables, &out),
+        Command::BuildSubgraph {
+            tables,
+            config,
+            out,
+            report,
+        } => cmd_build_subgraph(&tables, &config, &out, &report),
+        Command::FlygInfo { file } => cmd_flyg_info(&file),
     }
 }
 
@@ -162,6 +190,65 @@ fn cmd_stats(tables_dir: &std::path::Path, out: &std::path::Path) -> Result<()> 
     Ok(())
 }
 
+fn cmd_build_subgraph(
+    tables: &std::path::Path,
+    config: &std::path::Path,
+    out: &std::path::Path,
+    report: &std::path::Path,
+) -> Result<()> {
+    let summary = subgraph::run_build_subgraph(tables, config, out, report)?;
+    let rc = &summary.role_counts;
+    println!(
+        "neurons: {} (input_visual: {}, input_ascending: {}, hidden: {}, output: {})",
+        summary.neurons_total, rc.input_visual, rc.input_ascending, rc.hidden, rc.output
+    );
+    println!("edges: {}", summary.num_edges);
+    println!("wall time: {:.1}s", summary.wall_time.as_secs_f64());
+    match summary.peak_rss_kb {
+        Some(kb) => println!("peak RSS: {:.0} MiB", kb as f64 / 1024.0),
+        None => println!("peak RSS: n/a (could not read /proc/self/status)"),
+    }
+    println!("wrote {}", summary.flyg_path.display());
+    println!("  sha256={}", summary.flyg_sha256);
+    println!("wrote {}", summary.report_path.display());
+    Ok(())
+}
+
+fn cmd_flyg_info(file: &std::path::Path) -> Result<()> {
+    let flyg = ddai_flyg::load(file)?;
+    println!("{}", file.display());
+    println!(
+        "format_version={} generator={}",
+        flyg.header.format_version, flyg.header.generator_version
+    );
+    println!(
+        "source_tables_sha256={} config_sha256={}",
+        flyg.header.source_tables_sha256, flyg.header.config_sha256
+    );
+    let rc = &flyg.summary.neurons_by_role;
+    let total = rc.input_visual + rc.input_ascending + rc.hidden + rc.output;
+    println!(
+        "neurons: {total} (input_visual: {}, input_ascending: {}, hidden: {}, output: {})",
+        rc.input_visual, rc.input_ascending, rc.hidden, rc.output
+    );
+    println!("types: {}", flyg.summary.num_types);
+    println!("edges: {}", flyg.summary.num_edges);
+    println!(
+        "type_pairs: {} (shared parameters: {})",
+        flyg.summary.num_type_pairs, flyg.summary.shared_param_count
+    );
+    let sc = &flyg.summary.sign_counts;
+    println!(
+        "signs: +1={} -1={} 0={} (uncertain types: {})",
+        sc.excitatory, sc.inhibitory, sc.neutral, flyg.summary.uncertain_types
+    );
+    println!("output groups: {}", flyg.output_groups.len());
+    for g in &flyg.output_groups {
+        println!("  {}: {} neurons", g.action, g.members.len());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +283,41 @@ mod tests {
     fn stats_requires_tables_and_out() {
         assert!(Cli::try_parse_from(["ddai-connectome", "stats"]).is_err());
         let ok = Cli::try_parse_from(["ddai-connectome", "stats", "--tables", "t", "--out", "report.md"]);
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn build_subgraph_requires_tables_config_out_and_report() {
+        assert!(Cli::try_parse_from(["ddai-connectome", "build-subgraph"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "ddai-connectome",
+                "build-subgraph",
+                "--tables",
+                "t",
+                "--config",
+                "c.toml"
+            ])
+            .is_err()
+        );
+        let ok = Cli::try_parse_from([
+            "ddai-connectome",
+            "build-subgraph",
+            "--tables",
+            "t",
+            "--config",
+            "c.toml",
+            "--out",
+            "out.flyg",
+            "--report",
+            "report.md",
+        ]);
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn flyg_info_takes_a_positional_file() {
+        let ok = Cli::try_parse_from(["ddai-connectome", "flyg-info", "a.flyg"]);
         assert!(ok.is_ok(), "{ok:?}");
     }
 }

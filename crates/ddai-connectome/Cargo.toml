@@ -20,6 +20,10 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+# The `.flyg` subgraph format (task 6.3): types + read/write/validate. `ddai-flyg` itself has no
+# `arrow` dependency (see its Cargo.toml) — only this crate's `subgraph` module, which has arrow
+# access anyway, does the actual selection and builds a `ddai_flyg::Flyg` value from it.
+ddai-flyg = { path = "../ddai-flyg" }
 # Feather v2 == Arrow IPC file format, needing the `ipc` feature; `ipc_compression` additionally
 # pulls in LZ4 + zstd codec support for both reader and writer (default-features off: we need
 # neither `csv` nor `json`). `ipc_compression` already implies `ipc`; both are listed for clarity.

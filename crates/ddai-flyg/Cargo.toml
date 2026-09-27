@@ -1,0 +1,27 @@
+[package]
+name = "ddai-flyg"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The `.flyg` binary format: the fly's connectome subgraph (topology, synapse signs, receptive fields, output groups) that the fly model (phase 7) loads. No arrow, no ddai-connectome dependency — this is meant to be the one thing the fly model links against."
+
+[lib]
+name = "ddai_flyg"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+# Same postcard feature choice as ddai-connectome (see its Cargo.toml comment): default-features
+# = false drops the no_std `heapless-cas` feature we don't need and its unmaintained transitive
+# dependency (RUSTSEC-2023-0089), which `cargo deny` would otherwise flag.
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+zstd = "0.14.0"
+
+[dev-dependencies]
+tempfile = "3.14"
