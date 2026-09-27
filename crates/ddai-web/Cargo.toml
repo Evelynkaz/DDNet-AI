@@ -1,0 +1,39 @@
+[package]
+name = "ddai-web"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The bot's own web server: axum + WebSocket over loopback only, password login (argon2id), server-side sessions, CSRF/Origin checks, security headers, and a minimal login + status page. Task 5.1 skeleton; the game view comes later."
+
+[lib]
+name = "ddai_web"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+axum = { version = "0.8.9", features = ["ws"] }
+axum-extra = { version = "0.12.6", features = ["cookie"] }
+cookie = "0.18"
+tower = { version = "0.5", features = ["util", "timeout", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "timeout", "limit", "set-header"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+argon2 = "0.6"
+subtle = "2.6"
+hmac = "0.13"
+sha2 = "0.11"
+base64 = "0.23"
+getrandom = "0.4"
+tracing = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3.14"
+tokio-tungstenite = "0.29"
+futures-util = "0.3"

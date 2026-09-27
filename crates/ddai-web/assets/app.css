@@ -1,0 +1,140 @@
+/* Mobile-first: the default rules target a phone-sized viewport; the single breakpoint below
+   widens things a bit on a desktop browser. No external fonts/CDNs (CSP: default-src 'self'). */
+
+:root {
+  color-scheme: dark light;
+  --bg: #101318;
+  --panel: #181c24;
+  --text: #e8ebf0;
+  --muted: #8a93a3;
+  --accent: #4f8cff;
+  --danger: #ff5c5c;
+  --ok: #3ecf6f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  min-height: 100%;
+}
+
+.shell {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 4px 20px;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+}
+
+.dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot-off {
+  background: var(--danger);
+}
+
+.dot-on {
+  background: var(--ok);
+}
+
+.view h1 {
+  font-size: 1.3rem;
+  margin: 0 0 16px;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+input {
+  background: var(--panel);
+  border: 1px solid #2a3040;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 1rem;
+}
+
+button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:active {
+  opacity: 0.85;
+}
+
+.error {
+  color: var(--danger);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.status-grid dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.status-grid dd {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+}
+
+#logout-button {
+  background: var(--danger);
+  width: 100%;
+}
+
+@media (min-width: 640px) {
+  .shell {
+    padding-top: 48px;
+  }
+}

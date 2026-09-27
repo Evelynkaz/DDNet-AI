@@ -1,0 +1,145 @@
+//! Server configuration and the non-loopback bind refusal (acceptance criterion 1: "refuse
+//! non-loopback binds unless an explicit `--i-know-this-is-public` flag").
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use crate::auth::rate_limit::RateLimitConfig;
+
+/// Maximum concurrent WebSocket connections per session (acceptance criterion 5).
+pub const DEFAULT_MAX_WS_PER_SESSION: u32 = 4;
+
+/// Maximum request body size for API routes, in bytes (acceptance criterion 6: "16 KiB").
+pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024;
+
+/// Maximum WebSocket message size, in bytes. This channel only carries small typed JSON control
+/// messages for now (binary game-view frames are a later task per the goal), so this is
+/// deliberately tight.
+pub const DEFAULT_MAX_WS_MESSAGE_BYTES: usize = 4 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct WebConfig {
+    pub listen: SocketAddr,
+    pub data_dir: PathBuf,
+    /// Trust `X-Forwarded-For` when the TCP peer is loopback (acceptance criterion 3).
+    pub trust_proxy: bool,
+    /// Bypasses the non-loopback bind refusal. Never set this in normal operation.
+    pub i_know_this_is_public: bool,
+    /// Whether cookies get the `Secure` attribute (and the `__Host-` name prefix). Must be false
+    /// for plain-HTTP local testing (browsers refuse `Secure` cookies over plain HTTP) and should
+    /// be true once Caddy terminates HTTPS in front of this server (task 5.3).
+    pub cookie_secure: bool,
+    pub idle_timeout: Duration,
+    pub absolute_timeout: Duration,
+    pub login_rate_limit: RateLimitConfig,
+    pub max_ws_per_session: u32,
+    pub max_body_bytes: usize,
+    pub max_ws_message_bytes: usize,
+    pub request_timeout: Duration,
+    /// How long a trusted-device cookie stays valid (review finding F7). Also capped in practice
+    /// by a password change, which invalidates every existing device's stored fingerprint
+    /// regardless of this TTL — see `auth::device`.
+    pub trusted_device_ttl: Duration,
+}
+
+impl WebConfig {
+    /// Sensible production defaults (acceptance criteria 2, 3, 5, 6): 12h idle / 7d absolute
+    /// session timeout, the default login rate limits, 4 concurrent WS per session, 16 KiB body
+    /// limit. `cookie_secure` defaults to `false` because this binary, run standalone, only ever
+    /// speaks plain HTTP on loopback; task 5.3 (Caddy) is what makes `true` correct, and will set
+    /// it explicitly.
+    pub fn new(listen: SocketAddr, data_dir: PathBuf) -> Self {
+        Self {
+            listen,
+            data_dir,
+            trust_proxy: false,
+            i_know_this_is_public: false,
+            cookie_secure: false,
+            idle_timeout: Duration::from_secs(12 * 3600),
+            absolute_timeout: Duration::from_secs(7 * 24 * 3600),
+            login_rate_limit: RateLimitConfig::default(),
+            max_ws_per_session: DEFAULT_MAX_WS_PER_SESSION,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            max_ws_message_bytes: DEFAULT_MAX_WS_MESSAGE_BYTES,
+            request_timeout: Duration::from_secs(10),
+            trusted_device_ttl: Duration::from_secs(90 * 24 * 3600),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigError {
+    #[error(
+        "refusing to bind to non-loopback address {addr}: pass --i-know-this-is-public to override \
+         (and don't — this server has no TLS of its own; Caddy is meant to be the only public-facing hop)"
+    )]
+    NonLoopbackBind { addr: SocketAddr },
+}
+
+/// Refuses to bind anywhere but loopback unless `i_know_this_is_public` is set (acceptance
+/// criterion 1). Checked before any socket is actually opened.
+pub fn validate_listen_addr(listen: SocketAddr, i_know_this_is_public: bool) -> Result<(), ConfigError> {
+    if listen.ip().is_loopback() || i_know_this_is_public {
+        Ok(())
+    } else {
+        Err(ConfigError::NonLoopbackBind { addr: listen })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn addr(ip: std::net::IpAddr, port: u16) -> SocketAddr {
+        SocketAddr::new(ip, port)
+    }
+
+    #[test]
+    fn loopback_v4_is_allowed_by_default() {
+        assert!(validate_listen_addr(addr(Ipv4Addr::LOCALHOST.into(), 7788), false).is_ok());
+    }
+
+    #[test]
+    fn loopback_v6_is_allowed_by_default() {
+        assert!(validate_listen_addr(addr(Ipv6Addr::LOCALHOST.into(), 7788), false).is_ok());
+    }
+
+    #[test]
+    fn unspecified_v4_is_refused_by_default() {
+        let a = addr(Ipv4Addr::UNSPECIFIED.into(), 7788);
+        assert_eq!(
+            validate_listen_addr(a, false),
+            Err(ConfigError::NonLoopbackBind { addr: a })
+        );
+    }
+
+    #[test]
+    fn unspecified_v6_is_refused_by_default() {
+        let a = addr(Ipv6Addr::UNSPECIFIED.into(), 7788);
+        assert!(validate_listen_addr(a, false).is_err());
+    }
+
+    #[test]
+    fn public_v4_is_refused_by_default() {
+        let a = addr(Ipv4Addr::new(203, 0, 113, 5).into(), 7788);
+        assert!(validate_listen_addr(a, false).is_err());
+    }
+
+    #[test]
+    fn non_loopback_is_allowed_with_explicit_override() {
+        let a = addr(Ipv4Addr::new(203, 0, 113, 5).into(), 7788);
+        assert!(validate_listen_addr(a, true).is_ok());
+    }
+
+    #[test]
+    fn config_new_has_secure_defaults() {
+        let cfg = WebConfig::new(addr(Ipv4Addr::LOCALHOST.into(), 7788), PathBuf::from("/tmp/data"));
+        assert!(!cfg.cookie_secure);
+        assert!(!cfg.trust_proxy);
+        assert!(!cfg.i_know_this_is_public);
+        assert_eq!(cfg.max_ws_per_session, DEFAULT_MAX_WS_PER_SESSION);
+        assert_eq!(cfg.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+    }
+}

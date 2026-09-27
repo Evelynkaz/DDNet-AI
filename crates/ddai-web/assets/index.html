@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>DDNet-AI</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <span class="brand">DDNet-AI</span>
+        <span id="conn-dot" class="dot dot-off" aria-hidden="true"></span>
+      </header>
+
+      <section id="login-view" class="view" hidden>
+        <h1>Вход</h1>
+        <form id="login-form" autocomplete="off">
+          <label for="password">Пароль</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+          <button type="submit">Войти</button>
+          <p id="login-error" class="error" role="alert" hidden></p>
+        </form>
+      </section>
+
+      <section id="status-view" class="view" hidden>
+        <h1>Статус</h1>
+        <dl class="status-grid">
+          <dt>Соединение</dt>
+          <dd id="ws-state">—</dd>
+          <dt>Бот</dt>
+          <dd id="bot-state">—</dd>
+          <dt>Время работы</dt>
+          <dd id="uptime">—</dd>
+        </dl>
+        <button id="logout-button" type="button">Выйти</button>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

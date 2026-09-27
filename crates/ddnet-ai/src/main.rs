@@ -7,6 +7,7 @@
 mod fly_cmd;
 mod map_cmd;
 mod trace_cmd;
+mod web_cmd;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -27,6 +28,10 @@ enum Command {
     Fly(fly_cmd::FlyArgs),
     /// Real DDNet `.map` file inspection (task 1.4, `ddai-map`).
     Map(map_cmd::MapArgs),
+    /// Starts the bot's own web server (login + status page), listening on loopback only.
+    Web(web_cmd::WebArgs),
+    /// Generates (and stores the argon2id hash of) the web UI's owner password.
+    WebPasswd(web_cmd::WebPasswdArgs),
 }
 
 fn main() -> ExitCode {
@@ -36,6 +41,8 @@ fn main() -> ExitCode {
         Some(Command::Trace(args)) => trace_cmd::run(args),
         Some(Command::Fly(args)) => fly_cmd::run(args),
         Some(Command::Map(args)) => map_cmd::run(args),
+        Some(Command::Web(args)) => web_cmd::run_web(args),
+        Some(Command::WebPasswd(args)) => web_cmd::run_web_passwd(args),
     }
 }
 
@@ -346,5 +353,72 @@ mod tests {
     fn fly_bench_rejects_missing_required_flyg_flag() {
         let result = Cli::try_parse_from(["ddnet-ai", "fly", "bench"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn web_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "web"]).expect("web should parse with no flags");
+        match cli.command {
+            Some(super::Command::Web(args)) => {
+                assert_eq!(args.listen, "127.0.0.1:7788".parse().unwrap());
+                assert!(args.data_dir.is_none());
+                assert!(!args.trust_proxy);
+                assert!(!args.i_know_this_is_public);
+                assert!(!args.cookie_secure);
+            }
+            other => panic!("expected Web command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_parses_all_flags() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "web",
+            "--listen",
+            "127.0.0.1:9999",
+            "--data-dir",
+            "/tmp/ddai-data",
+            "--trust-proxy",
+            "--cookie-secure",
+        ])
+        .expect("web should parse with flags");
+        match cli.command {
+            Some(super::Command::Web(args)) => {
+                assert_eq!(args.listen, "127.0.0.1:9999".parse().unwrap());
+                assert_eq!(args.data_dir, Some(std::path::PathBuf::from("/tmp/ddai-data")));
+                assert!(args.trust_proxy);
+                assert!(!args.i_know_this_is_public);
+                assert!(args.cookie_secure);
+            }
+            other => panic!("expected Web command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_rejects_non_socket_addr_listen() {
+        let result = Cli::try_parse_from(["ddnet-ai", "web", "--listen", "not-an-address"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn web_passwd_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "web-passwd"]).expect("web-passwd should parse");
+        match cli.command {
+            Some(super::Command::WebPasswd(args)) => {
+                assert!(!args.show);
+                assert!(args.data_dir.is_none());
+            }
+            other => panic!("expected WebPasswd command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_passwd_parses_show_flag() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "web-passwd", "--show"]).expect("web-passwd --show should parse");
+        match cli.command {
+            Some(super::Command::WebPasswd(args)) => assert!(args.show),
+            other => panic!("expected WebPasswd command, got {other:?}"),
+        }
     }
 }
