@@ -16,11 +16,15 @@ pub struct TraceArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum TraceCommand {
-    /// Writes a synthetic recipe as a rawmap v1 file.
+    /// Writes a synthetic recipe, or a real DDNet `.map` file (task 1.4, `ddai-map`), as a
+    /// rawmap v1 file. Exactly one of `--recipe`/`--map` is required.
     ExportMap {
         /// Recipe name (see `ddai_trace::synthetic::RECIPES`), e.g. "arena".
-        #[arg(long)]
-        recipe: String,
+        #[arg(long, conflicts_with = "map")]
+        recipe: Option<String>,
+        /// A real DDNet `.map` file to read with `ddai_map::load_map`.
+        #[arg(long, conflicts_with = "recipe")]
+        map: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -61,7 +65,7 @@ pub enum TraceCommand {
 
 pub fn run(args: TraceArgs) -> ExitCode {
     match args.command {
-        TraceCommand::ExportMap { recipe, out } => export_map(&recipe, &out),
+        TraceCommand::ExportMap { recipe, map, out } => export_map(recipe.as_deref(), map.as_deref(), &out),
         TraceCommand::GenScenario {
             recipe,
             seed,
@@ -76,10 +80,35 @@ pub fn run(args: TraceArgs) -> ExitCode {
     }
 }
 
-fn export_map(recipe: &str, out: &PathBuf) -> ExitCode {
-    let Some(map) = synthetic::build(recipe) else {
-        eprintln!("unknown recipe '{recipe}', expected one of {:?}", synthetic::RECIPES);
-        return ExitCode::FAILURE;
+fn export_map(recipe: Option<&str>, map_path: Option<&std::path::Path>, out: &PathBuf) -> ExitCode {
+    let map = match (recipe, map_path) {
+        (Some(recipe), None) => match synthetic::build(recipe) {
+            Some(map) => map,
+            None => {
+                eprintln!("unknown recipe '{recipe}', expected one of {:?}", synthetic::RECIPES);
+                return ExitCode::FAILURE;
+            }
+        },
+        (None, Some(path)) => {
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("failed to read {}: {e}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            match ddai_map::load_map(&bytes) {
+                Ok(loaded) => loaded.data,
+                Err(e) => {
+                    eprintln!("failed to load map {}: {e}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        (Some(_), Some(_)) | (None, None) => {
+            eprintln!("exactly one of --recipe/--map is required");
+            return ExitCode::FAILURE;
+        }
     };
     let bytes = rawmap::write(&map);
     if let Err(e) = std::fs::write(out, &bytes) {

@@ -18,6 +18,7 @@ workspace = true
 clap = { workspace = true }
 ddai-fly = { path = "../ddai-fly" }
 ddai-flyg = { path = "../ddai-flyg" }
+ddai-map = { path = "../ddai-map" }
 ddai-trace = { path = "../ddai-trace" }
 serde_json = "1"
 # Best-effort thread pinning for `fly bench`'s realistic 25Hz duty-cycle loop (acceptance

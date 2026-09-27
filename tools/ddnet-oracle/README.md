@@ -102,3 +102,65 @@ build/oracle_core /tmp/arena.rawmap /tmp/s.scn /tmp/out.trace --generator random
 (`switch`-слой) в этом харнессе всегда неактивны (`m_vSwitchers` не заполняется) — двери не
 работают, но `STOP`/`STOPS`/`STOPA` из front/game-слоя от свитчеров не зависят и проверяются
 рецептом `front` напрямую.
+
+## `map2raw` (задача 1.4) — чтение настоящих `.map`-файлов
+
+Отдельный от `oracle_core` инструмент: читает настоящий DDNet `.map` (datafile v3/v4) через
+РЕАЛЬНЫЙ, не переписанный код DDNet (`engine/shared/datafile.cpp` + `engine/shared/map.cpp` +
+`game/layers.cpp`, из тех же скачанных `fetch.sh` исходников) и пишет физические слои
+(game/front/tele/speedup/switch/tune, обрезанные до размера game-слоя — как это фактически
+делает `CCollision::Init`) + Settings в формате rawmap v1 (`docs/formats.md` §1) — то же самое,
+что производит `ddnet-ai trace export-map --map <file> --out <file.rawmap>` (крейт `ddai-map`).
+Задача 1.4: `crates/ddai-map/src/loader.rs` должен совпасть с этим побайтово на всём корпусе карт.
+
+```bash
+./build.sh                      # собирает build/map2raw вместе с build/oracle_core
+build/map2raw input.map out.rawmap
+
+# Паритет на корпусе (см. tools/ddnet-oracle/map-corpus-check.sh):
+cd ../.. && cargo build --release -p ddnet-ai && cd tools/ddnet-oracle
+./map-corpus-check.sh ~/aiddnet/data/research/proto-scratch/ddnet-maps \
+    ~/aiddnet/data/maps/copy-love-box ~/aiddnet/data/research/physics-scratch/maps
+
+# Дифференциальный мутационный фаззинг (раунд 1 ревью — настоящие карты в корпусе выше все
+# ПРИНИМАЮТСЯ обеими сторонами, так что сам корпус не проверяет паритет на ОТКЛОНЕНИЕ; этот режим
+# портит случайные поля внутри LAYER-item'ов настоящей карты и сравнивает результат):
+./map-corpus-check.sh --mutate ~/aiddnet/data/research/physics-scratch/maps/BlockField.map \
+    --seed 42 --iterations-per-map 1000
+```
+
+### Песочница по памяти/времени (раунд 2 ревью, находка F7)
+
+И `map-corpus-check.sh`, и `map_mutation_fuzz.py` запускают **оба** инструмента — `build/map2raw`
+И `../../target/release/ddnet-ai trace export-map --map` — под жёстким лимитом виртуальной памяти
+и таймаутом: `prlimit --as=2147483648` (2 ГиБ) + `timeout --signal=KILL 20s`. Причина: `map2raw`
+линкует настоящий, немодифицированный код DDNet, у которого (как и у самого DDNet) нет гарантий
+ограниченной памяти — намеренно испорченная (мутационным фаззером) карта может попросить у
+`ReadSettings`/`std::vector` сотни миллионов записей и упасть в `std::bad_alloc`/`abort()` (реальный
+инцидент раунда 1: ~6.8 ГиБ RSS на карте с испорченной v4 declared-size таблицей для Settings-блоба,
+`settings_bomb_256m.map` в отчёте о билде). Классификация кода выхода под лимитом: `0` — приняла,
+`1` — собственный чистый отказ инструмента (`Fail()`/код ошибки `ddai-map`), что угодно другое
+(`124`/`137` от `timeout`, `128+сигнал` от `prlimit`) — инструмент упёрся в СВОЙ лимит, а не дал
+осмысленный ответ. Для `map2raw` это репортится отдельно (`cpp (map2raw) resource-limited`) и НЕ
+считается расхождением — ожидаемая, документированная форма (`ddai-map`'s bounded reads, критерий
+приёмки №2 задачи 1.4, — именно то, чего у real-DDNet-кода нет). Для `ddnet-ai`/`ddai-map` тот же
+код выхода — это всегда баг (`RUST/ddai-map crashed`) и всегда проваливает прогон: критерий №2
+обязывает `ddai-map` никогда не падать и никогда не выделять память пропорционально заявленному
+(а не реальному) размеру данных, так что сам Rust-инструмент не должен упираться в этот лимит на
+файле любого размера, каким бы испорченным он ни был.
+
+`map2raw.cpp` — своя (не DDNet) обвязка: минимальный `IStorage` (открывает путь к файлу напрямую
+через `io_open`, без реальной подсистемы хранения), заглушки для `g_UuidManager`/`CUuid` (все
+типы карточных item'ов, которые нас интересуют — VERSION/INFO/GROUP/LAYER — намного меньше
+`OFFSET_UUID`, так что реальный код `g_UuidManager` никогда не вызывается для них, см. комментарий
+в файле) и `log_log`/`log_log_color` (не нужен вывод DDNet, ошибки видны через код возврата
+`CMap::Load`). Компилирует РЕАЛЬНЫЕ `base/{str,mem,io,hash_libtomcrypt,bytes,unicode/tolower*}.cpp`
+— не переизобретает их — подробности и обоснование каждой заглушки в шапке `map2raw.cpp`.
+
+`map2raw` повторяет «ленивый» `nullptr`-фолбэк DDNet (`CCollision::Init` оставляет указатель
+`nullptr`, если данные КОНКРЕТНОГО не-game физического слоя не декомпрессировались, — карта всё
+равно загружается, этот слой просто отсутствует) — `GetGameLayerData` (жёсткий отказ, как у
+настоящего `CMap::Load` для game-слоя) отдельно от `GetOptionalPhysicsLayerData` (мягкий, как у
+`CCollision::Init`, для всех остальных). `ddai-map`'s единственный оставшийся bounded-allocation
+предел сверх собственных проверок DDNet — см. `crates/ddai-map/src/lib.rs`'s top-level doc
+comment, `docs/formats.md` §10.2 и отчёт о билде задачи 1.4.

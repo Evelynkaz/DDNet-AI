@@ -1,0 +1,29 @@
+[package]
+name = "ddai-map"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Exposes `testutil` (a tiny datafile/map writer, see src/testutil.rs) outside `cfg(test)`, so
+# `tests/*.rs` integration tests can build synthetic fixtures too, without a third-party `.map`
+# file ever touching this repository. Not meant to be enabled by anything other than this crate's
+# own dev-dependency on itself, below.
+test-util = []
+
+[dependencies]
+ddai-physics = { path = "../ddai-physics" }
+# Pure-Rust zlib inflate (no C dependency) — D-009-style purity for the crate we ship, unlike the
+# disposable `tools/ddnet-oracle/map2raw` oracle, which links system zlib for real DDNet parity.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+sha2 = "0.10"
+crc32fast = "1"
+
+[dev-dependencies]
+ddai-map = { path = ".", features = ["test-util"] }

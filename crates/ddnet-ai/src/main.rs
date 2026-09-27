@@ -5,6 +5,7 @@
 //! parity work (see `docs/formats.md`).
 
 mod fly_cmd;
+mod map_cmd;
 mod trace_cmd;
 
 use clap::{Parser, Subcommand};
@@ -24,6 +25,8 @@ enum Command {
     Trace(trace_cmd::TraceArgs),
     /// The fly's inference engine (phase 7.1): bench and info tooling for a compiled `.flyg`.
     Fly(fly_cmd::FlyArgs),
+    /// Real DDNet `.map` file inspection (task 1.4, `ddai-map`).
+    Map(map_cmd::MapArgs),
 }
 
 fn main() -> ExitCode {
@@ -32,6 +35,7 @@ fn main() -> ExitCode {
         None => ExitCode::SUCCESS,
         Some(Command::Trace(args)) => trace_cmd::run(args),
         Some(Command::Fly(args)) => fly_cmd::run(args),
+        Some(Command::Map(args)) => map_cmd::run(args),
     }
 }
 
@@ -79,13 +83,68 @@ mod tests {
         .expect("trace export-map should parse");
         match cli.command {
             Some(super::Command::Trace(args)) => match args.command {
-                super::trace_cmd::TraceCommand::ExportMap { recipe, out } => {
-                    assert_eq!(recipe, "arena");
+                super::trace_cmd::TraceCommand::ExportMap { recipe, map, out } => {
+                    assert_eq!(recipe.as_deref(), Some("arena"));
+                    assert_eq!(map, None);
                     assert_eq!(out, std::path::PathBuf::from("map.rawmap"));
                 }
                 other => panic!("expected ExportMap, got {other:?}"),
             },
             other => panic!("expected Trace command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trace_export_map_with_map_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "trace",
+            "export-map",
+            "--map",
+            "input.map",
+            "--out",
+            "map.rawmap",
+        ])
+        .expect("trace export-map --map should parse");
+        match cli.command {
+            Some(super::Command::Trace(args)) => match args.command {
+                super::trace_cmd::TraceCommand::ExportMap { recipe, map, out } => {
+                    assert_eq!(recipe, None);
+                    assert_eq!(map, Some(std::path::PathBuf::from("input.map")));
+                    assert_eq!(out, std::path::PathBuf::from("map.rawmap"));
+                }
+                other => panic!("expected ExportMap, got {other:?}"),
+            },
+            other => panic!("expected Trace command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trace_export_map_rejects_both_recipe_and_map() {
+        let result = Cli::try_parse_from([
+            "ddnet-ai",
+            "trace",
+            "export-map",
+            "--recipe",
+            "arena",
+            "--map",
+            "input.map",
+            "--out",
+            "map.rawmap",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn map_info_parses() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "map", "info", "input.map"]).expect("map info should parse");
+        match cli.command {
+            Some(super::Command::Map(args)) => match args.command {
+                super::map_cmd::MapCommand::Info { map } => {
+                    assert_eq!(map, std::path::PathBuf::from("input.map"));
+                }
+            },
+            other => panic!("expected Map command, got {other:?}"),
         }
     }
 
