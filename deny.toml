@@ -1,0 +1,49 @@
+# cargo-deny configuration (schema for cargo-deny 0.20.x).
+# Run locally with: cargo deny check
+# See docs/DECISIONS.md D-008/D-009 for the AGPL/GPL-2.0 exclusion rationale.
+
+# --- advisories: fail on known security/unsoundness/unmaintained advisories -----------------
+[advisories]
+ignore = []
+
+# --- licenses: allow-list, deny-by-default ---------------------------------------------------
+# cargo-deny denies any license expression that is not in `allow` (there is no separate `deny`
+# list in this config schema — an explicit `[licenses] deny` key was removed upstream, see
+# https://github.com/EmbarkStudios/cargo-deny/pull/611). That means AGPL-3.0-only,
+# AGPL-3.0-or-later and GPL-2.0-only are rejected simply by NOT being in this list, which is the
+# point: D-009 forbids AGPL crates (twmap/twgame) entirely, and GPL-2.0-only is incompatible with
+# our GPL-3.0-only license (GPL-2.0 code cannot be combined into a GPL-3.0-only binary).
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "MPL-2.0",
+    "LGPL-3.0-only",
+    "LGPL-3.0-or-later",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+]
+confidence-threshold = 0.8
+
+# --- bans: crate-level policy ------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+deny = [
+    # RUSTSEC-2025-0141: bincode is unmaintained; 3.0.0 is a tombstone release that fails to
+    # compile on purpose. Use `postcard` instead (see docs/research/rust-stack.md §1, §6).
+    { crate = "bincode", reason = "unmaintained, RUSTSEC-2025-0141 — use postcard instead" },
+]
+
+# --- sources: only crates.io and explicitly allowed git sources --------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

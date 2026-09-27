@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license = "GPL-3.0-only"
+repository = "https://github.com/Evelynkaz/DDNet-AI"
+
+[workspace.dependencies]
+clap = { version = "4.6", features = ["derive"] }
+
+# Shared lint policy for every crate in the workspace. Member crates opt in with
+# `[lints] workspace = true`. Kept strict from the start: this CI gates every later task.
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "warn"
+unimplemented = "warn"
+
+# Physics parity tests (later phases) must be bit-exact with the C++ reference, so nothing here
+# may change float semantics: no `target-cpu` (see rust-toolchain.toml / no .cargo/config.toml)
+# and no fast-math. `lto`/`codegen-units`/`debug` below only affect codegen strategy and
+# debuginfo, not the value any floating-point operation produces, so they are free to tune for
+# release binary size/speed. `[profile.dev]` bumps our own crates to opt-level 1 (debug builds
+# would otherwise be too slow for the heavy physics-parity tests) while keeping dependency code
+# at opt-level 3 via `[profile.dev.package."*"]`, since deps rarely need to be stepped through.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

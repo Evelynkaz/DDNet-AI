@@ -1,0 +1,5 @@
+# gitleaks configuration. Extends the built-in default ruleset; add narrowly-scoped
+# allowlist entries below only for confirmed false positives, each with a comment
+# explaining why. See docs/PLAN.md / CLAUDE.md "Никогда не коммитить" for the secrets policy.
+[extend]
+useDefault = true

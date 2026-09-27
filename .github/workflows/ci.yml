@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # rust-toolchain.toml pins the exact channel (1.98.1) and components (rustfmt, clippy) we
+      # need. `rustup toolchain install` with no arguments reads that file and installs exactly
+      # what it pins (GitHub-hosted ubuntu runners ship rustup pre-installed with network
+      # access), so we don't need a third-party toolchain-installer action here. We deliberately
+      # do NOT use `rustup show` for this: as of rustup 1.29, auto-installing a missing toolchain
+      # as a side effect of `rustup show` is deprecated and prints a warning (may become a no-op
+      # in a future rustup release).
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Show active toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # We run the gitleaks binary directly instead of gitleaks-action: gitleaks-action is
+      # under a proprietary EULA (a free GITLEAKS_LICENSE key is required for organizations),
+      # while the CLI itself is MIT-licensed. The release archive's sha256 is checked twice:
+      # once against a hash pinned right here (so a compromised/rewritten checksums file alone
+      # can't slip a different binary past us) and once against gitleaks' own checksums file for
+      # the same release (so a stale pin here would also be caught). Both hashes were verified
+      # by hand against the real release asset before being committed.
+      - name: Download and verify gitleaks 8.30.1
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          V="${GITLEAKS_VERSION}"
+          ASSET="gitleaks_${V}_linux_x64.tar.gz"
+          BASE="https://github.com/gitleaks/gitleaks/releases/download/v${V}"
+          curl -sSfLO "${BASE}/${ASSET}"
+          curl -sSfL "${BASE}/gitleaks_${V}_checksums.txt" -o "gitleaks_${V}_checksums.txt"
+          echo "${GITLEAKS_SHA256}  ${ASSET}" | sha256sum -c -
+          grep "${ASSET}" "gitleaks_${V}_checksums.txt" | sha256sum -c -
+          tar xzf "${ASSET}" gitleaks
+          chmod +x gitleaks
+
+      - name: Scan full git history for secrets
+        run: ./gitleaks git --redact --verbose --exit-code 1 --config .gitleaks.toml .
+
+  deny:
+    name: cargo-deny (advisories / licenses / bans / sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

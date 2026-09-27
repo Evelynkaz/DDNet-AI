@@ -24,3 +24,49 @@ settings.json.tmp
 .claude/
 site/public/shots/
 site/dist-preview/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Large / generated data that must never land in git history (see docs/PLAN.md §1.4,
+# docs/DECISIONS.md D-006/D-012): maps, demos, replay-derived traces, connectome exports,
+# training data and checkpoints all live outside the repo on the VPS. The four directory
+# patterns below are anchored to the repo root (leading `/`) so they don't also match
+# same-named source directories nested under crates/ (e.g. a `traces/` or `clips/` module
+# folder). `secrets/` is intentionally NOT anchored (see the "Secrets" block below): it must
+# also catch a stray `secrets/` directory nested anywhere, e.g. `crates/*/secrets/`.
+*.map
+*.demo
+*.flyg
+*.feather
+*.parquet
+*.ckpt
+/traces/
+/datasets/
+/checkpoints/
+/clips/
+
+# Exception: small, synthetic "golden" test fixtures committed under any crate's
+# tests/fixtures/ (see docs/PLAN.md §1.4) are allowed even though their names may match the
+# data-file extensions immediately above (e.g. a synthetic *.map fixture). This is deliberately
+# scoped to those specific extensions only, NOT a blanket `tests/fixtures/**`, so it can never
+# re-allow a secret-shaped file (`.env`, `*.pem`, `*.key`, a `secrets/` dir) that happens to sit
+# under a fixtures/ directory — the patterns in the "Secrets" block below are unaffected by this
+# exception no matter where they match.
+!crates/**/tests/fixtures/**/*.map
+!crates/**/tests/fixtures/**/*.demo
+!crates/**/tests/fixtures/**/*.flyg
+!crates/**/tests/fixtures/**/*.feather
+!crates/**/tests/fixtures/**/*.parquet
+!crates/**/tests/fixtures/**/*.ckpt
+
+# Secrets: never commit credentials, tokens or private keys. Unanchored so a nested
+# `secrets/` folder (e.g. under a crate) is caught too, not just one at the repo root.
+secrets/
+.env
+*.pem
+*.key
+
+# Local C++ oracle build output (tools/ddnet-oracle, added in a later task).
+tools/ddnet-oracle/build/
