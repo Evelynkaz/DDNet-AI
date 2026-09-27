@@ -1,12 +1,16 @@
 DDNet AI
 Copyright (C) 2026 Wranked1 (https://github.com/Wranked1)
+Original project: https://github.com/Wranked1/DDNet-AI
 
 This program is free software: you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the Free
 Software Foundation, version 3 (see LICENSE). It comes WITHOUT ANY WARRANTY.
-Whoever passes it on, changed or not, must keep this notice, name the
-original project, and publish the source of their version under the same
-license.
+
+Additional attribution term under GPLv3 section 7(b):
+Redistributions of this program, modified or unmodified, must preserve this
+NOTICE and the attribution above identifying DDNet AI and Wranked1 as the
+original project and author. Modified versions must also be clearly marked
+as modified, as required by GPLv3.
 
 ------------------------------------------------------------------------
 Third-party code
