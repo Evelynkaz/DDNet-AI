@@ -8,6 +8,8 @@
 
 ## Сделано
 
+- **2.1 (2026-09-27, `f15447b`):** локальный DDNet 20.1 (`ddnet-local.service`, только 127.0.0.1:8303, econ
+  127.0.0.1:8304, fail-closed юнит); проверено старым ботом: вход, смена карты, реконнект, 8 клиентов. /duo: 2 раунда.
 - **1.1 (2026-09-27, `f02d464`):** cargo workspace (edition 2024, Rust 1.98.1), `ddai-physics` (заготовка),
   `ddnet-ai` (CLI-скелет), CI: fmt/clippy/test, gitleaks (полная история), cargo-deny (лицензии без AGPL) — зелёный.
   /duo: 3 раунда ревью (исправлены .gitignore и установка toolchain в CI).
@@ -20,8 +22,9 @@
 | Задача | Где | Спецификация |
 |---|---|---|
 | 1.2 форматы трасс, синтетические карты, оракул A (C++ ядро DDNet 20.1) | основное дерево `~/aiddnet/DDNet-AI` | `~/aiddnet/data/specs/1.2-trace-oracle-a.md` |
-| 2.1 локальный ddnet-server 20.1 (сборка, systemd, econ) | `~/aiddnet/wt/task-2.1` | `~/aiddnet/data/specs/2.1-local-ddnet-server.md` |
-| 6.1 коннектом: манифест, скачивание, чтение Feather, отчёт | `~/aiddnet/wt/task-6.1` | `~/aiddnet/data/specs/6.1-connectome-fetch-read.md` |
+| 6.1 коннектом (одобрено, закоммичено в worktree `6929a26`, ждёт переноса после 1.2) | `~/aiddnet/wt/task-6.1` | `~/aiddnet/data/specs/6.1-connectome-fetch-read.md` |
+| 6.3 подграф мухи S/M + формат `.flyg` | `~/aiddnet/wt/task-6.1` (поверх 6.1) | `~/aiddnet/data/specs/6.3-fly-subgraph.md` |
+| исследование: тактики блока, источники демок, DDFightNet | субагент → `docs/research/block-knowledge.md` | — |
 
 Открытые мелочи: F7 (из ревью 1.1) — старые неякорные правила `maps/`, `runs/`, `vendor/` в `.gitignore` скрывают
 фикстуры в одноимённых подпапках `tests/fixtures/`; учтено в спецификации 1.2.
@@ -35,7 +38,9 @@
 
 ## Фоновые процессы
 
-Нет.
+| Что | Как | Логи |
+|---|---|---|
+| Локальный DDNet-сервер 20.1 | systemd `ddnet-local.service` (enabled) | `~/aiddnet/data/logs/ddnet-server/`, teehistorian в `~/aiddnet/data/ddnet-server/teehistorian/` |
 
 ## Инциденты живой игры (кики/баны)
 

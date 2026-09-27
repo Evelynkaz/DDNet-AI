@@ -92,10 +92,29 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D
 `main` (`git -C <wt> add -A && git -C <wt> diff --cached --binary > p.patch; git apply --index p.patch`), рабочая
 копия удаляется `git worktree remove`.
 
+## 5c. Локальный DDNet-сервер 20.1 (задача 2.1)
+
+apt-пакеты (Ubuntu 24.04.5): `cmake` 3.28.3-1build7, `ninja-build` 1.11.1-2, `pkg-config` 1.8.1-2build1,
+`libcurl4-openssl-dev` 8.5.0-2ubuntu10.15, `libsqlite3-dev` 3.45.1-1ubuntu2.8, `libssl-dev` 3.0.13-0ubuntu3.15
+(опционален), `zlib1g-dev` 1:1.3.dfsg-3.1ubuntu2.2 (возможно опционален), `shellcheck` 0.9.0-1 (линтер скриптов);
+автоматически: cmake-data, pkgconf, pkgconf-bin, libpkgconf3, libjsoncpp25, librhash0. Уже были: build-essential, git,
+python3. Rust для частей DDNet — существующий rustup 1.98.1.
+
+```bash
+tools/ddnet-server/build.sh            # исходники тега 20.1 (c9d20813…) + сборка → ~/aiddnet/build/ddnet-20.1/ (~45 с, пик ~1,8 ГБ)
+tools/ddnet-server/setup-runtime.sh    # ~/aiddnet/data/ddnet-server/, карты, секреты (0600)
+tools/ddnet-server/install-service.sh  # systemd ddnet-local.service; запускать от ubuntu, НЕ через sudo
+python3 tools/ddnet-server/econ.py status        # админ-консоль (127.0.0.1:8304)
+```
+
+Сервер слушает только 127.0.0.1:8303 (UDP), econ — 127.0.0.1:8304 (TCP), `sv_register 0`; юнит не стартует без
+конфига/секретов, systemd ограничивает трафик loopback'ом. После правки `tools/ddnet-server/local.cfg` — заново
+`install-service.sh` (он копирует конфиг в `~/aiddnet/data/ddnet-server/`). Подробно — `tools/ddnet-server/README.md`.
+
 ## 6. Будет добавлено по фазам
 
-- Фаза 1: пакеты для сборки C++-оракула DDNet (cmake, zlib, sqlite3, curl… — ровно то, что понадобится).
-- Фаза 2: локальный ddnet-server 20.1 + systemd-юнит.
+- Фаза 1: C++-оракулы собираются теми же пакетами, что и сервер (раздел 5c).
+- Фаза 2: сетевой клиент (без новых системных пакетов).
 - Фаза 5: Caddy 2.11 (официальный apt-репозиторий Cloudsmith), ufw 80/443, systemd-юниты бота, Playwright 1.63
   (Chromium headless shell).
 - Фаза 6: данные коннектома по манифесту.
