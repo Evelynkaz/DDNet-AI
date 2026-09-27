@@ -18,7 +18,7 @@ env:
 jobs:
   rust:
     name: fmt / clippy / test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -52,7 +52,7 @@ jobs:
 
   gitleaks:
     name: gitleaks (secret scan)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout (full history)
@@ -89,7 +89,7 @@ jobs:
 
   deny:
     name: cargo-deny (advisories / licenses / bans / sources)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout

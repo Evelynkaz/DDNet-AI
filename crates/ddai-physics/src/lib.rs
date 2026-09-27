@@ -3,16 +3,8 @@
 //! and world stepping — parameterized over the floating-point scalar (`f32`/`f64`) so it can be
 //! checked bit-for-bit against the C++ DDNet reference and against the legacy TypeScript bot.
 //!
-//! This crate is currently a placeholder: the port lands in later tasks (see `docs/PLAN.md`
-//! §1.1). It intentionally has no dependencies yet.
+//! For now this crate holds only the plain-data map representation (see [`map`]) that the rest
+//! of the parity infrastructure (`ddai-trace`, the C++ oracle) is built on. The physics port
+//! itself lands in a later task (see `docs/PLAN.md` §1.3).
 
-/// Placeholder so `cargo test` exercises this crate before the physics port lands.
-///
-/// Replace or remove once real physics tests exist.
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_builds_and_tests_run() {
-        assert_eq!(1 + 1, 2);
-    }
-}
+pub mod map;
