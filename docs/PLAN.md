@@ -63,7 +63,7 @@ tools/
   ts-trace/                # генератор эталонных трасс из старого TS (живёт до конца проекта)
   ddnet-oracle/            # C++-оракулы: (A) ядро gamecore/collision; (B) in-process сервер DDNet 20.1
 web/                       # исходники страницы (JS-модули, CSS), встраиваются в ddai-web
-data/                      # только манифесты (коннектом, ассеты); сами данные — в ~/aiddnet/data
+manifests/                 # только манифесты (коннектом, ассеты) с sha256; сами данные — в ~/aiddnet/data
 docs/
 ```
 
@@ -146,7 +146,7 @@ pub struct Decision { input: Input, telemetry: Telemetry /* план/нейро�
 
 | Данные | Источник | Объём | Где | Закрепление |
 |---|---|---|---|---|
-| Коннектом MaleCNS v1.0 (3 файла) | GCS `flyem-male-cns/v1.0/…/flat-connectome/` | 566 МБ | `data/connectome/raw/` | generation + md5 + sha256 в `data/connectome.manifest.toml` |
+| Коннектом MaleCNS v1.0 (3 файла) | GCS `flyem-male-cns/v1.0/…/flat-connectome/` | 566 МБ | `~/aiddnet/data/connectome/raw/` | generation + md5 + sha256 в `manifests/connectome.toml` |
 | Подграфы `.flyg` | сборка `ddai-connectome` | 1–20 МБ | `data/connectome/compiled/` | sha256 входов и конфига |
 | Блок-карты | архив карт с публичных серверов (heinrich5991), `github.com/DDNetPP/maps`, кэш карт, скачанных клиентом | 10–100 МБ | `data/maps/{sources,train,holdout}` | sha256, источник в `SOURCES.txt`; в git — нет |
 | Карты DDNet (корпус для теста ридера) | `ddnet-maps` (скачан в фазе 0) | ~2 ГБ | `data/research/proto-scratch/ddnet-maps` → `data/maps/corpus` | git-коммит |

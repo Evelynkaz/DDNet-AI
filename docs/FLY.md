@@ -30,7 +30,7 @@
   2. `body-neurotransmitters-male-cns-v1.0.feather` — `consensus_nt` на тип, `predicted_nt` + уверенность на нейрон (43,3 МБ);
   3. `connectome-weights-male-cns-v1.0-minconf-0.5-traced-only.feather` — 25 563 197 рёбер между 165 122 Traced-телами,
      `weight` = число синапсов (508 МБ).
-- **Закрепление версии:** манифест в репо (`data/connectome.manifest.toml`: url, `generation`, size, md5, sha256,
+- **Закрепление версии:** манифест в репо (`manifests/connectome.toml`: url, `generation`, size, md5, sha256,
   лицензия, цитирование). Качаем `…?generation=N` (неверный generation → 404, а не молча новые данные), проверяем
   md5 из HEAD и sha256 после. Кэш — `~/aiddnet/data/connectome/`. В git данные не кладём.
 - **Чтение — в Rust** (крейт `arrow` с IPC + LZ4), потоково по батчам, сразу фильтруя по множеству bodyId подграфа.
