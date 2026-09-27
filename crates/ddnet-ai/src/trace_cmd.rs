@@ -36,7 +36,7 @@ pub enum TraceCommand {
         seed: u64,
         #[arg(long)]
         ticks: u32,
-        /// Number of characters, 1..=4.
+        /// Number of characters, 1..=8.
         #[arg(long)]
         chars: u32,
         /// Sets the scenario's `no_weak_hook` world flag (mirrors `sv_no_weak_hook`). `random-v1`

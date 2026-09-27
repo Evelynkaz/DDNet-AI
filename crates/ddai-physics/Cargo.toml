@@ -11,3 +11,17 @@ publish = false
 workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+# Only for tests/benches: the golden fixtures, bulk trace corpus, scenario generator and
+# `resolve_input` all live in `ddai-trace` (task 1.2). `ddai-trace` depends on `ddai-physics`
+# (for `map::MapData`), never the other way around in non-dev code — this is a dev-only edge,
+# not a cycle in the published dependency graph.
+ddai-trace = { path = "../ddai-trace" }
+serde_json = "1"
+criterion = { version = "0.8", default-features = false }
+stats_alloc = "0.1.10"
+
+[[bench]]
+name = "physics"
+harness = false

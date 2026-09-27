@@ -83,8 +83,11 @@ impl MapData {
 pub enum MapDataError {
     /// `layer`'s `Vec` has `actual` entries but the map's `width * height` is `expected`.
     LayerLengthMismatch {
+        /// Which layer is malformed (`"game"`, `"front"`, ...).
         layer: &'static str,
+        /// `width * height`.
         expected: usize,
+        /// The layer's actual `Vec` length.
         actual: usize,
     },
 }
@@ -158,7 +161,7 @@ pub struct SwitchTile {
     /// Switch number this tile belongs to. Mirrors `CSwitchTile::m_Number`.
     pub number: u8,
     /// Switch tile type (door tile id, or a switch-control type such as
-    /// [`TILE_SWITCHTIMEDOPEN`]). Mirrors `CSwitchTile::m_Type`.
+    /// `TILE_SWITCHTIMEDOPEN`). Mirrors `CSwitchTile::m_Type`.
     pub kind: u8,
     /// Rotation/flip bits for the underlying tile (door). Mirrors `CSwitchTile::m_Flags`.
     pub flags: u8,
@@ -172,7 +175,7 @@ pub struct SwitchTile {
 pub struct TuneTile {
     /// Tune zone number (`0` = no zone). Mirrors `CTuneTile::m_Number`.
     pub number: u8,
-    /// Always [`TILE_TUNE`] when `number != 0`. Mirrors `CTuneTile::m_Type`.
+    /// Always `TILE_TUNE` when `number != 0`. Mirrors `CTuneTile::m_Type`.
     pub kind: u8,
 }
 
@@ -188,6 +191,12 @@ pub const TILE_SOLID: u8 = 1;
 pub const TILE_DEATH: u8 = 2;
 /// Solid, not hookable. `mapitems.h` `TILE_NOHOOK`.
 pub const TILE_NOHOOK: u8 = 3;
+/// Blocks laser (game/front); also the upper bound of `GetTile()`'s "solid" range
+/// `[TILE_SOLID, TILE_NOLASER]`. `mapitems.h` `TILE_NOLASER`.
+pub const TILE_NOLASER: u8 = 4;
+/// Switch-layer "N jumps" tile (`CSwitchTile::m_Delay` = jump count, `255` = unlimited).
+/// `mapitems.h` `TILE_JUMP`.
+pub const TILE_JUMP: u8 = 7;
 /// Hook-through: lets a hook that is already past cut through; body still solid.
 /// `mapitems.h` `TILE_THROUGH_CUT`.
 pub const TILE_THROUGH_CUT: u8 = 5;
@@ -206,15 +215,32 @@ pub const TILE_UNFREEZE: u8 = 11;
 pub const TILE_DFREEZE: u8 = 12;
 /// Ends deep freeze. `mapitems.h` `TILE_DUNFREEZE`.
 pub const TILE_DUNFREEZE: u8 = 13;
+/// Weapon tele-in: a projectile that flies into this tile teleports to the matching tele-out.
+/// Also a tele layer `m_Type` value. `mapitems.h` `TILE_TELEINWEAPON`.
+pub const TILE_TELEINWEAPON: u8 = 14;
 /// Hook tele-in: a hook that flies into this tile teleports to the matching tele-out. Also a
 /// tele layer `m_Type` value. `mapitems.h` `TILE_TELEINHOOK`.
 pub const TILE_TELEINHOOK: u8 = 15;
+/// Grants a wall-jump when touching a hookable wall while airborne (`character.cpp`, out of
+/// Oracle A's core-only scope, but a `CCollision::IsWallJump` getter is still ported).
+/// `mapitems.h` `TILE_WALLJUMP`.
+pub const TILE_WALLJUMP: u8 = 16;
+/// First tile id in the `TIME_CHECKPOINT` range (`CCollision::IsTimeCheckpoint`/
+/// `IsFrontTimeCheckpoint`). `mapitems.h` `TILE_TIME_CHECKPOINT_FIRST`.
+pub const TILE_TIME_CHECKPOINT_FIRST: u8 = 35;
+/// Last tile id in the `TIME_CHECKPOINT` range. `mapitems.h` `TILE_TIME_CHECKPOINT_LAST`.
+pub const TILE_TIME_CHECKPOINT_LAST: u8 = 59;
 /// One-way stopper; which way it blocks depends on rotation flags. `mapitems.h` `TILE_STOP`.
 pub const TILE_STOP: u8 = 60;
 /// Two-way stopper (blocks a pair of opposite directions). `mapitems.h` `TILE_STOPS`.
 pub const TILE_STOPS: u8 = 61;
 /// All-way stopper. `mapitems.h` `TILE_STOPA`.
 pub const TILE_STOPA: u8 = 62;
+/// "Mover" tile (moves lasers/plasma along a fixed direction, `CCollision::MoverSpeed`) — normal
+/// speed. `mapitems.h` `TILE_CP`.
+pub const TILE_CP: u8 = 64;
+/// Mover tile, "fast" variant (4x `TILE_CP`'s speed). `mapitems.h` `TILE_CP_F`.
+pub const TILE_CP_F: u8 = 65;
 /// Tele-in, normal variant (velocity kept). Also a tele layer `m_Type` value.
 /// `mapitems.h` `TILE_TELEIN`.
 pub const TILE_TELEIN: u8 = 26;
@@ -243,6 +269,29 @@ pub const TILE_THROUGH_DIR: u8 = 67;
 /// Checkpoint tele-in, "evil" variant. Tele layer `m_Type` value.
 /// `mapitems.h` `TILE_TELECHECKINEVIL`.
 pub const TILE_TELECHECKINEVIL: u8 = 63;
+
+// --- Switch-layer control tile ids (`CSwitchTile::m_Type`, `mapitems.h`), plus the range
+// `CCollision::Init` keeps verbatim in `m_pSwitch[i].m_Type` (everything else is zeroed). -------
+
+/// Switch-layer subtract-time control tile. `mapitems.h` `TILE_SUBTRACT_TIME`.
+pub const TILE_SUBTRACT_TIME: u8 = 95;
+/// Enables the tele gun pickup. `mapitems.h` `TILE_ALLOW_TELE_GUN`.
+pub const TILE_ALLOW_TELE_GUN: u8 = 98;
+/// Enables the blue ("freeze") tele gun pickup. `mapitems.h` `TILE_ALLOW_BLUE_TELE_GUN`.
+pub const TILE_ALLOW_BLUE_TELE_GUN: u8 = 99;
+/// Re-enables hooking other players (switch-layer). Also the upper bound of the switch-type
+/// range `CCollision::Init` keeps (`m_Type <= TILE_NPH_ENABLE`). `mapitems.h` `TILE_NPH_ENABLE`.
+pub const TILE_NPH_ENABLE: u8 = 107;
+
+// --- `CCollision::TileExists`'s two "interesting effect" game/front ranges (`mapitems.h`). ------
+
+/// Upper bound (inclusive) of the first `TileExists` range that starts at [`TILE_FREEZE`].
+/// `mapitems.h` `TILE_TELE_LASER_DISABLE`.
+pub const TILE_TELE_LASER_DISABLE: u8 = 129;
+/// Lower bound of `TileExists`'s second range (live freeze). `mapitems.h` `TILE_LFREEZE`.
+pub const TILE_LFREEZE: u8 = 144;
+/// Upper bound (inclusive) of `TileExists`'s second range. `mapitems.h` `TILE_LUNFREEZE`.
+pub const TILE_LUNFREEZE: u8 = 145;
 
 // --- Tile flags (`CTile::m_Flags` / `CSwitchTile::m_Flags`), `mapitems.h`. --------------------
 

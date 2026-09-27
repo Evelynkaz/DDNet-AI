@@ -30,7 +30,7 @@ pub struct Params {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeneratorError {
     UnknownRecipe(String),
-    /// `characters` was `0` or greater than 4.
+    /// `characters` was `0` or greater than 8.
     CharacterCountOutOfRange {
         characters: u32,
     },
@@ -47,7 +47,7 @@ impl std::fmt::Display for GeneratorError {
         match self {
             GeneratorError::UnknownRecipe(name) => write!(f, "unknown recipe '{name}'"),
             GeneratorError::CharacterCountOutOfRange { characters } => {
-                write!(f, "character count {characters} out of range (must be 1..=4)")
+                write!(f, "character count {characters} out of range (must be 1..=8)")
             }
             GeneratorError::NotEnoughFreeCells { needed, available } => {
                 write!(
@@ -66,7 +66,7 @@ const TEE_HALF_SIZE: i32 = TILE_SIZE / 2; // spawns land on tile centers, well i
 
 /// Builds a deterministic scenario for `recipe` (a [`synthetic::RECIPES`] name).
 pub fn random_v1(recipe: &str, params: Params) -> Result<Scenario, GeneratorError> {
-    if !(1..=4).contains(&params.characters) {
+    if !(1..=8).contains(&params.characters) {
         return Err(GeneratorError::CharacterCountOutOfRange {
             characters: params.characters,
         });
@@ -446,13 +446,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_more_than_four_characters() {
+    fn rejects_more_than_eight_characters() {
         let mut p = params();
-        p.characters = 5;
+        p.characters = 9;
         assert_eq!(
             random_v1("arena", p),
-            Err(GeneratorError::CharacterCountOutOfRange { characters: 5 })
+            Err(GeneratorError::CharacterCountOutOfRange { characters: 9 })
         );
+    }
+
+    #[test]
+    fn accepts_eight_characters() {
+        let mut p = params();
+        p.characters = 8;
+        let s = random_v1("arena", p).unwrap();
+        assert_eq!(s.characters.len(), 8);
     }
 
     #[test]
