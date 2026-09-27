@@ -17,32 +17,17 @@
   (9 исследовательских субагентов; заметки — `docs/research/`), офлайн-прогон старой версии (E-000), бенчмарк мухи
   (E-001), документы: CLAUDE.md, ORIGINAL, PLAN, FLY, DECISIONS, SETUP, EXPERIMENTS.
 
-## ⚠ Перезапуск Claude (2026-09-27 ~17:15) — как продолжить
-
-Фоновые агенты при перезапуске остановлены. Незакоммиченная работа лежит на диске:
-
-| Задача | Где лежит работа | Что сделать после перезапуска |
-|---|---|---|
-| 1.2 трассы + оракул A (раунд исправлений №1 шёл) | основное дерево `~/aiddnet/DDNet-AI` (незакоммичено) | прочитать `~/aiddnet/data/specs/handoff-1.2.md` и `1.2-review-round1.md`; новый sonnet-builder доделывает находки F1–F10, затем повторное ревью, коммит |
-| 6.1 коннектом | закоммичено в worktree `~/aiddnet/wt/task-6.1` как `6929a26` (одобрено) | после коммита 1.2 перенести в main (`git cherry-pick 6929a26`, пересобрать Cargo.lock), CI |
-| 6.3 подграф мухи | worktree `~/aiddnet/wt/task-6.1` поверх `6929a26` (незакоммичено) | прочитать `~/aiddnet/data/specs/handoff-6.3.md`; новый билдер продолжает по `6.3-fly-subgraph.md` |
-| исследование блока | `docs/research/block-knowledge.md` (может быть неполным) | дочитать, при необходимости добить субагентом |
-
-Готовые спецификации следующих задач: `1.3-physics-core.md`, `1.4-ddai-map.md`, `1.5-oracle-b.md`
-(в `~/aiddnet/data/specs/`). Субагенты теперь запускаются с `permissionMode: bypassPermissions`
-(`~/.claude/agents/*.md`) и общими allow-правилами в `~/.claude/settings.json`.
-
 ## В работе (параллельно)
 
-| Задача | Где | Спецификация |
+| Задача | Где | Спецификация / заметки |
 |---|---|---|
-| 1.2 форматы трасс, синтетические карты, оракул A (C++ ядро DDNet 20.1) | основное дерево `~/aiddnet/DDNet-AI` | `~/aiddnet/data/specs/1.2-trace-oracle-a.md` |
-| 6.1 коннектом (одобрено, закоммичено в worktree `6929a26`, ждёт переноса после 1.2) | `~/aiddnet/wt/task-6.1` | `~/aiddnet/data/specs/6.1-connectome-fetch-read.md` |
-| 6.3 подграф мухи S/M + формат `.flyg` | `~/aiddnet/wt/task-6.1` (поверх 6.1) | `~/aiddnet/data/specs/6.3-fly-subgraph.md` |
-| исследование: тактики блока, источники демок, DDFightNet | субагент → `docs/research/block-knowledge.md` | — |
+| 1.2 трассы + оракул A — раунд исправлений №1 (покрытие F1–F10) | основное дерево `~/aiddnet/DDNet-AI` | `~/aiddnet/data/specs/1.2-trace-oracle-a.md`, `1.2-review-round1.md`, `handoff-1.2.md` |
+| 6.1 коннектом — одобрено, коммит `6929a26` в worktree, ждёт переноса после 1.2 | `~/aiddnet/wt/task-6.1` | `6.1-connectome-fetch-read.md` |
+| 6.3 подграф мухи S/M + `.flyg` | `~/aiddnet/wt/task-6.1` (поверх `6929a26`) | `6.3-fly-subgraph.md` |
+| 2.2a сеть: huffman, packer, пакеты, TKEN, sans-IO соединение, UUID | `~/aiddnet/wt/task-2.2` | `2.2a-net-lowlevel.md` |
+| исследование: тактики блока, источники демок, DDFightNet/fng | субагент → `docs/research/block-knowledge.md` | — |
 
-Открытые мелочи: F7 (из ревью 1.1) — старые неякорные правила `maps/`, `runs/`, `vendor/` в `.gitignore` скрывают
-фикстуры в одноимённых подпапках `tests/fixtures/`; учтено в спецификации 1.2.
+Готовы к запуску: `1.3-physics-core.md`, `1.4-ddai-map.md`, `1.5-oracle-b.md` (после 1.2).
 
 ## Следующие шаги
 
