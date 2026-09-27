@@ -1,0 +1,24 @@
+[package]
+name = "ddai-net"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Transport-independent Teeworlds 0.6 + DDNet network protocol: Huffman, packer, packet/chunk framing, control handshake, sans-IO connection state machine, UUID extended messages."
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = "2"
+md-5 = "0.11"
+
+[dev-dependencies]
+proptest = "1"
+# Dev-only test oracles (decision D-029): libtw2 is a reference/test oracle for Huffman and
+# varint packing, never vendored into non-test builds. MIT/Apache-2.0, allowed by deny.toml.
+pre-rfc3243-libtw2-huffman = "0.2"
+pre-rfc3243-libtw2-packer = "0.2"
+pre-rfc3243-libtw2-warn = "0.2"
