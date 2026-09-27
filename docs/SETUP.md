@@ -90,6 +90,13 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D
 - `tcpdump` (apt) — захват трафика локального сервера для тестов сети (задача 2.2a):
   `sudo tcpdump -i lo -w <file>.pcap udp port 8303`.
 
+## 5a''. Playwright (задача 5.1, e2e-тесты веба)
+
+`tools/e2e/` — Node-проект (Playwright 1.63, lock-файл с хэшами): `cd tools/e2e && npm ci && npx playwright install
+chromium-headless-shell` (кэш `~/.cache/ms-playwright/`, Chrome Headless Shell 153.0.8010.12); системные зависимости
+Chromium ставились `sudo npx playwright install-deps chromium` (≈ 67 apt-пакетов: библиотеки X11/GTK/NSS/шрифты) и
+`ffmpeg`. Запуск: `npx playwright test` (см. `tools/e2e/README.md`).
+
 ## 5b. Параллельные задачи: git worktree
 
 Для одновременных задач /duo создаются отдельные рабочие копии без веток:
