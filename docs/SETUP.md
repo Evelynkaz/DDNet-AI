@@ -68,6 +68,30 @@ cd ~/aiddnet/DDNet-AI && npm ci --no-audit --no-fund   # node_modules в .gitign
 - Блок-карты для разведки: `~/aiddnet/data/maps/copy-love-box/` (источник и sha256 — `SOURCES.txt`),
   `~/aiddnet/data/research/physics-scratch/maps/` (6 карт из github.com/DDNetPP/maps).
 
+## 5a. Инструменты проверки (фаза 1, задача 1.1)
+
+```bash
+cargo install --locked cargo-deny            # 0.20.2 → ~/.cargo/bin/cargo-deny
+# gitleaks 8.30.1 (MIT) → ~/.local/bin/gitleaks, архив проверен по sha256
+# 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb и по checksums-файлу релиза
+# actionlint 1.7.12 → ~/.local/bin/actionlint, архив проверен по sha256 из релиза
+```
+
+Локальный полный прогон как в CI:
+
+```bash
+cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings \
+  && cargo test --workspace --locked && cargo deny check \
+  && gitleaks git --redact --exit-code 1 --config .gitleaks.toml . && actionlint .github/workflows/ci.yml
+```
+
+## 5b. Параллельные задачи: git worktree
+
+Для одновременных задач /duo создаются отдельные рабочие копии без веток:
+`git worktree add --detach ~/aiddnet/wt/task-<N> HEAD`. После одобрения изменения переносятся патчем в основной
+`main` (`git -C <wt> add -A && git -C <wt> diff --cached --binary > p.patch; git apply --index p.patch`), рабочая
+копия удаляется `git worktree remove`.
+
 ## 6. Будет добавлено по фазам
 
 - Фаза 1: пакеты для сборки C++-оракула DDNet (cmake, zlib, sqlite3, curl… — ровно то, что понадобится).
