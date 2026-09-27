@@ -4,6 +4,7 @@
 //! real one — synthetic maps, scenario generation, and trace comparison for the DDNet physics
 //! parity work (see `docs/formats.md`).
 
+mod fly_cmd;
 mod trace_cmd;
 
 use clap::{Parser, Subcommand};
@@ -21,6 +22,8 @@ struct Cli {
 enum Command {
     /// Physics parity tooling: synthetic maps, scenario generation, trace comparison.
     Trace(trace_cmd::TraceArgs),
+    /// The fly's inference engine (phase 7.1): bench and info tooling for a compiled `.flyg`.
+    Fly(fly_cmd::FlyArgs),
 }
 
 fn main() -> ExitCode {
@@ -28,6 +31,7 @@ fn main() -> ExitCode {
     match cli.command {
         None => ExitCode::SUCCESS,
         Some(Command::Trace(args)) => trace_cmd::run(args),
+        Some(Command::Fly(args)) => fly_cmd::run(args),
     }
 }
 
@@ -198,6 +202,90 @@ mod tests {
     #[test]
     fn trace_gen_scenario_rejects_missing_required_flag() {
         let result = Cli::try_parse_from(["ddnet-ai", "trace", "gen-scenario", "--recipe", "arena"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fly_info_parses() {
+        let cli =
+            Cli::try_parse_from(["ddnet-ai", "fly", "info", "--flyg", "fly-S-v1.flyg"]).expect("fly info should parse");
+        match cli.command {
+            Some(super::Command::Fly(args)) => match args.command {
+                super::fly_cmd::FlyCommand::Info { flyg } => {
+                    assert_eq!(flyg, std::path::PathBuf::from("fly-S-v1.flyg"));
+                }
+                other => panic!("expected Info, got {other:?}"),
+            },
+            other => panic!("expected Fly command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fly_bench_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "fly", "bench", "--flyg", "fly-M-v1.flyg"])
+            .expect("fly bench should parse");
+        match cli.command {
+            Some(super::Command::Fly(args)) => match args.command {
+                super::fly_cmd::FlyCommand::Bench {
+                    flyg,
+                    substeps,
+                    decisions,
+                    tick_ms,
+                    seed,
+                } => {
+                    assert_eq!(flyg, std::path::PathBuf::from("fly-M-v1.flyg"));
+                    assert_eq!(substeps, 4);
+                    assert_eq!(decisions, 500);
+                    assert_eq!(tick_ms, 40);
+                    assert_eq!(seed, 42);
+                }
+                other => panic!("expected Bench, got {other:?}"),
+            },
+            other => panic!("expected Fly command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fly_bench_overrides_parse() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "fly",
+            "bench",
+            "--flyg",
+            "fly-S-v1.flyg",
+            "--substeps",
+            "1",
+            "--decisions",
+            "10",
+            "--tick-ms",
+            "20",
+            "--seed",
+            "7",
+        ])
+        .expect("fly bench with overrides should parse");
+        match cli.command {
+            Some(super::Command::Fly(args)) => match args.command {
+                super::fly_cmd::FlyCommand::Bench {
+                    substeps,
+                    decisions,
+                    tick_ms,
+                    seed,
+                    ..
+                } => {
+                    assert_eq!(substeps, 1);
+                    assert_eq!(decisions, 10);
+                    assert_eq!(tick_ms, 20);
+                    assert_eq!(seed, 7);
+                }
+                other => panic!("expected Bench, got {other:?}"),
+            },
+            other => panic!("expected Fly command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fly_bench_rejects_missing_required_flyg_flag() {
+        let result = Cli::try_parse_from(["ddnet-ai", "fly", "bench"]);
         assert!(result.is_err());
     }
 }

@@ -16,5 +16,11 @@ workspace = true
 
 [dependencies]
 clap = { workspace = true }
+ddai-fly = { path = "../ddai-fly" }
+ddai-flyg = { path = "../ddai-flyg" }
 ddai-trace = { path = "../ddai-trace" }
 serde_json = "1"
+# Best-effort thread pinning for `fly bench`'s realistic 25Hz duty-cycle loop (acceptance
+# criterion 4's methodology) — kept out of `ddai-fly` itself, which only takes it as a
+# dev-dependency for its own criterion benches (see that crate's Cargo.toml comment).
+core_affinity = "0.8"

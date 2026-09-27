@@ -1,0 +1,42 @@
+[package]
+name = "ddai-fly"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The fly's inference engine: loads a compiled `.flyg` connectome subgraph plus trainable parameters and runs the continuous-time rate model (FLY.md §4) forward in real time. No backward pass, input encoder or training here (phase 7.2/7.3/8) — see README.md."
+
+[lib]
+name = "ddai_fly"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-flyg = { path = "../ddai-flyg" }
+serde = { version = "1.0.229", features = ["derive"] }
+# Same feature choice as ddai-flyg/ddai-connectome (see their Cargo.toml comments): default-features
+# = false drops the no_std `heapless-cas` feature (and its unmaintained transitive dependency,
+# RUSTSEC-2023-0089) we don't need, since `use-std` already gives `to_allocvec`/`from_bytes`.
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+zstd = "0.14.0"
+# Not in acceptance criterion 1's core dependency list (ddai-flyg/serde/postcard/zstd), but needed
+# for the checkpoint format's "sha256 of the `.flyg` it belongs to" (criterion 1e) — the same crate
+# `ddai-connectome` already uses for its own sha256 hashing, so no new hashing implementation or
+# license enters the tree.
+sha2 = "0.11.0"
+
+[dev-dependencies]
+tempfile = "3.14"
+criterion = { version = "0.7", default-features = false }
+# Thread pinning for the criterion benches only (the realistic 25 Hz duty-cycle loop lives in
+# `ddnet-ai`, which pins independently — see its Cargo.toml comment). Kept a dev-dependency here so
+# the library itself never links it.
+core_affinity = "0.8"
+
+[[bench]]
+name = "decision"
+harness = false
