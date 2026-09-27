@@ -5,12 +5,17 @@
 control-сообщения и рукопожатие DDNet «TKEN», sans-IO стейт-машина надёжной доставки
 (`Connection`), UUID расширенных сообщений (`NETMSG_EX`).
 
-Снапшоты, сгенерированные игровые сообщения и полноценная клиентская сессия — задачи 2.2b/2.3, не
-здесь. Крейт ничего не знает про сокеты и системные часы: время передаётся вызывающим кодом
-(`now: Duration`), сеть — байтами (`feed`/`flush`).
+Второй слой (задача 2.2b, тот же крейт): сгенерированные из `datasrc/network.py` объекты снапшота
+и игровые сообщения (`generated/`), hand-written системные сообщения (`sysmsg`, `ExSysMsg` в
+`message`), полная обработка снапшотов (мультичастная сборка, дельта, CRC, хранилище по тику —
+`delta`/`snapshot`/`assembly`) и типизированный view-API (`view`). Полноценная клиентская сессия
+(вход, докачка карты, тайминг ввода) — задача 2.3, не здесь. Крейт ничего не знает про сокеты и
+системные часы: время передаётся вызывающим кодом (`now: Duration`), сеть — байтами
+(`feed`/`flush`).
 
-Байтовые раскладки задокументированы в `docs/formats.md` (раздел «Протокол 0.6+DDNet: низкий
-уровень»); там же — как получена фикстура реального трафика в `tests/fixtures/`.
+Байтовые раскладки задокументированы в `docs/formats.md` (§9 «Протокол 0.6+DDNet: низкий уровень»,
+§13 «Протокол DDNet 20.1: сообщения и снапшоты»); там же — как получена фикстура реального трафика
+в `tests/fixtures/` и как перегенерировать `generated/` (`tools/ddnet-protocol-gen/`).
 
 ## Решение D-029: своя реализация, а не вендоринг
 
@@ -33,6 +38,16 @@ DDNet 20.1 (C++, `~/aiddnet/build/ddnet-20.1/src`, пиннутый коммит
 | `control` | Control-сообщения (`KEEPALIVE`/`CONNECT`/`CONNECTACCEPT`/`ACCEPT`/`CLOSE`) и байтовая раскладка рукопожатия TKEN — чистые функции, без состояния соединения |
 | `conn` | Sans-IO `Connection`: `connect`/`accept`/`feed`/`flush`/`send_chunk`/`disconnect`; ack/seq wraparound, resend-буфер, keepalive/timeout по переданным часам |
 | `uuid` | UUID v3 (md5 неймспейса + имени) для `NETMSG_EX`, таблица зарегистрированных имён, кодирование id сообщения |
+| `generated` | **Сгенерированный** (`tools/ddnet-protocol-gen/generate.py`, не редактировать руками) код из `datasrc/network.py`: `enums`/`objects`/`messages` — все объекты снапшота и игровые сообщения DDNet 20.1, decode/encode/валидация |
+| `sysmsg` | Hand-written системные сообщения (`NETMSG_*` без описания в `datasrc/`): `INFO`/`MAP_CHANGE`/`MAP_DATA`/`SNAP*`/`INPUTTIMING`/`INPUT`/`RCON_*`/… |
+| `intstr` | DDNet-кодирование «int-string» (`CNetObj_ClientInfo`'s имя/клан/скин) — 4 байта на `i32`, побайтовый сдвиг +128 |
+| `delta` | Дельта снапшота: `unpack_delta` (порт `CSnapshotDelta::UnpackDelta`, включая бюджет `CSnapshot::MAX_SIZE` — 64 КиБ, ревью раунда 1 F3), `create_delta` (только для тестов), статические размеры типов |
+| `snapshot` | `Snapshot`/`SnapshotItem`, CRC, резолв `ex`-типов через дескрипторы `NETOBJTYPE_EX` (≥ 4 int, как у самого DDNet — ревью раунда 1 F6), `SnapshotStorage` по тику |
+| `assembly` | Мультичастная сборка `NETMSG_SNAP`/`SNAPSINGLE`/`SNAPEMPTY` в готовый `Snapshot` (`SNAPSMALL` намеренно не участвует — настоящий клиент DDNet его тоже игнорирует, ревью раунда 1 F7), CRC-проверка, ресинк, `SnapAssembler::reset()` — сбросить хранилище/тики при смене карты (вызывать на каждом `ENTERGAME`, не только первом — ревью раунда 1 F1; без этого снапшоты новой карты навсегда «протухшие») |
+| `tuning` | `Sv_TuneParams`/`Sv_TeamsState(Legacy)` — в `datasrc/network.py` у них нет полей (сам DDNet-клиент разбирает их руками, `gameclient.cpp`), поэтому это hand-written порт: 47 именованных полей `CTuningParams` в порядке `tuning.h`, их дефолты (бит-в-бит те же `float`→fixed-point, что и `CTuneParam::operator=`), останов на первой ошибке пакера с сохранением дефолтов на непрочитанный хвост; аналогично для команд по флоку/DDrace-командам (ревью раунда 1 F2) |
+| `message` | Расширенные (`ex`) системные сообщения (`MAP_DETAILS`/`CAPABILITIES`/`CLIENTVER`/`WHATIS`/…), единый `Registry` UUID-имён, `decode`/`encode` верхнего уровня — перехватывает `Sv_TuneParams`/`Sv_TeamsState(Legacy)` (числовой id и `ex`-имя `teamsstate@netmsg.ddnet.tw`) перед сгенерированной таблицей и отдаёт их через `tuning` (см. выше, F2) |
+| `view` | Типизированный view над `Snapshot`: персонажи (слиты с `DDNetCharacter`), игроки, снаряды/лазеры/пикапы, игровая инфа |
+| `serverinfo` | Connectionless `SERVERINFO` (серверный браузер): `"iext"`/`"inf3"` целиком (включая список игроков), `"dtsf"`/`"iex+"` — только распознавание |
 
 ## Тесты
 
@@ -42,10 +57,28 @@ DDNet 20.1 (C++, `~/aiddnet/build/ddnet-20.1/src`, пиннутый коммит
   (≥ 100k случайных входов на каждое свойство, `cargo test --release` — быстрее).
 - `tests/robustness.rs` — фаз-тесты (> 10⁶ случайных/искажённых входов суммарно) в декодер
   пакетов, `Huffman::decompress`, `Unpacker`, `Connection::feed`: без паник.
-- `tests/capture.rs` — реальный захват трафика (см. `docs/formats.md` §8).
+- `tests/capture.rs` — реальный захват трафика, уровень пакетов/чанков (см. `docs/formats.md` §9.8).
 - `tests/lossy_link.rs` — симуляция ненадёжной сети (потери/переупорядочивание/дублирование) между
   двумя `Connection` (роли клиента и сервера), с детерминированным псевдослучайным генератором и
   поддельными часами.
+- `tests/oracle_libtw2_snapshot.rs` — дифференциальные тесты против `libtw2-snapshot` (по 10k
+  случаев в обе стороны: наш декодер против их кодировщика и наоборот, см. `docs/formats.md` §13.7).
+- `tests/robustness_2_2b.rs` — фаз-тесты (> 10⁶ случайных/искажённых входов суммарно) в декодер
+  сообщений, распаковку дельты и сборку `NETMSG_SNAP`: без паник.
+- `tests/real_traffic.rs` — та же фикстура 2.2a, но на уровень выше: чанки → сообщения → снапшоты,
+  0 несовпадений CRC, траектория собственного тика бота (см. `docs/formats.md` §13.8).
+- `tests/map_change_real_traffic.rs` — компактная (< 500 КБ) собственная фикстура с настоящей сменой
+  карты (`Copy Love Box` → `BlmapChill` → `Copy Love Box`) на локальном сервере: без `reset()` на
+  `ENTERGAME` бо́льшая часть снапшотов новой карты — `Event::Stale` (воспроизводит находку F1), с
+  `reset()` — восстанавливаются все, 0 несовпадений CRC; там же проверены реальные значения
+  `Sv_TuneParams` этого сервера (F2).
+- `tests/regenerate_check.rs` — `#[ignore]`d (нужно настоящее, некоммитящееся дерево исходников
+  DDNet 20.1): перегенерировать `generated/` и побайтово сравнить с закоммиченным (ревью раунда 1
+  F5, критерий приёмки №1). Запуск: `cargo test -p ddai-net --test regenerate_check -- --ignored`.
+- `tests/no_third_party_map_bytes.rs` — сканирует оба закоммиченных `.dat`-фикстуры и проверяет,
+  что ни в одном `MAP_DATA`-чанке не осталось ни одного не-нулевого байта (ревью раунда 2,
+  находка F10 — постоянная CI-проверка результата `examples/strip_map_data.rs`, а не разовый
+  прогон).
 
 ```bash
 cargo test -p ddai-net                     # всё, кроме тяжёлых прогонов на release-скорости

@@ -15,6 +15,16 @@ Usage: extract_capture.py <input.pcap> <output.dat> <server_port> <start:end> [<
 datagrams exchanged with `server_port` (i.e. index 0 is the first such datagram in the pcap, not
 the first datagram overall) — matching what `tools/classify` (a throwaway diagnostic, not part of
 this repo) would print for a raw capture.
+
+Second step, run once on this script's own output (review round 2, finding F10 — a chosen packet
+range can catch a few real `MAP_DATA` chunks at its edges, i.e. actual third-party map bytes, which
+this repo never commits): `cargo run -p ddai-net --example strip_map_data -- <output.dat>
+<output.dat>` zeroes every such chunk's payload in place, changing nothing else byte-for-byte. It
+is a Rust tool, not an addition to this script, because doing it correctly needs a Huffman
+decoder *and* encoder for DDNet's exact table, which `ddai-net` already has (fuzzed and
+differentially tested) — this script stays dependency-free/stdlib-only on purpose, so it does not
+duplicate that. See `crates/ddai-net/examples/strip_map_data.rs` for the full rationale, and
+`crates/ddai-net/tests/no_third_party_map_bytes.rs` for the CI check that no fixture regresses.
 """
 import struct
 import sys

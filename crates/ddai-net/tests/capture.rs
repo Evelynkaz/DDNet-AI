@@ -18,6 +18,15 @@
 //!    segment: `u32` LE record count, then per record: `u8` direction — 0 = client→server, 1 =
 //!    server→client — `u16` LE payload length, payload bytes; parsed below in
 //!    [`read_fixture`]).
+//! 4. `cargo run -p ddai-net --example strip_map_data -- tests/fixtures/local-capture-20260927.dat
+//!    tests/fixtures/local-capture-20260927.dat` (review round 2, finding F10) — the range above
+//!    keeps the *mechanism* of the first few `REQUEST_MAP_DATA`/`MAP_DATA` round trips (step 3's
+//!    own reasoning, right below), but that means 25 real chunks (22,375 B) of `Copy Love Box`'s
+//!    actual, third-party map bytes were sitting in the committed fixture doing nothing for any
+//!    test here. This step zeroes exactly those 25 chunks' raw payload in place — see
+//!    `examples/strip_map_data.rs`'s module docs for exactly what does and does not change, and
+//!    `tests/no_third_party_map_bytes.rs` for the permanent CI check that no non-zero byte of
+//!    them is still in the committed file.
 //!
 //! **Why two segments, not one contiguous prefix** (this is the fix for a real finding — an
 //! earlier version of this test took a single contiguous prefix of the first 400 packets and
@@ -29,8 +38,9 @@
 //! that mechanism without paying for its full ~1400-packet length), and [`SEGMENT_STEADY_STATE`]
 //! is source records `1414..=2777` — starting at the client's `READY`, through `CON_READY`,
 //! `Cl_StartInfo`, `ENTERGAME`, then genuine steady-state play (snapshots, `INPUTTIMING`, client
-//! `INPUT`, acks) all the way to the session's own clean `CLOSE`. Combined: 1405 records, ~76 KB,
-//! comfortably under the task's 200 KB ceiling. Sequence/ack continuity is only meaningful
+//! `INPUT`, acks) all the way to the session's own clean `CLOSE`. Combined: 1405 records, ~60 KB
+//! after step 4 strips the third-party map bytes (~76 KB before), comfortably under the task's
+//! 200 KB ceiling. Sequence/ack continuity is only meaningful
 //! *within* a segment (the excised map-download packets are real sequence numbers we no longer
 //! have), so every check below tracks state per segment, resetting at each segment boundary — see
 //! [`check_segment`].
@@ -69,7 +79,14 @@
 //!   original wire bytes exactly — checked against **real C++-produced output**, not just our own
 //!   encoder's self-consistency (`tests/oracle_libtw2.rs` already covers self-consistency against
 //!   an independent Rust implementation; this is the one place we cross-check against the actual
-//!   DDNet 20.1 binary).
+//!   DDNet 20.1 binary) — with one disclosed exception: the 25 records step 4 above rewrote to
+//!   zero third-party map bytes are, by construction, *our own* `Huffman::compress_vec`'s output
+//!   (of the zeroed content) rather than the original DDNet-produced bytes for those specific 25
+//!   records — this check still passes for them (trivially: decompressing-then-recompressing our
+//!   own already-canonical output reproduces itself), it just no longer *proves* anything about
+//!   the real server's encoder for those 25. The other ~1380 records in this fixture were never
+//!   touched and still are exactly what DDNet 20.1 and the old TS client actually put on the
+//!   wire.
 //! * **Chunk sequences/acks are consistent**: within each segment, every vital chunk's sequence
 //!   number is exactly the previous one (from the same direction, in the same segment) plus one,
 //!   and every ack, once we have seen at least one vital chunk from the acked direction within

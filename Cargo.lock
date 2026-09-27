@@ -970,6 +970,7 @@ dependencies = [
  "md-5",
  "pre-rfc3243-libtw2-huffman",
  "pre-rfc3243-libtw2-packer",
+ "pre-rfc3243-libtw2-snapshot",
  "pre-rfc3243-libtw2-warn",
  "proptest",
  "thiserror",
@@ -2091,6 +2092,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "pre-rfc3243-libtw2-gamenet-common"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bb02a3acc6f7f2919eb962f6be1551d2f0882166c6ba22e5792c3055e629712"
+dependencies = [
+ "arrayvec",
+ "pre-rfc3243-libtw2-buffer",
+ "pre-rfc3243-libtw2-common",
+ "pre-rfc3243-libtw2-packer",
+ "pre-rfc3243-libtw2-warn",
+ "serde",
+ "serde_derive",
+ "uuid",
+ "zerocopy 0.7.35",
+]
+
+[[package]]
+name = "pre-rfc3243-libtw2-gamenet-snap"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1660afb92ef0477083ed198b4ef331e5451a5f6c3748916a19981d4881d3307b"
+dependencies = [
+ "pre-rfc3243-libtw2-buffer",
+ "pre-rfc3243-libtw2-common",
+ "pre-rfc3243-libtw2-gamenet-common",
+ "pre-rfc3243-libtw2-packer",
+ "pre-rfc3243-libtw2-warn",
+]
+
+[[package]]
 name = "pre-rfc3243-libtw2-huffman"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2112,6 +2143,23 @@ dependencies = [
  "pre-rfc3243-libtw2-buffer",
  "pre-rfc3243-libtw2-common",
  "pre-rfc3243-libtw2-warn",
+ "uuid",
+]
+
+[[package]]
+name = "pre-rfc3243-libtw2-snapshot"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be38a9eff245ec527521c928cec822a2789631f1b0834f4e650667d6eb684a88"
+dependencies = [
+ "pre-rfc3243-libtw2-buffer",
+ "pre-rfc3243-libtw2-common",
+ "pre-rfc3243-libtw2-gamenet-common",
+ "pre-rfc3243-libtw2-gamenet-snap",
+ "pre-rfc3243-libtw2-packer",
+ "pre-rfc3243-libtw2-warn",
+ "uuid",
+ "vec_map",
 ]
 
 [[package]]
@@ -3259,10 +3307,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
+name = "uuid"
+version = "1.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+dependencies = [
+ "js-sys",
+ "serde_core",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vec_map"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
 
 [[package]]
 name = "version_check"

@@ -118,6 +118,46 @@ pub enum ControlDecodeError {
     UnknownType,
 }
 
+/// `str_utf8_fix_truncation` (`base/str.cpp`, called from `str_copy` after every hard-length
+/// truncation): backs `bytes` off to the last complete UTF-8 character boundary, by trimming a
+/// trailing multi-byte sequence that a fixed byte cap cut short. Never panics; if `bytes` is not
+/// valid UTF-8 for reasons *unrelated* to truncation (already-malformed input), this may still
+/// trim a byte or two off the very end — matching DDNet's own unconditional call, which has no way
+/// to tell "truncated" apart from "already invalid" either — the caller's own UTF-8 validation
+/// still catches whatever is left over.
+fn fix_utf8_truncation(bytes: &[u8]) -> &[u8] {
+    let len = bytes.len();
+    let max_back = len.min(4); // a complete UTF-8 sequence is at most 4 bytes long
+    for back in 1..=max_back {
+        let b = bytes[len - back];
+        if b & 0xC0 == 0x80 {
+            // A continuation byte: keep scanning backwards for the lead byte that started this
+            // sequence, unless we have already scanned as far as we usefully can.
+            if back == max_back {
+                return bytes;
+            }
+            continue;
+        }
+        let expected_len: usize = if b < 0x80 {
+            1 // ASCII
+        } else if b & 0xE0 == 0xC0 {
+            2
+        } else if b & 0xF0 == 0xE0 {
+            3
+        } else if b & 0xF8 == 0xF0 {
+            4
+        } else {
+            1 // not a valid UTF-8 lead byte either way; leave validation to the caller
+        };
+        return if expected_len > back {
+            &bytes[..len - back]
+        } else {
+            bytes
+        };
+    }
+    bytes
+}
+
 /// Decodes a control message payload (`pPacket->m_aChunkData[0..]` in the C++ reference, i.e.
 /// *without* any trailing security token still attached — strip that first). Never panics; a
 /// payload that is merely too short for what a message type would ideally carry decodes with
@@ -150,6 +190,14 @@ pub fn decode(payload: &[u8]) -> Result<ControlMsg, ControlDecodeError> {
                 Some(nul) => &capped[..nul],
                 None => capped,
             };
+            // F8 (2.2a review carry-over): `str_copy`'s `MAX_REASON_BYTES` cap can land in the
+            // middle of a multi-byte UTF-8 character (e.g. a 254-byte name plus one Cyrillic
+            // character straddling the cut). DDNet's `str_copy` always calls
+            // `str_utf8_fix_truncation` after truncating, backing off to the last complete
+            // character boundary so the *valid* prefix survives — without this, a long multibyte
+            // reason decodes as invalid UTF-8 as a whole and gets replaced by the fixed fallback
+            // message below, even though only the last character was ever in question.
+            let raw = fix_utf8_truncation(raw);
             let mut sanitized: Vec<u8> = raw.iter().map(|&b| if b < 32 { b' ' } else { b }).collect();
             let reason = match String::from_utf8(std::mem::take(&mut sanitized)) {
                 Ok(s) => s,
@@ -331,6 +379,50 @@ mod tests {
                 reason: Some("(Invalid error message)".to_string())
             }
         );
+    }
+
+    #[test]
+    fn close_reason_backs_off_to_last_complete_char_on_multibyte_truncation() {
+        // F8 (2.2a review carry-over): 254 × 'a' + "ä" (2-byte UTF-8) is 256 bytes, one over the
+        // 255-byte cap — the cap lands exactly on "ä"'s lead byte (0xC3), which must be trimmed
+        // off entirely (backing off to the last complete character) rather than surviving as a
+        // dangling lead byte that turns the *whole* reason into "(Invalid error message)".
+        let mut bytes = vec![ctrl_msg::CLOSE];
+        bytes.extend(std::iter::repeat_n(b'a', 254));
+        bytes.extend("ä".as_bytes()); // 0xC3 0xA4
+        let ControlMsg::Close { reason } = decode(&bytes).unwrap() else {
+            panic!("expected Close");
+        };
+        let reason = reason.unwrap();
+        assert_eq!(reason, "a".repeat(254));
+        assert_eq!(reason.len(), 254);
+    }
+
+    #[test]
+    fn fix_utf8_truncation_backs_off_various_multibyte_widths() {
+        // 3-byte sequence (e.g. '€' = E2 82 AC) cut after 1 or 2 bytes.
+        let three_byte = "€".as_bytes();
+        assert_eq!(fix_utf8_truncation(&three_byte[..1]), b"");
+        assert_eq!(fix_utf8_truncation(&three_byte[..2]), b"");
+        assert_eq!(fix_utf8_truncation(three_byte), three_byte);
+
+        // 4-byte sequence (e.g. '𝄞' U+1D11E) cut after 1..3 bytes.
+        let four_byte = "𝄞".as_bytes();
+        assert_eq!(four_byte.len(), 4);
+        for cut in 1..4 {
+            assert_eq!(fix_utf8_truncation(&four_byte[..cut]), b"");
+        }
+        assert_eq!(fix_utf8_truncation(four_byte), four_byte);
+
+        // A complete character followed by a truncated one: only the truncated tail is dropped.
+        let mixed = "a€".as_bytes(); // 'a' + first byte of '€' only, if we cut it
+        assert_eq!(fix_utf8_truncation(&mixed[..2]), b"a");
+
+        // Plain ASCII, no multibyte anywhere: never touched.
+        assert_eq!(fix_utf8_truncation(b"hello"), b"hello");
+
+        // Empty input: must not panic (no bytes to look at).
+        assert_eq!(fix_utf8_truncation(b""), b"");
     }
 
     #[test]

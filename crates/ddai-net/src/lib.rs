@@ -25,4 +25,15 @@ pub mod uuid;
 
 pub mod conn;
 
+pub mod assembly;
+pub mod delta;
+pub mod generated;
+pub mod intstr;
+pub mod message;
+pub mod serverinfo;
+pub mod snapshot;
+pub mod sysmsg;
+pub mod tuning;
+pub mod view;
+
 pub use huffman::Huffman;

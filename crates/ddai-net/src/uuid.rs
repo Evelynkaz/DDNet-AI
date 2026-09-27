@@ -130,13 +130,24 @@ impl Default for UuidRegistry {
 }
 
 impl UuidRegistry {
-    /// Builds the registry from [`REGISTERED_NAMES`], computing each UUID via
-    /// [`calculate_uuid`]. Panics only on a programmer error (a duplicate name/UUID in the fixed
-    /// list above), never on anything runtime/network-controlled — this never runs on
-    /// attacker-controlled input.
+    /// Builds the registry from [`REGISTERED_NAMES`] (task 2.2a's system/engine `ex` messages
+    /// only), computing each UUID via [`calculate_uuid`]. Panics only on a programmer error (a
+    /// duplicate name/UUID in the fixed list above), never on anything runtime/network-controlled
+    /// — this never runs on attacker-controlled input.
     pub fn new() -> Self {
-        let mut entries = Vec::with_capacity(REGISTERED_NAMES.len());
-        for &name in REGISTERED_NAMES {
+        Self::from_names(REGISTERED_NAMES)
+    }
+
+    /// Builds a registry from an arbitrary ordered list of names, assigning ids sequentially
+    /// starting at [`OFFSET_UUID`] in `names`' order — the general form [`UuidRegistry::new`]
+    /// calls with [`REGISTERED_NAMES`]. Task 2.2b uses this to build one combined registry
+    /// covering the system/engine `ex` messages *and* the game-level `ex` objects/messages
+    /// (`crate::generated::objects::EX_NAMES`, `crate::generated::messages::EX_NAMES`) — see
+    /// `crate::message`. Panics only on a programmer error (a duplicate name/UUID in `names`),
+    /// never on anything runtime/network-controlled.
+    pub fn from_names(names: &[&'static str]) -> Self {
+        let mut entries = Vec::with_capacity(names.len());
+        for &name in names {
             let uuid = calculate_uuid(name);
             debug_assert!(
                 !entries.iter().any(|(u, _)| *u == uuid),
