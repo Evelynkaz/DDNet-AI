@@ -45,7 +45,9 @@ crates/
   ddai-demo/               # чтение .demo (вендор libtw2-demo) + восстановление траекторий и вводов через физику
   ddai-world/              # LiveWorld: снапшот → World (reckoning, StrongWeakId, тюнинг), эхо-лаг, летящие вводы, прогноз
   ddai-brain/              # трейт Brain, DecisionContext, Decision, Action (общий язык планировщика/мухи/скрипта)
-  ddai-planner/            # jsmath (V8-совместимая математика), Rng (xoshiro128**), поля BFS, seal, shield, throwLines,
+  ddai-jsmath/             # V8-совместимая математика (round/hypot/sin/cos/log/pow…) + Rng (xoshiro128**) — D-035
+  ddai-tsworld/            # буквальный порт TS-мира (src/core) в f64 для паритета с TS; не играет — D-035
+  ddai-planner/            # поля BFS, seal, shield, throwLines,
                            #   скриптовый бот, дебютная книга, CEM, скоринг, пресеты (normal/low/strong/WB)
   ddai-nav/                # route (граф + Дейкстра), navigate, crossing, wayblock, FreezeMemory
   ddai-bot/                # оркестрация: цикл снапшота, выбор цели, режимы, команды, клипы/инциденты, списки
@@ -68,7 +70,7 @@ docs/
 ```
 
 Граф зависимостей (без циклов): `physics ← map`, `physics ← world ← brain ← {planner, fly} ← bot`, `net → world`,
-`nav → {physics, planner}`, `env → {physics, map, brain, planner}`, `train → {env, fly, planner}`,
+`jsmath ← {tsworld, planner}`, `tsworld ← map`, `nav → {physics, planner}`, `env → {physics, map, brain, planner}`, `train → {env, fly, planner}`,
 `web → bot (через каналы)`, `ddnet-ai → всё, кроме connectome`.
 
 ### 1.2 Ключевые интерфейсы (эскиз, уточняется в задачах)
@@ -204,7 +206,7 @@ pub struct Decision { input: Input, telemetry: Telemetry /* план/нейро�
 | 1.6 | Персонаж и мир: DDRace-тайлы (freeze/deep/live/unfreeze на game+front, death, tele всех типов, speedup 28/29, стопперы), молот, порядок тика (strong/weak), респавн/kill | 0 расхождений с оракулом B на ≥ 500 посл. × 3000 тиков × 2–4 ти на ≥ 4 блок-картах + сценарии «блок» (хук/молот у фриза) |
 | 1.7 | Switch-слой (двери, таймеры, switch-freeze/deep/jump/hit), tune-зоны, ehook, прыжковые тайлы, NPC/NPH/HIT, solo, команды | то же с оракулом B на картах, где эти тайлы есть (BlmapChill, blmapV5, Blockdale, BlockField) |
 | 1.8 | Оружие и снаряды (gun, shotgun, grenade, laser, ninja-минимум), пикапы (сердце-фриз, armor) | оракул B на сценариях с оружием |
-| 1.9 | TS-генератор трасс (`tools/ts-trace`) + профиль `TsCompat` в f64 | 0 расхождений Rust<f64,TsCompat> с TS на ≥ 1000 посл. × 1000 тиков на ≥ 3 картах; Rust<f32> vs TS одношагово — отчёт о доле расхождений (ожидаемо ~15%/ти) в пределах ±1 px / ±1/256 |
+| 1.9 | TS-генератор трасс (`tools/ts-trace`) + `ddai-tsworld` — буквальный порт TS-мира в f64 (D-035) | 0 расхождений Rust<f64,TsCompat> с TS на ≥ 1000 посл. × 1000 тиков на ≥ 3 картах; Rust<f32> vs TS одношагово — отчёт о доле расхождений (ожидаемо ~15%/ти) в пределах ±1 px / ±1/256 |
 | 1.10 | Производительность: criterion-бенчи step/clone | отчёт; цель ≥ 5M ти-тиков/с на ядро (2 ти, блок-карта), clone мира ≤ 1 мкс; нижняя планка 3M |
 
 **Фаза 1 готова**, когда: R1 выполнена (0 расхождений с оракулом B на ≥ 1000 посл. реальных блок-карт по всем
