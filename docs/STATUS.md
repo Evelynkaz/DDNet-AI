@@ -8,6 +8,11 @@
 
 ## Сделано
 
+- **6.1 (2026-09-27, `bc8d1ee`):** `ddai-connectome` — закреплённая загрузка MaleCNS v1.0 (3 файла, 566 МБ,
+  generation+md5+sha256), потоковое чтение Feather → компактные таблицы (0,67 ГБ пик, ~13 с), отчёт; числа совпали с
+  исследованием точно. /duo: 2 раунда.
+- **1.2 (2026-09-27, `4f678f4`):** форматы rawmap/scenario v2/trace, синтетические карты, генератор, оракул A (настоящий
+  C++ DDNet 20.1: gamecore/collision), золотые фикстуры в CI; покрытие проверено gcov. /duo: 2 раунда.
 - **2.1 (2026-09-27, `f15447b`):** локальный DDNet 20.1 (`ddnet-local.service`, только 127.0.0.1:8303, econ
   127.0.0.1:8304, fail-closed юнит); проверено старым ботом: вход, смена карты, реконнект, 8 клиентов. /duo: 2 раунда.
 - **1.1 (2026-09-27, `f02d464`):** cargo workspace (edition 2024, Rust 1.98.1), `ddai-physics` (заготовка),
@@ -19,15 +24,15 @@
 
 ## В работе (параллельно)
 
-| Задача | Где | Спецификация / заметки |
+| Задача | Где | Спецификация |
 |---|---|---|
-| 1.2 трассы + оракул A — раунд исправлений №1 (покрытие F1–F10) | основное дерево `~/aiddnet/DDNet-AI` | `~/aiddnet/data/specs/1.2-trace-oracle-a.md`, `1.2-review-round1.md`, `handoff-1.2.md` |
-| 6.1 коннектом — одобрено, коммит `6929a26` в worktree, ждёт переноса после 1.2 | `~/aiddnet/wt/task-6.1` | `6.1-connectome-fetch-read.md` |
+| 1.2c покрытие трасс: no-weak-hook отдельно от тюнинга, блокер THROUGH_DIR над пустотой | основное дерево | `~/aiddnet/data/specs/1.2c-coverage-followup.md` |
+| 1.3 ядро физики на Rust (f32 бит-в-бит с оракулом A) | `~/aiddnet/wt/task-1.3` | `1.3-physics-core.md` |
+| 1.4 свой ридер `.map` + `map2raw` из DDNet 20.1, сверка на 2428 картах | `~/aiddnet/wt/task-1.4` | `1.4-ddai-map.md` |
+| 2.2a сеть: низкий уровень | `~/aiddnet/wt/task-2.2` | `2.2a-net-lowlevel.md` |
 | 6.3 подграф мухи S/M + `.flyg` | `~/aiddnet/wt/task-6.1` (поверх `6929a26`) | `6.3-fly-subgraph.md` |
-| 2.2a сеть: huffman, packer, пакеты, TKEN, sans-IO соединение, UUID | `~/aiddnet/wt/task-2.2` | `2.2a-net-lowlevel.md` |
-| исследование: тактики блока, источники демок, DDFightNet/fng | субагент → `docs/research/block-knowledge.md` | — |
 
-Готовы к запуску: `1.3-physics-core.md`, `1.4-ddai-map.md`, `1.5-oracle-b.md` (после 1.2).
+Готовы к запуску: `1.5-oracle-b.md` (после 1.2c), `2.2b-net-snapshots-messages.md` (после 2.2a).
 
 ## Следующие шаги
 
