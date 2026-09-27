@@ -1,0 +1,24 @@
+[package]
+name = "ddai-jsmath"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "V8-bit-exact ports of the JS numeric primitives (round/trunc/floor/ceil/abs/sign/max/min/sqrt/imul/to_int32/to_uint32/shifts/rem/hypot, sin/cos/tanh/atan/atan2/exp/log/pow) and the old bot's `Rng` (splitmix32 + xoshiro128** + Box-Muller), needed for bit-exact parity with the legacy TS planner running on V8 (Node 24). Leaf crate, no runtime dependencies."
+
+[lib]
+name = "ddai_jsmath"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Intentionally empty: no runtime dependencies (not even `libm`, see README "Почему без крейтов").
+
+[dev-dependencies]
+# Intentionally empty: the probe/oracle machinery (tools/jsmath-oracle) generates its own probe
+# bit patterns with a small splitmix64 PRNG defined right in the test/bin, so no `rand` crate is
+# needed even for tests.

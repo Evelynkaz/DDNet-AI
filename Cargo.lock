@@ -953,6 +953,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-jsmath"
+version = "0.1.0"
+
+[[package]]
 name = "ddai-map"
 version = "0.1.0"
 dependencies = [

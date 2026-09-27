@@ -47,6 +47,67 @@ window uses are read from the player's own DDNet install and are not part
 of this program.
 
 ------------------------------------------------------------------------
+crates/ddai-jsmath: V8 / fdlibm
+------------------------------------------------------------------------
+
+`crates/ddai-jsmath/src/fdlibm/*.rs` (except `mod.rs`) is ported from V8's
+own copy of fdlibm (`src/base/ieee754.cc`, from the Node 24.21.0 / V8 13.6
+tag) or, for `bits.rs`'s `scalbn` alone, from fdlibm's own `s_scalbn.c`
+directly (V8 never vendors `scalbn`; it calls the platform's, see that
+file's header) — altered for this project: rewritten from C++/C to Rust,
+using safe bit operations instead of pointer aliasing, otherwise
+line-for-line with the same operation order (see each file's header and
+the crate's README for the exact citations). Every file ported from
+`ieee754.cc` carries both notices below verbatim, per their terms;
+`bits.rs` carries only the fdlibm/Sun one (it has no V8-authored code).
+
+V8 license (BSD-3-Clause):
+
+Copyright 2006-2011, the V8 project authors. All rights reserved.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+    * Neither the name of Google Inc. nor the names of its
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+fdlibm license (the original code V8's ieee754.cc itself adapted, per its
+own header comment; Sun's permissive notice, kept because V8 keeps it):
+
+Copyright (C) 1993-2004 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunSoft, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+
+No glibc source is vendored: Node's build of V8 does not compile V8's
+optional glibc-derived trig implementation in (`v8_use_libm_trig_functions`
+is unset — see the crate README for how this was established), so `sin`/
+`cos` are the fdlibm ones above, not glibc's; `Math.pow` calls the
+platform's own `pow` at runtime (same as Rust's `f64::powf`), which is
+linking against the system's libm, not copying its source.
+
+------------------------------------------------------------------------
 Modified version
 ------------------------------------------------------------------------
 

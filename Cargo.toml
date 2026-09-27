@@ -46,3 +46,14 @@ opt-level = 3
 # cross-function-inlined codegen the actual `--release` build (and every real caller) gets.
 [profile.bench]
 inherits = "release"
+
+# ddai-jsmath needs real inlining+constant-folding even in `cargo test`'s dev profile (opt-level
+# 1 from `[profile.dev]` above): its `pow` regression test (task 3.1a review F9) only reproduces
+# the bug it guards against — LLVM rewriting `f64::powf` for a constant operand it can see through
+# after inlining — when the compiler actually inlines and folds, which opt-level 1 doesn't do. This
+# does not weaken the physics-parity guarantee the comment above protects (no `target-cpu`, no
+# fast-math): `opt-level` alone never changes what value a floating-point operation produces,
+# only which optimizations (dead code, inlining, constant folding) run — the property this crate's
+# entire test suite exists to check.
+[profile.dev.package.ddai-jsmath]
+opt-level = 3
