@@ -85,6 +85,11 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D
   && gitleaks git --redact --exit-code 1 --config .gitleaks.toml . && actionlint .github/workflows/ci.yml
 ```
 
+## 5a'. Прочие утилиты
+
+- `tcpdump` (apt) — захват трафика локального сервера для тестов сети (задача 2.2a):
+  `sudo tcpdump -i lo -w <file>.pcap udp port 8303`.
+
 ## 5b. Параллельные задачи: git worktree
 
 Для одновременных задач /duo создаются отдельные рабочие копии без веток:
