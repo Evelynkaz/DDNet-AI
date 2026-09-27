@@ -1,0 +1,52 @@
+# Pinned manifest for the MaleCNS v1.0 connectome "minimal file set" (see
+# docs/research/fly-data.md §6.1 and docs/FLY.md §2). Read and written by
+# `crates/ddai-connectome` (`ddai-connectome fetch` / `--update-sha256`).
+#
+# Each entry pins:
+#   - url          : object URL without a query string; `fetch` requests `url?generation=N`
+#   - generation    : GCS object generation (from HEAD's `x-goog-generation`); a wrong/rotated
+#                      generation makes GCS answer 404 instead of silently serving new bytes
+#   - size          : expected object size in bytes (HEAD `content-length`)
+#   - md5           : expected MD5 (hex), decoded from HEAD's `x-goog-hash: md5=<base64>`
+#   - sha256        : expected SHA-256 (hex) of the downloaded bytes, checked after every
+#                      download; empty string "" means "not pinned yet" — `fetch
+#                      --update-sha256` fills it in the first time this entry is downloaded and
+#                      verified, and refuses to overwrite a non-empty value
+#   - license       : data license (attribution required, see NOTICE)
+#   - source_version: dataset release this file was pinned from
+#   - citation      : how to cite the dataset (verified against Crossref for
+#                      10.1016/j.cell.2026.08.015 on 2026-09-27: Cell 189(18):5504-5526.e15)
+version = 1
+
+[[files]]
+name = "body-annotations-male-cns-v1.0-minconf-0.5.feather"
+url = "https://storage.googleapis.com/flyem-male-cns/v1.0/connectome-data/flat-connectome/body-annotations-male-cns-v1.0-minconf-0.5.feather"
+generation = 1780494878811468
+size = 14483314
+md5 = "50a7718770c57220f160ba4f431ab89e"
+sha256 = "2177e246113e4cfbf1e7772ec37c6da1955ff22e8063d0b1f833101f99a9a3b2"
+license = "CC-BY-4.0"
+source_version = "MaleCNS v1.0"
+citation = "Berg et al. (2026) Sexual dimorphism in the complete Drosophila male central nervous system connectome. Cell 189(18):5504-5526.e15. doi:10.1016/j.cell.2026.08.015"
+
+[[files]]
+name = "body-neurotransmitters-male-cns-v1.0.feather"
+url = "https://storage.googleapis.com/flyem-male-cns/v1.0/connectome-data/flat-connectome/body-neurotransmitters-male-cns-v1.0.feather"
+generation = 1780894899156750
+size = 43282834
+md5 = "3d842b12fe5c49eefade528d7dd24a1f"
+sha256 = "95c9289220663abeb3409f3ad9e5a7f8a53f8093f5139d15502cd08da8879621"
+license = "CC-BY-4.0"
+source_version = "MaleCNS v1.0"
+citation = "Berg et al. (2026) Sexual dimorphism in the complete Drosophila male central nervous system connectome. Cell 189(18):5504-5526.e15. doi:10.1016/j.cell.2026.08.015"
+
+[[files]]
+name = "connectome-weights-male-cns-v1.0-minconf-0.5-traced-only.feather"
+url = "https://storage.googleapis.com/flyem-male-cns/v1.0/connectome-data/flat-connectome/connectome-weights-male-cns-v1.0-minconf-0.5-traced-only.feather"
+generation = 1780494884279095
+size = 508025642
+md5 = "6601d4ad0afa99fd03eb087965ef2423"
+sha256 = "9b3beab17bad5f618be3f2c02d3139a8d07b822565919c013f1e5506d93e604b"
+license = "CC-BY-4.0"
+source_version = "MaleCNS v1.0"
+citation = "Berg et al. (2026) Sexual dimorphism in the complete Drosophila male central nervous system connectome. Cell 189(18):5504-5526.e15. doi:10.1016/j.cell.2026.08.015"

@@ -25,6 +25,12 @@ allow = [
     "Unicode-3.0",
     "CC0-1.0",
     "BSL-1.0",
+    # webpki-root-certs (Mozilla's bundled root CA list, pulled in transitively by
+    # ddai-connectome's reqwest -> rustls-platform-verifier). A permissive *data* license (no
+    # attribution requirement since v2.0, no copyleft, no field-of-use restriction — same
+    # rationale as CC0-1.0/Unicode-3.0 above), so it imposes nothing that conflicts with
+    # combining it into a GPL-3.0-only binary.
+    "CDLA-Permissive-2.0",
     "MPL-2.0",
     "LGPL-3.0-only",
     "LGPL-3.0-or-later",

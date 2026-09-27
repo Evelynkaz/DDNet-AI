@@ -1,0 +1,51 @@
+[package]
+name = "ddai-connectome"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Fetch, verify and read the MaleCNS connectome (Arrow Feather) into compact internal tables. Not a dependency of ddnet-ai: keeps the heavy arrow dependency out of the bot binary."
+
+[lib]
+name = "ddai_connectome"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ddai-connectome"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Feather v2 == Arrow IPC file format, needing the `ipc` feature; `ipc_compression` additionally
+# pulls in LZ4 + zstd codec support for both reader and writer (default-features off: we need
+# neither `csv` nor `json`). `ipc_compression` already implies `ipc`; both are listed for clarity.
+arrow = { version = "60", default-features = false, features = ["ipc", "ipc_compression"] }
+clap = { workspace = true }
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+# default-features = false drops postcard's default `heapless-cas` feature (a no_std
+# fixed-capacity buffer API we don't use, since `use-std` gives us `to_allocvec`/`from_bytes`).
+# `heapless-cas` pulls in `heapless`, which for a few embedded targets (avr/riscv32/thumbv6m/
+# xtensa — never our actual build target) depends on `atomic-polyfill`, an unmaintained crate
+# with no safe upgrade (RUSTSEC-2023-0089); `cargo deny` flags it even though it's inert on our
+# target because Cargo.lock records dependencies for every target. Disabling the feature we don't
+# need removes it from the tree entirely instead of suppressing the advisory.
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+zstd = "0.14.0"
+md-5 = "0.11.0"
+sha2 = "0.11.0"
+base64 = "0.23.1"
+# Blocking client: `fetch` downloads exactly 3 files sequentially with resumable Range
+# requests. There is no concurrency to exploit and no other part of this binary needs an async
+# runtime, so the blocking API keeps `fetch.rs` straight-line and easy to read; see
+# crates/ddai-connectome/README.md "Почему reqwest::blocking" for the full justification.
+reqwest = { version = "0.13.5", features = ["blocking"] }
+
+[dev-dependencies]
+tempfile = "3.14"
