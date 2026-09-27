@@ -519,7 +519,10 @@ async fn forged_device_cookie_does_not_bypass_the_global_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_device_cookie_does_not_bypass_the_global_limit() {
     let server = TestServer::start_with(|c| {
-        c.trusted_device_ttl = Duration::from_millis(50);
+        // Device expiry is Unix-seconds granularity, not sub-second `Instant` precision (review
+        // round 2, finding F8a: it must survive a process restart) — needs a >=1s TTL and a sleep
+        // comfortably past it, robust to wherever within the current second the login landed.
+        c.trusted_device_ttl = Duration::from_secs(1);
         c.login_rate_limit.global_limit = 2;
         c.login_rate_limit.per_ip_limit = 1000;
     })
@@ -527,7 +530,7 @@ async fn expired_device_cookie_does_not_bypass_the_global_limit() {
 
     // Login #1 (global slot 1/2) earns a device cookie, which we then let expire.
     let (_cookie, device_cookie, _csrf) = server.login_with_device();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(2100)).await;
 
     // One more plain attempt (global slot 2/2) saturates the budget.
     send(
@@ -586,6 +589,96 @@ async fn device_trust_survives_logout_but_not_a_password_change() {
     assert_eq!(
         still_trusted.status, 200,
         "logout must not revoke device trust: {still_trusted:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stolen_device_cookie_copy_does_not_regain_bypass_after_a_password_change_and_relogin() {
+    // Review round 2, finding F9's own repro, end-to-end over real HTTP (device.rs's
+    // `reviewer_scenario_a_saved_old_cookie_copy_never_regains_bypass` covers the same property
+    // at the DeviceStore level directly): an attacker who captured a COPY of the device cookie
+    // before a password rotation must never have it start working again purely because the
+    // legitimate owner's own next login (with the new password) happens to use that same cookie.
+    let server = TestServer::start_with(|c| {
+        c.login_rate_limit.global_limit = 2;
+        c.login_rate_limit.per_ip_limit = 1000;
+    })
+    .await;
+
+    // Step 1-2: first login earns a device cookie under the OLD password.
+    let (_cookie, old_device_cookie, _csrf) = server.login_with_device();
+    // The attacker's stolen copy is byte-for-byte the same Set-Cookie value.
+    let stolen_copy = old_device_cookie.clone();
+
+    // web-passwd rotates the password (finding F9a: this also wipes web-devices.toml, but the
+    // point of THIS test is the in-memory table the running server still holds regardless).
+    let paths = ddai_web::secrets::SecretsPaths::new(&server.config.data_dir);
+    let weak_params = ddai_web::secrets::Argon2Params {
+        m_cost_kib: 8 * 1024,
+        t_cost: 1,
+        p_cost: 1,
+    };
+    let new_password = ddai_web::secrets::generate_and_store_password(&paths, weak_params)
+        .expect("rotate the password")
+        .plaintext;
+
+    // Step 5: the legitimate browser logs back in with the NEW password, presenting its copy of
+    // the OLD device cookie. Must succeed (right password) — this is the login whose `confirm()`
+    // call is the actual bug site being fixed.
+    let relogin = send(
+        server.addr,
+        Req::new("POST", "/api/login")
+            .header("Origin", &server.origin())
+            .cookie(&old_device_cookie)
+            .json_body(&serde_json::json!({ "password": new_password })),
+    );
+    assert_eq!(
+        relogin.status, 200,
+        "relogin with the new password should succeed: {relogin:?}"
+    );
+    // The fix (F9b): this relogin must mint a FRESH device cookie, not reuse/re-trust the
+    // presented old one.
+    let fresh_device_cookie =
+        extract_set_cookie_pair(&relogin, server.device_cookie_name()).expect("a fresh device Set-Cookie");
+    assert_ne!(
+        fresh_device_cookie, old_device_cookie,
+        "the relogin must not re-issue/re-trust the same old device cookie value"
+    );
+
+    // Saturate the global budget (slot 1/2 was the relogin above; one more plain attempt is 2/2)
+    // so that ONLY a genuinely bypassing device cookie can still get through below.
+    send(
+        server.addr,
+        Req::new("POST", "/api/login")
+            .header("Origin", &server.origin())
+            .json_body(&serde_json::json!({ "password": "wrong" })),
+    );
+
+    // Step 7 — THE ACTUAL FINDING: the attacker's stolen copy of the OLD cookie must NOT bypass
+    // the now-saturated global limit.
+    let attacker_attempt = send(
+        server.addr,
+        Req::new("POST", "/api/login")
+            .header("Origin", &server.origin())
+            .cookie(&stolen_copy)
+            .json_body(&serde_json::json!({ "password": new_password })),
+    );
+    assert_eq!(
+        attacker_attempt.status, 429,
+        "a stolen copy of the OLD device cookie must NOT regain its bypass: {attacker_attempt:?}"
+    );
+
+    // Contrast: the LEGITIMATE fresh device cookie from the relogin above still bypasses fine.
+    let legit_attempt = send(
+        server.addr,
+        Req::new("POST", "/api/login")
+            .header("Origin", &server.origin())
+            .cookie(&fresh_device_cookie)
+            .json_body(&serde_json::json!({ "password": new_password })),
+    );
+    assert_eq!(
+        legit_attempt.status, 200,
+        "the fresh device cookie from the relogin should still bypass the saturated global limit: {legit_attempt:?}"
     );
 }
 

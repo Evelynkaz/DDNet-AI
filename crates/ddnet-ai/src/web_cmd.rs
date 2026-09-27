@@ -160,6 +160,16 @@ pub fn run_web_passwd(args: WebPasswdArgs) -> ExitCode {
             } else {
                 println!("(pass --show to also print the password here; it was written to the file above)");
             }
+            // Review round 2, finding F3: the new password takes effect on the next login attempt
+            // without a restart (it's read from disk on every POST /api/login), but a SESSION
+            // created under the OLD password keeps working regardless — sessions aren't
+            // re-checked against the current password hash on every request, only at login time.
+            // If this password change is happening because an old session might be compromised
+            // (not just routine rotation), only a restart actually invalidates it.
+            println!(
+                "note: existing logged-in sessions are NOT invalidated by a new password. If you \
+                 suspect a session may be compromised, also run: sudo systemctl restart ddnet-ai-web"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

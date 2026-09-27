@@ -13,6 +13,7 @@ use crate::auth::cookie::{
     encode_device_cookie_value, encode_session_cookie_value,
 };
 use crate::auth::csrf;
+use crate::auth::device::password_fingerprint;
 use crate::origin::client_ip;
 use crate::rand_util::{encode_b64, random_bytes};
 use crate::secrets;
@@ -144,8 +145,14 @@ pub async fn login(
     let presented_device_id = request_jar
         .get(device_cookie_name(state.config.cookie_secure))
         .and_then(|c| decode_device_cookie_value(&state.session_key, c.value()));
-    let bypass_global = match (&auth, presented_device_id) {
-        (Some(auth), Some(id)) => state.devices.is_trusted(&id, &auth.hash_phc),
+    // Review round 2, finding F9c: store/compare a keyed fingerprint of the hash, never the raw
+    // PHC string — computed once here and reused below (the underlying `auth.hash_phc` doesn't
+    // change between now and the `confirm` call further down).
+    let current_fingerprint = auth
+        .as_ref()
+        .map(|auth| password_fingerprint(&state.session_key, &auth.hash_phc));
+    let bypass_global = match (&current_fingerprint, presented_device_id) {
+        (Some(fingerprint), Some(id)) => state.devices.is_trusted(&id, fingerprint),
         _ => false,
     };
 
@@ -210,12 +217,25 @@ pub async fn login(
         duration_to_cookie_max_age(state.config.absolute_timeout),
     );
 
-    // Review finding F7: (re)confirm this device as trusted for the password that just verified.
-    // Reusing an id the request already presented (even one that wasn't currently trusted, e.g.
-    // after a password change) means a returning browser doesn't accumulate a fresh device
-    // record on every login; the fingerprint update is what re-establishes trust.
-    let device_id = presented_device_id.unwrap_or_else(random_bytes);
-    state.devices.confirm(device_id, &auth.hash_phc);
+    // Review round 2, finding F9b: only ever REFRESH an id that was ALREADY trusted (this
+    // request's own `bypass_global`, computed above from the state *before* this login) — never
+    // mint trust for a presented id that `is_trusted` had just said "no" to. The previous
+    // behavior (reuse whatever id was presented, trusted or not, "so a returning browser doesn't
+    // accumulate a fresh device record on every login") had a sharp edge: an old device cookie's
+    // id and HMAC signature don't change across a password rotation, only its stored fingerprint
+    // does — so re-confirming a presented-but-untrusted id under the NEW fingerprint (purely
+    // because the legitimate browser happened to log back in with it) also silently re-authorized
+    // ANY OTHER copy of that exact cookie value an attacker might have captured earlier. A
+    // presented-but-untrusted id is now simply left alone: it stays exactly as untrusted as it
+    // was (bounded by its own TTL, or by `MAX_TRACKED_DEVICES`' eviction — finding F10), and this
+    // login instead earns a brand-new id that no earlier copy could have known in advance.
+    let device_id = if bypass_global {
+        presented_device_id.expect("bypass_global is only ever true when a device id was both presented and trusted")
+    } else {
+        random_bytes()
+    };
+    let fingerprint = current_fingerprint.expect("auth is Some at this point, so current_fingerprint was too");
+    state.devices.confirm(device_id, &fingerprint);
     let device_cookie_value = encode_device_cookie_value(&state.session_key, &device_id);
     let device_cookie = build_device_cookie(
         state.config.cookie_secure,

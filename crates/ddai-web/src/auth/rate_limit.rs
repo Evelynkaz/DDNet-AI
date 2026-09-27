@@ -10,40 +10,48 @@
 //! maintained, and its `GovernorConfigBuilder` doesn't give per-key exponential lockout out of
 //! the box) — this is small and fully under our control.
 //!
-//! Three properties earned from review round 1 (findings F3, F7) and round 2 (F8), all
-//! load-bearing — `check`'s three-step structure (peek → global → per-IP update) exists
-//! specifically to hold all three at once:
-//! - **An already-locked-out IP is rejected by a read-only peek at the per-IP table, before the
-//!   global counter is ever touched** (review finding F8). Checking the *global* limiter first
-//!   (the F3 fix, see below) had an unintended consequence: every repeat attempt from an
-//!   already-locked-out IP still consumed a global slot on its way to being per-IP-rejected, so a
-//!   *single* attacker who quickly triggers their own lockout and keeps hammering it can drain the
-//!   entire global budget alone and lock the real owner out — reproduced in review with one IP
-//!   and ~31 requests/min. The peek is read-only (no entry created, no counters touched), so it
-//!   doesn't reopen F3's unbounded-growth problem: a *new* IP still can't get a free peek-only
-//!   pass, since there's nothing to peek at until step 3 creates its entry, which still only
-//!   happens after the global check.
-//! - **The global check runs before any per-IP `HashMap` entry is *created*.** A flood of
-//!   requests from unique/rotating source addresses (real for IPv6, trivial to spoof via
-//!   `X-Forwarded-For` if `--trust-proxy` is misconfigured) can otherwise grow the per-IP table
-//!   without bound — 800k entries / 20s were reproduced in review. Checking the IP-agnostic
-//!   global limiter before creating a new entry means a flood can create at most `global_limit`
-//!   *new* per-IP entries per `global_window`, regardless of how many distinct addresses it uses.
-//!   [`purge_expired`] and a hard [`RateLimitConfig::max_tracked_ips`] cap (LRU-ish eviction by
-//!   `window_start`) are defense in depth on top of that, not the primary fix. A *known* (already
-//!   tracked) IP that isn't currently locked still passes through the global check on every
-//!   attempt — only an *already-locked* IP's repeat attempts skip it, per the F8 point above.
+//! **Two layers of per-prefix limiter (review round 2, finding F8b).** IPv6 addresses are keyed
+//! at TWO granularities at once, checked and updated independently:
+//! - `/64` (the typical single-customer allocation unit) — the original, finer-grained limiter.
+//! - `/48` — wider. A single actor holding a routed `/48` (trivially/cheaply obtained from many
+//!   transit providers, unlike an IPv4 range of comparable size) has 65,536 distinct `/64`s to
+//!   round-robin through, each individually staying well under the `/64` limiter's radar, while
+//!   in aggregate draining the *global* budget (see below) alone from a single actor —
+//!   reproduced in review as ~40+ attempts spread over 1,000 distinct `/64`s inside one `/48`.
+//!   The `/48` limiter (its own window/limit/lockout, deliberately wider and looser than the
+//!   `/64` one — see [`RateLimitConfig`]'s `per_48_*` fields) catches that aggregate in a way no
+//!   amount of tuning the `/64` limiter alone ever could, since by definition it only ever sees
+//!   one `/64`'s worth of traffic per key.
+//!   IPv4 has no equivalent second tier: an IPv4 range wide enough to pull off the same trick
+//!   (a `/16`+, say) is a scarce, expensive, ISP-grade allocation, a fundamentally different
+//!   threat model than "free from any IPv6 transit provider" — out of scope here.
+//!
+//! `check`'s structure (peek both tiers → global → update both tiers) keeps three properties, all
+//! load-bearing, earned across review round 1 (findings F3, F7) and round 2 (F8):
+//! - **An already-locked-out key (either tier) is rejected by a read-only peek, before the global
+//!   counter is ever touched** (round 1 finding F8, extended to the `/48` tier in round 2's F8b).
+//!   Checking the *global* limiter first (the F3 fix, see below) had an unintended consequence:
+//!   every repeat attempt from an already-locked-out key still consumed a global slot on its way
+//!   to being rejected anyway, so a *single* attacker (one `/64`, or now one `/48` round-robining
+//!   many `/64`s) who quickly triggers their own lockout and keeps hammering it could drain the
+//!   entire global budget alone and lock the real owner out. Both peeks are read-only (no entry
+//!   created, no counters touched), so neither reopens F3's unbounded-growth problem: a key with
+//!   nothing tracked yet has nothing to peek at, so this can't be used to dodge the "no entry
+//!   before the global check" guarantee below.
+//! - **The global check runs before any new per-prefix `HashMap` entry is *created*, in either
+//!   tier.** A flood of requests from unique/rotating source addresses (real for IPv6, trivial to
+//!   spoof via `X-Forwarded-For` if `--trust-proxy` is misconfigured) can otherwise grow either
+//!   table without bound — 800k `/64` entries / 20s were reproduced in review round 1.
+//!   [`PrefixLimiter::purge_expired`] and each tier's own hard `max_tracked` cap (LRU-ish eviction
+//!   by `window_start`) are defense in depth on top of that, not the primary fix.
 //! - **A caller can pass `bypass_global = true`** (used by a verified trusted-device cookie, see
-//!   `auth::device`) to skip *only* the global check while still being fully subject to the
-//!   per-IP limiter. Without this, an attacker with enough distinct source IPs/addresses can
+//!   `auth::device`) to skip *only* the global check while still being fully subject to BOTH
+//!   per-prefix limiters. Without this, an attacker with enough distinct source addresses can
 //!   exhaust the shared global budget and lock the legitimate owner out indefinitely — the global
 //!   limit protects against a single attacker hammering the endpoint, not against a determined
 //!   owner-lockout attempt, so a device that has already proven it knows the *current* password
-//!   gets to skip it.
-//!
-//! IPv6 addresses are rate-limited by their `/64` (the typical single-customer allocation unit),
-//! not the full 128 bits — otherwise an attacker with a routed `/64` can rotate the low 64 bits
-//! per request and never repeat an IP.
+//!   gets to skip it. Neither prefix limiter is ever bypassable this way — bypassing "am I part of
+//!   a flood" checks would defeat their own point.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
@@ -58,16 +66,29 @@ pub struct RateLimitConfig {
     pub global_window: Duration,
     pub base_lockout: Duration,
     pub max_lockout: Duration,
-    /// Hard cap on the number of distinct per-IP(-prefix) entries tracked at once. When a *new*
+    /// Hard cap on the number of distinct `/64`(-or-v4) entries tracked at once. When a *new*
     /// key would exceed this, the entry with the oldest `window_start` is evicted first. This is
     /// a defensive backstop — under normal operation the global-first check ordering (see module
     /// docs) keeps the table far below this.
     pub max_tracked_ips: usize,
+    /// Review round 2, finding F8b: a second, wider IPv6-only limiter keyed by `/48` instead of
+    /// `/64`, layered on top of (checked/updated in addition to, not instead of) the `/64` one —
+    /// see the module doc comment. Deliberately looser than the `/64` defaults (a *legitimate*
+    /// `/48` can easily contain more than one real household/customer's worth of traffic
+    /// aggregated together, e.g. an ISP's whole allocation to one PoP), while still being far
+    /// tighter than the shared global budget so one abusive `/48` can never consume most of it.
+    pub per_48_limit: u32,
+    pub per_48_window: Duration,
+    pub per_48_base_lockout: Duration,
+    pub per_48_max_lockout: Duration,
+    pub max_tracked_48s: usize,
 }
 
 impl Default for RateLimitConfig {
     /// Acceptance criterion 3's suggested numbers: "5 attempts/min/IP with exponential lockout,
-    /// 30/min global".
+    /// 30/min global". `per_48_limit: 20` is finding F8b's own suggested number — comfortably
+    /// below `global_limit`'s 30, so even a `/48` that maxes out its own budget before locking
+    /// itself out still leaves headroom in the shared budget for a legitimate login elsewhere.
     fn default() -> Self {
         Self {
             per_ip_limit: 5,
@@ -77,15 +98,124 @@ impl Default for RateLimitConfig {
             base_lockout: Duration::from_secs(30),
             max_lockout: Duration::from_secs(30 * 60),
             max_tracked_ips: 100_000,
+            per_48_limit: 20,
+            per_48_window: Duration::from_secs(60),
+            per_48_base_lockout: Duration::from_secs(30),
+            per_48_max_lockout: Duration::from_secs(30 * 60),
+            max_tracked_48s: 100_000,
         }
     }
 }
 
-struct IpState {
+struct PrefixState {
     window_start: Instant,
     count_in_window: u32,
     lockout_until: Option<Instant>,
     lockout_streak: u32,
+}
+
+/// One sliding-window-with-exponential-lockout limiter keyed by an already-truncated address (a
+/// `/64`-or-v4-address, or a `/48` — see module docs). Generic over nothing but the config it's
+/// built with: [`LoginRateLimiter`] holds two independent instances of this, one per tier.
+struct PrefixLimiter {
+    limit: u32,
+    window: Duration,
+    base_lockout: Duration,
+    max_lockout: Duration,
+    max_tracked: usize,
+    table: Mutex<HashMap<IpAddr, PrefixState>>,
+}
+
+impl PrefixLimiter {
+    fn new(limit: u32, window: Duration, base_lockout: Duration, max_lockout: Duration, max_tracked: usize) -> Self {
+        Self {
+            limit,
+            window,
+            base_lockout,
+            max_lockout,
+            max_tracked,
+            table: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Read-only: `Some(until)` if `key` is currently tracked and locked out (regardless of
+    /// whether `until` has already passed — the caller compares against `now` itself), `None` if
+    /// unknown or not locked. Never creates an entry.
+    fn peek_lockout(&self, key: &IpAddr) -> Option<Instant> {
+        let table = self.table.lock().expect("rate limiter mutex poisoned");
+        table.get(key).and_then(|state| state.lockout_until)
+    }
+
+    /// Records one attempt against `key` and decides whether it may proceed, exactly like the
+    /// crate-level docs' "Step 3" (the actual per-prefix update): sliding window, exponential
+    /// lockout on exceeding `limit`. A concurrent request for the same key could have locked it
+    /// out in the narrow window between an earlier [`PrefixLimiter::peek_lockout`] and this call —
+    /// handled below exactly the same way a peek would have, just after the caller already spent
+    /// whatever it spent (e.g. a global slot) on a very tight race, an accepted, bounded cost (see
+    /// `lockout_triggering_attempt_consumes_a_global_slot_but_locked_out_retries_do_not`).
+    fn record_attempt(&self, key: IpAddr, now: Instant) -> Result<(), RateLimited> {
+        let mut table = self.table.lock().expect("rate limiter mutex poisoned");
+        if !table.contains_key(&key) && table.len() >= self.max_tracked {
+            evict_oldest(&mut table);
+        }
+        let state = table.entry(key).or_insert_with(|| PrefixState {
+            window_start: now,
+            count_in_window: 0,
+            lockout_until: None,
+            lockout_streak: 0,
+        });
+        if let Some(until) = state.lockout_until {
+            if now < until {
+                return Err(RateLimited {
+                    retry_after: until - now,
+                });
+            }
+            // The lockout just expired: start a fresh window from here, rather than leaving
+            // `count_in_window` at its already-over-the-limit value (which would otherwise
+            // immediately re-trigger another lockout on this very attempt).
+            state.lockout_until = None;
+            state.window_start = now;
+            state.count_in_window = 0;
+        }
+        if now.duration_since(state.window_start) >= self.window {
+            state.window_start = now;
+            state.count_in_window = 0;
+        }
+        state.count_in_window += 1;
+        if state.count_in_window > self.limit {
+            state.lockout_streak += 1;
+            let shift = (state.lockout_streak - 1).min(10);
+            let lockout = (self.base_lockout * (1u32 << shift)).min(self.max_lockout);
+            state.lockout_until = Some(now + lockout);
+            return Err(RateLimited { retry_after: lockout });
+        }
+        Ok(())
+    }
+
+    fn record_success(&self, key: IpAddr) {
+        let mut table = self.table.lock().expect("rate limiter mutex poisoned");
+        if let Some(state) = table.get_mut(&key) {
+            state.count_in_window = 0;
+            state.lockout_until = None;
+            state.lockout_streak = 0;
+        }
+    }
+
+    fn purge_expired(&self) -> usize {
+        let now = Instant::now();
+        let mut table = self.table.lock().expect("rate limiter mutex poisoned");
+        let before = table.len();
+        table.retain(|_, state| {
+            let within_window = now.duration_since(state.window_start) < self.window;
+            let locked = state.lockout_until.is_some_and(|until| now < until);
+            within_window || locked
+        });
+        before - table.len()
+    }
+
+    fn tracked_count(&self) -> usize {
+        self.table.lock().expect("rate limiter mutex poisoned").len()
+    }
 }
 
 struct GlobalState {
@@ -95,7 +225,10 @@ struct GlobalState {
 
 pub struct LoginRateLimiter {
     config: RateLimitConfig,
-    per_ip: Mutex<HashMap<IpAddr, IpState>>,
+    per_64: PrefixLimiter,
+    /// `/48` tier (finding F8b), IPv6 only — see module docs. `rate_limit_key_48` returns `None`
+    /// for an IPv4 address, and callers below skip this tier entirely in that case.
+    per_48: PrefixLimiter,
     global: Mutex<GlobalState>,
 }
 
@@ -106,7 +239,7 @@ pub struct RateLimited {
 
 /// Normalizes the key used for per-address tracking: IPv4 addresses are used as-is, IPv6
 /// addresses are truncated to their `/64` routing prefix (see module docs).
-fn rate_limit_key(ip: IpAddr) -> IpAddr {
+fn rate_limit_key_64(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
         IpAddr::V6(v6) => {
@@ -125,11 +258,45 @@ fn rate_limit_key(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// The `/48` key for the wider IPv6-only tier (finding F8b). `None` for an IPv4 address: there is
+/// no second tier for v4 (see the module doc comment on why).
+fn rate_limit_key_48(ip: IpAddr) -> Option<IpAddr> {
+    match ip {
+        IpAddr::V4(_) => None,
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            Some(IpAddr::V6(Ipv6Addr::new(
+                segments[0],
+                segments[1],
+                segments[2],
+                0,
+                0,
+                0,
+                0,
+                0,
+            )))
+        }
+    }
+}
+
 impl LoginRateLimiter {
     pub fn new(config: RateLimitConfig) -> Self {
         Self {
+            per_64: PrefixLimiter::new(
+                config.per_ip_limit,
+                config.per_ip_window,
+                config.base_lockout,
+                config.max_lockout,
+                config.max_tracked_ips,
+            ),
+            per_48: PrefixLimiter::new(
+                config.per_48_limit,
+                config.per_48_window,
+                config.per_48_base_lockout,
+                config.per_48_max_lockout,
+                config.max_tracked_48s,
+            ),
             config,
-            per_ip: Mutex::new(HashMap::new()),
             global: Mutex::new(GlobalState {
                 window_start: Instant::now(),
                 count_in_window: 0,
@@ -140,20 +307,26 @@ impl LoginRateLimiter {
     /// Records one login attempt from `ip` and decides whether it may proceed. Call this once
     /// per `POST /api/login`, before verifying the password.
     ///
-    /// `bypass_global`: skip the shared global limiter for this attempt (the per-IP limiter still
-    /// applies in full) — set this only for a request that already carries independent proof it's
-    /// not part of a flood, e.g. a verified trusted-device cookie (finding F7).
+    /// `bypass_global`: skip the shared global limiter for this attempt (both per-prefix limiters
+    /// still apply in full) — set this only for a request that already carries independent proof
+    /// it's not part of a flood, e.g. a verified trusted-device cookie (finding F7).
     pub fn check(&self, ip: IpAddr, bypass_global: bool) -> Result<(), RateLimited> {
         let now = Instant::now();
-        let key = rate_limit_key(ip);
+        let key64 = rate_limit_key_64(ip);
+        let key48 = rate_limit_key_48(ip);
 
-        // Step 1 (review finding F8): a read-only peek. If this key is *already* locked out,
-        // reject immediately without touching the global counter or creating/mutating any entry
-        // — otherwise a single already-locked-out IP could keep consuming global slots forever on
-        // its way to being per-IP-rejected anyway, draining the shared budget alone. Read-only on
-        // purpose: an IP we've never seen has nothing to peek at, so this can't be used to dodge
-        // the F3 "no entry before the global check" guarantee below.
-        if let Some(until) = self.peek_lockout(&key)
+        // Step 1 (finding F8, extended to the /48 tier by F8b): read-only peeks at BOTH tiers
+        // before touching anything mutable, so an already-locked key is rejected without ever
+        // reaching the global counter.
+        if let Some(until) = self.per_64.peek_lockout(&key64)
+            && now < until
+        {
+            return Err(RateLimited {
+                retry_after: until - now,
+            });
+        }
+        if let Some(key48) = key48
+            && let Some(until) = self.per_48.peek_lockout(&key48)
             && now < until
         {
             return Err(RateLimited {
@@ -176,96 +349,50 @@ impl LoginRateLimiter {
             }
         }
 
-        // Step 3: the actual per-IP update. A concurrent request for the same key could have
-        // locked it out in the narrow window between step 1 and here — handled below exactly like
-        // step 1, just after this attempt already spent a global slot on a very tight race, which
-        // is the same order-of-magnitude cost this design already accepts (a per-IP lockout's
-        // *triggering* attempt always costs one global slot; see
-        // `lockout_triggering_attempt_consumes_a_global_slot_but_locked_out_retries_do_not`).
-        let mut per_ip = self.per_ip.lock().expect("rate limiter mutex poisoned");
-        if !per_ip.contains_key(&key) && per_ip.len() >= self.config.max_tracked_ips {
-            evict_oldest(&mut per_ip);
-        }
-        let state = per_ip.entry(key).or_insert_with(|| IpState {
-            window_start: now,
-            count_in_window: 0,
-            lockout_until: None,
-            lockout_streak: 0,
-        });
-        if let Some(until) = state.lockout_until {
-            if now < until {
-                return Err(RateLimited {
-                    retry_after: until - now,
-                });
-            }
-            // The lockout just expired: start a fresh window from here, rather than leaving
-            // `count_in_window` at its already-over-the-limit value (which would otherwise
-            // immediately re-trigger another lockout on this very attempt).
-            state.lockout_until = None;
-            state.window_start = now;
-            state.count_in_window = 0;
-        }
-        if now.duration_since(state.window_start) >= self.config.per_ip_window {
-            state.window_start = now;
-            state.count_in_window = 0;
-        }
-        state.count_in_window += 1;
-        if state.count_in_window > self.config.per_ip_limit {
-            state.lockout_streak += 1;
-            let shift = (state.lockout_streak - 1).min(10);
-            let lockout = (self.config.base_lockout * (1u32 << shift)).min(self.config.max_lockout);
-            state.lockout_until = Some(now + lockout);
-            return Err(RateLimited { retry_after: lockout });
-        }
-
-        Ok(())
+        // Step 3: the actual per-prefix updates, both tiers. Both always run (not short-circuited
+        // by one another) — they answer independent questions ("has this one narrow /64
+        // misbehaved" vs "has this wide /48 misbehaved in aggregate") and each tier's own count
+        // must reflect every attempt regardless of what the other tier decides.
+        let result64 = self.per_64.record_attempt(key64, now);
+        let result48 = match key48 {
+            Some(key48) => self.per_48.record_attempt(key48, now),
+            None => Ok(()),
+        };
+        result64?;
+        result48
     }
 
-    /// Read-only: `Some(until)` if `key` is currently tracked and locked out (regardless of
-    /// whether `until` has already passed — the caller compares against `now` itself), `None` if
-    /// unknown or not locked. Never creates an entry.
-    fn peek_lockout(&self, key: &IpAddr) -> Option<Instant> {
-        let per_ip = self.per_ip.lock().expect("rate limiter mutex poisoned");
-        per_ip.get(key).and_then(|state| state.lockout_until)
-    }
-
-    /// Clears `ip`'s backoff state after a successful login.
+    /// Clears `ip`'s backoff state (both tiers) after a successful login.
     pub fn record_success(&self, ip: IpAddr) {
-        let key = rate_limit_key(ip);
-        let mut per_ip = self.per_ip.lock().expect("rate limiter mutex poisoned");
-        if let Some(state) = per_ip.get_mut(&key) {
-            state.count_in_window = 0;
-            state.lockout_until = None;
-            state.lockout_streak = 0;
+        self.per_64.record_success(rate_limit_key_64(ip));
+        if let Some(key48) = rate_limit_key_48(ip) {
+            self.per_48.record_success(key48);
         }
     }
 
-    /// Removes per-IP entries that are neither within their current window nor still locked out
-    /// (i.e. have nothing left to track). Called periodically from the same background task that
-    /// purges expired sessions (finding F3: without this the table only ever grows). Returns how
-    /// many entries were removed.
+    /// Removes per-prefix entries (both tiers) that are neither within their current window nor
+    /// still locked out (i.e. have nothing left to track). Called periodically from the same
+    /// background task that purges expired sessions (finding F3: without this the tables only
+    /// ever grow). Returns how many entries were removed in total across both tiers.
     pub fn purge_expired(&self) -> usize {
-        let now = Instant::now();
-        let mut per_ip = self.per_ip.lock().expect("rate limiter mutex poisoned");
-        let before = per_ip.len();
-        per_ip.retain(|_, state| {
-            let within_window = now.duration_since(state.window_start) < self.config.per_ip_window;
-            let locked = state.lockout_until.is_some_and(|until| now < until);
-            within_window || locked
-        });
-        before - per_ip.len()
+        self.per_64.purge_expired() + self.per_48.purge_expired()
     }
 
-    /// Number of distinct per-IP(-prefix) entries currently tracked. Test/observability only.
+    /// Number of distinct `/64`(-or-v4) entries currently tracked. Test/observability only.
     pub fn tracked_ip_count(&self) -> usize {
-        self.per_ip.lock().expect("rate limiter mutex poisoned").len()
+        self.per_64.tracked_count()
+    }
+
+    /// Number of distinct `/48` entries currently tracked (finding F8b). Test/observability only.
+    pub fn tracked_48_count(&self) -> usize {
+        self.per_48.tracked_count()
     }
 }
 
-/// Evicts the single entry with the oldest `window_start` (used only when at
-/// [`RateLimitConfig::max_tracked_ips`] capacity — a rare, defensive path, so an O(n) scan here is
+/// Evicts the single entry with the oldest `window_start` (used only when a [`PrefixLimiter`] is
+/// at its configured `max_tracked` capacity — a rare, defensive path, so an O(n) scan here is
 /// fine).
-fn evict_oldest(map: &mut HashMap<IpAddr, IpState>) {
+fn evict_oldest(map: &mut HashMap<IpAddr, PrefixState>) {
     if let Some(&oldest_key) = map
         .iter()
         .min_by_key(|(_, state)| state.window_start)
@@ -294,6 +421,11 @@ mod tests {
             base_lockout: Duration::from_millis(50),
             max_lockout: Duration::from_secs(10),
             max_tracked_ips: 100_000,
+            per_48_limit: 20,
+            per_48_window: Duration::from_secs(60),
+            per_48_base_lockout: Duration::from_millis(50),
+            per_48_max_lockout: Duration::from_secs(10),
+            max_tracked_48s: 100_000,
         }
     }
 
@@ -496,6 +628,7 @@ mod tests {
         let mut cfg = config();
         cfg.per_ip_limit = 2;
         cfg.global_limit = 100_000;
+        cfg.per_48_limit = 100_000; // keep the new /48 tier out of the way for this test
         let limiter = LoginRateLimiter::new(cfg);
         let addr_of = |low: u16| -> IpAddr { IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, low)) };
         // Two different low-64-bit addresses within the same /64 share one bucket.
@@ -516,6 +649,7 @@ mod tests {
         let mut cfg = config();
         cfg.per_ip_limit = 1;
         cfg.global_limit = 100_000;
+        cfg.per_48_limit = 100_000;
         let limiter = LoginRateLimiter::new(cfg);
         let a = IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 1, 0, 0, 0, 1));
         let b = IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 2, 0, 0, 0, 1));
@@ -566,5 +700,111 @@ mod tests {
         // A 4th distinct IP must evict the oldest (ip 100) rather than growing past the cap.
         limiter.check(ip(200), false).expect("still allowed, but should evict");
         assert_eq!(limiter.tracked_ip_count(), 3, "table must stay at the cap");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // /48 tier (review round 2, finding F8b)
+    // -----------------------------------------------------------------------------------------
+
+    fn v6(prefix48: u16, low64: u16, low: u16) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, prefix48, low64, 0, 0, 0, low))
+    }
+
+    #[test]
+    fn many_distinct_64s_in_one_48_are_caught_by_the_48_tier_before_the_64_tier_would_notice() {
+        let mut cfg = config();
+        cfg.per_48_limit = 3;
+        cfg.global_limit = 100_000; // isolate the /48 tier itself for this test
+        let limiter = LoginRateLimiter::new(cfg);
+        // Each of these is a DIFFERENT /64 (varying the 4th segment), all inside the SAME /48
+        // (fixed 3rd segment) — the /64 tier alone would treat every single one as brand new.
+        for low64 in 0..3u16 {
+            limiter.check(v6(0xaaaa, low64, 1), false).expect("under the /48 limit");
+        }
+        let err = limiter
+            .check(v6(0xaaaa, 999, 1), false)
+            .expect_err("a 4th distinct /64 in the same /48 must still be caught by the /48 tier");
+        assert!(err.retry_after > Duration::ZERO);
+        assert_eq!(limiter.tracked_48_count(), 1, "all of these collapse to one /48 entry");
+        // Confirm the /64 tier really did treat each as independent (proving the /48 tier, not
+        // the /64 one, is what caught the 4th attempt above) — 4 entries: the 3 initial ones plus
+        // the 4th /64, which the /64 tier itself was perfectly happy with on its own.
+        assert_eq!(limiter.tracked_ip_count(), 4);
+    }
+
+    #[test]
+    fn different_48_prefixes_are_independent() {
+        let mut cfg = config();
+        cfg.per_48_limit = 1;
+        cfg.global_limit = 100_000;
+        let limiter = LoginRateLimiter::new(cfg);
+        limiter.check(v6(1, 0, 1), false).expect("under limit");
+        assert!(
+            limiter.check(v6(2, 0, 1), false).is_ok(),
+            "a different /48 must be unaffected by the first one's usage"
+        );
+    }
+
+    #[test]
+    fn ipv4_addresses_never_touch_the_48_tier() {
+        let mut cfg = config();
+        cfg.per_48_limit = 1;
+        cfg.per_ip_limit = 1000; // keep the (irrelevant here) v4/64 tier out of the way too
+        cfg.global_limit = 100_000;
+        let limiter = LoginRateLimiter::new(cfg);
+        for _ in 0..10 {
+            limiter.check(ip(1), false).expect("v4 has no /48 tier to trip");
+        }
+        assert_eq!(
+            limiter.tracked_48_count(),
+            0,
+            "no /48 entries should ever be created for v4"
+        );
+    }
+
+    #[test]
+    fn many_distinct_64s_in_one_48_cannot_drain_the_global_budget_for_a_different_prefix() {
+        // Direct regression test for finding F8b's own repro: ~40+ attempts spread over many
+        // distinct /64s inside ONE /48 (here, 1000, matching the repro's own scale) must not be
+        // able to exhaust the shared global budget — a login from a totally different address
+        // (no device-trust bypass involved) must still find room.
+        let limiter = LoginRateLimiter::new(RateLimitConfig::default());
+        for low64 in 0..1000u16 {
+            let _ = limiter.check(v6(0xbeef, low64, 1), false);
+        }
+        let owner = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        assert!(
+            limiter.check(owner, false).is_ok(),
+            "1000 distinct /64s inside one /48 must not drain the global budget for a different address"
+        );
+    }
+
+    #[test]
+    fn bypass_global_does_not_bypass_the_48_tier() {
+        let mut cfg = config();
+        cfg.per_48_limit = 1;
+        cfg.global_limit = 1000;
+        let limiter = LoginRateLimiter::new(cfg);
+        limiter
+            .check(v6(5, 0, 1), true)
+            .expect("first attempt under the /48 limit");
+        limiter
+            .check(v6(5, 1, 1), true) // a different /64, SAME /48
+            .expect_err("bypass_global must not also bypass the /48 limiter");
+    }
+
+    #[test]
+    fn purge_expired_covers_the_48_tier_too() {
+        let mut cfg = config();
+        cfg.per_48_window = Duration::from_millis(30);
+        cfg.per_48_limit = 1000;
+        cfg.global_limit = 100_000;
+        let limiter = LoginRateLimiter::new(cfg);
+        limiter.check(v6(1, 0, 1), false).expect("attempt 1");
+        sleep(Duration::from_millis(60));
+        limiter.check(v6(2, 0, 1), false).expect("attempt 2, fresh /48 window");
+        let removed = limiter.purge_expired();
+        assert_eq!(removed, 1, "only the stale /48 entry should be purged");
+        assert_eq!(limiter.tracked_48_count(), 1);
     }
 }

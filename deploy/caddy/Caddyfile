@@ -1,0 +1,118 @@
+# Caddy config for the DDNet-AI web UI (task 5.3). Installed to /etc/caddy/Caddyfile by
+# deploy/install.sh. Caddy terminates HTTPS on the public name and reverse-proxies everything to
+# the bot, which listens ONLY on 127.0.0.1:7788 (task 5.1) — see deploy/README.md for the full
+# picture and docs/SETUP.md for the installed package/version/key.
+#
+# No `email` is set for ACME: that would put a personal contact address in a file this repository
+# commits. Let's Encrypt issues and auto-renews without one; add one later with
+# `{ email you@example.com }` here if the owner wants renewal notices.
+{
+	# Review finding F2: a plain TCP admin API at 127.0.0.1:2019, even loopback-only, is reachable
+	# by ANY local process — including a hypothetically-compromised ddnet-ai-web (its own systemd
+	# sandbox only restricts which *addresses* it may talk to, not which *local* services; its
+	# IPAddressAllow=127.0.0.0/8 does not exclude 127.0.0.1:2019). The admin API is unauthenticated
+	# and can rewrite Caddy's entire running config (e.g. to expose a currently-loopback-only
+	# backend). A Unix socket, owned by `caddy` and mode 0600, is reachable only by that same user
+	# (or root) — ddnet-ai-web runs as `ubuntu`, which cannot open it at all. Verified live: see
+	# BUILD REPORT for the reviewer's own sandboxed-curl repro before/after.
+	#
+	# /var/lib/caddy already exists (0750, owned by caddy:caddy — Caddy's own HOME, created by
+	# the package) and needs no extra directory setup, unlike /run/caddy (tmpfs, gone on every
+	# reboot without an additional tmpfiles.d entry).
+	admin unix//var/lib/caddy/admin.sock|0600
+
+	servers {
+		# HTTP/1.1 + HTTP/2 only (acceptance criterion 1). Without this, Caddy also serves
+		# HTTP/3 over QUIC (UDP) and advertises it via `Alt-Svc`; ufw keeps UDP 443 closed
+		# (deploy/install.sh), so a client that tried H3 would just waste a round trip on a
+		# closed port instead of never being offered it.
+		protocols h1 h2
+
+		# `trusted_proxies` is intentionally NOT set anywhere in this file (acceptance criterion
+		# 1: "Caddy must not trust incoming X-Forwarded-For from clients"). With it unset, Caddy
+		# ignores any X-Forwarded-For/-Proto/-Host the client sends and replaces them with the
+		# values it computes itself from the real TCP connection — this is what makes
+		# `ddnet-ai web --trust-proxy` safe to trust that header at all (the bot only honors it
+		# when the TCP peer is loopback, i.e. Caddy itself; see ddai-web's `origin::client_ip`).
+	}
+}
+
+89-58-7-133.sslip.io {
+	# Applies to the whole site: this site only ever reverse-proxies to the one bot below, so a
+	# single limit "consistent with the bot's" (acceptance criterion 1) is exactly the bot's own
+	# 16 KiB API body limit (ddai-web's `DEFAULT_MAX_BODY_BYTES`) — Caddy rejects an oversized
+	# body before it even reaches the backend. `KiB`, not `KB` (review finding F6's nit): 16 KB
+	# would be 16,000 bytes (go-humanize's decimal unit), 1,384 bytes short of the bot's own
+	# 16*1024 = 16,384-byte limit this is meant to match.
+	request_body {
+		max_size 16KiB
+	}
+
+	# Compress static assets only. `/api/*` and `/ws` must reach the bot exactly as sent
+	# (acceptance criterion 1: gzip/zstd must not touch API/WS). `@static` is a REQUEST matcher
+	# naming the only three paths `encode` even runs on — deliberately not `encode`'s own `match`
+	# sub-block, which matches on the *response* (Content-Type), and whose built-in default
+	# would otherwise happily compress `application/json`/`text/*` API responses too.
+	@static path / /app.css /app.js
+	encode @static zstd gzip
+
+	header {
+		# HSTS (acceptance criterion 1: max-age >= 1 year, no preload — preload is a one-way,
+		# hard-to-reverse commitment across the whole domain and its subdomains, not appropriate
+		# to opt into on the owner's behalf for a shared name like sslip.io).
+		Strict-Transport-Security "max-age=31536000"
+		# Don't leak the Caddy version (acceptance criterion 1). Every other security header
+		# (CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Cache-Control on
+		# API/WS) is set by the bot itself (ddai-web's headers.rs) and passed through unchanged —
+		# duplicating them here would just be a second copy that could drift out of sync with it.
+		-Server
+	}
+
+	# JSON access log with rotation (acceptance criterion 1), at the default-ish path
+	# /var/log/caddy/ (deploy/install.sh creates that directory, owned by the `caddy` user).
+	# Caddy redacts Cookie/Set-Cookie/Authorization/Proxy-Authorization as "REDACTED" in access
+	# logs by default (undone only by the `log_credentials` server option, which is not set here)
+	# — verified live in the report by grepping the actual log file.
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 20MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+
+	# WebSocket upgrade is automatic, no extra config needed. `stream_close_delay` keeps an
+	# open /ws connection alive across a graceful `systemctl reload caddy` instead of the
+	# default of severing every open stream immediately.
+	reverse_proxy 127.0.0.1:7788 {
+		stream_close_delay 5m
+	}
+
+	# Review finding F6 (nit): a response Caddy generates ITSELF — e.g. this site's own
+	# `request_body`'s 413, or any future 4xx/5xx that never reaches `reverse_proxy` at all —
+	# skips the `header` directive above (confirmed live: a 413 previously came back with
+	# `server: Caddy` and no HSTS). `handle_errors` is a separate error-handling chain that these
+	# self-generated responses DO go through, so the same two headers are repeated here for them.
+	# A response the *backend* itself generates for a route it actually reached (a normal 404 from
+	# the bot's own router, `/api/*` errors, ...) already carries the bot's full header set
+	# (headers.rs) untouched — this block only ever fires for what Caddy itself short-circuits.
+	handle_errors {
+		header {
+			Strict-Transport-Security "max-age=31536000"
+			-Server
+		}
+		respond "{err.status_code} {err.status_text}"
+	}
+}
+
+# Review finding F6 (nit): a request whose SNI matches this site's certificate (so the TLS
+# handshake succeeds) but whose HTTP `Host` header does not match `89-58-7-133.sslip.io` above
+# falls through to here — Caddy's default for an unmatched Host is an empty `200 OK` with none of
+# this file's headers either. `abort` instead closes the connection outright, the same "never
+# reaches the app" outcome as a wrong SNI already has (verified live) — never anything to accept
+# on top. This is a fallback with no hostname of its own: it does not request or manage any TLS
+# certificate; whatever SNI got the connection here keeps using that (real) site's certificate.
+:443 {
+	abort
+}

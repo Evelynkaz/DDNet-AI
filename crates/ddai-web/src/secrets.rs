@@ -76,6 +76,12 @@ impl SecretsPaths {
     pub fn password_file(&self) -> PathBuf {
         self.dir.join("web-password.txt")
     }
+
+    /// Trusted-device records (review round 2, finding F8a). Not real TOML either — see this
+    /// module's doc comment and [`encode_devices`]/[`decode_devices`].
+    pub fn devices_file(&self) -> PathBuf {
+        self.dir.join("web-devices.toml")
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -130,7 +136,7 @@ pub fn ensure_secrets_dir(paths: &SecretsPaths) -> Result<(), SecretsError> {
 /// able to read or (for the directory) list (review finding F6). This runs on every *load*, not
 /// just on write, so it also catches a directory/file that predates this check, sits on a
 /// misconfigured filesystem, or was loosened by an external tool.
-fn enforce_private_permissions(path: &Path, expected_mode: u32) -> Result<(), SecretsError> {
+pub(crate) fn enforce_private_permissions(path: &Path, expected_mode: u32) -> Result<(), SecretsError> {
     let metadata = fs::metadata(path).map_err(|e| io_err(path, e))?;
     let actual_mode = metadata.permissions().mode() & 0o777;
     if actual_mode & 0o077 != 0 {
@@ -154,7 +160,7 @@ fn tmp_sibling_path(path: &Path) -> PathBuf {
 /// Writes `contents` to `path` with exactly `0600` permissions, atomically (write to a sibling
 /// temp file, then rename) so a crash never leaves a partially written or wrong-permission
 /// secrets file, and no other local process ever observes a too-permissive window.
-fn write_secret_file(path: &Path, contents: &str) -> Result<(), SecretsError> {
+pub(crate) fn write_secret_file(path: &Path, contents: &str) -> Result<(), SecretsError> {
     use std::io::Write;
 
     let tmp_path = tmp_sibling_path(path);
@@ -184,7 +190,7 @@ fn write_secret_file(path: &Path, contents: &str) -> Result<(), SecretsError> {
     })
 }
 
-fn read_to_string_checked(path: &Path) -> Result<String, SecretsError> {
+pub(crate) fn read_to_string_checked(path: &Path) -> Result<String, SecretsError> {
     fs::read_to_string(path).map_err(|e| io_err(path, e))
 }
 
@@ -302,6 +308,16 @@ pub fn generate_and_store_password(
     let auth = PasswordAuth { hash_phc, params };
     write_secret_file(&paths.password_file(), &format!("{plaintext}\n"))?;
     save_password_auth(paths, &auth)?;
+    // Review round 2, finding F9a: wipe every persisted trusted-device record on every password
+    // rotation. Not strictly the ONLY thing preventing a stale record from being trusted again
+    // (that's the fingerprint-mismatch check in `auth::device::DeviceStore::is_trusted`, which
+    // keeps working even if this write is somehow skipped/lost — see that module's doc comment),
+    // but there is no reason to keep a superseded password's fingerprint sitting in this file for
+    // up to its full TTL (90 days) once the password that ever could have matched it is gone for
+    // good. Ordering relative to the two writes above is not security-load-bearing (unlike
+    // plaintext-before-hash above): whichever order a crash lands in, the new hash is already
+    // active and old records — cleared or not — can never match it again either way.
+    save_devices(paths, &[])?;
     Ok(GeneratedPassword { plaintext, auth })
 }
 
@@ -353,6 +369,123 @@ pub fn load_or_create_session_key(paths: &SecretsPaths) -> Result<[u8; SESSION_K
     );
     write_secret_file(&path, &text)?;
     Ok(key)
+}
+
+// ---------------------------------------------------------------------------------------------
+// `web-devices.toml`: trusted devices that may skip the global login rate limit (review round 2,
+// finding F8a — see `auth::device` for why this needs to survive a restart at all)
+// ---------------------------------------------------------------------------------------------
+
+/// One trusted-device record as persisted to disk. Keyed by [`PersistedDevice::id_hash`] — a
+/// SHA-256 of the actual 256-bit device id, never the id itself, so that reading this file alone
+/// is never enough to forge a valid device cookie (the signed cookie value also needs the
+/// session-signing key, but hashing the id here is one more, independent layer: a leak of this
+/// file specifically hands out nothing directly replayable). `auth::device` hashes an incoming
+/// cookie's id the same way before every lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedDevice {
+    pub id_hash: [u8; 32],
+    /// The PHC hash string this device last confirmed — see `auth::device::DeviceRecord` for why
+    /// comparing this against the *current* password hash on every check is the entire
+    /// password-change revocation mechanism, unaffected by whether this device record came from
+    /// memory or from this file.
+    pub password_hash_fingerprint: String,
+    pub expires_at_unix: u64,
+    pub last_seen_unix: u64,
+}
+
+/// Renders `devices` as this file's line format: `<id_hash> <expires_at_unix> <last_seen_unix>
+/// <password_hash_fingerprint>`, space-separated (the PHC hash format never contains a space, so
+/// a plain split is unambiguous — see [`decode_devices`]).
+fn encode_devices(devices: &[PersistedDevice]) -> String {
+    let mut out = String::new();
+    for line in [
+        "ddai-web trusted devices (task 5.3, finding F8a). Managed automatically by the running",
+        "server; do not edit by hand; do not commit (see CLAUDE.md).",
+        "One line per device: <base64url sha256(device_id)> <expires_at_unix_s> <last_seen_unix_s> <password hash it was confirmed under>",
+    ] {
+        out.push_str("# ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    for device in devices {
+        out.push_str(&encode_b64(&device.id_hash));
+        out.push(' ');
+        out.push_str(&device.expires_at_unix.to_string());
+        out.push(' ');
+        out.push_str(&device.last_seen_unix.to_string());
+        out.push(' ');
+        out.push_str(&device.password_hash_fingerprint);
+        out.push('\n');
+    }
+    out
+}
+
+/// Parses [`encode_devices`]'s format. Deliberately lenient, unlike [`toml_kv::parse_kv`]: a
+/// single malformed line (partial write racing a crash, disk corruption, hand-editing despite the
+/// header comment's request not to) is logged and skipped rather than discarding every OTHER
+/// device's trust along with it — this file is a convenience cache, not a security boundary in
+/// itself (see `auth::device::DeviceStore::load_or_empty`'s doc comment).
+fn decode_devices(text: &str) -> Vec<PersistedDevice> {
+    let mut devices = Vec::new();
+    for (idx, raw_line) in text.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(4, ' ');
+        let (Some(id_hash_b64), Some(expires_s), Some(last_seen_s), Some(hash_phc)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            tracing::warn!(
+                line = idx + 1,
+                "web-devices.toml: skipping malformed line (too few fields)"
+            );
+            continue;
+        };
+        let id_hash = match decode_b64(id_hash_b64).ok().and_then(|v| <[u8; 32]>::try_from(v).ok()) {
+            Some(id_hash) => id_hash,
+            None => {
+                tracing::warn!(line = idx + 1, "web-devices.toml: skipping line with a bad id hash");
+                continue;
+            }
+        };
+        let (Ok(expires_at_unix), Ok(last_seen_unix)) = (expires_s.parse::<u64>(), last_seen_s.parse::<u64>()) else {
+            tracing::warn!(line = idx + 1, "web-devices.toml: skipping line with a bad timestamp");
+            continue;
+        };
+        devices.push(PersistedDevice {
+            id_hash,
+            password_hash_fingerprint: hash_phc.to_string(),
+            expires_at_unix,
+            last_seen_unix,
+        });
+    }
+    devices
+}
+
+/// Overwrites `web-devices.toml` with exactly `devices` (not an append/merge — callers pass the
+/// full current table, matching how small this is expected to stay for a single-owner panel).
+pub fn save_devices(paths: &SecretsPaths, devices: &[PersistedDevice]) -> Result<(), SecretsError> {
+    ensure_secrets_dir(paths)?;
+    write_secret_file(&paths.devices_file(), &encode_devices(devices))
+}
+
+/// Loads trusted-device records. A missing file is `Ok(vec![])` (nothing has ever been trusted
+/// yet), not an error — unlike the password hash or session key, there is nothing to fail
+/// startup over here.
+pub fn load_devices(paths: &SecretsPaths) -> Result<Vec<PersistedDevice>, SecretsError> {
+    let path = paths.devices_file();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    if paths.dir().exists() {
+        enforce_private_permissions(paths.dir(), 0o700)?;
+    }
+    enforce_private_permissions(&path, 0o600)?;
+    let text = read_to_string_checked(&path)?;
+    Ok(decode_devices(&text))
 }
 
 #[cfg(test)]
@@ -544,6 +677,122 @@ mod tests {
         assert!(
             !plaintext_on_disk.trim().is_empty(),
             "plaintext must have been written before the failing hash write"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // web-devices.toml (review round 2, finding F8a)
+    // -----------------------------------------------------------------------------------------
+
+    fn device(seed: u8) -> PersistedDevice {
+        let mut id_hash = [0u8; 32];
+        id_hash[0] = seed;
+        PersistedDevice {
+            id_hash,
+            password_hash_fingerprint: format!("$argon2id$v=19$m=8,t=1,p=1$AAAA$hash-{seed}"),
+            expires_at_unix: 1_000_000 + seed as u64,
+            last_seen_unix: 900_000 + seed as u64,
+        }
+    }
+
+    #[test]
+    fn devices_roundtrip_through_encode_decode() {
+        let devices = vec![device(1), device(2), device(3)];
+        let decoded = decode_devices(&encode_devices(&devices));
+        assert_eq!(decoded, devices);
+    }
+
+    #[test]
+    fn decode_devices_skips_malformed_lines_but_keeps_the_rest() {
+        let good = device(7);
+        let text = format!(
+            "# comment\n\ntoo few fields\nnot-base64!! 1 2 $argon2id$whatever\n{} 1 2 $argon2id$whatever\n{} {} {} {}\n",
+            // A valid base64url string, but decoding to the wrong length for an id hash (5 bytes,
+            // not 32) — exercises the `<[u8; 32]>::try_from` failure branch specifically, distinct
+            // from `not-base64!!` above (which fails at `decode_b64` itself).
+            encode_b64(&[9u8; 5]),
+            encode_b64(&good.id_hash),
+            good.expires_at_unix,
+            good.last_seen_unix,
+            good.password_hash_fingerprint,
+        );
+        let decoded = decode_devices(&text);
+        assert_eq!(
+            decoded,
+            vec![good],
+            "only the one well-formed line should survive: {text}"
+        );
+    }
+
+    #[test]
+    fn decode_devices_ignores_comments_and_blank_lines() {
+        assert_eq!(decode_devices("# just a header\n\n\n").len(), 0);
+        assert_eq!(decode_devices("").len(), 0);
+    }
+
+    #[test]
+    fn save_and_load_devices_roundtrip_with_0600_0700() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = SecretsPaths::new(tmp.path());
+        let devices = vec![device(1), device(2)];
+        save_devices(&paths, &devices).expect("save");
+
+        assert_eq!(perms(paths.dir()), 0o700);
+        assert_eq!(perms(&paths.devices_file()), 0o600);
+
+        let loaded = load_devices(&paths).expect("load");
+        assert_eq!(loaded, devices);
+    }
+
+    #[test]
+    fn load_devices_missing_file_returns_empty_not_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = SecretsPaths::new(tmp.path());
+        assert_eq!(load_devices(&paths).expect("load"), Vec::new());
+    }
+
+    #[test]
+    fn saving_overwrites_the_previous_table_entirely() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = SecretsPaths::new(tmp.path());
+        save_devices(&paths, &[device(1), device(2)]).expect("save 1");
+        save_devices(&paths, &[device(3)]).expect("save 2");
+        assert_eq!(load_devices(&paths).expect("load"), vec![device(3)]);
+    }
+
+    #[test]
+    fn the_raw_device_id_never_appears_in_the_persisted_file_only_its_hash() {
+        // Security property finding F8a asks for directly: the file stores a hash of the device
+        // id, never the id itself, so reading the file alone never hands out a directly-replayable
+        // value.
+        let raw_id: [u8; 32] = random_bytes();
+        let id_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(raw_id);
+            let out: [u8; 32] = hasher.finalize().into();
+            out
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = SecretsPaths::new(tmp.path());
+        save_devices(
+            &paths,
+            &[PersistedDevice {
+                id_hash,
+                password_hash_fingerprint: "$argon2id$v=19$m=8,t=1,p=1$AAAA$hash".to_string(),
+                expires_at_unix: 1,
+                last_seen_unix: 1,
+            }],
+        )
+        .expect("save");
+        let raw_contents = fs::read_to_string(paths.devices_file()).expect("read raw file");
+        assert!(
+            !raw_contents.contains(&encode_b64(&raw_id)),
+            "the raw device id must never appear in the persisted file"
+        );
+        assert!(
+            raw_contents.contains(&encode_b64(&id_hash)),
+            "the device id's hash should be the thing actually stored"
         );
     }
 }

@@ -56,7 +56,10 @@ impl AppState {
     pub fn new(config: WebConfig, session_key: [u8; 32]) -> Self {
         let secrets_paths = SecretsPaths::new(&config.data_dir);
         let sessions = SessionStore::new(config.idle_timeout, config.absolute_timeout);
-        let devices = DeviceStore::new(config.trusted_device_ttl);
+        // Review round 2, finding F8a: loads any previously-trusted devices from disk so a
+        // restart/redeploy doesn't strand the owner without their one way past the global login
+        // rate limit — see `auth::device`'s module doc comment.
+        let devices = DeviceStore::load_or_empty(&secrets_paths, config.trusted_device_ttl);
         let login_rate_limiter = LoginRateLimiter::new(config.login_rate_limit);
         let (session_invalidated, _rx) = broadcast::channel(SESSION_INVALIDATED_CHANNEL_CAPACITY);
         Self {

@@ -1,0 +1,64 @@
+# The bot's own web server (task 5.1's `ddnet-ai web`), behind Caddy (task 5.3). Installed to
+# /etc/systemd/system/ddnet-ai-web.service by deploy/install.sh. See deploy/README.md.
+#
+# Absolute paths and User=ubuntu are hardcoded (not templated) because this deploys to exactly
+# one owner-operated VPS with a fixed layout (~/aiddnet/data per CLAUDE.md), unlike
+# tools/ddnet-server's install-service.sh, which renders a unit from env-overridable variables.
+
+[Unit]
+Description=DDNet-AI web UI (loopback only; Caddy is the public HTTPS hop, task 5.3)
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+After=network.target
+# Not a hard dependency (this unit works and is independently testable without Caddy at all —
+# task 5.1's own e2e does exactly that) — just ordering, so a fresh boot doesn't have Caddy
+# proxying to nothing for the second or two it takes this to come up.
+Before=caddy.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/aiddnet/data
+# Fail closed if the binary is missing (e.g. deploy/install.sh was interrupted before the build
+# step finished) instead of systemd retrying a nonexistent exec forever.
+ExecStartPre=/usr/bin/test -x /home/ubuntu/aiddnet/bin/ddnet-ai
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure
+Restart=on-failure
+RestartSec=2
+
+# --- Hardening (acceptance criterion 2) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The only two subtrees this process ever writes to (secrets: password hash/session key;
+# logs: the daily-rotating audit log — see ddnet-ai's `web_cmd::init_tracing`). Both already
+# exist before this unit's first start (deploy/install.sh pre-creates logs/web/; secrets/ was
+# created earlier by `ddnet-ai web-passwd`), so ProtectSystem=strict's read-only bind mount of
+# everything else never blocks a subdirectory create *inside* either of these two paths.
+ReadWritePaths=/home/ubuntu/aiddnet/data/secrets /home/ubuntu/aiddnet/data/logs
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=512M
+# Kernel-level (cgroup eBPF) backstop, same pattern as ddnet-local.service: even if the
+# application somehow ended up bound to a wider address than --listen 127.0.0.1:7788 asked for,
+# traffic to/from anything but loopback is dropped for this unit's processes regardless.
+IPAddressAllow=127.0.0.0/8 ::1
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target
