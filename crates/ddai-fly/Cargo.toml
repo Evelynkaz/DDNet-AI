@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "The fly's inference engine: loads a compiled `.flyg` connectome subgraph plus trainable parameters and runs the continuous-time rate model (FLY.md §4) forward in real time. No backward pass, input encoder or training here (phase 7.2/7.3/8) — see README.md."
+description = "The fly's inference engine plus its backward pass and training loop: loads a compiled `.flyg` connectome subgraph plus trainable parameters, runs the continuous-time rate model (FLY.md §4) forward in real time, and (task 7.2) trains it with hand-written truncated BPTT, Adam, and data-parallel batching. No input encoder / action decoder here (phase 7.3) — see README.md."
 
 [lib]
 name = "ddai_fly"
@@ -28,6 +28,11 @@ zstd = "0.14.0"
 # `ddai-connectome` already uses for its own sha256 hashing, so no new hashing implementation or
 # license enters the tree.
 sha2 = "0.11.0"
+# Data-parallel batch training (acceptance criterion 4): `train_step` forward+backward's each
+# sequence of a batch on a separate `rayon` worker, reducing into one gradient sequentially and
+# deterministically (see `train.rs`'s doc comment) once all of them finish. The only new runtime
+# dependency this task adds (constraints: "no external autodiff/ML frameworks ... rayon is fine").
+rayon = "1.10"
 
 [dev-dependencies]
 tempfile = "3.14"

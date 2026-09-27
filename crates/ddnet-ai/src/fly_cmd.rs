@@ -1,13 +1,20 @@
-//! `ddnet-ai fly` subcommand group (task 7.1, acceptance criterion 6): `bench` (the realistic 25Hz
-//! decision loop — acceptance criterion 4's methodology) and `info` (graph sizes/types/output
-//! groups) for a compiled `.flyg` (`ddai-flyg`/`ddai-fly`).
+//! `ddnet-ai fly` subcommand group: `bench` (the realistic 25Hz decision loop — acceptance
+//! criterion 4's methodology, task 7.1) and `info` (graph sizes/types/output groups, task 7.1) for
+//! a compiled `.flyg` (`ddai-flyg`/`ddai-fly`); `train-demo` (task 7.2, acceptance criterion 5) —
+//! the same "left/right visual sector -> direction_left/right DN group" synthetic supervised demo
+//! `ddai-fly`'s own `tests/train_demo_real_graph.rs` runs, exposed here so it can be run manually
+//! against any compiled `.flyg` and its loss/grad-norm curve saved as CSV without going through
+//! `cargo test`.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
-use ddai_fly::{FlyConfig, FlyModel, FlyParams, FlyState};
+use ddai_fly::demo::{DirectionDemoConfig, direction_inputs_outputs_from_flyg, evaluate_direction, run_direction_demo};
+use ddai_fly::optim::{AdamConfig, GuardedAdamConfig};
+use ddai_fly::{BackwardIndex, FlyConfig, FlyModel, FlyParams, FlyState};
 
 #[derive(Debug, Args)]
 pub struct FlyArgs {
@@ -37,6 +44,44 @@ pub enum FlyCommand {
         #[arg(long)]
         flyg: PathBuf,
     },
+    /// Task 7.2, acceptance criterion 5: trains the "left/right visual sector ->
+    /// direction_left/right DN group" synthetic supervised demo on a compiled `.flyg` and writes
+    /// its loss/grad-norm curve as CSV. Requires the graph to have `output_groups` entries named
+    /// `--left-action`/`--right-action` (the real S/M graphs' `direction_left`/`direction_right`
+    /// by default — see `ddnet-ai fly info`).
+    TrainDemo {
+        #[arg(long)]
+        flyg: PathBuf,
+        #[arg(long, default_value_t = 300)]
+        steps: usize,
+        #[arg(long, default_value_t = 24)]
+        batch_size: usize,
+        #[arg(long, default_value_t = 6)]
+        t_decisions: usize,
+        #[arg(long, default_value_t = 2)]
+        readout_decisions: usize,
+        #[arg(long, default_value_t = 0.5)]
+        activation_prob: f32,
+        #[arg(long, default_value_t = 6.0)]
+        target_high: f32,
+        #[arg(long, default_value_t = 1.0)]
+        target_low: f32,
+        #[arg(long, default_value_t = 1.0)]
+        grad_clip_norm: f32,
+        #[arg(long, default_value_t = 2e-2)]
+        lr: f32,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value = "direction_left")]
+        left_action: String,
+        #[arg(long, default_value = "direction_right")]
+        right_action: String,
+        /// CSV output path. Defaults to `~/aiddnet/data/runs/7.2-demo/<flyg-stem>-direction-demo.csv`
+        /// (this project's convention: experiment output lives under `~/aiddnet/data`, never in
+        /// the repo — see `CLAUDE.md`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 pub fn run(args: FlyArgs) -> ExitCode {
@@ -49,6 +94,37 @@ pub fn run(args: FlyArgs) -> ExitCode {
             seed,
         } => bench(&flyg, substeps, decisions, tick_ms, seed),
         FlyCommand::Info { flyg } => info(&flyg),
+        FlyCommand::TrainDemo {
+            flyg,
+            steps,
+            batch_size,
+            t_decisions,
+            readout_decisions,
+            activation_prob,
+            target_high,
+            target_low,
+            grad_clip_norm,
+            lr,
+            seed,
+            left_action,
+            right_action,
+            out,
+        } => train_demo(TrainDemoArgs {
+            flyg,
+            steps,
+            batch_size,
+            t_decisions,
+            readout_decisions,
+            activation_prob,
+            target_high,
+            target_low,
+            grad_clip_norm,
+            lr,
+            seed,
+            left_action,
+            right_action,
+            out,
+        }),
     }
 }
 
@@ -208,4 +284,172 @@ fn info(flyg_path: &Path) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+struct TrainDemoArgs {
+    flyg: PathBuf,
+    steps: usize,
+    batch_size: usize,
+    t_decisions: usize,
+    readout_decisions: usize,
+    activation_prob: f32,
+    target_high: f32,
+    target_low: f32,
+    grad_clip_norm: f32,
+    lr: f32,
+    seed: u64,
+    left_action: String,
+    right_action: String,
+    out: Option<PathBuf>,
+}
+
+fn default_csv_out_path(flyg_path: &Path) -> Result<PathBuf, ExitCode> {
+    let home = std::env::var("HOME").map_err(|_| {
+        eprintln!("HOME must be set to default --out to ~/aiddnet/data/runs/7.2-demo/");
+        ExitCode::FAILURE
+    })?;
+    let stem = flyg_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "flyg".to_string());
+    Ok(PathBuf::from(home)
+        .join("aiddnet/data/runs/7.2-demo")
+        .join(format!("{stem}-direction-demo.csv")))
+}
+
+fn train_demo(args: TrainDemoArgs) -> ExitCode {
+    let flyg = match load_flyg_or_fail(&args.flyg) {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
+
+    let config = FlyConfig::default();
+    let params = FlyParams::init_default(&flyg, &config, args.seed);
+    let mut model = match FlyModel::new(flyg, config, params) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("failed to build model: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let index = BackwardIndex::build(&model);
+
+    let mut warm = FlyState::new(&model);
+    let warm_report = warm.warm_up(&model);
+    println!(
+        "warm-up: converged={} in {} decisions ({:.0}ms)",
+        warm_report.converged, warm_report.decisions_run, warm_report.elapsed_ms
+    );
+    if !warm_report.converged {
+        eprintln!("warning: warm-up did not converge within the default cap; proceeding with its best-effort state");
+    }
+    let v_init = warm.v().to_vec();
+
+    let (left_inputs, right_inputs, left_outputs, right_outputs) =
+        direction_inputs_outputs_from_flyg(&model, &args.left_action, &args.right_action);
+    println!(
+        "task: {} left inputs, {} right inputs, {} left_outputs ({:?}), {} right_outputs ({:?})",
+        left_inputs.len(),
+        right_inputs.len(),
+        left_outputs.len(),
+        args.left_action,
+        right_outputs.len(),
+        args.right_action,
+    );
+
+    let demo = DirectionDemoConfig {
+        left_inputs,
+        right_inputs,
+        left_outputs,
+        right_outputs,
+        target_high: args.target_high,
+        target_low: args.target_low,
+        activation_prob: args.activation_prob,
+        batch_size: args.batch_size,
+        t_decisions: args.t_decisions,
+        readout_decisions: args.readout_decisions,
+        steps: args.steps,
+        grad_clip_norm: args.grad_clip_norm,
+        adam: GuardedAdamConfig {
+            adam: AdamConfig {
+                lr_a: args.lr,
+                lr_b: args.lr,
+                lr_theta: args.lr,
+                ..AdamConfig::default()
+            },
+            ..GuardedAdamConfig::default()
+        },
+        seed: args.seed,
+    };
+
+    let held_out_seed = args.seed.wrapping_add(1);
+    let eval_before = evaluate_direction(&model, &demo, &v_init, held_out_seed, 60);
+
+    let start = Instant::now();
+    let metrics = run_direction_demo(&mut model, &index, &demo, &v_init);
+    let elapsed = start.elapsed();
+
+    let not_applied = metrics.iter().filter(|m| !m.applied).count();
+    let rolled_back = metrics
+        .iter()
+        .filter(|m| matches!(m.outcome, ddai_fly::optim::GuardedStepOutcome::RolledBack { .. }))
+        .count();
+    let max_abs_v_ever = metrics.iter().map(|m| m.max_abs_v).fold(0.0f32, f32::max);
+    let final_lr_scale = metrics.last().map(|m| m.lr_scale).unwrap_or(1.0);
+    let initial_loss = metrics.first().map(|m| m.loss).unwrap_or(f32::NAN);
+    let tail = metrics.len().saturating_sub(10);
+    let final_loss: f32 = if metrics.len() > tail {
+        metrics[tail..].iter().map(|m| m.loss).sum::<f32>() / (metrics.len() - tail) as f32
+    } else {
+        f32::NAN
+    };
+    let eval_after = evaluate_direction(&model, &demo, &v_init, held_out_seed, 60);
+
+    println!("trained {} steps in {elapsed:?}", metrics.len());
+    println!("loss: initial={initial_loss:.4}, final (last 10 avg)={final_loss:.4}");
+    println!(
+        "NaN/inf guard: {not_applied}/{} steps not applied ({rolled_back} rolled back), final lr_scale={final_lr_scale:.4}",
+        metrics.len()
+    );
+    println!("max |V| observed during training: {max_abs_v_ever:.3}");
+    println!(
+        "held-out (seed={held_out_seed}, 60 patterns): accuracy before={:.3} after={:.3}; mean margin before={:.4} after={:.4}",
+        eval_before.accuracy, eval_after.accuracy, eval_before.mean_margin, eval_after.mean_margin
+    );
+
+    let out_path = match args.out {
+        Some(p) => p,
+        None => match default_csv_out_path(&args.flyg) {
+            Ok(p) => p,
+            Err(code) => return code,
+        },
+    };
+    if let Some(parent) = out_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("failed to create {}: {e}", parent.display());
+        return ExitCode::FAILURE;
+    }
+    match write_metrics_csv(&out_path, &metrics) {
+        Ok(()) => println!("wrote loss/grad_norm curve to {}", out_path.display()),
+        Err(e) => {
+            eprintln!("failed to write {}: {e}", out_path.display());
+            return ExitCode::FAILURE;
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn write_metrics_csv(path: &Path, metrics: &[ddai_fly::demo::StepMetric]) -> std::io::Result<()> {
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "step,loss,grad_norm,applied,lr_scale,max_abs_v")?;
+    for m in metrics {
+        writeln!(
+            f,
+            "{},{},{},{},{},{}",
+            m.step, m.loss, m.grad_norm, m.applied, m.lr_scale, m.max_abs_v
+        )?;
+    }
+    Ok(())
 }

@@ -46,6 +46,14 @@ pub enum FlyError {
     /// fuzz test on a real checkpoint found this catches essentially every single-bit flip that
     /// zstd's own content checksum, checked earlier during decompression, didn't already reject).
     ChecksumMismatch,
+    /// The checkpoint's `optimizer` (`Some`) doesn't shape-match its own `params` (review round 1,
+    /// F7d): [`crate::optim::AdamState::matches_shape`] said no. Checked once, right in
+    /// [`crate::checkpoint::load_checkpoint`], rather than leaving every caller to remember to
+    /// call `matches_shape` itself before trusting a loaded checkpoint's optimiser state (the
+    /// `flyg_sha256` check already rules out a mismatched *graph*, but a hand-edited or corrupted
+    /// checkpoint could still have `params` and `optimizer` individually well-formed yet
+    /// disagree with each other in length).
+    OptimizerShapeMismatch(String),
 }
 
 impl fmt::Display for FlyError {
@@ -68,6 +76,9 @@ impl fmt::Display for FlyError {
                 write!(f, "checkpoint file is truncated: {len} bytes, need at least {min_len}")
             }
             FlyError::ChecksumMismatch => write!(f, "checkpoint payload hash does not match — file is corrupted"),
+            FlyError::OptimizerShapeMismatch(msg) => {
+                write!(f, "checkpoint's optimizer state does not match its own params: {msg}")
+            }
         }
     }
 }

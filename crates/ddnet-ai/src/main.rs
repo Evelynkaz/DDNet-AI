@@ -421,4 +421,67 @@ mod tests {
             other => panic!("expected WebPasswd command, got {other:?}"),
         }
     }
+
+    #[test]
+    fn fly_train_demo_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "fly", "train-demo", "--flyg", "fly-S-v1.flyg"])
+            .expect("fly train-demo should parse");
+        match cli.command {
+            Some(super::Command::Fly(args)) => match args.command {
+                super::fly_cmd::FlyCommand::TrainDemo {
+                    flyg,
+                    steps,
+                    batch_size,
+                    t_decisions,
+                    readout_decisions,
+                    left_action,
+                    right_action,
+                    out,
+                    ..
+                } => {
+                    assert_eq!(flyg, std::path::PathBuf::from("fly-S-v1.flyg"));
+                    assert_eq!(steps, 300);
+                    assert_eq!(batch_size, 24);
+                    assert_eq!(t_decisions, 6);
+                    assert_eq!(readout_decisions, 2);
+                    assert_eq!(left_action, "direction_left");
+                    assert_eq!(right_action, "direction_right");
+                    assert_eq!(out, None);
+                }
+                other => panic!("expected TrainDemo, got {other:?}"),
+            },
+            other => panic!("expected Fly command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fly_train_demo_overrides_parse() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "fly",
+            "train-demo",
+            "--flyg",
+            "fly-S-v1.flyg",
+            "--steps",
+            "10",
+            "--batch-size",
+            "4",
+            "--out",
+            "out.csv",
+        ])
+        .expect("fly train-demo with overrides should parse");
+        match cli.command {
+            Some(super::Command::Fly(args)) => match args.command {
+                super::fly_cmd::FlyCommand::TrainDemo {
+                    steps, batch_size, out, ..
+                } => {
+                    assert_eq!(steps, 10);
+                    assert_eq!(batch_size, 4);
+                    assert_eq!(out, Some(std::path::PathBuf::from("out.csv")));
+                }
+                other => panic!("expected TrainDemo, got {other:?}"),
+            },
+            other => panic!("expected Fly command, got {other:?}"),
+        }
+    }
 }

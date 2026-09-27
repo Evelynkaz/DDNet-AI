@@ -203,8 +203,11 @@ impl FlyState {
             if let Some(rec) = recorder.as_deref_mut() {
                 // Pairs `V` *after* this update with the `r` that *drove* it (i.e. `f(V after
                 // update substep-1)`, still sitting in `r_buf` at this point) — not the `r`
-                // resulting from this update. See `TrajectoryRecorder`'s doc comment.
-                rec.record(&self.v, &self.r_buf);
+                // resulting from this update — plus `V_∞` this same substep computed (task 7.2's
+                // backward pass needs it; see `TrajectoryRecorder::v_inf_at`'s doc comment for
+                // why it's stored rather than reconstructed from `V`/`decay` alone). See
+                // `TrajectoryRecorder`'s doc comment for the exact `(V, r)` pairing.
+                rec.record(&self.v, &self.r_buf, &self.v_inf_buf);
             }
 
             self.refresh_r_buf_from_v(model.config().r_max);
