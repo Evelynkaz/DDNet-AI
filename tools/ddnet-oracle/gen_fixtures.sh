@@ -65,8 +65,14 @@ for recipe in arena freeze front tele-speedup; do
 done
 
 # no_weak_hook / tuning-override fixtures (review round 1, finding F8): before this, neither
-# path was represented anywhere in the committed fixtures.
+# path was represented anywhere in the committed fixtures. `arena_tune_202`'s overrides (review
+# round 2, finding F11) are non-default but realistic — `gravity=40`/`hook_length=50000`/
+# `hook_drag_speed=1800` all differ from their 20.1 defaults (tuning.h: 50/38000/1500) while
+# still letting characters fall and hook the ground/each other; the old `--tune gravity=0
+# --tune hook_length=38000` zeroed gravity (so nobody ever fell into anyone) and its
+# `hook_length` override was silently the default, leaving this fixture with 0 hook-on-player
+# events.
 gen_one arena 201 3 arena_nwh_201 --no-weak-hook
-gen_one arena 202 3 arena_tune_202 --tune gravity=0 --tune hook_length=38000
+gen_one arena 202 3 arena_tune_202 --tune gravity=40 --tune hook_length=50000 --tune hook_drag_speed=1800
 
 du -ch "$FIXTURES_DIR"/*.json | tail -1

@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Runs Oracle A over a large batch of scenarios (default: 4 recipes x 50 seeds = 200 scenarios,
-# 3000 ticks x 3 characters each, plus a small `no_weak_hook`/tuning-override slice — review
-# round 1, finding F8) into ~/aiddnet/data/traces/oracle-a/v1/ (outside the repo, per the task
-# spec) for task 1.3's bulk parity test. Reports total size and wall time.
+# 3000 ticks x 3 characters each, plus two small extra slices — review round 1, finding F8;
+# split into two by review round 2, finding F11:
+#   - a `no_weak_hook`-only slice (normal, default tuning), and
+#   - a tuning-override-only slice (default `no_weak_hook=false`), with non-default overrides
+#     realistic enough that characters still fall and hook each other (finding F11: the old
+#     combined slice's `--tune gravity=0` starved player-vs-player hooking, and its
+#     `hook_length=38000` was silently the 20.1 default)
+# into ~/aiddnet/data/traces/oracle-a/v1/ (outside the repo, per the task spec) for task 1.3's
+# bulk parity test. Reports total size and wall time.
 #
 # Usage: ./bulk_run.sh [num_seeds] [ticks] [chars]
 set -euo pipefail
@@ -62,15 +68,29 @@ for recipe in "${RECIPES[@]}"; do
 	done
 done
 
-# `no_weak_hook`/tuning-override slice: a handful of scenarios per recipe exercising the world
-# flag and tuning-override paths, which the main loop above never sets (review round 1, finding
-# F8 — before this, `no_weak_hook=true` and any tuning override never appeared anywhere in the
-# bulk corpus or the fixtures, despite the oracle supporting both since task 1.2's first draft).
+# `no_weak_hook`-only slice: normal (default) tuning, so the world-flag path is exercised in
+# isolation (review round 1, finding F8 introduced this path; review round 2, finding F11 split
+# it out of a combined slice that always also zeroed gravity, so plain `no_weak_hook` with
+# normal physics existed only in the single `arena_nwh_201` fixture, never in the bulk corpus).
 readonly NWH_SEEDS=5
 for recipe in "${RECIPES[@]}"; do
 	for seed in $(seq 1001 $((1000 + NWH_SEEDS))); do
 		count=$((count + 1))
-		run_one "$recipe" "$seed" nwh --no-weak-hook --tune gravity=0
+		run_one "$recipe" "$seed" nwh --no-weak-hook
+	done
+done
+
+# Tuning-override-only slice: default `no_weak_hook=false`, non-default but realistic overrides
+# (each verified to differ from its 20.1 default in tuning.h) that still let characters fall and
+# hook the ground/each other — review round 2, finding F11 (the old combined slice's
+# `--tune gravity=0` made every character weightless, so player-vs-player hooking never
+# happened; `hook_length=38000` was silently the default, so `gravity` was the only override
+# that ever actually took effect anywhere in the bulk corpus).
+readonly TUNE_SEEDS=5
+for recipe in "${RECIPES[@]}"; do
+	for seed in $(seq 2001 $((2000 + TUNE_SEEDS))); do
+		count=$((count + 1))
+		run_one "$recipe" "$seed" tune --tune gravity=40 --tune hook_length=50000 --tune hook_drag_speed=1800
 	done
 done
 end_time=$(date +%s.%N)
@@ -79,7 +99,8 @@ elapsed=$(echo "$end_time - $start_time" | bc)
 total_bytes=$(du -cb "$OUT_DIR"/*.trace | tail -1 | cut -f1)
 main_count=$((${#RECIPES[@]} * NUM_SEEDS))
 nwh_count=$((${#RECIPES[@]} * NWH_SEEDS))
-echo "bulk_run.sh: $count scenarios total ($main_count main + $nwh_count no_weak_hook/tune), $TICKS ticks, $CHARS characters each"
+tune_count=$((${#RECIPES[@]} * TUNE_SEEDS))
+echo "bulk_run.sh: $count scenarios total ($main_count main + $nwh_count no_weak_hook-only + $tune_count tuning-only), $TICKS ticks, $CHARS characters each"
 echo "bulk_run.sh: wall time: ${elapsed}s"
 echo "bulk_run.sh: total trace size: $total_bytes bytes ($(du -sh "$OUT_DIR" | cut -f1))"
 echo "bulk_run.sh: manifest: $manifest"

@@ -22,8 +22,8 @@
 | `oracle_core.cpp` | Сам харнесс: свои небольшие ридеры rawmap v1/scenario v2, сборка `IMap`/`CLayers`/`CCollision`, разрешение «режима прицела» (`ResolveInput`, docs/formats.md §2.1), цикл тика, запись trace v1. |
 | `sha256.h` | Маленькая своя реализация SHA-256 (для проверки `map_sha256` сценария и для `scenario_sha256` в метаданных трейса) — не код DDNet. |
 | `selftest.sh` | Собирает оракул, генерирует ≥ 20 сценариев (`ddnet-ai trace gen-scenario`, все 4 рецепта), гоняет оракул по два раза на каждый, сверяет sha256, печатает throughput. |
-| `gen_fixtures.sh` + `build_fixture.py` | Пересобирает золотые фикстуры `crates/ddai-trace/tests/fixtures/*.json` (см. `docs/formats.md` §7), включая пару `no_weak_hook`/tuning-override. |
-| `bulk_run.sh` | Прогоняет ≥ 200 сценариев (3000 тиков × 3 персонажа, плюс `no_weak_hook`/tuning-override слайс) в `~/aiddnet/data/traces/oracle-a/v1/` (вне репозитория) для задачи 1.3. |
+| `gen_fixtures.sh` + `build_fixture.py` | Пересобирает золотые фикстуры `crates/ddai-trace/tests/fixtures/*.json` (см. `docs/formats.md` §7), включая пару `no_weak_hook` / tuning-override (раунд 2, находка F11: у tuning-фикстуры теперь реалистичные переопределения, не гасящие взаимодействие персонажей). |
+| `bulk_run.sh` | Прогоняет ≥ 200 сценариев (3000 тиков × 3 персонажа) плюс два отдельных ≥ 20-сценарных слайса — только `no_weak_hook` (обычный тюнинг) и только tuning-переопределения (обычный `no_weak_hook=false`) — раунд 2, находка F11 — итого ≥ 240, в `~/aiddnet/data/traces/oracle-a/v1/` (вне репозитория) для задачи 1.3. |
 | `build/` | Игнорируется git; скачанные исходники DDNet, сгенерированный заголовок, объектные файлы, бинарник, рабочие файлы селфтеста. |
 
 ## Использование
@@ -44,13 +44,14 @@ build/oracle_core /tmp/arena.rawmap /tmp/s.scn /tmp/out.trace --generator random
 ../../target/release/ddnet-ai trace hashes /tmp/out.trace --out /tmp/hashes.json
 
 # no_weak_hook / tuning-переопределения — отдельные флаги gen-scenario (не параметры
-# random-v1, см. docs/formats.md §2): один сценарий может задать оба.
+# random-v1, см. docs/formats.md §2): один сценарий может задать оба сразу, хотя bulk_run.sh
+# (ниже) прогоняет их как два отдельных слайса, не смешивая (раунд 2, находка F11).
 ../../target/release/ddnet-ai trace gen-scenario --recipe arena --seed 1 --ticks 3000 --chars 3 \
-    --no-weak-hook --tune gravity=0 --out /tmp/s_nwh.scn
+    --no-weak-hook --tune gravity=40 --out /tmp/s_nwh.scn
 
 ./selftest.sh               # полная проверка детерминизма + throughput
 ./gen_fixtures.sh           # пересборка золотых фикстур (после изменения генератора/оракула)
-./bulk_run.sh                # ≥ 200 сценариев в ~/aiddnet/data/traces/oracle-a/v1/
+./bulk_run.sh                # ≥ 240 сценариев в ~/aiddnet/data/traces/oracle-a/v1/
 ```
 
 `--generator`/`--seed` у `oracle_core` — необязательная аннотация в JSON-метаданных трейса

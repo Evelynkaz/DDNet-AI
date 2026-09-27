@@ -225,6 +225,18 @@ fn freeze() -> MapData {
 /// tile is "open" — but the raw game-layer tile id is `THROUGH_ALL`/`THROUGH_DIR` anyway, which
 /// `GetTile()` doesn't recognize as solid since those ids fall outside `[TILE_SOLID,
 /// TILE_NOLASER]`, while `IsHookBlocker` reads the raw id directly).
+///
+/// Review round 2, finding F12: row D above puts `THROUGH_ALL`/`THROUGH_DIR` on the *game*
+/// layer over open air, which reaches `IsHookBlocker`'s first two branches
+/// (`collision.cpp:625`, `:627-631`) but never its third — the *front*-layer `THROUGH_DIR`
+/// check at `collision.cpp:632-633` (`m_pFront[Index].m_Index == TILE_THROUGH_DIR && ...`),
+/// which every real map that uses a front-layer `THROUGH_DIR` tile as a one-way hook blocker
+/// over open ground depends on. Row E restores it: a front-layer `THROUGH_DIR` cell (game layer
+/// left untouched, still plain `TILE_AIR`) for each rotation, placed in the middle of the large
+/// open room above the floor — clear of every other row, and clear on all 4 sides — so a hook
+/// can reach each cell from whichever direction its rotation cares about (each cell blocks a
+/// hook travelling in exactly one of the 4 cardinal directions and lets every other hook,
+/// including one travelling the opposite way, pass through as if it were still bare air).
 fn front() -> MapData {
     let mut g = Grid::new(30, 20);
     g.solid_border();
@@ -275,6 +287,15 @@ fn front() -> MapData {
     g.game(2, yd, TILE_THROUGH_ALL);
     for (i, flags) in ROTATIONS.iter().enumerate() {
         g.game_flags(4 + i as i32, yd, TILE_THROUGH_DIR, *flags);
+    }
+
+    // Row E (review round 2, finding F12): front-layer THROUGH_DIR, one cell per rotation, over
+    // otherwise-open air — the game layer at every one of these cells stays plain TILE_AIR.
+    // Placed in the open room above the floor, well clear of rows A-D and every border/pillar,
+    // so hooks can reach each cell from any of the 4 cardinal directions.
+    let ye = 5;
+    for (i, flags) in ROTATIONS.iter().enumerate() {
+        g.front_flags(10 + i as i32, ye, TILE_THROUGH_DIR, *flags);
     }
 
     g.into_map()
@@ -404,13 +425,20 @@ mod tests {
     fn front_recipe_puts_every_hook_through_rotation_over_a_solid_game_tile() {
         // Review round 1, finding F1: THROUGH_CUT/ALL/DIR on the front layer only ever reach
         // `IsThrough` when the game layer at that same cell is solid (`CheckPoint` true) —
-        // otherwise the hook line never registers a hit there to begin with.
+        // otherwise the hook line never registers a hit there to begin with. Scoped to row A
+        // (y=8): row E (review round 2, finding F12, see
+        // `front_recipe_has_front_layer_through_dir_over_open_air`) deliberately puts
+        // THROUGH_DIR on the front layer over open air instead, so it must be excluded here.
+        const ROW_A_Y: i32 = 8;
         let map = front();
         let front_tiles = map.front.as_ref().unwrap();
         let width = map.width as i32;
         for index in [TILE_THROUGH_CUT, TILE_THROUGH_ALL, TILE_THROUGH_DIR] {
-            let cells = find_front(front_tiles, width, index);
-            assert!(!cells.is_empty(), "expected at least one front-layer {index}");
+            let cells: Vec<(i32, i32, u8)> = find_front(front_tiles, width, index)
+                .into_iter()
+                .filter(|&(_, y, _)| y == ROW_A_Y)
+                .collect();
+            assert!(!cells.is_empty(), "expected at least one row-A front-layer {index}");
             for (x, y, _) in cells {
                 let game_index = map.game[(y * width + x) as usize].index;
                 assert!(
@@ -419,15 +447,55 @@ mod tests {
                 );
             }
         }
-        let through_dir_cells = find_front(front_tiles, width, TILE_THROUGH_DIR);
+        let through_dir_cells: Vec<(i32, i32, u8)> = find_front(front_tiles, width, TILE_THROUGH_DIR)
+            .into_iter()
+            .filter(|&(_, y, _)| y == ROW_A_Y)
+            .collect();
         assert_eq!(
             through_dir_cells.len(),
             ROTATIONS.len(),
-            "expected one THROUGH_DIR per rotation"
+            "expected one row-A THROUGH_DIR per rotation"
         );
         let mut expected = ROTATIONS.to_vec();
         expected.sort_unstable();
         assert_eq!(sorted_flags(&through_dir_cells), expected);
+    }
+
+    #[test]
+    fn front_recipe_has_front_layer_through_dir_over_open_air() {
+        // Review round 2, finding F12: `IsHookBlocker`'s front-layer THROUGH_DIR branch
+        // (`collision.cpp:632-633`) is only reachable when the GAME layer at that cell is open
+        // (`CheckPoint` false, unlike row A) while the FRONT layer itself carries THROUGH_DIR —
+        // row D (game-layer THROUGH_ALL/DIR over air) covers `IsHookBlocker`'s other two
+        // branches (`collision.cpp:625`, `:627-631`) but never this one. Row E sets this up.
+        let map = front();
+        let front_tiles = map.front.as_ref().unwrap();
+        let width = map.width as i32;
+        let through_dir: Vec<(i32, i32, u8)> = find_front(front_tiles, width, TILE_THROUGH_DIR)
+            .into_iter()
+            .filter(|&(x, y, _)| map.game[(y * width + x) as usize].index == TILE_AIR)
+            .collect();
+        assert_eq!(
+            through_dir.len(),
+            ROTATIONS.len(),
+            "expected one front-layer THROUGH_DIR per rotation sitting over open (TILE_AIR) game"
+        );
+        let mut expected = ROTATIONS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(sorted_flags(&through_dir), expected);
+
+        // Reachable from all 4 cardinal directions: every immediate neighbor (including another
+        // row-E cell) is open air on the game layer, not tucked against a wall/border/pillar.
+        for &(x, y, _) in &through_dir {
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let (nx, ny) = (x + dx, y + dy);
+                let neighbor_index = map.game[(ny * width + nx) as usize].index;
+                assert_eq!(
+                    neighbor_index, TILE_AIR,
+                    "cell ({x},{y})'s neighbor ({nx},{ny}) must be open air, found {neighbor_index}"
+                );
+            }
+        }
     }
 
     #[test]
