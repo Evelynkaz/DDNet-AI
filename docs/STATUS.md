@@ -45,8 +45,10 @@
 | 2.2b сеть: снапшоты + сообщения | билдер | `~/aiddnet/wt/task-2.2b` | `2.2b-net-snapshots-messages.md` |
 | 5.1 веб: каркас, вход, сессии, WS | раунд 3: глобальный лимит входа не должен исчерпываться одним IP | `~/aiddnet/wt/task-5.1` | `5.1-web-skeleton.md` |
 | 7.2 муха: BPTT, Adam, обучение | билдер | `~/aiddnet/wt/task-7.2` | `7.2-fly-backward.md` |
+| 3.1a `ddai-jsmath`: V8-точная математика + `Rng` | билдер | `~/aiddnet/wt/task-3.1a` | `3.1a-jsmath-rng.md` |
 
-Готовы к запуску: `1.6-world-port.md` (после 1.3+1.4+1.5), `2.3-client-session.md` (после 2.2b).
+Готовы к запуску: `1.6-world-port.md` (после 1.3+1.5), `2.3-client-session.md` (после 2.2b), `5.3-caddy-https.md`
+(после 5.1), `1.9-tsworld-parity.md` (после 3.1a; D-035).
 
 ## Следующие шаги
 
