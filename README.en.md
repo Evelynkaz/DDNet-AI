@@ -1,3 +1,5 @@
+> **Modified version.** This is a fork of [Wranked1/DDNet-AI](https://github.com/Wranked1/DDNet-AI) (author: Wranked1, GPL-3.0) that is being rewritten in Rust since 2026-09-27, with a neural network constrained by the Drosophila connectome ("the fly") and a web interface instead of Electron. It is not Wranked1's original program. Until the port is done, the text below describes the original TypeScript version. Plan (in Russian): [docs/PLAN.md](docs/PLAN.md).
+
 <div align="center">
 
 <img src="assets/logo.png" width="112" alt="">

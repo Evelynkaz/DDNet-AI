@@ -45,3 +45,14 @@ typescript and others) keep their own licenses, found in each package.
 The icons are from Lucide (ISC license). The DDNet graphics and sounds the
 window uses are read from the player's own DDNet install and are not part
 of this program.
+
+------------------------------------------------------------------------
+Modified version
+------------------------------------------------------------------------
+
+This is a modified version of DDNet AI, maintained at
+https://github.com/Evelynkaz/DDNet-AI. Since 2026-09-27 it is being
+rewritten in Rust, with a neural network constrained by the Drosophila
+connectome ("the fly") and a web interface replacing the Electron window.
+It is not the original program by Wranked1; the original is available at
+https://github.com/Wranked1/DDNet-AI.

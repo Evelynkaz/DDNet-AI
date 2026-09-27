@@ -1,3 +1,5 @@
+> **Изменённая версия.** Это форк [Wranked1/DDNet-AI](https://github.com/Wranked1/DDNet-AI) (автор — Wranked1, GPL-3.0), который с 2026-09-27 переписывается на Rust: с нейросетью на коннектоме дрозофилы («муха») и веб-интерфейсом вместо Electron. Это не оригинальная программа Wranked1. Пока идёт перенос, ниже описана исходная TypeScript-версия. План — [docs/PLAN.md](docs/PLAN.md), статус — [docs/STATUS.md](docs/STATUS.md).
+
 <div align="center">
 
 <img src="assets/logo.png" width="112" alt="">
