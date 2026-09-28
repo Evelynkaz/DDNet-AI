@@ -24,6 +24,9 @@
 | `selftest.sh` | Собирает оракул, генерирует ≥ 20 сценариев (`ddnet-ai trace gen-scenario`, все 4 рецепта), гоняет оракул по два раза на каждый, сверяет sha256, печатает throughput. |
 | `gen_fixtures.sh` + `build_fixture.py` | Пересобирает золотые фикстуры `crates/ddai-trace/tests/fixtures/*.json` (см. `docs/formats.md` §7), включая пару `no_weak_hook` / tuning-override (раунд 2, находка F11: у tuning-фикстуры теперь реалистичные переопределения, не гасящие взаимодействие персонажей). |
 | `bulk_run.sh` | Прогоняет ≥ 200 сценариев (3000 тиков × 3 персонажа) плюс два отдельных ≥ 20-сценарных слайса — только `no_weak_hook` (обычный тюнинг) и только tuning-переопределения (обычный `no_weak_hook=false`) — раунд 2, находка F11 — итого ≥ 240, в `~/aiddnet/data/traces/oracle-a/v1/` (вне репозитория) для задачи 1.3. |
+| `map2raw.cpp` | Читает настоящий `.map` через реальный код DDNet, пишет rawmap v1 (задача 1.4) — см. §ниже. |
+| `demo2json.cpp` | Читает настоящий `.demo` через реальный код DDNet, пишет per-tick JSONL снапшотов (задача 8.4b) — см. §ниже. |
+| `parity_check_demo.sh` | Сверяет `build/demo2json` с `ddnet-ai demo dump --raw` по корпусу `.demo`-файлов, побайтово. |
 | `build/` | Игнорируется git; скачанные исходники DDNet, сгенерированный заголовок, объектные файлы, бинарник, рабочие файлы селфтеста. |
 
 ## Использование
@@ -164,6 +167,32 @@ cd ../.. && cargo build --release -p ddnet-ai && cd tools/ddnet-oracle
 `CCollision::Init`, для всех остальных). `ddai-map`'s единственный оставшийся bounded-allocation
 предел сверх собственных проверок DDNet — см. `crates/ddai-map/src/lib.rs`'s top-level doc
 comment, `docs/formats.md` §10.2 и отчёт о билде задачи 1.4.
+
+## `demo2json` (задача 8.4b) — чтение настоящих `.demo`-файлов
+
+Отдельный от `oracle_core`/`map2raw` инструмент: читает настоящий `.demo` через РЕАЛЬНЫЙ,
+неизменённый код DDNet (`engine/shared/demo.cpp` + `snapshot.cpp` + `compression.cpp` +
+`huffman.cpp`) и пишет per-tick JSON-строки с элементами полностью раскрытого снапшота (ключ +
+сырые `i32`-данные, в порядке файла) — подробный разбор формата и всех заглушек этого файла
+(`CNetBase::Compress`/`Decompress` против собственного `CHuffman`, статические размеры типов
+через `sizeof`, минимальный `IStorage` и т.д.) — в шапке `demo2json.cpp` и `docs/formats.md`
+§18.5. То же самое, только на Rust, делает `ddnet-ai demo dump --raw` (крейт `ddai-demo`,
+задача 8.4b) — оба должны совпасть байт-в-байт на любом реальном `.demo`.
+
+```bash
+./build.sh                        # собирает build/demo2json вместе с остальными
+build/demo2json input.demo out.jsonl
+
+# Паритет на корпусе (нужен и build/demo2json, и release-сборка ddnet-ai):
+cd ../.. && cargo build --release -p ddnet-ai && cd tools/ddnet-oracle
+./parity_check_demo.sh ~/aiddnet/data/demos/chillerdragon/block-06 ~/aiddnet/data/demos/public-samples
+```
+
+Тот же принцип песочницы, что и у `map2raw` (см. выше): `parity_check_demo.sh` гоняет оба
+инструмента под `prlimit --as=2147483648` + `timeout --signal=KILL 60s` (демки крупнее карт —
+таймаут больше), `demo2json`-упор-в-лимит репортится отдельно и не считается расхождением,
+`ddnet-ai`-упор-в-лимит — всегда баг. Результаты полного прогона — `docs/formats.md` §18.7 и
+отчёт о билде задачи 8.4b.
 
 ---
 

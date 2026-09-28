@@ -53,3 +53,17 @@ fi
 mkdir -p "$GENERATED_DIR"
 (cd "$SRC_DIR" && python3 datasrc/compile.py network_header) >"$GENERATED_DIR/protocol.h"
 echo "fetch.sh: generated $GENERATED_DIR/protocol.h ($(wc -l <"$GENERATED_DIR/protocol.h") lines)"
+
+# task 8.4b (demo2json): `engine/shared/snapshot.cpp` itself `#include`s
+# `<generated/protocol7.h>` and `<generated/protocolglue.h>` (0.7/"sixup" cross-conversion
+# support inside `CSnapshotBuilder::NewItem`, snapshot.cpp:14-15,924 — dead code for this repo's
+# 0.6-only demo2json, see that file's header comment, but still needed to *link*: the whole
+# object file is pulled in). Generated the same way real DDNet's CMake build does (`generate_
+# source7`/`generate_maps` in CMakeLists.txt), via the sparse-checked-out `datasrc/seven/` and
+# `datasrc/crosscompile.py` (both already present — see the sparse-checkout set above).
+(cd "$SRC_DIR" && python3 -m datasrc.seven.compile network_header) >"$GENERATED_DIR/protocol7.h"
+echo "fetch.sh: generated $GENERATED_DIR/protocol7.h ($(wc -l <"$GENERATED_DIR/protocol7.h") lines)"
+(cd "$SRC_DIR" && python3 datasrc/crosscompile.py map_header) >"$GENERATED_DIR/protocolglue.h"
+echo "fetch.sh: generated $GENERATED_DIR/protocolglue.h ($(wc -l <"$GENERATED_DIR/protocolglue.h") lines)"
+(cd "$SRC_DIR" && python3 datasrc/crosscompile.py map_source) >"$GENERATED_DIR/protocolglue_generated.cpp"
+echo "fetch.sh: generated $GENERATED_DIR/protocolglue_generated.cpp ($(wc -l <"$GENERATED_DIR/protocolglue_generated.cpp") lines)"

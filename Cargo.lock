@@ -967,6 +967,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-demo"
+version = "0.1.0"
+dependencies = [
+ "ddai-demo",
+ "ddai-net",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "ddai-fly"
 version = "0.1.0"
 dependencies = [
@@ -1107,13 +1117,16 @@ dependencies = [
  "clap",
  "core_affinity",
  "ddai-client",
+ "ddai-demo",
  "ddai-fly",
  "ddai-flyg",
  "ddai-map",
+ "ddai-net",
  "ddai-physics",
  "ddai-trace",
  "ddai-web",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",

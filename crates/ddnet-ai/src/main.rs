@@ -4,6 +4,7 @@
 //! real one — synthetic maps, scenario generation, and trace comparison for the DDNet physics
 //! parity work (see `docs/formats.md`).
 
+mod demo_cmd;
 mod fly_cmd;
 mod map_cmd;
 mod play_cmd;
@@ -29,6 +30,8 @@ enum Command {
     Fly(fly_cmd::FlyArgs),
     /// Real DDNet `.map` file inspection (task 1.4, `ddai-map`).
     Map(map_cmd::MapArgs),
+    /// Real DDNet `.demo` file inspection (task 8.4b, `ddai-demo`): info/dump/stats.
+    Demo(demo_cmd::DemoArgs),
     /// Starts the bot's own web server (login + status page), listening on loopback only.
     Web(web_cmd::WebArgs),
     /// Generates (and stores the argon2id hash of) the web UI's owner password.
@@ -45,6 +48,7 @@ fn main() -> ExitCode {
         Some(Command::Trace(args)) => trace_cmd::run(args),
         Some(Command::Fly(args)) => fly_cmd::run(args),
         Some(Command::Map(args)) => map_cmd::run(args),
+        Some(Command::Demo(args)) => demo_cmd::run(args),
         Some(Command::Web(args)) => web_cmd::run_web(args),
         Some(Command::WebPasswd(args)) => web_cmd::run_web_passwd(args),
         Some(Command::Play(args)) => play_cmd::run(args),
@@ -157,6 +161,84 @@ mod tests {
                 }
             },
             other => panic!("expected Map command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demo_info_parses() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "demo", "info", "game.demo"]).expect("demo info should parse");
+        match cli.command {
+            Some(super::Command::Demo(args)) => match args.command {
+                super::demo_cmd::DemoCommand::Info { file } => {
+                    assert_eq!(file, std::path::PathBuf::from("game.demo"));
+                }
+                other => panic!("expected Info, got {other:?}"),
+            },
+            other => panic!("expected Demo command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demo_dump_parses_flags() {
+        // `--raw` and `--anonymize` conflict (review round 1 finding F3) — tested separately
+        // below, so this only combines `--raw` with `--limit`.
+        let cli = Cli::try_parse_from(["ddnet-ai", "demo", "dump", "game.demo", "--raw", "--limit", "10"])
+            .expect("demo dump should parse");
+        match cli.command {
+            Some(super::Command::Demo(args)) => match args.command {
+                super::demo_cmd::DemoCommand::Dump {
+                    file,
+                    anonymize,
+                    raw,
+                    limit,
+                } => {
+                    assert_eq!(file, std::path::PathBuf::from("game.demo"));
+                    assert!(!anonymize);
+                    assert!(raw);
+                    assert_eq!(limit, Some(10));
+                }
+                other => panic!("expected Dump, got {other:?}"),
+            },
+            other => panic!("expected Demo command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demo_dump_accepts_anonymize_alone() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "demo", "dump", "game.demo", "--anonymize"]).expect("should parse");
+        match cli.command {
+            Some(super::Command::Demo(args)) => match args.command {
+                super::demo_cmd::DemoCommand::Dump { anonymize, raw, .. } => {
+                    assert!(anonymize);
+                    assert!(!raw);
+                }
+                other => panic!("expected Dump, got {other:?}"),
+            },
+            other => panic!("expected Demo command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demo_dump_rejects_raw_and_anonymize_together() {
+        // Review round 1 finding F3: `--raw` prints unredacted `ClientInfo` ints regardless of
+        // `--anonymize`, so the two must be rejected together rather than one silently winning.
+        let result = Cli::try_parse_from(["ddnet-ai", "demo", "dump", "game.demo", "--raw", "--anonymize"]);
+        assert!(result.is_err(), "expected --raw and --anonymize to conflict");
+    }
+
+    #[test]
+    fn demo_stats_parses() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "demo", "stats", "demos/", "--anonymize"])
+            .expect("demo stats should parse");
+        match cli.command {
+            Some(super::Command::Demo(args)) => match args.command {
+                super::demo_cmd::DemoCommand::Stats { path, anonymize } => {
+                    assert_eq!(path, std::path::PathBuf::from("demos/"));
+                    assert!(anonymize);
+                }
+                other => panic!("expected Stats, got {other:?}"),
+            },
+            other => panic!("expected Demo command, got {other:?}"),
         }
     }
 

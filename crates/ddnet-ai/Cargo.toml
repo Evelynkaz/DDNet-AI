@@ -17,15 +17,21 @@ workspace = true
 [dependencies]
 clap = { workspace = true }
 ddai-client = { path = "../ddai-client" }
+ddai-demo = { path = "../ddai-demo" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-flyg = { path = "../ddai-flyg" }
 ddai-map = { path = "../ddai-map" }
+ddai-net = { path = "../ddai-net" }
 # Task 7.3's `fly brain-demo`: `ddai_physics::map::MapData` (`ddai-map::load_map`'s own return
 # type) needs to be named directly here (an `Arc<MapData>` is built for `ddai_fly::demo_brain`).
 ddai-physics = { path = "../ddai-physics" }
 ddai-trace = { path = "../ddai-trace" }
 ddai-web = { path = "../ddai-web" }
 serde_json = "1"
+# `demo stats`/`demo info`: falls back to hashing the embedded map's own bytes when a pre-v6 demo
+# has no SHA256 extension, matching `CDemoPlayer::ExtractMap`'s fallback (`demo.cpp:940-950`,
+# review round 1 finding F7) — same version already pinned by `ddai-map`'s own Cargo.toml.
+sha2 = "0.10"
 # Best-effort thread pinning for `fly bench`'s realistic 25Hz duty-cycle loop (acceptance
 # criterion 4's methodology) — kept out of `ddai-fly` itself, which only takes it as a
 # dev-dependency for its own criterion benches (see that crate's Cargo.toml comment).
