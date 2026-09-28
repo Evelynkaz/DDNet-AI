@@ -10,6 +10,7 @@ use crate::auth::device::DeviceStore;
 use crate::auth::rate_limit::LoginRateLimiter;
 use crate::auth::session::{SessionId, SessionStore};
 use crate::config::WebConfig;
+use crate::live::hub::LiveHub;
 use crate::secrets::SecretsPaths;
 
 /// Everything handlers need, wrapped once in an `Arc` and cloned cheaply per request.
@@ -50,10 +51,21 @@ pub struct AppState {
     /// validity check (review finding F2). Session *expiry* (idle/absolute timeout elapsing) has
     /// no corresponding event — those are caught by the WS task's own periodic check.
     pub session_invalidated: broadcast::Sender<SessionId>,
+    /// Task 5.2a: the live map view's `FrameSource` hub, when `config.replay_source` was
+    /// configured — `None` otherwise (the WS still works; it just never gets `map`/`live`
+    /// messages). See `crate::live::hub`.
+    pub live_hub: Option<Arc<LiveHub>>,
 }
 
 impl AppState {
+    /// Constructs state with no live-view source attached (`live_hub: None`) — used by every
+    /// existing test that doesn't care about the live map view, and equivalent to
+    /// [`AppState::new_with_live_hub`] with `live_hub: None`.
     pub fn new(config: WebConfig, session_key: [u8; 32]) -> Self {
+        Self::new_with_live_hub(config, session_key, None)
+    }
+
+    pub fn new_with_live_hub(config: WebConfig, session_key: [u8; 32], live_hub: Option<Arc<LiveHub>>) -> Self {
         let secrets_paths = SecretsPaths::new(&config.data_dir);
         let sessions = SessionStore::new(config.idle_timeout, config.absolute_timeout);
         // Review round 2, finding F8a: loads any previously-trusted devices from disk so a
@@ -73,6 +85,7 @@ impl AppState {
             ws_conns_per_session: Mutex::new(HashMap::new()),
             argon2_semaphore: Semaphore::new(ARGON2_MAX_CONCURRENT),
             session_invalidated,
+            live_hub,
         }
     }
 

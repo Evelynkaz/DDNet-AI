@@ -41,6 +41,18 @@ pub struct WebConfig {
     /// by a password change, which invalidates every existing device's stored fingerprint
     /// regardless of this TTL — see `auth::device`.
     pub trusted_device_ttl: Duration,
+    /// Task 5.2a, `ddnet-ai web --replay <dir-or-file>`: a directory of Oracle B `trace-b` files
+    /// to loop through, or a single such file. `None` means the live map view has no active
+    /// source — the WS still works, it just never sends `map`/`live` messages.
+    pub replay_source: Option<PathBuf>,
+    /// Task 5.2a: directories `crate::live::map_resolve` may read a real `.map` file's bytes
+    /// from, by filename, when resolving a real-map replay trace's map (never any path taken
+    /// from request or trace content directly — see that module's doc comment). Typically
+    /// `~/aiddnet/data/ddnet-server/maps` and/or `~/aiddnet/data/maps/<subdir>`.
+    pub map_search_dirs: Vec<PathBuf>,
+    /// Live WS frame rate cap, in Hz (acceptance criterion 1: "≤ 50 Hz; default 25 Hz, 10 Hz
+    /// эконом"). A client's `sub{live: hz}` request is clamped to this.
+    pub max_live_hz: f32,
 }
 
 impl WebConfig {
@@ -64,6 +76,9 @@ impl WebConfig {
             max_ws_message_bytes: DEFAULT_MAX_WS_MESSAGE_BYTES,
             request_timeout: Duration::from_secs(10),
             trusted_device_ttl: Duration::from_secs(90 * 24 * 3600),
+            replay_source: None,
+            map_search_dirs: Vec::new(),
+            max_live_hz: 50.0,
         }
     }
 }

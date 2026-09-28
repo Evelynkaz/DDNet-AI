@@ -42,6 +42,23 @@
 //! re-trusted): it either expires on its own `expires_at_unix`, or gets pruned once [`MAX_TRACKED_DEVICES`]
 //! is exceeded (finding F10).
 //!
+//! **Write ordering (task 5.2a carry-over, review finding F12).** [`DeviceStore::confirm`],
+//! [`DeviceStore::revoke_all`] and [`DeviceStore::purge_expired`] each used to take their on-disk
+//! snapshot *while* holding `devices`, then call [`DeviceStore::persist`] only *after* releasing
+//! it (deliberately — see [`DeviceStore::persist`]'s own doc comment on why the fsync must not run
+//! under that lock). That left a gap: two concurrent writers could take their snapshots in one
+//! order (A's mutation, then B's, which therefore includes A's) but run their `persist` disk
+//! writes in the *other* order (B's write lands, then A's overwrites it with a snapshot that
+//! predates B's change) — the file on disk would end up missing a trusted device that the
+//! in-memory table still has, until the next mutation happens to persist again. `write_lock`
+//! (below) is held from right before the data lock is taken through the end of `persist`, for
+//! every one of these three methods — so a second writer's entire mutate-snapshot-persist
+//! sequence can only start after the first one's `persist` call has *returned*, which makes the
+//! sequence of on-disk writes match the sequence of mutations exactly (no write can ever carry a
+//! snapshot older than the one before it). Plain readers ([`DeviceStore::is_trusted`],
+//! [`DeviceStore::len`]) never take `write_lock` — they only ever need `devices` briefly and are
+//! unaffected by this ordering.
+//!
 //! `web-passwd` also wipes this file outright on every password rotation
 //! (`secrets::generate_and_store_password`) — the *running* server's own in-memory copy of
 //! whatever was trusted under the old password is a separate table that command has no way to
@@ -127,6 +144,13 @@ pub struct DeviceStore {
     /// care about persistence, and by the plain [`DeviceStore::new`] constructor); production
     /// always goes through [`DeviceStore::load_or_empty`], which sets this.
     paths: Option<SecretsPaths>,
+    /// Serializes every mutate-snapshot-persist sequence ([`DeviceStore::confirm`],
+    /// [`DeviceStore::revoke_all`], [`DeviceStore::purge_expired`]) against each other — see
+    /// finding F12 in this module's doc comment. A separate lock from `devices` on purpose: it
+    /// must stay held across the (possibly slow) disk write in [`DeviceStore::persist`], which
+    /// `devices` itself must NOT be held across (that was finding F10's whole point — see
+    /// `persist`'s doc comment).
+    write_lock: Mutex<()>,
 }
 
 /// Evicts the single entry with the oldest `last_seen_unix` (used only when
@@ -149,6 +173,7 @@ impl DeviceStore {
             devices: Mutex::new(HashMap::new()),
             ttl,
             paths: None,
+            write_lock: Mutex::new(()),
         }
     }
 
@@ -189,6 +214,7 @@ impl DeviceStore {
             devices: Mutex::new(devices),
             ttl,
             paths: Some(paths.clone()),
+            write_lock: Mutex::new(()),
         }
     }
 
@@ -244,6 +270,13 @@ impl DeviceStore {
     /// the difference between "a brand-new id" and "an id that was just rejected by `is_trusted`
     /// a moment ago", so that decision belongs entirely to the caller.
     pub fn confirm(&self, id: DeviceId, current_hash_phc: &str) {
+        // Finding F12: held for the whole mutate-snapshot-persist sequence, so a second call
+        // (any of `confirm`/`revoke_all`/`purge_expired`, on this or another thread) cannot take
+        // its own snapshot and persist it until THIS one's write has actually landed — otherwise
+        // the two on-disk writes could land in an order that doesn't match the order the two
+        // mutations happened in, silently losing whichever mutation's snapshot was older. See
+        // this module's doc comment.
+        let _write_guard = self.write_lock.lock().expect("device store write lock poisoned");
         let now = unix_now();
         let key = hash_id(&id);
         let snapshot = {
@@ -262,7 +295,8 @@ impl DeviceStore {
                 },
             );
             Self::snapshot(&devices)
-        }; // lock released here, before the (possibly slow) disk write (finding F10)
+        }; // `devices` released here, before the (possibly slow) disk write (finding F10) — but
+        // `write_lock` (held for this whole function) stays held until `persist` returns.
         self.persist(snapshot);
     }
 
@@ -278,6 +312,8 @@ impl DeviceStore {
     /// action exists in this skeleton) but a natural building block for one; exercised directly by
     /// tests.
     pub fn revoke_all(&self) {
+        // Finding F12 — see `confirm`'s identical comment.
+        let _write_guard = self.write_lock.lock().expect("device store write lock poisoned");
         let snapshot = {
             let mut devices = self.devices.lock().expect("device store mutex poisoned");
             devices.clear();
@@ -288,6 +324,11 @@ impl DeviceStore {
 
     /// Removes expired device records. Called periodically alongside session/rate-limit purging.
     pub fn purge_expired(&self) -> usize {
+        // Finding F12 — see `confirm`'s identical comment. Held even on the "nothing removed, no
+        // persist call" path: the point is to serialize the whole sequence including the
+        // snapshot read against other writers, and taking the lock unconditionally is simpler and
+        // cheaper than re-deriving whether SOME other writer might still race the no-op case.
+        let _write_guard = self.write_lock.lock().expect("device store write lock poisoned");
         let now = unix_now();
         let (removed, snapshot) = {
             let mut devices = self.devices.lock().expect("device store mutex poisoned");
@@ -688,6 +729,137 @@ mod tests {
         assert!(
             !store.is_trusted(&stolen_copy, HASH_B),
             "step 7: a saved copy of the old cookie must NOT regain its bypass"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Write ordering under concurrency (task 5.2a carry-over, review finding F12)
+    // -----------------------------------------------------------------------------------------
+
+    /// Stress test: many threads call `confirm` on the SAME store concurrently, each with a
+    /// distinct device id. Without `write_lock` serializing each call's whole
+    /// mutate-snapshot-persist sequence, two `persist` disk writes could land in the opposite
+    /// order from their snapshots (an older snapshot overwriting a newer one on disk) — this
+    /// wouldn't lose anything from the *in-memory* table (still checked below, just for
+    /// completeness) but could silently lose entries from the *persisted* file, which only shows
+    /// up after a reload. Run several rounds with a `Barrier` to line every thread's `confirm`
+    /// call up at (as close to) the same instant as this process can arrange, maximizing the
+    /// chance of exactly the interleaving the fix targets.
+    #[test]
+    fn concurrent_confirms_are_never_lost_from_the_persisted_file() {
+        // `THREADS * ROUNDS` is kept at exactly `MAX_TRACKED_DEVICES` (finding F10's cap) so this
+        // test's own device count never triggers an eviction, which would otherwise be a second,
+        // unrelated reason for `store.len()` to come in under the raw total — this test is only
+        // about write ORDERING, not about the cap (that's `table_size_is_capped_by_evicting_...`,
+        // above).
+        const THREADS: usize = 8;
+        const ROUNDS: usize = MAX_TRACKED_DEVICES / THREADS;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = SecretsPaths::new(tmp.path());
+        let store = std::sync::Arc::new(DeviceStore::load_or_empty(&paths, Duration::from_secs(3600)));
+
+        let mut all_ids: Vec<DeviceId> = Vec::new();
+        for round in 0..ROUNDS {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+            let mut handles = Vec::new();
+            for i in 0..THREADS {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                // Deterministic-but-distinct id per (round, thread), so every call across every
+                // round targets its own never-before-seen key (a fresh insert, not a refresh —
+                // finding F10's "refreshing an existing device is never turned away" path takes a
+                // different branch and isn't what this test is exercising).
+                let mut id = [0u8; 32];
+                id[0..8].copy_from_slice(&(round as u64).to_le_bytes());
+                id[8..16].copy_from_slice(&(i as u64).to_le_bytes());
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    store.confirm(id, HASH_A);
+                    id
+                }));
+            }
+            for handle in handles {
+                all_ids.push(handle.join().expect("writer thread panicked"));
+            }
+        }
+
+        assert_eq!(store.len(), THREADS * ROUNDS, "in-memory table must have every device");
+
+        // The real assertion: reload from disk (a fresh store, exactly like a process restart)
+        // and check every single one of the THREADS * ROUNDS confirmed ids actually made it to
+        // the persisted file — not just "most of them", which is what F12's race would otherwise
+        // produce (each round has a chance of losing whichever confirm's snapshot got persisted
+        // out of order relative to a later one in the same round).
+        let reloaded = DeviceStore::load_or_empty(&paths, Duration::from_secs(3600));
+        assert_eq!(
+            reloaded.len(),
+            THREADS * ROUNDS,
+            "persisted file must have every device that was confirmed, not just most of them"
+        );
+        for id in &all_ids {
+            assert!(
+                reloaded.is_trusted(id, HASH_A),
+                "a concurrently-confirmed device is missing from the reloaded (persisted) store"
+            );
+        }
+    }
+
+    /// Same property as above but mixing `confirm`/`purge_expired`/`revoke_all` concurrently (the
+    /// other two write paths F12 names explicitly) rather than only `confirm`: `revoke_all` runs
+    /// once, from a second thread, concurrently with a batch of `confirm` calls, followed by a
+    /// fresh batch of `confirm` calls after it — the persisted end state must match whichever
+    /// mutation actually happened last in real time, never a stale interleaving of the two.
+    #[test]
+    fn revoke_all_concurrent_with_confirm_persists_a_consistent_end_state() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = SecretsPaths::new(tmp.path());
+        let store = std::sync::Arc::new(DeviceStore::load_or_empty(&paths, Duration::from_secs(3600)));
+
+        // Seed some devices, then race a `revoke_all` against a fresh confirm on another thread.
+        for i in 0..8u64 {
+            let mut id = [0u8; 32];
+            id[0..8].copy_from_slice(&i.to_le_bytes());
+            store.confirm(id, HASH_A);
+        }
+        assert_eq!(store.len(), 8);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let store_a = store.clone();
+        let barrier_a = barrier.clone();
+        let revoker = std::thread::spawn(move || {
+            barrier_a.wait();
+            store_a.revoke_all();
+        });
+        let store_b = store.clone();
+        let barrier_b = barrier.clone();
+        let post_revoke_id = {
+            let mut id = [0u8; 32];
+            id[0..8].copy_from_slice(&99u64.to_le_bytes());
+            id
+        };
+        let confirmer = std::thread::spawn(move || {
+            barrier_b.wait();
+            store_b.confirm(post_revoke_id, HASH_A);
+        });
+        revoker.join().expect("revoker thread panicked");
+        confirmer.join().expect("confirmer thread panicked");
+
+        // Whichever order the two actually ran in, the in-memory table is unambiguous — check the
+        // PERSISTED file matches it exactly (this is what F12 could desync: a `revoke_all`
+        // snapshot (empty) persisted AFTER a `confirm` snapshot (one device) whenever `revoke_all`
+        // actually mutated first but the two writes landed in the other order).
+        let in_memory_len = store.len();
+        let reloaded = DeviceStore::load_or_empty(&paths, Duration::from_secs(3600));
+        assert_eq!(
+            reloaded.len(),
+            in_memory_len,
+            "persisted file must match the in-memory table's final state exactly"
+        );
+        assert_eq!(
+            reloaded.is_trusted(&post_revoke_id, HASH_A),
+            store.is_trusted(&post_revoke_id, HASH_A),
+            "the persisted file's view of the post-revoke device must match the in-memory table"
         );
     }
 }

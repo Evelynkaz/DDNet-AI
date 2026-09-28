@@ -45,6 +45,20 @@ pub struct WebArgs {
     /// over plain HTTP, so leave this unset for local/direct use.
     #[arg(long)]
     pub(crate) cookie_secure: bool,
+    /// Task 5.2a: replay Oracle B `trace-b` files (task 1.5) as the live map view's data source —
+    /// either a single `.trb` file, or a directory to loop through in sorted-filename order. The
+    /// live bot itself doesn't exist yet (tasks 2.3/2.4/4.x); this is the one real `FrameSource`
+    /// today. Omit to run the web UI with no live map (only the login/status screen from task
+    /// 5.1).
+    #[arg(long)]
+    pub(crate) replay: Option<PathBuf>,
+    /// Task 5.2a: a directory `crate::live::map_resolve` may read a real `.map` file's bytes
+    /// from, by filename, when resolving a `--replay` trace's map (repeatable). Typically
+    /// `~/aiddnet/data/ddnet-server/maps` and/or a subdirectory of `~/aiddnet/data/maps`. Only
+    /// read from, never written to; a path derived from a trace's own (untrusted) metadata is
+    /// never used directly — see `ddai_web::live::map_resolve`'s doc comment.
+    #[arg(long = "maps-dir")]
+    pub(crate) maps_dir: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -119,6 +133,8 @@ pub fn run_web(args: WebArgs) -> ExitCode {
     config.trust_proxy = args.trust_proxy;
     config.i_know_this_is_public = args.i_know_this_is_public;
     config.cookie_secure = args.cookie_secure;
+    config.replay_source = args.replay;
+    config.map_search_dirs = args.maps_dir;
 
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,

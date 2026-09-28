@@ -15,8 +15,15 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+# Exposes `live::replay::testutil` (a trace-b v2 fixture writer, see that module) outside
+# `cfg(test)`, so `tests/*.rs` integration tests can build synthetic replay fixtures too, without
+# any real Oracle B trace file ever touching this repository. Same pattern as `ddai-map`'s
+# `test-util` feature (see its `Cargo.toml`'s comment).
+test-util = []
+
 [dependencies]
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs", "io-util"] }
 axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 cookie = "0.18"
@@ -32,8 +39,23 @@ base64 = "0.23"
 getrandom = "0.4"
 tracing = "0.1"
 thiserror = "2"
+# Task 5.2a: the live map view.
+ddai-physics = { path = "../ddai-physics" }
+ddai-map = { path = "../ddai-map" }
+ddai-trace = { path = "../ddai-trace" }
+# Pure-Rust zlib deflate (no C dependency, same choice `ddai-map` already made) for the
+# compressed `/api/map/<sha256>` scene payload.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 tempfile = "3.14"
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
+# Enables `ddai_map::testutil` (see that crate's own `[dev-dependencies]` for the same
+# self-reference trick) so this crate's own tests can build a real, loadable synthetic `.map`
+# fixture without a third-party map file ever touching this repository.
+ddai-map = { path = "../ddai-map", features = ["test-util"] }
+# Self-reference (same trick as above and as `ddai-map`'s own `[dev-dependencies]`): enables this
+# crate's own `test-util` feature so `tests/*.rs` integration tests can reach
+# `ddai_web::live::replay::testutil`.
+ddai-web = { path = ".", features = ["test-util"] }

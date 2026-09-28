@@ -10,6 +10,26 @@
   --accent: #4f8cff;
   --danger: #ff5c5c;
   --ok: #3ecf6f;
+
+  /* Task 5.2a: map "kind" palette (`crate::live::scene::Kind`, see docs/formats.md) — one flat
+     color per tile kind, no DDNet graphics assets (decision D-011/constraint: "kinds/entities-
+     style view only" for this task). Indexed by kind byte via `KIND_COLORS` in game.js. */
+  --kind-air: #0b0e13;
+  --kind-solid: #6b7280;
+  --kind-nohook: #8b6f47;
+  --kind-death: #dc2626;
+  --kind-deep-freeze: #1e3a8a;
+  --kind-freeze: #38bdf8;
+  --kind-deep-unfreeze: #0d9488;
+  --kind-unfreeze: #86efac;
+  --kind-tele-in: #a855f7;
+  --kind-tele-out: #d946ef;
+  --kind-tele-checkpoint: #8b5cf6;
+  --kind-speedup: #f97316;
+  --kind-switch: #eab308;
+  --kind-tune-zone: #ec4899;
+  --kind-stopper: #92400e;
+  --kind-spawn: #4ade80;
 }
 
 * {
@@ -137,4 +157,264 @@ button:active {
   .shell {
     padding-top: 48px;
   }
+}
+
+/* Every element below is toggled via the plain `hidden` HTML attribute from `app.js`, but also
+   gets its own unconditional `display: flex` further down (needed once shown) — author styles
+   always win over the UA stylesheet's `[hidden] { display: none }` regardless of selector
+   specificity (a same-origin, same-specificity rule falls back to source order, and these rules
+   necessarily come later), so without this override `hidden` alone would do nothing on any of
+   them. Kept in one place, ahead of those rules, rather than repeating `:not([hidden])` on each. */
+.tabbar[hidden],
+.game-view[hidden],
+.replay-bar[hidden] {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Task 5.2a: bottom tab bar.
+   --------------------------------------------------------------------------------------------- */
+
+/* Review round 1, finding F4: this used to switch to `position: static` at >=640px, which took
+   it out of its own stacking context — the still-`position: fixed`, full-viewport `.game-view`
+   then painted OVER it regardless of DOM order, making "Статус" (and therefore logout)
+   unreachable while on the "Игра" tab on any desktop-sized screen. Simplest robust fix: this stays
+   `position: fixed` with a high `z-index` at every viewport width, full stop — a fixed element
+   always paints above an unpositioned-or-equally-stacked one in the same stacking context, so
+   nothing on this page can cover it again by accident the same way. */
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  background: var(--panel);
+  border-top: 1px solid #2a3040;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  z-index: 20;
+}
+
+.tabbar button {
+  flex: 1;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 0;
+  font-weight: 600;
+  padding: 12px 8px;
+}
+
+.tabbar button.active {
+  color: var(--text);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Task 5.2a: the live map view itself — full-viewport, outside `.shell`'s narrow max-width.
+   `.canvas-area` (canvas + its overlays) and `.bottom-stack` (replay bar + player list) are the
+   two top-level flex children — see index.html's own comment on why they're split out this way
+   (review round 1, finding F4).
+   --------------------------------------------------------------------------------------------- */
+
+.game-view {
+  position: fixed;
+  inset: 0;
+  background: var(--kind-air);
+  display: flex;
+  flex-direction: column;
+  /* Room for the always-`position: fixed` `.tabbar` at every viewport width — see `.tabbar`'s own
+     comment for why this is never conditionally removed the way it used to be. */
+  padding-bottom: calc(56px + env(safe-area-inset-bottom, 0));
+}
+
+.canvas-area {
+  position: relative;
+  flex: 1;
+  min-height: 0; /* allow this flex child to actually shrink instead of overflowing the column */
+  overflow: hidden;
+}
+
+#game-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none; /* we handle pan/pinch ourselves */
+}
+
+.hud-top {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: calc(8px + env(safe-area-inset-top, 0)) 12px 6px;
+  background: linear-gradient(to bottom, rgba(16, 19, 24, 0.85), transparent);
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.hud-top strong {
+  color: var(--text);
+}
+
+.view-controls {
+  position: absolute;
+  right: 8px;
+  top: calc(8px + env(safe-area-inset-top, 0));
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.view-controls button {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 20px;
+  background: rgba(24, 28, 36, 0.85);
+  color: var(--text);
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.view-controls button.active {
+  background: var(--accent);
+}
+
+.legend {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  max-width: 60%;
+  font-size: 0.65rem;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+/* Replay transport (task 5.2a, acceptance criterion 3: "replay controls" in the HUD) + player
+   list: a bottom sheet on phone (both stacked, in that order, right above `.tabbar`), a side
+   column on desktop (acceptance criterion 3) — see `@media (min-width: 900px)` below. */
+.bottom-stack {
+  position: relative;
+  z-index: 15; /* above `.canvas-area`'s own content; still below `.tabbar`'s 20 */
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(16, 19, 24, 0.85);
+  font-size: 0.8rem;
+}
+
+.replay-bar button {
+  padding: 6px 10px;
+  font-size: 0.9rem;
+  min-width: 40px;
+}
+
+.replay-bar input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.replay-bar select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid #2a3040;
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.player-sheet {
+  max-height: 30vh;
+  overflow-y: auto;
+  background: rgba(16, 19, 24, 0.92);
+  border-top: 1px solid #2a3040;
+}
+
+.player-sheet ul {
+  list-style: none;
+  margin: 0;
+  padding: 4px 8px;
+}
+
+.player-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.player-row.selected {
+  background: rgba(79, 140, 255, 0.18);
+}
+
+.player-row .swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.player-row .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-row .frozen-mark {
+  color: var(--kind-freeze);
+  font-size: 0.75rem;
+}
+
+.player-row .frozen-mark.deep {
+  color: var(--kind-deep-freeze);
+}
+
+@media (min-width: 900px) {
+  .game-view {
+    flex-direction: row;
+  }
+
+  .bottom-stack {
+    width: 260px;
+    height: 100%;
+    /* Normal (not reversed) column: DOM order already puts the replay bar first, the player
+       list second — `.player-sheet`'s own `flex: 1` below just lets it fill the rest of the
+       column's height instead of collapsing to its content's natural (short) height. */
+  }
+
+  .player-sheet {
+    flex: 1;
+    max-height: none;
+  }
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
 }

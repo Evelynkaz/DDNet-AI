@@ -14,6 +14,9 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::config::{ConfigError, WebConfig};
+use crate::live::hub::LiveHub;
+use crate::live::map_resolve::MapCache;
+use crate::live::replay::ReplaySource;
 use crate::secrets::{self, SecretsError};
 use crate::state::{AppState, SharedState};
 use crate::{headers, http, ws};
@@ -34,6 +37,8 @@ pub enum BindError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to start the replay source: {0}")]
+    Replay(std::io::Error),
 }
 
 pub fn build_router(state: SharedState) -> Router {
@@ -44,12 +49,19 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/ws", get(ws::ws_handler))
         .route_layer(axum::middleware::from_fn(headers::no_store));
 
+    // Deliberately NOT under `headers::no_store` above (acceptance criterion 1: "Cacheable by
+    // sha256 via ETag; `no-store` doesn't apply to this immutable content" — see
+    // `http::map`'s doc comment for the full cache policy): a map's classified scene is immutable
+    // for a given sha256, so this route sets its own long-lived, revalidatable cache headers
+    // instead of the blanket `no-store` every other `/api/*`/`/ws` route gets.
+    let map_route = Router::new().route("/api/map/{sha256}", get(http::map::get_map));
+
     let assets = Router::new()
         .route("/", get(http::assets::page))
         .route("/app.css", get(http::assets::css))
         .route("/app.js", get(http::assets::js));
 
-    let app: Router<SharedState> = Router::new().merge(api_and_ws).merge(assets);
+    let app: Router<SharedState> = Router::new().merge(api_and_ws).merge(map_route).merge(assets);
     // Order matters (review finding F5): `tower::Layer::layer` wraps the *current* service, so
     // the layer added last ends up outermost — the first to see a request and the last to touch
     // its response. `common_layers` (CSP/nosniff/X-Frame-Options/Referrer-Policy) must be that
@@ -97,7 +109,20 @@ pub async fn bind(config: WebConfig) -> Result<Bound, BindError> {
         source,
     })?;
 
-    let state: SharedState = Arc::new(AppState::new(config, session_key));
+    // Task 5.2a: start the replay `FrameSource`, if configured. A bad `--replay` path fails
+    // startup loudly (rather than silently serving a web UI with no live map at all) — the whole
+    // point of passing this flag is to get a working live view.
+    let live_hub = match &config.replay_source {
+        Some(path) => {
+            let map_cache = Arc::new(MapCache::new());
+            let source = ReplaySource::new(path, config.map_search_dirs.clone(), map_cache.clone())
+                .map_err(BindError::Replay)?;
+            Some(Arc::new(LiveHub::start(Box::new(source), map_cache)))
+        }
+        None => None,
+    };
+
+    let state: SharedState = Arc::new(AppState::new_with_live_hub(config, session_key, live_hub));
     let router = build_router(state.clone());
 
     Ok(Bound {

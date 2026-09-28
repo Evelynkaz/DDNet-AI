@@ -370,6 +370,8 @@ mod tests {
                 assert!(!args.trust_proxy);
                 assert!(!args.i_know_this_is_public);
                 assert!(!args.cookie_secure);
+                assert!(args.replay.is_none());
+                assert!(args.maps_dir.is_empty());
             }
             other => panic!("expected Web command, got {other:?}"),
         }
@@ -395,6 +397,35 @@ mod tests {
                 assert!(args.trust_proxy);
                 assert!(!args.i_know_this_is_public);
                 assert!(args.cookie_secure);
+            }
+            other => panic!("expected Web command, got {other:?}"),
+        }
+    }
+
+    /// Task 5.2a: `--replay` (single value) and repeatable `--maps-dir`.
+    #[test]
+    fn web_parses_replay_and_maps_dir_flags() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "web",
+            "--replay",
+            "/tmp/traces",
+            "--maps-dir",
+            "/tmp/maps-a",
+            "--maps-dir",
+            "/tmp/maps-b",
+        ])
+        .expect("web should parse with --replay/--maps-dir");
+        match cli.command {
+            Some(super::Command::Web(args)) => {
+                assert_eq!(args.replay, Some(std::path::PathBuf::from("/tmp/traces")));
+                assert_eq!(
+                    args.maps_dir,
+                    vec![
+                        std::path::PathBuf::from("/tmp/maps-a"),
+                        std::path::PathBuf::from("/tmp/maps-b"),
+                    ]
+                );
             }
             other => panic!("expected Web command, got {other:?}"),
         }

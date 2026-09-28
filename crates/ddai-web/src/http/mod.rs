@@ -3,3 +3,4 @@
 
 pub mod assets;
 pub mod login;
+pub mod map;

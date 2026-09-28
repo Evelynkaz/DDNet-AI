@@ -10,9 +10,12 @@ use axum::response::{IntoResponse, Response};
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast;
 use tokio::time::{interval, interval_at};
 
 use crate::auth::session::SessionId;
+use crate::live::hub::HubEvent;
+use crate::live::source::{GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus};
 use crate::session_guard::{current_session, request_is_same_origin};
 use crate::state::SharedState;
 
@@ -20,6 +23,15 @@ use crate::state::SharedState;
 /// client from `hello.version` (acceptance criterion 5: "versioned JSON for now").
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Lower bound on a client-requested `sub{live: hz}` rate (acceptance criterion 1's "≤ 50 Hz;
+/// default 25 Hz, 10 Hz эконом" only ever names an upper bound — review round 1, finding F6: a
+/// client-supplied rate close enough to 0 without actually *being* 0 (the unsubscribe sentinel,
+/// handled separately below) drove `1.0 / live_hz` up past what `Duration` can represent,
+/// panicking the whole WS task on the next `select!` iteration. `0.1` Hz (one frame per 10s) is
+/// comfortably impractical-but-safe: the important thing is it keeps `1.0 / live_hz` (and
+/// therefore every `Duration` built from it) bounded, not that it's a particularly useful rate to
+/// actually request.
+const MIN_LIVE_HZ: f32 = 0.1;
 /// How often the server sends a `status` message while connected.
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the server pings an otherwise-quiet connection.
@@ -29,18 +41,173 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// dead and closed.
 const IDLE_CLOSE_AFTER: Duration = Duration::from_secs(45);
 
+/// A `Map`/`Players`/`Events`/`ReplayStatus`/`Error` message's JSON shape (acceptance criterion
+/// 1's WS topics). Wire field names are deliberately terse (`w`/`h`/`t`) to match the task's own
+/// sketch (`docs/research/orig-web.md` §7.3) and keep these — sent once per map/roster change, so
+/// bandwidth is not the concern `live`'s binary format exists for — still small and obvious.
+#[derive(Debug, Serialize)]
+struct MapMsg {
+    sha256: String,
+    name: String,
+    w: u32,
+    h: u32,
+}
+
+impl From<MapMeta> for MapMsg {
+    fn from(m: MapMeta) -> Self {
+        MapMsg {
+            // `ddai_trace::hash::to_hex` (already a dependency for `crate::live::replay`) rather
+            // than pulling in a `hex` crate just for this one call site.
+            sha256: ddai_trace::hash::to_hex(&m.sha256),
+            name: m.name,
+            w: m.width,
+            h: m.height,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PlayerMsg {
+    id: u8,
+    name: String,
+    team: u8,
+}
+
+impl From<PlayerMeta> for PlayerMsg {
+    fn from(p: PlayerMeta) -> Self {
+        PlayerMsg {
+            id: p.id,
+            name: p.name,
+            team: p.team,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum EventMsg {
+    Freeze { id: u8 },
+    Unfreeze { id: u8 },
+    Death { id: u8 },
+    Respawn { id: u8 },
+    HookGrab { id: u8, target: Option<u8> },
+}
+
+impl From<GameEvent> for EventMsg {
+    fn from(e: GameEvent) -> Self {
+        match e {
+            GameEvent::Freeze { id } => EventMsg::Freeze { id },
+            GameEvent::Unfreeze { id } => EventMsg::Unfreeze { id },
+            GameEvent::Death { id } => EventMsg::Death { id },
+            GameEvent::Respawn { id } => EventMsg::Respawn { id },
+            GameEvent::HookGrab { id, target } => EventMsg::HookGrab { id, target },
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ReplayStatusMsg {
+    file: String,
+    tick: u32,
+    tick_count: u32,
+    playing: bool,
+    speed: f32,
+}
+
+impl From<ReplayStatus> for ReplayStatusMsg {
+    fn from(s: ReplayStatus) -> Self {
+        ReplayStatusMsg {
+            file: s.file,
+            tick: s.tick,
+            tick_count: s.tick_count,
+            playing: s.playing,
+            speed: s.speed,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMessage {
-    Hello { version: u32, server_time: u64 },
-    Status { uptime_s: u64, bot_state: &'static str },
+    Hello {
+        version: u32,
+        server_time: u64,
+    },
+    Status {
+        uptime_s: u64,
+        bot_state: &'static str,
+    },
     Pong,
+    Map(MapMsg),
+    Players {
+        list: Vec<PlayerMsg>,
+    },
+    Events {
+        tick: u32,
+        events: Vec<EventMsg>,
+    },
+    ReplayStatus(ReplayStatusMsg),
+    /// A live-source problem (acceptance criterion 2: "a malformed trace gives an error event,
+    /// not a panic") — reported to the client, distinct from any HTTP-level error.
+    LiveError {
+        message: String,
+    },
+}
+
+fn hub_event_to_server_message(event: &HubEvent) -> ServerMessage {
+    match event {
+        HubEvent::Map(meta) => ServerMessage::Map(meta.clone().into()),
+        HubEvent::Players(players) => ServerMessage::Players {
+            list: players.iter().cloned().map(PlayerMsg::from).collect(),
+        },
+        HubEvent::Events { tick, events } => ServerMessage::Events {
+            tick: *tick,
+            events: events.iter().copied().map(EventMsg::from).collect(),
+        },
+        HubEvent::ReplayStatus(status) => ServerMessage::ReplayStatus(status.clone().into()),
+        HubEvent::Error(message) => ServerMessage::LiveError {
+            message: message.clone(),
+        },
+    }
+}
+
+/// A client `replay{...}` command's JSON shape (acceptance criterion 2: "WS messages
+/// `replay{play|pause|speed|seek|next}`").
+#[derive(Debug, Deserialize)]
+struct ReplayCommand {
+    action: String,
+    #[serde(default)]
+    value: Option<f32>,
+    #[serde(default)]
+    tick: Option<u32>,
+}
+
+impl ReplayCommand {
+    /// `None` for an action this build doesn't recognize — ignored, same convention as an
+    /// unknown top-level message type (forward-compatible with a newer client).
+    fn into_control(self) -> Option<ReplayControl> {
+        match self.action.as_str() {
+            "play" => Some(ReplayControl::Play),
+            "pause" => Some(ReplayControl::Pause),
+            "speed" => self.value.map(ReplayControl::SetSpeed),
+            "seek" => self.tick.map(ReplayControl::Seek),
+            "next" => Some(ReplayControl::Next),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
     Ping,
+    /// `{"type":"sub","live":25}` (acceptance criterion 1: "the client subscribes
+    /// (`sub{live: hz}`)"). `live <= 0` unsubscribes (no more `live` binary frames until the next
+    /// `sub` with a positive rate).
+    Sub {
+        live: f32,
+    },
+    Replay(ReplayCommand),
 }
 
 fn unix_time_secs() -> u64 {
@@ -113,6 +280,43 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
         return;
     }
 
+    // Task 5.2a: a newly-connecting client is handed the CURRENT map/roster directly, rather
+    // than waiting for the next change to be broadcast — see `LiveHub`'s doc comment on why the
+    // broadcast channel alone can't guarantee that for a connection that joins between two
+    // (rare) map-change events.
+    let mut live_rx = state.live_hub.as_ref().map(|hub| hub.subscribe_live());
+    let mut event_rx = state.live_hub.as_ref().map(|hub| hub.subscribe_events());
+    if let Some(hub) = &state.live_hub {
+        if let Some(map) = hub.latest_map()
+            && send_json(&mut socket, &ServerMessage::Map(map.into())).await.is_err()
+        {
+            return;
+        }
+        let players = hub.latest_players();
+        if !players.is_empty()
+            && send_json(
+                &mut socket,
+                &ServerMessage::Players {
+                    list: players.into_iter().map(PlayerMsg::from).collect(),
+                },
+            )
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    // Live frames flow at this rate by default (acceptance criterion 1: "default 25 Hz") until
+    // the client sends its own `sub{live: hz}` — clamped to `config.max_live_hz` either way.
+    let mut live_hz: f32 = 25.0f32.min(state.config.max_live_hz);
+    // So the very first live frame that arrives is sent immediately rather than waiting out a
+    // full `1/live_hz` interval — `checked_sub` (not a bare `-`) since `Instant` subtraction
+    // panics on underflow, which a process that has been up for well under a second could
+    // otherwise hit here.
+    let mut last_live_sent = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+
     let mut status_ticker = interval(STATUS_INTERVAL);
     // `interval()`'s first tick fires immediately, which is what we want for `status_ticker`
     // (the client gets a status right after `hello`, without waiting a full second) but not for
@@ -171,6 +375,63 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
                     break;
                 }
             }
+            // Task 5.2a, acceptance criterion 1's backpressure requirement: `recv()` on a
+            // `broadcast` channel this connection has fallen behind on returns `Lagged` rather
+            // than the oldest still-buffered frame, so a slow connection naturally skips ahead to
+            // the newest frame instead of this loop ever building its own unbounded queue —
+            // `Lagged` is deliberately just `continue`d here, not logged as an error, since it is
+            // the intended behavior under load, not a bug. Only polled when subscribed
+            // (`live_hz > 0.0`); see `live_rx`'s construction above for why `None` (no live hub
+            // configured at all) never fires this branch either.
+            live_bytes = async {
+                match live_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if live_hz > 0.0 => {
+                match live_bytes {
+                    Ok(bytes) => {
+                        // Per-connection downsampling to this connection's own requested rate —
+                        // independent of the hub's own (much higher) production rate and of any
+                        // other connection's rate. `live_hz` is already bounded to
+                        // `[MIN_LIVE_HZ, max_live_hz]` by the `Sub` handler below (finding F6), so
+                        // `try_from_secs_f32` should never actually hit its `Err` arm here — kept
+                        // as `try_from` (not the panicking `from_secs_f32`) anyway, on the same
+                        // "audit every float-to-duration conversion" principle the finding asked
+                        // for: a *future* change to that bound must not turn back into a panic.
+                        let min_interval = Duration::try_from_secs_f32((1.0 / live_hz).max(0.0))
+                            .unwrap_or(Duration::from_secs_f32(1.0 / 25.0));
+                        if last_live_sent.elapsed() >= min_interval {
+                            last_live_sent = Instant::now();
+                            if socket.send(Message::Binary(Bytes::from((*bytes).clone()))).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {} // see the comment above
+                    Err(broadcast::error::RecvError::Closed) => {} // hub shut down; nothing to do
+                }
+            }
+            event = async {
+                match event_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match event {
+                    Ok(event) => {
+                        let message = hub_event_to_server_message(&event);
+                        if send_json(&mut socket, &message).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // See `LiveHub`'s doc comment: rare, mitigated but not eliminated —
+                        // nothing better to do here than continue with whatever arrives next.
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {}
+                }
+            }
             incoming = socket.recv() => {
                 match incoming {
                     None => break,
@@ -178,16 +439,43 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
                     Some(Ok(Message::Close(_))) => break,
                     Some(Ok(Message::Text(text))) => {
                         last_activity = Instant::now();
-                        if let Ok(ClientMessage::Ping) = serde_json::from_str::<ClientMessage>(&text)
-                            && send_json(&mut socket, &ServerMessage::Pong).await.is_err()
-                        {
-                            break;
+                        match serde_json::from_str::<ClientMessage>(&text) {
+                            Ok(ClientMessage::Ping) => {
+                                if send_json(&mut socket, &ServerMessage::Pong).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(ClientMessage::Sub { live }) => {
+                                // Review round 1, finding F6: `live <= 0.0` (including NaN, which
+                                // every comparison against is `false`) unsubscribes; anything
+                                // else is clamped into `[MIN_LIVE_HZ, max_live_hz]` — never a
+                                // tiny-but-positive value that would later blow up
+                                // `Duration::from_secs_f32(1.0 / live_hz)`.
+                                live_hz = if live > 0.0 {
+                                    live.clamp(MIN_LIVE_HZ, state.config.max_live_hz)
+                                } else {
+                                    0.0
+                                };
+                            }
+                            Ok(ClientMessage::Replay(command)) => {
+                                // Acceptance criterion 2: "allowed only for authenticated
+                                // sessions, like everything else on the WS" — already guaranteed
+                                // here, since this whole connection only exists because the
+                                // upgrade above required a valid session; there is no separate
+                                // per-message check to add.
+                                if let (Some(hub), Some(control)) = (&state.live_hub, command.into_control()) {
+                                    hub.send_control(control);
+                                }
+                            }
+                            Err(_) => {
+                                // Any other/unknown message type is ignored (forward-compatible:
+                                // a newer client may send message types this build doesn't know
+                                // about yet).
+                            }
                         }
-                        // Any other/unknown message type is ignored (forward-compatible: a newer
-                        // client may send message types this build doesn't know about yet).
                     }
                     Some(Ok(Message::Binary(_))) => {
-                        // Reserved for the live game view (later task); ignored for now.
+                        // The client never sends binary frames in this protocol; ignored.
                         last_activity = Instant::now();
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {

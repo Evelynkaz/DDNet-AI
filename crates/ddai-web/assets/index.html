@@ -36,6 +36,65 @@
         <button id="logout-button" type="button">Выйти</button>
       </section>
     </main>
+
+    <!-- Task 5.2a: live map view — deliberately outside `.shell` (full-viewport, see app.css).
+         `.canvas-area` (canvas + its overlays) and `.bottom-stack` (replay bar + player list) are
+         separate flex children of `.game-view` on purpose (review round 1, finding F4): keeping
+         the canvas's own absolutely-positioned overlays (`.view-controls`/`.legend`/`.hud-top`)
+         scoped to `.canvas-area` alone, rather than the whole `.game-view` box, is what stops
+         them drifting under `.player-sheet` once the desktop layout puts the sheet in a side
+         column next to (not below) the canvas. -->
+    <section id="game-view" class="game-view" hidden>
+      <div class="canvas-area">
+        <canvas id="game-canvas" aria-label="Карта игры"></canvas>
+
+        <div class="hud-top" id="game-hud" aria-hidden="true">
+          <span>тик <strong id="hud-tick">—</strong></span>
+          <span>FPS <strong id="hud-fps">—</strong></span>
+          <span>кадры/с <strong id="hud-frame-rate">—</strong></span>
+          <span>карта <strong id="hud-map-name">—</strong></span>
+        </div>
+
+        <div class="view-controls">
+          <button id="btn-follow" type="button" title="Следить за выбранным">◎</button>
+          <button id="btn-fit" type="button" title="Вся карта">▢</button>
+          <button id="btn-names" type="button" class="active" title="Имена">Aa</button>
+          <button id="btn-econ" type="button" title="Эконом-режим (10 Гц вместо 25)">🐢</button>
+        </div>
+
+        <div class="legend" id="game-legend" aria-hidden="true"></div>
+      </div>
+
+      <div class="bottom-stack">
+        <div class="replay-bar" id="replay-bar" hidden>
+          <button id="replay-play" type="button">▶</button>
+          <button id="replay-pause" type="button">⏸</button>
+          <input id="replay-seek" type="range" min="0" max="1" value="0" step="1" />
+          <select id="replay-speed">
+            <option value="0.25">×0.25</option>
+            <option value="0.5">×0.5</option>
+            <option value="1" selected>×1</option>
+            <option value="2">×2</option>
+            <option value="4">×4</option>
+          </select>
+          <button id="replay-next" type="button">⏭</button>
+        </div>
+
+        <div class="player-sheet">
+          <ul id="player-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- Always `position: fixed` (see app.css) — must stay clickable, and above `#game-view`,
+         at every viewport width (review round 1, finding F4: a previous version switched this to
+         `position: static` on wide screens, which let the fixed, full-viewport `#game-view`
+         paint over it and made "Статус"/logout unreachable while on the "Игра" tab). -->
+    <nav class="tabbar" id="tabbar" hidden>
+      <button id="tab-status" type="button" class="active">Статус</button>
+      <button id="tab-game" type="button">Игра</button>
+    </nav>
+
     <script src="/app.js"></script>
   </body>
 </html>
