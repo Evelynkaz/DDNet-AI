@@ -431,13 +431,15 @@ pub struct CharacterCore<R: Real> {
     /// change it without affecting siblings.
     pub tuning: TuningParams,
 
-    /// `m_MoveRestrictions` (private in C++, computed at the start of `Tick` from
-    /// `CCollision::GetMoveRestrictions` and read by `TickDeferred`'s hook-drag `ClampVel` calls
-    /// — both by `self` and, for the hooked character's own `ClampVel`, by *another*
+    /// `CCharacterCore::m_MoveRestrictions` (private in C++, `gamecore.h:282`) — computed once
+    /// per tick, at the start of `Tick()`, from `CCollision::GetMoveRestrictions(callback, this,
+    /// m_Pos)` (no `MapIndex` override), and read by `TickDeferred`'s hook-drag `ClampVel` calls
+    /// only (both by `self` and, for the hooked character's own `ClampVel`, by *another*
     /// `CharacterCore`'s `TickDeferred`, matching C++'s same-class private-field access from a
-    /// different instance). Recompute the reported/observed value via
-    /// `Collision::get_move_restrictions` instead of reading this directly, matching
-    /// `docs/formats.md`'s note that Oracle A's trace does exactly that.
+    /// different instance — `gamecore.cpp:517,521`). See [`CharacterCore::move_restrictions`]'s
+    /// doc comment for why this is a genuinely *different* field from `CCharacter`'s own
+    /// `m_MoveRestrictions` (task 1.6's [`crate::world::Character::move_restrictions`]) despite
+    /// the identical name — conflating the two was a real, found-empirically bug this crate had.
     move_restrictions: i32,
 }
 
@@ -504,9 +506,18 @@ impl<R: Real> CharacterCore<R> {
         self.hooked_player
     }
 
-    /// `CCharacterCore::m_MoveRestrictions`'s current value — see that field's doc comment for
-    /// why callers reporting/comparing this externally should prefer recomputing it via
-    /// [`Collision::get_move_restrictions`] instead (matching Oracle A).
+    /// `CCharacterCore::m_MoveRestrictions`'s current value — computed once per tick by [`tick`]
+    /// alone (`gamecore.cpp:197`, `m_Pos` alone, no `MapIndex` override). **Not** the same field
+    /// as `CCharacter::m_MoveRestrictions` (`character.h:136`,
+    /// [`crate::world::Character::move_restrictions`]), which `HandleTiles` recomputes with a
+    /// `MapIndex` override every tile its anti-skip loop visits — see that field's doc comment
+    /// (task 1.6, root-caused against an instrumented Oracle B binary: this crate's
+    /// `handle_tiles` used to overwrite *this* field, conflating the two). This core-level field
+    /// is read only by [`tick_deferred`]'s hook-drag `ClampVel` calls (`gamecore.cpp:517,521`)
+    /// and by the parity trace comparison (which dumps exactly this field,
+    /// `oracle_server.cpp:2375`, `pChar->m_Core.m_MoveRestrictions`) — every *other* DDRace-level
+    /// consumer (`TakeDamage`, `ApplyMoveRestrictions`, speedup tiles, the stopper jump-reset,
+    /// the hammer-hit target clamp) must use the character-level field instead.
     pub fn move_restrictions(&self) -> i32 {
         self.move_restrictions
     }
@@ -1099,8 +1110,10 @@ impl<R: Real, const CAP: usize> WorldCore<R, CAP> {
 /// `CCharacterCore::SetHookedPlayer(int HookedPlayer)`, generalized to operate on `me` (a local
 /// copy extracted from `world`, per the module doc comment) instead of `this` — updates the
 /// *previous* and *new* hooked player's `attached_players` in `world` (only for ids that are
-/// actually present — matches the C++ null-pointer checks), then `me.hooked_player`.
-fn set_hooked_player<R: Real, const CAP: usize>(
+/// actually present — matches the C++ null-pointer checks), then `me.hooked_player`. `pub`
+/// (task 1.6): `CCharacter::ReleaseHook`/`ResetHook` (`character.cpp:766-777`) call this directly
+/// on a character's own core from outside this module, exactly like every call site here does.
+pub fn set_hooked_player<R: Real, const CAP: usize>(
     world: &mut WorldCore<R, CAP>,
     me: &mut CharacterCore<R>,
     self_id: u8,
@@ -1128,10 +1141,18 @@ fn set_hooked_player<R: Real, const CAP: usize>(
 /// extract/mutate-others/write-back pattern this and its sibling functions use in place of a
 /// `this->m_pWorld` pointer.
 ///
-/// The `pfnSwitchActive` callback `GetMoveRestrictions` takes is always passed as `None` here —
-/// per `docs/formats.md` §5.5, this gives the *exact same* result as the real
-/// `IsSwitchActiveCb`/`this` pair `CCharacterCore::Tick` passes, because `world.switchers` is
-/// always empty in every scenario this crate builds (switch-zone state selection is task 1.7).
+/// The `pfnSwitchActive` callback `GetMoveRestrictions` takes mirrors `CCharacterCore::
+/// IsSwitchActiveCb` (`gamecore.cpp:740-747`) exactly: `false` whenever `world.switchers` is
+/// empty, `id == -1`, or `teams.team(id) == teams.team_super()`, else `world.switchers[Number]
+/// .status[team]`. Oracle A/task 1.3's parity tests always have empty `world.switchers` (switch
+/// tiles are out of Oracle A's core-only scope — `docs/formats.md` §5.5), so for every one of
+/// them this is provably identical to always passing `None` (the callback can never even be
+/// invoked — `get_move_restrictions` only calls it when a door tile's number is `<=
+/// m_HighestSwitchNumber`, and an empty-switchers collision never reports a nonzero highest
+/// switch number since no switch layer was ever loaded); task 1.6's `World` populates real
+/// switchers, where this now matters (a character standing in a closed door's `TILE_STOPA`
+/// cell must have `CANTMOVE_*` bits set exactly when the real server's callback would report the
+/// door active for that character's team).
 pub fn tick<R: Real, const CAP: usize>(
     world: &mut WorldCore<R, CAP>,
     self_slot: usize,
@@ -1143,7 +1164,24 @@ pub fn tick<R: Real, const CAP: usize>(
     let self_id = world.ids[self_slot];
     let mut me = world.cores[self_slot];
 
-    me.move_restrictions = collision.get_move_restrictions_simple(me.pos, R::from_i32(18));
+    me.move_restrictions = if world.switchers.is_empty() {
+        collision.get_move_restrictions_simple(me.pos, R::from_i32(18))
+    } else {
+        let self_team = if me.id != -1 { teams.team(me.id) } else { -1 };
+        let team_super = teams.team_super();
+        let switchers = &world.switchers;
+        collision.get_move_restrictions(
+            Some(|number: u8| {
+                self_team != -1
+                    && self_team != team_super
+                    && (number as usize) < switchers.len()
+                    && switchers[number as usize].status[self_team as usize]
+            }),
+            me.pos,
+            R::from_i32(18),
+            None,
+        )
+    };
     me.triggered_events = 0;
 
     let grounded = collision.is_on_ground(me.pos, physical_size());

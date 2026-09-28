@@ -29,7 +29,15 @@ pub mod map;
 /// Port of 20.1 `CPrng` (`src/game/prng.{h,cpp}`).
 pub mod prng;
 pub mod real;
+// `switch` documents itself via its own `//!` (module-inner) doc comment — same reasoning as
+// `core_world`/`map`/`real` above (task 1.6: switch-layer behavior, `CDoor` collision setup and
+// timed-switch expiry, built on top of task 1.3's [`core::Switcher`] placeholder).
+pub mod switch;
 /// Port of 20.1 `CTuningParams`/`CTuneParam` (`src/game/tuning.h`, `src/game/gamecore.h`).
 pub mod tuning;
 /// Port of the subset of 20.1 `base/vmath.h`/`base/math.h` this crate needs.
 pub mod vmath;
+// `world` documents itself via its own `//!` (module-inner) doc comment — same reasoning as
+// `core_world`/`map`/`real`/`switch` above (task 1.6, Stage A: `World<R>`, the server-level
+// DDRace simulation).
+pub mod world;

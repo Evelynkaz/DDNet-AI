@@ -296,6 +296,13 @@ impl<R: Real> Collision<R> {
         self.height
     }
 
+    /// `CCollision::m_HighestSwitchNumber` — task 1.6: [`crate::core::WorldCore::init_switchers`]
+    /// (`CWorldCore::InitSwitchers`) always takes this exact value as its `HighestSwitchNumber`
+    /// argument in the real server (`gameworld.cpp:47-51`, `CGameWorld::Init`).
+    pub fn highest_switch_number(&self) -> i32 {
+        self.highest_switch_number
+    }
+
     // --- Basic point/tile queries -------------------------------------------------------------
 
     /// `CCollision::GetTile(int x, int y)`: the game-layer tile id at pixel `(x, y)` if it's in
@@ -397,18 +404,41 @@ impl<R: Real> Collision<R> {
     /// The `int`-argument overload C++ callers get "for free" via implicit `int -> float`
     /// conversion before reaching `GetPureMapIndex(float, float)` — spelled out explicitly here
     /// since Rust has no implicit numeric conversions. Used by [`Collision::is_through`]/
-    /// [`Collision::is_hook_blocker`], which take already-rounded pixel coordinates.
+    /// [`Collision::is_hook_blocker`], which take already-(wrapping-)summed pixel coordinates.
+    ///
+    /// Task 1.3 review round 3, finding F7. `x`/`y` here are `ix + OffsetX`/`iy + OffsetY`
+    /// computed with C++'s (wrapping, two's-complement) `int` arithmetic — see the call sites'
+    /// `wrapping_add`. For every `v` with `|v| < 2^24` (`f32`'s exact-integer range),
+    /// `round_to_int(R::from_i32(v))` is provably exactly `v` again (`from_i32` widens exactly,
+    /// and `round_to_int` of an already-integer value adds/subtracts `0.5` then truncates,
+    /// landing back on the same integer), so dividing `v` directly instead of taking the `int ->
+    /// float -> round_to_int` round trip through [`Collision::get_pure_map_index`] (review round
+    /// 2, finding F4) is a provable no-op — and is *not* a no-op once `|v| >= 2^24`: an `f32`
+    /// cannot represent every such integer exactly, so `(float)v` can round to a different value
+    /// than `v` itself, and C++ takes exactly that (potentially rounding) conversion on its way
+    /// into `GetPureMapIndex(float, float)`. Concretely: `ix == i32::MIN`, `OffsetX == -32` wraps
+    /// to `2147483616` (`i32`, positive) — a value the fast path's plain integer division would
+    /// clamp to `width - 1`, while C++'s `(float)2147483616` rounds to exactly `2147483648.0f`
+    /// (`2^31`), whose `round_to_int` is `i32::MIN` (see [`Real::to_i32_trunc`]'s doc comment),
+    /// dividing (truncating toward zero) to a large *negative* number that clamps to column `0`
+    /// instead. So for `|v| >= 2^24` this takes the exact same float round trip
+    /// [`Collision::get_pure_map_index`] does, reproducing C++'s rounding (and its
+    /// hardware-`i32::MIN`-on-overflow behavior) bit-for-bit instead of the (for this range,
+    /// actually wrong) integer shortcut.
     fn pure_map_index_from_ints(&self, x: i32, y: i32) -> usize {
-        // `vmath::round_to_int(R::from_i32(v))` is provably exactly `v` again for every `v` this
-        // function is ever called with (pixel coordinates ± a 32px tile offset — always tiny
-        // compared to `f32`'s 24-bit exact-integer range, per `Real::from_i32`'s doc comment):
-        // `from_i32` widens exactly, and `round_to_int` of an already-integer value adds/
-        // subtracts `0.5` then truncates, landing back on the same integer. So this divides `x`/
-        // `y` directly instead of taking the `int -> float -> round_to_int` round trip through
-        // [`Collision::get_pure_map_index`] (review round 2, finding F4) — same result, skips
-        // work that was provably a no-op.
-        let nx = (x / 32).clamp(0, self.width.max(1) - 1);
-        let ny = (y / 32).clamp(0, self.height.max(1) - 1);
+        const EXACT_LIMIT: i32 = 1 << 24;
+        let nx = if (-EXACT_LIMIT..EXACT_LIMIT).contains(&x) {
+            x / 32
+        } else {
+            vmath::round_to_int(R::from_i32(x)) / 32
+        };
+        let ny = if (-EXACT_LIMIT..EXACT_LIMIT).contains(&y) {
+            y / 32
+        } else {
+            vmath::round_to_int(R::from_i32(y)) / 32
+        };
+        let nx = nx.clamp(0, self.width.max(1) - 1);
+        let ny = ny.clamp(0, self.height.max(1) - 1);
         (ny * self.width + nx) as usize
     }
 
@@ -629,7 +659,12 @@ impl<R: Real> Collision<R> {
                 return true;
             }
         }
-        let offset_index = self.pure_map_index_from_ints(x + offset_x, y + offset_y);
+        // `wrapping_add`, not `+`: C++'s `int` arithmetic here wraps on overflow (two's
+        // complement, no UB in practice on this platform/toolchain), and `ix == i32::MIN`,
+        // `OffsetX == -32` is exactly the case `pure_map_index_from_ints`'s doc comment (F7)
+        // walks through — using plain `+` would panic in debug builds instead of reproducing
+        // that wraparound.
+        let offset_index = self.pure_map_index_from_ints(x.wrapping_add(offset_x), y.wrapping_add(offset_y));
         self.game[offset_index].index == map::TILE_THROUGH
             || self
                 .front
@@ -1333,9 +1368,15 @@ impl<R: Real> Collision<R> {
     }
 
     /// `CCollision::GetMapIndices(vec2 PrevPos, vec2 Pos, unsigned MaxIndices)`.
-    pub fn get_map_indices(&self, prev_pos: Vec2<R>, pos: Vec2<R>, max_indices: usize) -> Vec<i32> {
+    /// Writes into `out` (cleared first) instead of returning a freshly allocated `Vec` — zero
+    /// heap allocations in steady state when `out` is a reused scratch buffer whose capacity has
+    /// already grown to fit (acceptance criterion 1; review round 2, finding F9: called from
+    /// [`crate::world::ddrace_post_core_tick`] every tick a character is on or passes over any
+    /// `tile_exists` tile — freeze/speedup/stopper/tele/switch/kill/etc, i.e. most of a real
+    /// map's gameplay-relevant tiles — not a rare event the way `can_spawn`'s own allocation is).
+    pub fn get_map_indices_into(&self, prev_pos: Vec2<R>, pos: Vec2<R>, max_indices: usize, out: &mut Vec<i32>) {
+        out.clear();
         let d = vmath::distance(prev_pos, pos);
-        let mut out = Vec::new();
         if d == R::ZERO {
             let nx = (pos.x.to_i32_trunc() / 32).clamp(0, self.width - 1);
             let ny = (pos.y.to_i32_trunc() / 32).clamp(0, self.height - 1);
@@ -1343,7 +1384,7 @@ impl<R: Real> Collision<R> {
             if self.tile_exists(index) {
                 out.push(index);
             }
-            return out;
+            return;
         }
         let end = (d + R::ONE).to_i32_trunc();
         let mut last_index = 0;
@@ -1355,13 +1396,12 @@ impl<R: Real> Collision<R> {
             let index = ny * self.width + nx;
             if self.tile_exists(index) && last_index != index {
                 if max_indices != 0 && out.len() > max_indices {
-                    return out;
+                    return;
                 }
                 out.push(index);
                 last_index = index;
             }
         }
-        out
     }
 
     /// `CCollision::GetIndex(vec2 PrevPos, vec2 Pos)`: the map index of the first tele/speedup
@@ -1935,5 +1975,44 @@ mod tests {
         assert_eq!(clamp_vel(CANTMOVE_RIGHT, v), Vec2::new(0.0, -5.0));
         assert_eq!(clamp_vel(CANTMOVE_UP, v), Vec2::new(5.0, 0.0));
         assert_eq!(clamp_vel(0, v), v);
+    }
+
+    /// Task 1.3 review round 3, finding F7 (fixed in task 1.6): `is_through`'s second
+    /// `pure_map_index_from_ints` call adds `OffsetX`/`OffsetY` to `x`/`y` in `int` arithmetic
+    /// (matching C++) *before* dividing by 32 — at `x == i32::MIN`, `offset_x == -32` this wraps
+    /// to `2147483616` (`i32`, positive). C++'s `(float)2147483616` rounds to exactly
+    /// `2147483648.0f` (`2^31`, since a plain `int -> float` conversion there loses precision
+    /// past `f32`'s 24-bit mantissa), whose `round_to_int` hits `i32::MIN` (hardware "integer
+    /// indefinite"), landing on column `0` after the `/32` + clamp. The pre-fix "shortcut" (plain
+    /// integer division of the wrapped `2147483616`) instead landed on column `width - 1` — the
+    /// wrong column. This pins the *correct* (C++-matching) column-0 answer through the public
+    /// `is_through` API (`pure_map_index_from_ints` itself is private).
+    #[test]
+    fn is_through_matches_cpp_int_overflow_at_i32_min_offset() {
+        let w = 20i32;
+        // A `TILE_THROUGH` marker at column 0 (row 5) in one map, and at column `w - 1` (same
+        // row) in a separate, otherwise-identical map — only the column-0 map should report
+        // `is_through` true for this `x == i32::MIN`, `offset_x == -32` case.
+        let mut map_col0 = bordered_map(w, 10);
+        set_tile(&mut map_col0, 0, 5, tile(map::TILE_THROUGH));
+        let c0: Collision<f32> = Collision::new(&map_col0);
+
+        let mut map_last = bordered_map(w, 10);
+        set_tile(&mut map_last, w - 1, 5, tile(map::TILE_THROUGH));
+        let c_last: Collision<f32> = Collision::new(&map_last);
+
+        // `y` chosen so `y / 32` lands on tile row 5 regardless of the (irrelevant here) offset;
+        // `pos0`/`pos1` are dummies (no `TILE_THROUGH_DIR`/`TILE_THROUGH_ALL` involved on either
+        // side of this call, so the direction check inside `is_through` never triggers).
+        let y = 5 * 32 + 16;
+        let dummy = Vec2::new(0.0f32, 0.0f32);
+        assert!(
+            c0.is_through(i32::MIN, y, -32, 0, dummy, dummy),
+            "C++'s int->float overflow at i32::MIN lands on column 0, not column width-1"
+        );
+        assert!(
+            !c_last.is_through(i32::MIN, y, -32, 0, dummy, dummy),
+            "the pre-fix shortcut would have wrongly matched the width-1 column here"
+        );
     }
 }

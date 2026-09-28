@@ -283,6 +283,184 @@ pub const TILE_ALLOW_BLUE_TELE_GUN: u8 = 99;
 /// range `CCollision::Init` keeps (`m_Type <= TILE_NPH_ENABLE`). `mapitems.h` `TILE_NPH_ENABLE`.
 pub const TILE_NPH_ENABLE: u8 = 107;
 
+// --- Task 1.6: `CCharacter::HandleTiles`/`HandleSkippableTiles`/`DDRaceTick` game/front-layer
+// tile ids and switch-layer control tile ids (`src/game/mapitems.h`, verbatim numeric values). --
+
+/// Enables endless-hook for a character touching it (game/front). `mapitems.h`
+/// `TILE_EHOOK_ENABLE`.
+pub const TILE_EHOOK_ENABLE: u8 = 17;
+/// Disables endless-hook. `mapitems.h` `TILE_EHOOK_DISABLE`.
+pub const TILE_EHOOK_DISABLE: u8 = 18;
+/// Re-enables all "can't hit others" flags at once (game/front). `mapitems.h` `TILE_HIT_ENABLE`.
+pub const TILE_HIT_ENABLE: u8 = 19;
+/// Disables all "can hit others" flags at once (game/front). `mapitems.h` `TILE_HIT_DISABLE`.
+pub const TILE_HIT_DISABLE: u8 = 20;
+/// Enters a solo part (game/front; dispatched by the game controller, not `CCharacter` itself —
+/// `gamemodes/ddnet.cpp:108`). `mapitems.h` `TILE_SOLO_ENABLE`.
+pub const TILE_SOLO_ENABLE: u8 = 21;
+/// Leaves a solo part (game/front). `mapitems.h` `TILE_SOLO_DISABLE`. Numerically identical to
+/// [`TILE_SWITCHTIMEDOPEN`] — the two are never ambiguous in practice: one is only ever read from
+/// the game/front layer, the other only from the switch layer.
+pub const TILE_SOLO_DISABLE: u8 = 22;
+/// Switch-layer: opens switch `Number` for `Delay` seconds, then it auto-closes (a timed
+/// countdown pair with [`TILE_SWITCHTIMEDCLOSE`]). `mapitems.h` `TILE_SWITCHTIMEDOPEN`.
+pub const TILE_SWITCHTIMEDOPEN: u8 = 22;
+/// Switch-layer: closes switch `Number` for `Delay` seconds, then it auto-reopens. `mapitems.h`
+/// `TILE_SWITCHTIMEDCLOSE`.
+pub const TILE_SWITCHTIMEDCLOSE: u8 = 23;
+/// Switch-layer: opens switch `Number` until explicitly closed. `mapitems.h` `TILE_SWITCHOPEN`.
+pub const TILE_SWITCHOPEN: u8 = 24;
+/// Switch-layer: closes switch `Number` until explicitly opened. `mapitems.h` `TILE_SWITCHCLOSE`.
+pub const TILE_SWITCHCLOSE: u8 = 25;
+/// Refills the character's jump count immediately (game/front), edge-triggered via
+/// `CCharacter::m_LastRefillJumps`. `mapitems.h` `TILE_REFILL_JUMPS`.
+pub const TILE_REFILL_JUMPS: u8 = 32;
+/// Race-timer start (also read from the 4 diagonal "sensitivity" positions in
+/// `IGameController::HandleCharacterTiles`). `mapitems.h` `TILE_START`.
+pub const TILE_START: u8 = 33;
+/// Race-timer finish. `mapitems.h` `TILE_FINISH`.
+pub const TILE_FINISH: u8 = 34;
+/// DDRace-team tile: unlocks the character's current team (game/front). `mapitems.h`
+/// `TILE_UNLOCK_TEAM`.
+pub const TILE_UNLOCK_TEAM: u8 = 76;
+/// Switch-layer: sets `+Minutes*60+Seconds` onto the character's race timer, once per visit
+/// (edge-triggered via `CCharacter::m_LastPenalty`), and propagates to every other character
+/// currently on the same non-flock team. `mapitems.h` `TILE_ADD_TIME`.
+pub const TILE_ADD_TIME: u8 = 79;
+/// Game/front: disables player-vs-player collision for the toucher. `mapitems.h`
+/// `TILE_NPC_DISABLE`.
+pub const TILE_NPC_DISABLE: u8 = 88;
+/// Game/front: takes away unlimited air jumps. `mapitems.h` `TILE_UNLIMITED_JUMPS_DISABLE`.
+pub const TILE_UNLIMITED_JUMPS_DISABLE: u8 = 89;
+/// Game/front: takes away the jetpack gun. `mapitems.h` `TILE_JETPACK_DISABLE`.
+pub const TILE_JETPACK_DISABLE: u8 = 90;
+/// Game/front: disables hooking other players. `mapitems.h` `TILE_NPH_DISABLE`.
+pub const TILE_NPH_DISABLE: u8 = 91;
+/// Enables the tele-gun pickup for the gun weapon (game/front). `mapitems.h`
+/// `TILE_TELE_GUN_ENABLE`.
+pub const TILE_TELE_GUN_ENABLE: u8 = 96;
+/// Disables the gun-weapon tele-gun. `mapitems.h` `TILE_TELE_GUN_DISABLE`.
+pub const TILE_TELE_GUN_DISABLE: u8 = 97;
+/// Game/front: re-enables player-vs-player collision. `mapitems.h` `TILE_NPC_ENABLE`.
+pub const TILE_NPC_ENABLE: u8 = 104;
+/// Game/front: grants unlimited air jumps. `mapitems.h` `TILE_UNLIMITED_JUMPS_ENABLE`.
+pub const TILE_UNLIMITED_JUMPS_ENABLE: u8 = 105;
+/// Game/front: grants the jetpack gun. `mapitems.h` `TILE_JETPACK_ENABLE`.
+pub const TILE_JETPACK_ENABLE: u8 = 106;
+/// Enables the tele-gun pickup for the grenade weapon. `mapitems.h`
+/// `TILE_TELE_GRENADE_ENABLE`.
+pub const TILE_TELE_GRENADE_ENABLE: u8 = 112;
+/// Disables the grenade-weapon tele-gun. `mapitems.h` `TILE_TELE_GRENADE_DISABLE`.
+pub const TILE_TELE_GRENADE_DISABLE: u8 = 113;
+/// Enables the tele-gun pickup for the laser weapon. `mapitems.h` `TILE_TELE_LASER_ENABLE`.
+pub const TILE_TELE_LASER_ENABLE: u8 = 128;
+
+// --- Task 1.6: `IGameController::OnEntity`/`CGameContext::CreateAllEntities` map-fixture and
+// global-tile-flag ids (`src/game/mapitems.h`); `ENTITY_OFFSET` is the raw-tile-index bias
+// (`GameIndex - ENTITY_OFFSET` in `CreateAllEntities`) every `ENTITY_*` id below is relative to. -
+
+/// `CreateAllEntities`'s bias: a raw game/front/switch tile index `>= ENTITY_OFFSET` encodes an
+/// `ENTITY_*` id as `raw - ENTITY_OFFSET`. `mapitems.h` `ENTITY_OFFSET` (`255 - 16*4`).
+pub const ENTITY_OFFSET: u8 = 255 - 16 * 4;
+/// A default-team spawn point (only collected when scanning the *initial* map load). `mapitems.h`
+/// `ENTITY_SPAWN`.
+pub const ENTITY_SPAWN: u8 = 1;
+/// A red-team spawn point. `mapitems.h` `ENTITY_SPAWN_RED`.
+pub const ENTITY_SPAWN_RED: u8 = 2;
+/// A blue-team spawn point; also the upper end of the `ENTITY_SPAWN..=ENTITY_SPAWN_BLUE` scan
+/// range. `mapitems.h` `ENTITY_SPAWN_BLUE`.
+pub const ENTITY_SPAWN_BLUE: u8 = 3;
+/// Armor pickup. `mapitems.h` `ENTITY_ARMOR_1`.
+pub const ENTITY_ARMOR_1: u8 = 6;
+/// "Health" pickup — in DDRace this is `POWERUP_FREEZE` (freezes on touch), not a health refill.
+/// `mapitems.h` `ENTITY_HEALTH_1`.
+pub const ENTITY_HEALTH_1: u8 = 7;
+/// Shotgun pickup. `mapitems.h` `ENTITY_WEAPON_SHOTGUN`.
+pub const ENTITY_WEAPON_SHOTGUN: u8 = 8;
+/// Grenade launcher pickup. `mapitems.h` `ENTITY_WEAPON_GRENADE`.
+pub const ENTITY_WEAPON_GRENADE: u8 = 9;
+/// Ninja power-up pickup. `mapitems.h` `ENTITY_POWERUP_NINJA`.
+pub const ENTITY_POWERUP_NINJA: u8 = 10;
+/// Laser rifle pickup. `mapitems.h` `ENTITY_WEAPON_LASER`.
+pub const ENTITY_WEAPON_LASER: u8 = 11;
+/// Lower end of the light-rotation-speed marker range (`ENTITY_LASER_FAST_CCW..=
+/// ENTITY_LASER_FAST_CW`) — stage B (`CLight`); kept here only so [`ENTITY_LASER_SHORT`]'s
+/// neighbor-scan range is unambiguous. `mapitems.h` `ENTITY_LASER_FAST_CCW`.
+pub const ENTITY_LASER_FAST_CCW: u8 = 12;
+/// A non-rotating light source (`AngularSpeed == 0`) — the `Ind == 0` case of the
+/// `ENTITY_LASER_FAST_CCW..=ENTITY_LASER_FAST_CW` range. Stage B (`CLight`); named because task
+/// 1.6's cut-rule detector treats *only* this case as static-geometry-checkable (see
+/// `docs/formats.md`). `mapitems.h` `ENTITY_LASER_STOP`.
+pub const ENTITY_LASER_STOP: u8 = 15;
+/// Upper end of the light-rotation-speed marker range. `mapitems.h` `ENTITY_LASER_FAST_CW`.
+pub const ENTITY_LASER_FAST_CW: u8 = 18;
+/// Lower end of the door/light length-marker range read from a neighbor cell
+/// (`ENTITY_LASER_SHORT..=ENTITY_LASER_LONG`, `Length = 32*3 + 32*(marker - ENTITY_LASER_SHORT)*3`
+/// in `IGameController::OnEntity`). `mapitems.h` `ENTITY_LASER_SHORT`.
+pub const ENTITY_LASER_SHORT: u8 = 19;
+/// Upper end of the door/light length-marker range. `mapitems.h` `ENTITY_LASER_LONG`.
+pub const ENTITY_LASER_LONG: u8 = 21;
+/// Turret (`CGun`) variant marker: explosive, not freezing. `mapitems.h` `ENTITY_PLASMAE`.
+pub const ENTITY_PLASMAE: u8 = 29;
+/// Turret variant marker: freezing, not explosive. `mapitems.h` `ENTITY_PLASMAF`.
+pub const ENTITY_PLASMAF: u8 = 30;
+/// Turret variant marker: freezing and explosive. `mapitems.h` `ENTITY_PLASMA`.
+pub const ENTITY_PLASMA: u8 = 31;
+/// Turret variant marker: neither freezing nor explosive. `mapitems.h` `ENTITY_PLASMAU`.
+pub const ENTITY_PLASMAU: u8 = 32;
+/// "Crazy shotgun", rotation-flag variant: spawns a permanently-bouncing `WEAPON_SHOTGUN`
+/// `CProjectile` (explosive) at map-load time. Not a player-fired shotgun (that's a `CLaser`,
+/// stage B) — this map fixture is a genuine `CProjectile`, in Stage A's scope. `mapitems.h`
+/// `ENTITY_CRAZY_SHOTGUN_EX`.
+pub const ENTITY_CRAZY_SHOTGUN_EX: u8 = 33;
+/// "Crazy shotgun", `TILEFLAG_ROTATE`/`XFLIP|YFLIP`-variant: spawns a permanently-bouncing
+/// `WEAPON_SHOTGUN` `CProjectile` (not explosive, freezing). `mapitems.h`
+/// `ENTITY_CRAZY_SHOTGUN`.
+pub const ENTITY_CRAZY_SHOTGUN: u8 = 34;
+/// Shotgun-ammo armor pickup (drops the shotgun on touch). `mapitems.h` `ENTITY_ARMOR_SHOTGUN`.
+pub const ENTITY_ARMOR_SHOTGUN: u8 = 35;
+/// Grenade-ammo armor pickup. `mapitems.h` `ENTITY_ARMOR_GRENADE`.
+pub const ENTITY_ARMOR_GRENADE: u8 = 36;
+/// Ninja armor pickup (resets an active ninja's remaining time/velocity state). `mapitems.h`
+/// `ENTITY_ARMOR_NINJA`.
+pub const ENTITY_ARMOR_NINJA: u8 = 37;
+/// Laser-ammo armor pickup. `mapitems.h` `ENTITY_ARMOR_LASER`.
+pub const ENTITY_ARMOR_LASER: u8 = 38;
+/// Lower end of the weak-dragger marker range (`ENTITY_DRAGGER_WEAK..=ENTITY_DRAGGER_STRONG`,
+/// axis-aligned). Stage B (`CDragger`). `mapitems.h` `ENTITY_DRAGGER_WEAK`.
+pub const ENTITY_DRAGGER_WEAK: u8 = 42;
+/// Upper end of the axis-aligned dragger marker range. `mapitems.h` `ENTITY_DRAGGER_STRONG`.
+pub const ENTITY_DRAGGER_STRONG: u8 = 44;
+/// Lower end of the diagonal ("NW", `IgnoreWalls`) dragger marker range. `mapitems.h`
+/// `ENTITY_DRAGGER_WEAK_NW`.
+pub const ENTITY_DRAGGER_WEAK_NW: u8 = 45;
+/// Upper end of the diagonal dragger marker range. `mapitems.h` `ENTITY_DRAGGER_STRONG_NW`.
+pub const ENTITY_DRAGGER_STRONG_NW: u8 = 47;
+/// A door (switch-layer only: `SwitchType - ENTITY_OFFSET == ENTITY_DOOR`) — the door's own
+/// length/direction come from a neighboring switch-layer cell in the
+/// [`ENTITY_LASER_SHORT`]/[`ENTITY_LASER_LONG`] range; `Number` is the switch tile's own
+/// `m_Number`. Stage A (`CDoor` collision). `mapitems.h` `ENTITY_DOOR`.
+pub const ENTITY_DOOR: u8 = 49;
+
+// --- Task 1.6: `CreateAllEntities`'s map-wide global-effect tile ids (read from *any* game/front
+// cell, applied once at map load — `mapitems.h`, `gamecontext.cpp:4288-4312`). ------------------
+
+/// Anywhere on the game/front layer: sets `sv_old_laser = 1` for the whole map. `mapitems.h`
+/// `TILE_OLDLASER`.
+pub const TILE_OLDLASER: u8 = 71;
+/// Anywhere on the game/front layer: sets `player_collision` tuning to `0` for every zone.
+/// `mapitems.h` `TILE_NPC`.
+pub const TILE_NPC: u8 = 72;
+/// Anywhere on the game/front layer: sets `sv_endless_drag = 1` for the whole map. `mapitems.h`
+/// `TILE_EHOOK`.
+pub const TILE_EHOOK: u8 = 73;
+/// Anywhere on the game/front layer: sets `sv_hit = 0` for the whole map. `mapitems.h`
+/// `TILE_NOHIT`.
+pub const TILE_NOHIT: u8 = 74;
+/// Anywhere on the game/front layer: sets `player_hooking` tuning to `0` for every zone.
+/// `mapitems.h` `TILE_NPH`.
+pub const TILE_NPH: u8 = 75;
+
 // --- `CCollision::TileExists`'s two "interesting effect" game/front ranges (`mapitems.h`). ------
 
 /// Upper bound (inclusive) of the first `TileExists` range that starts at [`TILE_FREEZE`].

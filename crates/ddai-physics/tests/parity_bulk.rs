@@ -312,11 +312,20 @@ fn generate_cases(count: usize) -> Vec<GeneratedCase> {
                 5 => random_extreme_tuning(seed ^ 0xA5A5_5A5A_5A5A_5A5A),
                 _ => Vec::new(),
             };
+            // Task 1.3 review round 2, finding F8 (fixed in task 1.6): `i % 10 == 5` (the
+            // extreme-tuning branch above) only ever lands on odd `i`, so `no_weak_hook: i % 2
+            // == 0` was `false` for *every* extreme-tuning case — no scenario ever exercised
+            // `no_weak_hook=true` together with extreme tuning (an index-parity coincidence
+            // between the two `% ` selectors, not an intentional exclusion). `(i / 2) % 2` is
+            // uncorrelated with `i % 10 == 5`'s parity, so the extreme-tuning cases now cover
+            // both `no_weak_hook` values as intended; other cases keep the original `i % 2`
+            // derivation (no reason to change what already worked for them).
+            let no_weak_hook = if i % 10 == 5 { (i / 2) % 2 == 0 } else { i % 2 == 0 };
             cases.push(GeneratedCase {
                 recipe,
                 seed,
                 characters: 1 + (i as u32 % 8),
-                no_weak_hook: i % 2 == 0,
+                no_weak_hook,
                 tuning_overrides,
                 sparse_ids: if i % 3 == 0 {
                     Some(ID_POOLS[i % ID_POOLS.len()])
@@ -436,5 +445,31 @@ fn generates_and_replays_additional_scenarios_through_oracle_a() {
         "generates_and_replays_additional_scenarios_through_oracle_a: {scenarios_checked} scenarios, \
          {} ticks, {total_character_ticks} character-ticks, 0 mismatches",
         scenarios_checked * TICKS as u64
+    );
+}
+
+/// Task 1.3 review round 2, finding F8 (fixed in task 1.6): pins that the extreme-tuning cases
+/// (`i % 10 == 5`) cover both `no_weak_hook` values, not just one — this is a lightweight,
+/// always-run guard (no C++ oracle required) for the `generate_cases` fix above; the actual
+/// parity coverage claim still comes from `generates_and_replays_additional_scenarios_through_oracle_a`
+/// (`#[ignore]`, requires the oracle binary).
+#[test]
+fn extreme_tuning_cases_cover_both_no_weak_hook_values() {
+    let cases = generate_cases(2000);
+    let extreme_tuned: Vec<&GeneratedCase> = cases
+        .iter()
+        .filter(|c| !c.tuning_overrides.is_empty() && c.tuning_overrides.len() > 3)
+        .collect();
+    assert!(
+        !extreme_tuned.is_empty(),
+        "expected at least one extreme-tuning case (i % 10 == 5) in the first 2000"
+    );
+    assert!(
+        extreme_tuned.iter().any(|c| c.no_weak_hook),
+        "no extreme-tuning case has no_weak_hook=true — F8 regressed"
+    );
+    assert!(
+        extreme_tuned.iter().any(|c| !c.no_weak_hook),
+        "no extreme-tuning case has no_weak_hook=false"
     );
 }

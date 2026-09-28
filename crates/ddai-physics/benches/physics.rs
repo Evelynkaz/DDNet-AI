@@ -36,6 +36,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use ddai_physics::collision::Collision;
 use ddai_physics::core::{self, CharacterCore, PlayerInput, TeamsCore, WorldCore};
 use ddai_physics::map::MapData;
+use ddai_physics::real::Real;
 use ddai_physics::vmath::Vec2;
 use ddai_trace::synthetic;
 use std::hint::black_box;
@@ -155,5 +156,198 @@ fn bench_clone(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_world_tick, bench_clone);
+/// Task 1.6, spec item 7 ("measure that it costs nothing noticeable"): the `black_box`-hardened
+/// `Real::powf`/`sin`/`atan2` (see `src/real.rs`'s module doc comment) against the exact same
+/// calls made directly through `f32`'s own inherent methods (no `black_box`) — both loops touch
+/// the same number of transcendental calls over the same varying input, so any real overhead
+/// `black_box` adds would show up as a throughput difference between the two `bench_function`s.
+fn bench_real_math_black_box(c: &mut Criterion) {
+    let mut group = c.benchmark_group("real_math_black_box");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("via_real_trait_with_black_box", |b| {
+        let mut x: f32 = 0.1;
+        b.iter(|| {
+            x = black_box(x.powf(black_box(2.0f32)));
+            x = Real::sin(x) * 0.5 + 0.5; // keep x in a stable range across iterations
+            x = Real::atan2(x, 0.7f32);
+            black_box(x)
+        });
+    });
+
+    group.bench_function("direct_std_no_black_box", |b| {
+        let mut x: f32 = 0.1;
+        b.iter(|| {
+            x = f32::powf(x, 2.0f32);
+            x = f32::sin(x) * 0.5 + 0.5;
+            x = f32::atan2(x, 0.7f32);
+            black_box(x)
+        });
+    });
+
+    group.finish();
+}
+
+/// Task 1.6, Stage A, spec item 6: "criterion bench on Copy Love Box and BlmapChill with 2 and 8
+/// characters doing block-like input: report world-ticks/s and character-ticks/s". Loads each
+/// map's rawmap bytes straight from the Oracle B corpus (`~/aiddnet/data/traces/oracle-b/v1/`,
+/// outside the repo — skipped, not failed, if that directory isn't present in this environment,
+/// same convention `tests/parity_oracle_b.rs` uses), places `n` characters on its own
+/// `spawn_points` (falling back to the map center, spaced out, if the map has fewer spawn points
+/// than characters), and drives every tick with "block-like" input: `hook` held every tick
+/// (block mode's defining behavior — constantly trying to hook other players/walls),
+/// `direction` alternating every 15 ticks, `jump` pulsed every 5th tick, `target_x`/`target_y`
+/// aimed at the *next* character in the list (wrapping) — a deterministic, no-RNG stand-in for
+/// "a player trying to hook someone" rather than a claim of realistic human play. This is
+/// `World::step()` alone (no trace comparison, no I/O) — the harness-dominated
+/// ~13.8k ticks/s/~41k character-ticks/s `measures_world_step_throughput_on_one_real_map_trace`
+/// (`tests/parity_oracle_b.rs`) reports is a different, much lower number for exactly that
+/// reason (comparison/IO-bound, not `step()`-bound); see this bench's own numbers in the task's
+/// `BUILD REPORT` for the honest comparison against the ≥1M character-ticks/s target.
+fn bench_world_step_on_real_maps(c: &mut Criterion) {
+    let corpus_dir = {
+        let home = std::env::var("HOME").expect("HOME must be set");
+        std::path::PathBuf::from(home).join("aiddnet/data/traces/oracle-b/v1")
+    };
+    let maps: [(&str, &str); 2] = [
+        ("BlmapChill", "realmap_BlmapChill__seed10001.rawmap"),
+        (
+            "CopyLoveBox",
+            "realmap_Copy_Love_Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25__seed10001.rawmap",
+        ),
+    ];
+
+    for (map_name, rawmap_file) in maps {
+        let rawmap_path = corpus_dir.join(rawmap_file);
+        let Ok(rawmap_bytes) = std::fs::read(&rawmap_path) else {
+            eprintln!(
+                "bench_world_step_on_real_maps: skipping {map_name} — {} not found (Oracle B corpus not present in this environment)",
+                rawmap_path.display()
+            );
+            continue;
+        };
+        let map = match ddai_trace::rawmap::read(&rawmap_bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("bench_world_step_on_real_maps: skipping {map_name} — failed to parse {rawmap_file}: {e:?}");
+                continue;
+            }
+        };
+
+        for &n in &[2usize, 8usize] {
+            let mut world: ddai_physics::world::World<f32> = ddai_physics::world::World::from_map(&map, 1);
+            world.init(std::iter::empty::<&str>()).unwrap();
+            let spawn_positions: Vec<Vec2<f32>> = (0..n)
+                .map(|i| {
+                    world
+                        .spawn_points
+                        .get(i)
+                        .copied()
+                        .unwrap_or_else(|| Vec2::new(200.0 + (i as f32) * 64.0, 200.0))
+                })
+                .collect();
+            let spawn_at = |i: usize| -> Vec2<f32> { spawn_positions[i] };
+            for i in 0..n {
+                world.players[i] = Some(ddai_physics::world::Player::new(0));
+                ddai_physics::world::spawn_character(&mut world, i as i32, spawn_at(i));
+            }
+
+            let mut tick: u32 = 0;
+            let mut group = c.benchmark_group(format!("world_step_{map_name}_{n}_characters"));
+            group.throughput(Throughput::Elements(n as u64));
+            group.bench_function("block_like_input", |b| {
+                b.iter(|| {
+                    let inputs: Vec<ddai_physics::world::TickInput> = (0..n)
+                        .map(|i| {
+                            let target = spawn_at((i + 1) % n) - spawn_at(i);
+                            ddai_physics::world::TickInput {
+                                id: i as u8,
+                                input: PlayerInput {
+                                    direction: if (tick / 15).is_multiple_of(2) { 1 } else { -1 },
+                                    target_x: target.x as i32 + 1,
+                                    target_y: target.y as i32 + 1,
+                                    jump: i32::from(tick.is_multiple_of(5)),
+                                    fire: 0,
+                                    hook: 1,
+                                    player_flags: 0,
+                                    wanted_weapon: 0,
+                                    next_weapon: 0,
+                                    prev_weapon: 0,
+                                },
+                                kill: false,
+                            }
+                        })
+                        .collect();
+                    world.step(&inputs);
+                    tick = tick.wrapping_add(1);
+                    black_box(world.tick);
+                });
+            });
+            group.finish();
+        }
+    }
+}
+
+/// Review round 1, finding F10: [`bench_clone`] above measures `WorldCore::clone()` (the tiny
+/// task-1.3 core array), not `world::World::clone()` (this task's own type, acceptance criterion
+/// 1/6's actual "save/restore" target) — on a real map, `World::collision` used to be the
+/// dominant cost of a `World::clone()` (measured before the `Arc` fix: ~3.25 ms / 21.7 MB for
+/// `BlmapChill`, ~350 `World::step` calls' worth). This benches the real thing, 2 characters, on
+/// the same two real maps [`bench_world_step_on_real_maps`] already loads — target: a few µs.
+fn bench_world_clone_on_real_maps(c: &mut Criterion) {
+    let corpus_dir = {
+        let home = std::env::var("HOME").expect("HOME must be set");
+        std::path::PathBuf::from(home).join("aiddnet/data/traces/oracle-b/v1")
+    };
+    let maps: [(&str, &str); 2] = [
+        ("BlmapChill", "realmap_BlmapChill__seed10001.rawmap"),
+        (
+            "CopyLoveBox",
+            "realmap_Copy_Love_Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25__seed10001.rawmap",
+        ),
+    ];
+
+    for (map_name, rawmap_file) in maps {
+        let rawmap_path = corpus_dir.join(rawmap_file);
+        let Ok(rawmap_bytes) = std::fs::read(&rawmap_path) else {
+            eprintln!(
+                "bench_world_clone_on_real_maps: skipping {map_name} — {} not found (Oracle B corpus not present in this environment)",
+                rawmap_path.display()
+            );
+            continue;
+        };
+        let map = match ddai_trace::rawmap::read(&rawmap_bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("bench_world_clone_on_real_maps: skipping {map_name} — failed to parse {rawmap_file}: {e:?}");
+                continue;
+            }
+        };
+
+        let mut world: ddai_physics::world::World<f32> = ddai_physics::world::World::from_map(&map, 1);
+        world.init(std::iter::empty::<&str>()).unwrap();
+        for i in 0..2 {
+            let pos = world
+                .spawn_points
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| Vec2::new(200.0 + (i as f32) * 64.0, 200.0));
+            world.players[i] = Some(ddai_physics::world::Player::new(0));
+            ddai_physics::world::spawn_character(&mut world, i as i32, pos);
+        }
+
+        c.bench_function(&format!("clone_two_character_world_{map_name}"), |b| {
+            b.iter(|| black_box(world.clone()));
+        });
+    }
+}
+
+criterion_group!(
+    benches,
+    bench_world_tick,
+    bench_clone,
+    bench_world_clone_on_real_maps,
+    bench_real_math_black_box,
+    bench_world_step_on_real_maps
+);
 criterion_main!(benches);

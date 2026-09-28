@@ -14,6 +14,28 @@
 //! port must not either: every arithmetic expression elsewhere in this crate is written to
 //! mirror the C++ source's exact operation order and relies on the plain (non-fused) `+`/`*`
 //! this trait's operators provide.
+//!
+//! **Constant folding of libm calls (task 1.6, lesson from the 3.1a review).** LLVM rewrites
+//! `powf`/`pow` calls whose exponent (or, for some patterns, base) is a compile-time constant
+//! *even without fast-math*: `pow(x, -1)` becomes `1/x`, `pow(2^n, y)` becomes `exp2(n*y)`, and
+//! `pow(x, 2)` may become `x*x` — all algebraically equal to the libm call in exact arithmetic,
+//! but not bit-for-bit equal to what glibc's `pow`/`powf` actually returns at run time (glibc's
+//! implementation does not special-case these exponents the same way). This crate's own callers
+//! never write a literal exponent directly (`powf`'s only ported call site,
+//! [`crate::core::velocity_ramp`], passes a *runtime* value — the DDRace old-type speedup
+//! port's own literal-`2`-exponent `std::pow` call does *not* go through this method at all, see
+//! [`Real::powf`]'s own doc comment for why), but after inlining across a generic `R: Real` boundary the optimizer can
+//! still see a literal at the final, monomorphized call site (e.g. a caller that happens to
+//! compute the same runtime value as some constant one). Every `impl Real::powf`/`sin`/`cos`/
+//! `atan`/`atan2` below passes its argument(s) through [`std::hint::black_box`] specifically to
+//! block that: `black_box` is defined to force the value through an (unoptimized-away) memory
+//! round trip, which erases any "this happens to be a compile-time constant" fact the optimizer
+//! might otherwise have propagated into the call, at effectively zero run-time cost (it is not a
+//! real memory barrier on any target this crate builds for — see `real_math_black_box_bench` in
+//! `benches/physics.rs` for a measurement). `ddai-physics`'s own core/collision/tuning code (task
+//! 1.3) was checked and has no call site that passes a literal argument to `Real::powf`/etc., so
+//! this hardening is defense-in-depth for this crate and every future caller, not a fix for an
+//! observed mismatch.
 
 use std::fmt::Debug;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
@@ -90,9 +112,30 @@ pub trait Real:
 
     /// `std::sqrt(Self)`.
     fn sqrt(self) -> Self;
-    /// `std::pow(Self, Self)` — used only by [`crate::core::velocity_ramp`], matching
-    /// `VelocityRamp`'s `std::pow(Curvature, (Value - Start) / Range)` (`gamecore.cpp`).
+    /// `std::pow(Self, Self)`, i.e. C++'s `float pow(float, float)`/`double pow(double, double)`
+    /// overload — used only by [`crate::core::velocity_ramp`], matching `VelocityRamp`'s
+    /// `std::pow(Curvature, (Value - Start) / Range)` (`gamecore.cpp`), whose *both* arguments
+    /// are genuinely `float` in the C++ source, so this exact-type overload applies with no
+    /// promotion. **Not** a match for `std::pow(SomeFloat, 2)` (a bare `int` literal exponent,
+    /// as the DDRace old-type speedup port's `character.cpp:1558` has): with a mismatched
+    /// argument-type pair, overload resolution instead picks the generic `<cmath>` "additional
+    /// overload" that promotes *both* arguments (and the result) to `double` regardless of `R`
+    /// — see `crate::world::apply_speedup`'s own `to_f64()`/`powi`/`sqrt` for why that call
+    /// site does not use this method (an earlier revision of this crate did, and this doc
+    /// comment used to claim that was correct — found empirically: the `f32` path differed from
+    /// a `double`-throughout one on 16% of 1M random inputs). See the module doc comment's
+    /// "constant folding" note and each `impl Real`'s `powf` for why the exponent (and base) are
+    /// passed through [`std::hint::black_box`] here.
     fn powf(self, exp: Self) -> Self;
+    // Deliberately **no** `ln`/`log` method here: this crate's one ported `log(...)` call
+    // (`crate::world::max_ramp_speed`, `character.cpp:1580`) is the *bare*, unqualified C
+    // library function — not `std::log` — which has no `float` overload at all (unlike
+    // `std::pow`'s `float pow(float, float)`), so it *always* computes in `double` regardless of
+    // its argument's original type, with the caller responsible for widening first and
+    // narrowing the final result back once. A generic `Real::ln` returning `Self` would invite
+    // exactly the bug review round 2 found: an earlier revision of this crate had one, computing
+    // natively in `R` (`f32::ln`/`f64::ln`) — wrong for the `f32` instantiation, since the real
+    // call is `double`-only. `max_ramp_speed` calls `f64::ln()` directly instead.
     /// `std::sin(Self)`.
     fn sin(self) -> Self;
     /// `std::cos(Self)`.
@@ -172,19 +215,22 @@ impl Real for f32 {
         f32::sqrt(self)
     }
     fn powf(self, exp: Self) -> Self {
-        f32::powf(self, exp)
+        // See the module doc comment's "constant folding" note: `black_box` on both operands
+        // blocks LLVM from rewriting a literal-exponent `pow` (e.g. `pow(x, 2)` -> `x*x`) into
+        // something that is no longer bit-for-bit what glibc's `powf` returns at run time.
+        f32::powf(std::hint::black_box(self), std::hint::black_box(exp))
     }
     fn sin(self) -> Self {
-        f32::sin(self)
+        f32::sin(std::hint::black_box(self))
     }
     fn cos(self) -> Self {
-        f32::cos(self)
+        f32::cos(std::hint::black_box(self))
     }
     fn atan(self) -> Self {
-        f32::atan(self)
+        f32::atan(std::hint::black_box(self))
     }
     fn atan2(self, x: Self) -> Self {
-        f32::atan2(self, x)
+        f32::atan2(std::hint::black_box(self), std::hint::black_box(x))
     }
     fn abs(self) -> Self {
         f32::abs(self)
@@ -235,19 +281,20 @@ impl Real for f64 {
         f64::sqrt(self)
     }
     fn powf(self, exp: Self) -> Self {
-        f64::powf(self, exp)
+        // See `impl Real for f32`'s `powf` and the module doc comment.
+        f64::powf(std::hint::black_box(self), std::hint::black_box(exp))
     }
     fn sin(self) -> Self {
-        f64::sin(self)
+        f64::sin(std::hint::black_box(self))
     }
     fn cos(self) -> Self {
-        f64::cos(self)
+        f64::cos(std::hint::black_box(self))
     }
     fn atan(self) -> Self {
-        f64::atan(self)
+        f64::atan(std::hint::black_box(self))
     }
     fn atan2(self, x: Self) -> Self {
-        f64::atan2(self, x)
+        f64::atan2(std::hint::black_box(self), std::hint::black_box(x))
     }
     fn abs(self) -> Self {
         f64::abs(self)

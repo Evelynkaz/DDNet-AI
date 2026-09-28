@@ -399,6 +399,101 @@ impl TuningParams {
     pub fn ground_elasticity_y<R: crate::real::Real>(&self) -> R {
         self.param(idx::GROUND_ELASTICITY_Y)
     }
+
+    // Task 1.6: weapon/projectile tuning accessors (`character.cpp`/`projectile.cpp`, out of
+    // task 1.3's core-only scope, in scope here). Same pattern as the accessors above.
+    /// `m_GunCurvature` (`gun_curvature`).
+    pub fn gun_curvature<R: crate::real::Real>(&self) -> R {
+        self.param(idx::GUN_CURVATURE)
+    }
+    /// `m_GunSpeed` (`gun_speed`).
+    pub fn gun_speed<R: crate::real::Real>(&self) -> R {
+        self.param(idx::GUN_SPEED)
+    }
+    /// `m_GunLifetime` (`gun_lifetime`), in seconds — `character.cpp:574`:
+    /// `(int)(Server()->TickSpeed() * GetTuning(m_TuneZone)->m_GunLifetime)`.
+    pub fn gun_lifetime(&self) -> f32 {
+        self.param::<f32>(idx::GUN_LIFETIME)
+    }
+    /// `m_GrenadeCurvature` (`grenade_curvature`).
+    pub fn grenade_curvature<R: crate::real::Real>(&self) -> R {
+        self.param(idx::GRENADE_CURVATURE)
+    }
+    /// `m_GrenadeSpeed` (`grenade_speed`).
+    pub fn grenade_speed<R: crate::real::Real>(&self) -> R {
+        self.param(idx::GRENADE_SPEED)
+    }
+    /// `m_GrenadeLifetime` (`grenade_lifetime`), in seconds — see [`Self::gun_lifetime`]'s doc
+    /// comment for the same pattern (`character.cpp:605`).
+    pub fn grenade_lifetime(&self) -> f32 {
+        self.param::<f32>(idx::GRENADE_LIFETIME)
+    }
+    /// `m_ShotgunCurvature` (`shotgun_curvature`) — used by the `ENTITY_CRAZY_SHOTGUN[_EX]` map
+    /// fixture's `CProjectile` (a real `WEAPON_SHOTGUN`-typed projectile; Stage A scope), not by
+    /// the player's own shotgun fire (a `CLaser`, Stage B).
+    pub fn shotgun_curvature<R: crate::real::Real>(&self) -> R {
+        self.param(idx::SHOTGUN_CURVATURE)
+    }
+    /// `m_ShotgunSpeed` (`shotgun_speed`).
+    pub fn shotgun_speed<R: crate::real::Real>(&self) -> R {
+        self.param(idx::SHOTGUN_SPEED)
+    }
+    /// `m_JetpackStrength` (`jetpack_strength`) — read by `HandleJetpack` (`character.cpp:289`);
+    /// never actually applied in this corpus (`jetpack_ticks == 0` — no scenario/map ever sets
+    /// `m_Core.m_Jetpack`), kept for structural completeness.
+    pub fn jetpack_strength<R: crate::real::Real>(&self) -> R {
+        self.param(idx::JETPACK_STRENGTH)
+    }
+    /// `m_ExplosionStrength` (`explosion_strength`) — `CGameContext::CreateExplosion`
+    /// (`gamecontext.cpp:372`).
+    pub fn explosion_strength<R: crate::real::Real>(&self) -> R {
+        self.param(idx::EXPLOSION_STRENGTH)
+    }
+    /// `m_HammerStrength` (`hammer_strength`) — `FireWeapon`'s `WEAPON_HAMMER` case
+    /// (`character.cpp:547`).
+    pub fn hammer_strength<R: crate::real::Real>(&self) -> R {
+        self.param(idx::HAMMER_STRENGTH)
+    }
+
+    /// `CTuningParams::GetWeaponFireDelay(int Weapon)` (`gamecore.cpp:56-68`): always plain
+    /// `float` arithmetic in the C++ source (the return type is `float`, unconditionally, never
+    /// widened to whatever `R` the calling `CharacterCore<R>` uses) — so this returns `f32`
+    /// rather than being generic over [`crate::real::Real`], matching that exactly.
+    ///
+    /// # Panics
+    ///
+    /// If `weapon` isn't one of `WEAPON_HAMMER..=WEAPON_NINJA` (`0..=5`) — matches the C++
+    /// `dbg_assert_failed` on its `default` switch case (a caller passing e.g. `-1`, "no
+    /// weapon", is a logic error the same way it would be in the original).
+    pub fn get_weapon_fire_delay(&self, weapon: i32) -> f32 {
+        let idx = match weapon {
+            0 => idx::HAMMER_FIRE_DELAY,
+            1 => idx::GUN_FIRE_DELAY,
+            2 => idx::SHOTGUN_FIRE_DELAY,
+            3 => idx::GRENADE_FIRE_DELAY,
+            4 => idx::LASER_FIRE_DELAY,
+            5 => idx::NINJA_FIRE_DELAY,
+            other => panic!("GetWeaponFireDelay: invalid weapon {other}"),
+        };
+        self.param::<f32>(idx) / 1000.0f32
+    }
+
+    /// `m_HammerFireDelay`/`m_HammerHitFireDelay` — the "miss"/"hit" reload-timer formulas
+    /// `FireWeapon`'s `WEAPON_HAMMER` case picks between (`character.cpp:561-566`), each already
+    /// divided into [`Self::get_weapon_fire_delay`]'s `WEAPON_HAMMER` case for the "miss" one;
+    /// this is the "hit" one specifically, in **milliseconds** (not yet divided by 1000, and not
+    /// yet multiplied by `TickSpeed` — `character.cpp:564-565` does
+    /// `FireDelay * Server()->TickSpeed() / 1000` as a single `float` expression, so callers
+    /// reproduce that exact expression shape themselves rather than composing two already-scaled
+    /// helpers).
+    pub fn hammer_hit_fire_delay_ms(&self) -> f32 {
+        self.param::<f32>(idx::HAMMER_HIT_FIRE_DELAY)
+    }
+    /// `m_HammerFireDelay`, in **milliseconds** — see [`Self::hammer_hit_fire_delay_ms`]'s doc
+    /// comment for why this is the raw millisecond value, not a ticks conversion.
+    pub fn hammer_fire_delay_ms(&self) -> f32 {
+        self.param::<f32>(idx::HAMMER_FIRE_DELAY)
+    }
 }
 
 /// `CWorldCore`/`CCharacter::m_Core.m_Tuning` per-zone overrides (`TILE_TUNE`, `CTuneTile`):
