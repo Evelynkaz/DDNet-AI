@@ -6,6 +6,7 @@
 
 mod fly_cmd;
 mod map_cmd;
+mod play_cmd;
 mod trace_cmd;
 mod web_cmd;
 
@@ -32,6 +33,9 @@ enum Command {
     Web(web_cmd::WebArgs),
     /// Generates (and stores the argon2id hash of) the web UI's owner password.
     WebPasswd(web_cmd::WebPasswdArgs),
+    /// Connects to a real DDNet 20.x server and plays with a trivial built-in brain (task 2.3;
+    /// the real bot's brain is a later phase) — `--server 127.0.0.1:8303 --brain idle|circle`.
+    Play(play_cmd::PlayArgs),
 }
 
 fn main() -> ExitCode {
@@ -43,6 +47,7 @@ fn main() -> ExitCode {
         Some(Command::Map(args)) => map_cmd::run(args),
         Some(Command::Web(args)) => web_cmd::run_web(args),
         Some(Command::WebPasswd(args)) => web_cmd::run_web_passwd(args),
+        Some(Command::Play(args)) => play_cmd::run(args),
     }
 }
 
@@ -483,5 +488,60 @@ mod tests {
             },
             other => panic!("expected Fly command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn play_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303"]).expect("play should parse");
+        match cli.command {
+            Some(super::Command::Play(args)) => {
+                assert_eq!(args.server, "127.0.0.1:8303".parse().unwrap());
+                assert_eq!(args.name, "ddai-bot");
+                assert!(matches!(args.brain, super::play_cmd::Brain::Idle));
+                assert_eq!(args.duration, 30);
+                assert!(args.data_dir.is_none());
+            }
+            other => panic!("expected Play command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn play_parses_all_flags() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "play",
+            "--server",
+            "127.0.0.1:8303",
+            "--name",
+            "test-bot",
+            "--brain",
+            "circle",
+            "--duration",
+            "60",
+            "--data-dir",
+            "/tmp/ddai-data",
+        ])
+        .expect("play should parse with flags");
+        match cli.command {
+            Some(super::Command::Play(args)) => {
+                assert_eq!(args.name, "test-bot");
+                assert!(matches!(args.brain, super::play_cmd::Brain::Circle));
+                assert_eq!(args.duration, 60);
+                assert_eq!(args.data_dir, Some(std::path::PathBuf::from("/tmp/ddai-data")));
+            }
+            other => panic!("expected Play command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn play_rejects_missing_server() {
+        let result = Cli::try_parse_from(["ddnet-ai", "play"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn play_rejects_invalid_brain() {
+        let result = Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303", "--brain", "planner"]);
+        assert!(result.is_err());
     }
 }

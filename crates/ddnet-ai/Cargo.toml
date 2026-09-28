@@ -16,6 +16,7 @@ workspace = true
 
 [dependencies]
 clap = { workspace = true }
+ddai-client = { path = "../ddai-client" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-flyg = { path = "../ddai-flyg" }
 ddai-map = { path = "../ddai-map" }

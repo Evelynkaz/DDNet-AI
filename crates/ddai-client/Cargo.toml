@@ -1,0 +1,32 @@
+[package]
+name = "ddai-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "DDNet 20.x client session (task 2.3): a sans-IO join-sequence/snapshot/input-timing state machine over ddai-net, plus a real UDP driver exposing Client::connect/events/set_input/disconnect."
+
+[lib]
+name = "ddai_client"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-net = { path = "../ddai-net" }
+ddai-map = { path = "../ddai-map" }
+thiserror = "2"
+tracing = "0.1"
+# Only for `map_cache::sha256_of` (hashing bytes we have not yet handed to `ddai_map::load_map`,
+# e.g. to check a cache hit *before* paying for a full `load_map`/CRC/sha256 verification pass);
+# same crate `ddai-map` already depends on, so this adds no new dependency to the tree.
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.14"
+# Unlocks `ddai_map::testutil` (a tiny synthetic `.map` builder) for this crate's own tests, same
+# pattern `ddai-map` uses on itself — see that crate's Cargo.toml.
+ddai-map = { path = "../ddai-map", features = ["test-util"] }
