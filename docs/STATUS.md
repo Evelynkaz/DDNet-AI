@@ -28,7 +28,7 @@
 2. **Правки 2.4** (LiveWorld) у билдера — worktree `~/aiddnet/wt/task-2.4`.
    - Находки ревью 1: боезапас, перезарядка, таймеры свитчей, зона тюнинга, живой тест своих вводов, соло,
      ограничения на тики, e2e по карте, тесты.
-   - Если билдер потерян, текст находок — в этом разговоре. Кратко: F1 ammo как в `prediction/entities/character.cpp:1538-1548`;
+   - Находки целиком — `~/aiddnet/data/specs/2.4-review-round1.md`. Кратко: F1 ammo как в `prediction/entities/character.cpp:1538-1548`;
      F2 `num_inputs` ≥ 2, `latest_input`, reload из `attack_tick`; F3 чистить истёкшие `end_tick`, kind как у клиента;
      F4 тюнинг в зону своего ти (`gameclient.cpp:3440-3517`); F5 `InputSent`+PredTick из InputTiming, живой e2e с
      движущимся ти ≥ 0.999; F6 `teams_core.set_solo`; F7 кап 150 тиков на evolve и горизонт; F8 карта из
