@@ -265,6 +265,26 @@ impl<'a> View<'a> {
         out
     }
 
+    /// Every `CNetObj_SwitchState` in this snapshot, as `(team, state)` pairs — task 2.4's
+    /// LiveWorld needs the switch layer's live on/off status, which (unlike characters/
+    /// projectiles/pickups) is sent once per *DDRace team*, not once per client id: `id()` here
+    /// is `CGameContext::SnapSwitchers`'s `SentTeam` (`gamecontext.cpp:504-557`) — the receiving
+    /// client's own current team (or `0` server-wide once `sv_team == SV_TEAM_FORCED_SOLO`), so a
+    /// single connection normally sees at most one entry (its own team's switch state); a
+    /// multi-connection observer (e.g. this project's own scripted test clients, each on a
+    /// possibly different team) can see one per distinct team represented among them.
+    pub fn switch_states(&self) -> Vec<(i32, objects::SwitchState)> {
+        let mut out = Vec::new();
+        for it in &self.snap.items {
+            if ex_name(self.snap, it) == Some("switch-state@netobj.ddnet.tw")
+                && let Some((v, _)) = objects::SwitchState::decode(&it.data)
+            {
+                out.push((it.id(), v));
+            }
+        }
+        out
+    }
+
     /// Every item this view has no specific accessor for (an unknown numbered type, an
     /// unresolved/unregistered UUID, or a known ex type with no wrapper method above) — task
     /// acceptance criterion 3's "unknown object types are kept as raw items": nothing in
@@ -415,6 +435,52 @@ mod tests {
         let view = View::new(&snap);
         let got = view.character(0).expect("present");
         assert_eq!(got.ddnet, None);
+    }
+
+    /// Task 2.4 review round 1, finding F9: `View::switch_states` had no test at all.
+    #[test]
+    fn switch_states_decodes_one_per_team_id() {
+        let mut team0_data = vec![5]; // highest_switch_number
+        team0_data.extend_from_slice(&[0b0101, 0, 0, 0, 0, 0, 0, 0]); // status: switches 0,2 open
+        team0_data.extend_from_slice(&[2, 0, 0, 0]); // switch_numbers (only slot 0 used)
+        team0_data.extend_from_slice(&[1010, 0, 0, 0]); // end_ticks
+
+        let mut team1_data = vec![5];
+        team1_data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
+        team1_data.extend_from_slice(&[0, 0, 0, 0]);
+        team1_data.extend_from_slice(&[0, 0, 0, 0]);
+
+        let snap = Snapshot {
+            items: vec![
+                ex_type_descriptor(0x4001, "switch-state@netobj.ddnet.tw"),
+                SnapshotItem {
+                    key: (0x4001 << 16), // team 0
+                    data: team0_data,
+                },
+                SnapshotItem {
+                    key: (0x4001 << 16) | 1, // team 1
+                    data: team1_data,
+                },
+            ],
+        };
+        let view = View::new(&snap);
+        let mut states = view.switch_states();
+        states.sort_by_key(|&(team, _)| team);
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].0, 0);
+        assert_eq!(states[0].1.highest_switch_number, 5);
+        assert_eq!(states[0].1.status[0], 0b0101);
+        assert_eq!(states[0].1.switch_numbers[0], 2);
+        assert_eq!(states[0].1.end_ticks[0], 1010);
+        assert_eq!(states[1].0, 1);
+        assert_eq!(states[1].1.status[0], 0);
+    }
+
+    #[test]
+    fn switch_states_is_empty_when_absent() {
+        let snap = Snapshot { items: vec![] };
+        let view = View::new(&snap);
+        assert!(view.switch_states().is_empty());
     }
 
     #[test]

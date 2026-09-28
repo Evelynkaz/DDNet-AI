@@ -1,0 +1,35 @@
+[package]
+name = "ddai-world"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "LiveWorld (task 2.4): turns the client's snapshot stream into a predicted ddai-physics::World<f32> at PredTick, builds ddai-brain::Observation, and measures prediction accuracy."
+
+[lib]
+name = "ddai_world"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-physics = { path = "../ddai-physics" }
+ddai-net = { path = "../ddai-net" }
+ddai-brain = { path = "../ddai-brain" }
+
+[dev-dependencies]
+# Synthetic map recipes (task 1.2/1.6's own test maps) for offline determinism/accuracy tests —
+# no third-party map bytes, matching every other crate's test-fixture policy.
+ddai-trace = { path = "../ddai-trace" }
+# Counting allocator for `tests/predict_cost.rs` (this crate itself has no `unsafe`, so it cannot
+# implement `GlobalAlloc` on its own — same reasoning/dependency `ddai-physics` uses for its own
+# `tests/world_no_alloc.rs`).
+stats_alloc = "0.1.10"
+# Live e2e test only (`tests/e2e_local_server.rs`, `#[ignore]` + `DDAI_E2E=1`): drives a real
+# `ddai_client::session::Session` (sans-IO) over a real UDP socket against the local DDNet
+# server, and loads the server's own map file via `ddai-map`.
+ddai-client = { path = "../ddai-client" }
+ddai-map = { path = "../ddai-map" }

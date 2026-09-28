@@ -252,6 +252,16 @@ fn log_event(ev: ClientEvent, in_game: &mut bool, ended: &mut bool, last_own_pos
                 tracing::info!(tick, x, y, "own position");
             }
         }
+        ClientEvent::LiveWorldSnapshot(snap) => {
+            // Task 2.4's `LiveWorld` is this event's real consumer; this demo/test tool has none
+            // (see this file's module doc comment) — logged at DEBUG only, same reasoning as
+            // `OwnPosition` above (fires once per snapshot, up to ~50/s).
+            tracing::debug!(
+                tick = snap.tick,
+                characters = snap.characters.len(),
+                "live-world snapshot"
+            );
+        }
         ClientEvent::MarginSummary(s) => {
             tracing::info!(
                 count = s.count,

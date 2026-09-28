@@ -240,6 +240,33 @@ pub enum ClientEvent {
     /// `NETMSG_INPUTTIMING` margin distribution (task e2e scenario h: "measure the fraction of
     /// inputs arriving in time ... report the margin distribution").
     MarginSummary(MarginSummary),
+    /// Synthesized alongside every [`SessionEvent::Snapshot`] (task 2.4): everything
+    /// `ddai-world`'s `LiveWorld::on_snapshot` needs, bundled here because `Session` itself lives
+    /// on this driver's background thread — an event is the only way its state ever reaches a
+    /// caller on another thread, the same reason [`ClientEvent::OwnPosition`] exists. Boxed for
+    /// the same reason as [`ClientEvent::Session`] (this is the largest variant by far: a
+    /// `Vec<CharacterView>` plus a handful of `Copy` structs).
+    LiveWorldSnapshot(Box<LiveWorldSnapshot>),
+}
+
+/// Payload of [`ClientEvent::LiveWorldSnapshot`] — see that variant's docs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveWorldSnapshot {
+    /// The snapshot's own game tick (matches the paired `SessionEvent::Snapshot { tick }`).
+    pub tick: i32,
+    /// This connection's own client id (`PlayerInfo::local == 1`), if the snapshot already
+    /// includes one — matches [`ClientEvent::OwnPosition`]'s own lookup.
+    pub own_id: Option<i32>,
+    /// [`ddai_net::view::View::characters`]'s result.
+    pub characters: Vec<ddai_net::view::CharacterView>,
+    /// [`Session::tuning`]'s current value.
+    pub tuning: ddai_net::tuning::TuneParams,
+    /// [`ddai_net::view::View::switch_states`]'s result.
+    pub switch_states: Vec<(i32, ddai_net::generated::objects::SwitchState)>,
+    /// [`Session::teams_state`]'s result — `None` when no `Sv_TeamsState`/`Sv_TeamsStateLegacy`
+    /// has been received yet this connection (see that method's own doc comment for the "carry
+    /// forward the last known value" semantics a caller needs to replicate itself across calls).
+    pub teams: Option<ddai_net::tuning::TeamsState>,
 }
 
 impl ClientEvent {
@@ -250,13 +277,33 @@ impl ClientEvent {
     /// keep [`event_channel`]'s queue under [`EVENT_QUEUE_CAP`] — every per-tick/per-message event
     /// where losing an old one under sustained backpressure just means missing one stale
     /// position/tick/chat line, never a missed state transition or terminal event.
+    ///
+    /// `SessionEvent::InputSent`/`InputTiming` (round 3, finding F12): task 2.4's round 1/2 gave
+    /// these their own top-level, non-droppable `ClientEvent` variants — which turned out to
+    /// conflict with task 8.4a's own, independently-designed and already-reviewed
+    /// `SessionEvent::InputSent` (droppable, delivered the plain `ClientEvent::Session` way, for
+    /// exactly the same unbounded-queue-growth reason as `Snapshot`/`GameMessage` above). Adopting
+    /// 8.4a's shape here (droppable, wrapped) keeps the two crates' events reconcilable at merge
+    /// time without a name/shape clash; a caller that cares about not silently losing one (this
+    /// crate's own `LiveWorld::on_snapshot`'s `own_input_at_tick`) must tolerate a drop by holding
+    /// the previous known input — see `ddai-world`'s own `BUILD REPORT` (round 3) for how its e2e
+    /// test does exactly that.
     fn is_droppable(&self) -> bool {
-        matches!(self, ClientEvent::OwnPosition { .. })
-            || matches!(
-                self,
-                ClientEvent::Session(ev)
-                    if matches!(**ev, SessionEvent::Snapshot { .. } | SessionEvent::GameMessage(_) | SessionEvent::ExGameMessage(_))
-            )
+        matches!(
+            self,
+            ClientEvent::OwnPosition { .. } | ClientEvent::LiveWorldSnapshot(_)
+        ) || matches!(
+            self,
+            ClientEvent::Session(ev)
+                if matches!(
+                    **ev,
+                    SessionEvent::Snapshot { .. }
+                        | SessionEvent::GameMessage(_)
+                        | SessionEvent::ExGameMessage(_)
+                        | SessionEvent::InputSent { .. }
+                        | SessionEvent::InputTiming { .. }
+                )
+        )
     }
 }
 
@@ -705,6 +752,19 @@ fn handle_session_event(
             y: character.character.y,
         });
     }
+    if let SessionEvent::Snapshot { tick } = &ev
+        && let Some(view) = session.latest_view()
+    {
+        let own_id = view.players().iter().find(|p| p.info.local == 1).map(|p| p.id);
+        synthesized.push(ClientEvent::LiveWorldSnapshot(Box::new(LiveWorldSnapshot {
+            tick: *tick,
+            own_id,
+            characters: view.characters(),
+            tuning: session.tuning(),
+            switch_states: view.switch_states(),
+            teams: session.teams_state(),
+        })));
+    }
 
     let outcome = match &ev {
         SessionEvent::ReconnectRequested => Some(ConnectionOutcome::Reconnect),
@@ -725,6 +785,10 @@ fn handle_session_event(
         SessionEvent::ProtocolViolation { .. } => Some(ConnectionOutcome::ProtocolViolation),
         _ => None,
     };
+    // Review round 3, finding F12: `InputSent`/`InputTiming` used to get their own top-level
+    // `ClientEvent` variant (review round 1, finding F5) instead of the generic
+    // `ClientEvent::Session` wrap every other `SessionEvent` gets — reverted to match task 8.4a's
+    // own shape (see `ClientEvent::is_droppable`'s doc comment for why).
     events_tx.send(ClientEvent::Session(Box::new(ev)));
     for event in synthesized {
         events_tx.send(event);

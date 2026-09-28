@@ -156,6 +156,13 @@ pub struct ClientConfig {
     /// (`<cache_dir>/<name>_<sha256-hex>.map` — see `crate::map_cache`). [`Session`] itself never
     /// touches this (sans-IO); only [`crate::driver::Client`] reads it.
     pub cache_dir: std::path::PathBuf,
+    /// Task 2.4 review round 1, finding F5 (naming/shape kept compatible with task 8.4a's own,
+    /// not-yet-merged, identical addition — see [`SessionEvent::InputSent`]'s doc comment): when
+    /// `true`, [`Session::send_input`] also queues a [`SessionEvent::InputSent`] for every
+    /// `NETMSG_INPUT` actually sent (~50/s while in-game). `false` by default — a caller that
+    /// never needs its own exact sent-input history (e.g. `LiveWorld::predict`'s
+    /// `own_inputs_in_flight`) pays nothing for it.
+    pub emit_input_sent: bool,
 }
 
 /// `~/aiddnet/data/maps/cache`, per `CLAUDE.md`'s folder layout, falling back to a relative
@@ -186,6 +193,7 @@ impl Default for ClientConfig {
             max_map_size_bytes: DEFAULT_MAX_MAP_SIZE_BYTES,
             timeout: conn::DEFAULT_TIMEOUT,
             cache_dir: default_cache_dir(),
+            emit_input_sent: false,
         }
     }
 }
@@ -324,6 +332,26 @@ pub enum SessionEvent {
     /// caller wanting a "this looks like a captcha lobby" heuristic can inspect those directly
     /// (e.g. an implausibly small `size` for a known map name).
     Anomaly(String),
+    /// Task 2.4 review round 1, finding F5 (name/shape kept compatible with task 8.4a's own,
+    /// not-yet-merged, identical addition, so the two are easy to reconcile at merge time): the
+    /// exact `PlayerInput` just embedded in a `NETMSG_INPUT` for `tick` (the same `tick`/`input`
+    /// [`Session::send_input`] just packed onto the wire). Gated by
+    /// [`ClientConfig::emit_input_sent`] — this is `LiveWorld::predict`'s own
+    /// `own_inputs_in_flight` ground truth: without it, a caller has no way to know what input it
+    /// actually queued for a given future tick, only the *current* input `Client::set_input` last
+    /// set (which may have changed since). Emitted from [`Session::flush`] (where the real send
+    /// happens) but delivered through [`Session::take_events`], not `flush`'s own return value —
+    /// `flush` already has a fixed, unrelated return type (bytes to send).
+    InputSent { tick: i32, input: objects::PlayerInput },
+    /// The server's own `NETMSG_INPUTTIMING` feedback for one `pred_tick`
+    /// (`client.cpp:2084-2108`, `crate::timing::InputTiming::on_input_timing`) — `time_left`'s
+    /// sign is the "did this input make its deadline" signal: negative means the server tells us
+    /// our `NETMSG_INPUT` for `tick` (== a [`SessionEvent::InputSent::tick`]) missed its intended
+    /// tick, so the server kept using the *previous* input for it instead. Gated by the same
+    /// [`ClientConfig::emit_input_sent`] flag as [`SessionEvent::InputSent`] — the two only make
+    /// sense used together, correcting `own_inputs_in_flight` for a `LiveWorld::predict` accuracy
+    /// measurement (a late tick's sent input never actually took effect on that exact tick).
+    InputTiming { tick: i32, time_left: i32 },
 }
 
 /// Why [`Session::supply_cached_map`] refused.
@@ -499,6 +527,11 @@ pub struct Session {
     /// When to next originate a `PINGEX` (`client.cpp:527,2982-3004`) — `None` until `ENTERGAME`,
     /// review finding F9.
     next_ping_ex_at_ns: Option<i64>,
+    /// Events produced outside [`Session::feed`]'s own control flow (currently only
+    /// [`SessionEvent::InputSent`], queued by [`Session::send_input`] from inside [`Session::flush`])
+    /// — drained by [`Session::take_events`], the same channel [`ddai_net::conn::Connection`]'s own
+    /// out-of-band events already use.
+    pending_events: VecDeque<SessionEvent>,
 }
 
 impl Session {
@@ -537,6 +570,7 @@ impl Session {
             teams_state: None,
             outgoing_log: VecDeque::new(),
             next_ping_ex_at_ns: None,
+            pending_events: VecDeque::new(),
             config,
         }
     }
@@ -660,31 +694,30 @@ impl Session {
 
     /// Drains events produced by something other than [`Session::feed`] (a
     /// [`ddai_net::conn::Connection`]-detected timeout/too-weak-connection, observed via its own
-    /// `take_events`) — call this after [`Session::flush`].
+    /// `take_events`, plus [`Session::pending_events`] — currently only [`SessionEvent::InputSent`],
+    /// queued by [`Session::send_input`]) — call this after [`Session::flush`].
     pub fn take_events(&mut self) -> Vec<SessionEvent> {
-        self.connection
-            .take_events()
-            .into_iter()
-            .map(|ev| match ev {
-                conn::Event::Error(reason) => SessionEvent::Disconnected {
-                    reason: Some(reason),
-                    by_peer: false,
-                },
-                conn::Event::ClosedByPeer(reason) => SessionEvent::Disconnected {
-                    reason: if reason.is_empty() { None } else { Some(reason) },
-                    by_peer: true,
-                },
-                // `Connection::take_events` never actually produces these two (see its own docs:
-                // only state transitions *outside* `feed()` — timeouts and similar — end up
-                // here), kept for an exhaustive match rather than a wildcard so a future
-                // `ddai_net` change that *did* start emitting one of these would fail to compile
-                // here instead of silently being dropped.
-                conn::Event::Connected => SessionEvent::Connected,
-                conn::Event::Chunk { .. } => {
-                    SessionEvent::Anomaly("unexpected Chunk event from Connection::take_events".to_string())
-                }
-            })
-            .collect()
+        let mut events: Vec<SessionEvent> = self.pending_events.drain(..).collect();
+        events.extend(self.connection.take_events().into_iter().map(|ev| match ev {
+            conn::Event::Error(reason) => SessionEvent::Disconnected {
+                reason: Some(reason),
+                by_peer: false,
+            },
+            conn::Event::ClosedByPeer(reason) => SessionEvent::Disconnected {
+                reason: if reason.is_empty() { None } else { Some(reason) },
+                by_peer: true,
+            },
+            // `Connection::take_events` never actually produces these two (see its own docs:
+            // only state transitions *outside* `feed()` — timeouts and similar — end up
+            // here), kept for an exhaustive match rather than a wildcard so a future
+            // `ddai_net` change that *did* start emitting one of these would fail to compile
+            // here instead of silently being dropped.
+            conn::Event::Connected => SessionEvent::Connected,
+            conn::Event::Chunk { .. } => {
+                SessionEvent::Anomaly("unexpected Chunk event from Connection::take_events".to_string())
+            }
+        }));
+        events
     }
 
     /// The driver calls this after seeing [`SessionEvent::MapChanging`] with `sha256.is_some()`,
@@ -760,6 +793,12 @@ impl Session {
             | SysMsg::SnapSingle { .. }
             | SysMsg::SnapSmall { .. }) => self.handle_snap(&snap, now),
             SysMsg::InputTiming { pred_tick, time_left } => {
+                if self.config.emit_input_sent {
+                    self.pending_events.push_back(SessionEvent::InputTiming {
+                        tick: pred_tick,
+                        time_left,
+                    });
+                }
                 self.timing.on_input_timing(pred_tick, time_left, to_ns(now));
                 Vec::new()
             }
@@ -1245,6 +1284,15 @@ impl Session {
             data: ints.to_vec(),
         };
         self.send_system_chunk(&msg, false, now);
+        // Review round 1, finding F5, gated by `ClientConfig::emit_input_sent` (same reasoning as
+        // task 8.4a's own identical addition — see `SessionEvent::InputSent`'s doc comment): must
+        // stay opt-in and cheap-when-off.
+        if self.config.emit_input_sent {
+            self.pending_events.push_back(SessionEvent::InputSent {
+                tick,
+                input: self.current_input,
+            });
+        }
     }
 
     // ---- internal: the single outgoing paths (task acceptance criterion 6g) -------------------
@@ -1850,6 +1898,46 @@ mod tests {
             session.send_start_info(secs(0));
         }
         assert_eq!(session.recent_outgoing().count(), OUTGOING_LOG_CAP);
+    }
+
+    /// Review round 1, finding F5: `Session::send_input` queues a matching
+    /// `SessionEvent::InputSent`, delivered through `take_events` — `LiveWorld::predict`'s own
+    /// `own_inputs_in_flight` ground truth.
+    #[test]
+    fn send_input_is_observable_via_take_events() {
+        let mut session = Session::new(ClientConfig {
+            emit_input_sent: true,
+            ..ClientConfig::default()
+        });
+        let input = objects::PlayerInput {
+            direction: 1,
+            target_x: 50,
+            target_y: -30,
+            jump: 1,
+            fire: 0,
+            hook: 1,
+            player_flags: playerflagflag::PLAYING,
+            wanted_weapon: 0,
+            next_weapon: 0,
+            prev_weapon: 0,
+        };
+        session.set_input(input);
+        session.send_input(777, secs(0));
+        let events = session.take_events();
+        assert_eq!(events, vec![SessionEvent::InputSent { tick: 777, input }]);
+        // Draining once must not repeat the same event on the next call.
+        assert_eq!(session.take_events(), Vec::new());
+    }
+
+    /// `emit_input_sent` defaults to `false`, and `send_input` must not queue anything at all in
+    /// that case (not just "queue it and let the caller ignore it" — the whole point is that a
+    /// caller who never reads sent-input ground truth pays nothing for it).
+    #[test]
+    fn send_input_queues_nothing_when_emit_input_sent_is_off() {
+        let mut session = Session::new(ClientConfig::default());
+        assert!(!session.config.emit_input_sent, "must default to off");
+        session.send_input(1, secs(0));
+        assert_eq!(session.take_events(), Vec::new());
     }
 
     #[test]

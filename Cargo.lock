@@ -1088,6 +1088,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-world"
+version = "0.1.0"
+dependencies = [
+ "ddai-brain",
+ "ddai-client",
+ "ddai-map",
+ "ddai-net",
+ "ddai-physics",
+ "ddai-trace",
+ "stats_alloc",
+]
+
+[[package]]
 name = "ddnet-ai"
 version = "0.1.0"
 dependencies = [
