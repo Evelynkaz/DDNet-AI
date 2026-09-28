@@ -430,3 +430,166 @@ fn armor_pickup_strips_ninja_too() {
         "and its ammo, matching pickup.cpp:62's `j < NUM_WEAPONS` bound"
     );
 }
+
+// --- Task 1.10: `World::restore_from` correctness (no parity test above ever calls it — they
+// only call `World::step`) -----------------------------------------------------------------
+
+/// A block-like input pattern for one client id, deterministic in `tick` alone, so two `World`s
+/// stepped with the same `id`/`tick` sequence stay in lockstep.
+fn block_like_input(id: u8, tick: u32, aim_at: (i32, i32)) -> TickInput {
+    let phase = tick.wrapping_add(u32::from(id) * 13) % 80;
+    TickInput {
+        id,
+        input: PlayerInput {
+            direction: if phase < 40 { 1 } else { -1 },
+            target_x: aim_at.0,
+            target_y: aim_at.1,
+            jump: i32::from(phase == 0),
+            hook: i32::from(phase < 32),
+            fire: i32::from(phase.is_multiple_of(9)),
+            ..Default::default()
+        },
+        kill: false,
+    }
+}
+
+/// `World::restore_from` must reproduce not just a saved snapshot's *fields* but its *future
+/// behavior*: a world restored from a baseline and then stepped must land in exactly the same
+/// state a fresh clone of that same baseline, stepped with the same inputs, would. Uses
+/// non-contiguous client ids (`0` and `5`) — `World::characters`/`World::players` are indexed
+/// directly by id, so this exercises `restore_id_indexed_array`'s real "only the shared active
+/// prefix" logic (a contiguous `0`/`1` pair, like every other test in this file uses, would only
+/// ever touch index `0..=1`).
+#[test]
+fn restore_from_reproduces_saved_state_and_future_behavior() {
+    let map = synthetic::build("freeze").expect("freeze recipe must exist");
+    let mut world: World<f32> = World::from_map(&map, 7);
+    let a = world.spawn_points.first().copied().unwrap_or(Vec2::new(200.0, 200.0));
+    let b = world.spawn_points.get(1).copied().unwrap_or(Vec2::new(260.0, 200.0));
+    world.players[0] = Some(Player::new(0));
+    world.players[5] = Some(Player::new(0));
+    world::spawn_character(&mut world, 0, a);
+    world::spawn_character(&mut world, 5, b);
+
+    // Diverge into a non-trivial state (walking/jumping/hooking) before the snapshot.
+    for tick in 0..300u32 {
+        world.step(&[
+            block_like_input(0, tick, (260, 200)),
+            block_like_input(5, tick, (200, 200)),
+        ]);
+    }
+    let baseline = world.clone();
+
+    // Diverge `world` further, away from `baseline`.
+    for tick in 300..600u32 {
+        world.step(&[
+            block_like_input(0, tick, (260, 200)),
+            block_like_input(5, tick, (200, 200)),
+        ]);
+    }
+    assert!(
+        world.characters[0] != baseline.characters[0] || world.characters[5] != baseline.characters[5],
+        "sanity: 300 more ticks must actually change something (position, freeze state, ...) \
+         away from the baseline — comparing `characters`, not `cores`, since a death mid-run can \
+         legitimately make `cores.get(id)` momentarily `None` on one side or the other"
+    );
+
+    world.restore_from(&baseline);
+
+    assert_eq!(world.tick, baseline.tick);
+    assert_eq!(world.cores.get(0), baseline.cores.get(0));
+    assert_eq!(world.cores.get(5), baseline.cores.get(5));
+    assert_eq!(world.characters[0], baseline.characters[0]);
+    assert_eq!(world.characters[5], baseline.characters[5]);
+    assert_eq!(world.players[0], baseline.players[0]);
+    assert_eq!(world.players[5], baseline.players[5]);
+    for id in [1u8, 2, 3, 4] {
+        assert!(
+            world.characters[id as usize].is_none() && world.players[id as usize].is_none(),
+            "id {id} was never spawned on either world and must stay None after restore"
+        );
+    }
+
+    // The real bar: step the restored `world` and a fresh clone of `baseline` with the *same*
+    // future inputs and confirm they land in the exact same place — not just that `restore_from`
+    // copied the right bytes, but that the restored `World` behaves identically going forward.
+    let mut expected = baseline.clone();
+    for tick in 300..350u32 {
+        let inputs = [
+            block_like_input(0, tick, (260, 200)),
+            block_like_input(5, tick, (200, 200)),
+        ];
+        world.step(&inputs);
+        expected.step(&inputs);
+    }
+    assert_eq!(world.tick, expected.tick);
+    assert_eq!(world.cores.get(0), expected.cores.get(0));
+    assert_eq!(world.cores.get(5), expected.cores.get(5));
+    assert_eq!(world.characters[0], expected.characters[0]);
+    assert_eq!(world.characters[5], expected.characters[5]);
+}
+
+/// The tail-safety case `restore_id_indexed_array`'s doc comment argues for: `self` (the restore
+/// target) has an active client id (`3`) the saved `source` never did. `restore_from` must clear
+/// it back to `None`, not leave it dangling (the naive "only copy up to `source`'s own high-water
+/// mark" version would miss exactly this).
+#[test]
+fn restore_from_clears_a_character_spawned_after_the_saved_snapshot() {
+    let map = synthetic::build("freeze").expect("freeze recipe must exist");
+    let mut world: World<f32> = World::from_map(&map, 1);
+    let a = world.spawn_points.first().copied().unwrap_or(Vec2::new(200.0, 200.0));
+    world.players[0] = Some(Player::new(0));
+    world::spawn_character(&mut world, 0, a);
+
+    let baseline = world.clone();
+    assert_eq!(baseline.cores.len(), 1);
+
+    let c = world.spawn_points.get(1).copied().unwrap_or(Vec2::new(260.0, 200.0));
+    world.players[3] = Some(Player::new(0));
+    world::spawn_character(&mut world, 3, c);
+    assert_eq!(world.cores.len(), 2, "sanity: id 3 must actually be registered");
+
+    world.restore_from(&baseline);
+
+    assert_eq!(
+        world.cores.len(),
+        1,
+        "id 3's core must be gone after restoring a world that never had it"
+    );
+    assert!(world.cores.get(3).is_none());
+    assert!(
+        world.characters[3].is_none(),
+        "id 3's `characters` slot must be cleared back to None, not left dangling"
+    );
+    assert!(world.players[3].is_none());
+    assert_eq!(world.cores.get(0), baseline.cores.get(0));
+}
+
+/// `TuningList`'s copy-on-write `Arc` (task 1.10) must not leak a mutation from one `World` into
+/// another it was cloned from/restored against: `Arc::make_mut` inside `zone_mut` has to actually
+/// clone-on-write the first time a shared allocation diverges, not silently mutate the shared one
+/// in place.
+#[test]
+fn tuning_arc_cow_does_not_leak_between_cloned_worlds() {
+    let map = synthetic::build("freeze").expect("freeze recipe must exist");
+    let mut world: World<f32> = World::from_map(&map, 1);
+    spawn_two(&mut world);
+
+    let baseline = world.clone(); // shares the same `Arc<[TuningParams; 256]>` as `world`, for now.
+    let default_gravity = baseline.tuning.zone(0).get_by_name("gravity").unwrap();
+
+    world.apply_commands(["tune gravity 0"]).unwrap();
+    assert_eq!(world.tuning.zone(0).get_by_name("gravity"), Some(0.0));
+    assert_eq!(
+        baseline.tuning.zone(0).get_by_name("gravity"),
+        Some(default_gravity),
+        "mutating `world`'s tuning through `Arc::make_mut` must not affect `baseline`'s shared Arc"
+    );
+
+    world.restore_from(&baseline);
+    assert_eq!(
+        world.tuning.zone(0).get_by_name("gravity"),
+        Some(default_gravity),
+        "restore_from must revert a diverged tuning value back to the saved baseline's"
+    );
+}

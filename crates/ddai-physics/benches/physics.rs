@@ -342,11 +342,155 @@ fn bench_world_clone_on_real_maps(c: &mut Criterion) {
     }
 }
 
+/// The two corpus rawmap files [`bench_world_step_on_real_maps`]/[`bench_world_clone_on_real_maps`]
+/// each load independently; factored out for the task 1.10 benches below, which need the same
+/// pair again. Returns `(map_name, MapData)`, skipping (not failing) a map that isn't present in
+/// this environment, same convention as every other bench/test reading this corpus.
+fn load_corpus_maps() -> Vec<(&'static str, MapData)> {
+    let corpus_dir = {
+        let home = std::env::var("HOME").expect("HOME must be set");
+        std::path::PathBuf::from(home).join("aiddnet/data/traces/oracle-b/v1")
+    };
+    let maps: [(&str, &str); 2] = [
+        ("BlmapChill", "realmap_BlmapChill__seed10001.rawmap"),
+        (
+            "CopyLoveBox",
+            "realmap_Copy_Love_Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25__seed10001.rawmap",
+        ),
+    ];
+    let mut out = Vec::new();
+    for (map_name, rawmap_file) in maps {
+        let rawmap_path = corpus_dir.join(rawmap_file);
+        let Ok(rawmap_bytes) = std::fs::read(&rawmap_path) else {
+            eprintln!(
+                "load_corpus_maps: skipping {map_name} — {} not found (Oracle B corpus not present in this environment)",
+                rawmap_path.display()
+            );
+            continue;
+        };
+        match ddai_trace::rawmap::read(&rawmap_bytes) {
+            Ok(m) => out.push((map_name, m)),
+            Err(e) => {
+                eprintln!("load_corpus_maps: skipping {map_name} — failed to parse {rawmap_file}: {e:?}");
+            }
+        }
+    }
+    out
+}
+
+/// Builds a 2-character `World` on `map`, spawned on its own first two spawn points (falling back
+/// to a fixed offset apart if it has fewer than two), same convention
+/// [`bench_world_step_on_real_maps`]/[`bench_world_clone_on_real_maps`] each use inline.
+fn two_character_real_world(map: &MapData) -> ddai_physics::world::World<f32> {
+    let mut world: ddai_physics::world::World<f32> = ddai_physics::world::World::from_map(map, 1);
+    world.init(std::iter::empty::<&str>()).unwrap();
+    for i in 0..2 {
+        let pos = world
+            .spawn_points
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| Vec2::new(200.0 + (i as f32) * 64.0, 200.0));
+        world.players[i] = Some(ddai_physics::world::Player::new(0));
+        ddai_physics::world::spawn_character(&mut world, i as i32, pos);
+    }
+    world
+}
+
+/// Task 1.10, acceptance criterion 4: `World::restore_from`, on the same two real maps, 2
+/// characters — the direct counterpart to [`bench_world_clone_on_real_maps`]'s `World::clone()`
+/// measurement, target "a few µs" either way (acceptance criterion "clone or save/restore <= 5
+/// µs"). The first `restore_from` call (outside the timed loop) grows every scratch `Vec` to its
+/// final capacity, so the timed loop measures steady-state (zero-allocation) restores only,
+/// matching the real search-loop access pattern (grow once, reuse forever).
+fn bench_world_restore_on_real_maps(c: &mut Criterion) {
+    for (map_name, map) in load_corpus_maps() {
+        let source = two_character_real_world(&map);
+        let mut scratch = source.clone();
+        scratch.restore_from(&source); // warm up: grow `scratch`'s buffers to fit.
+
+        c.bench_function(&format!("restore_two_character_world_{map_name}"), |b| {
+            b.iter(|| {
+                scratch.restore_from(&source);
+                black_box(&scratch);
+            });
+        });
+    }
+}
+
+/// Task 1.10, acceptance criterion 4: a "search-like" benchmark — from one saved state, run 64
+/// rollouts x 30 ticks each (restoring the shared state between rollouts, not re-cloning it),
+/// 2 characters, on the same two real maps. Reports rollouts/s (criterion's own throughput line,
+/// `Throughput::Elements(64)`) and this function also prints ms/decision-equivalent (wall time
+/// for one full batch of 64 rollouts, i.e. what one live decision's search would cost if it
+/// needed exactly this many rollouts) directly, since criterion has no built-in "per-batch"
+/// summary distinct from its own per-iteration/throughput numbers.
+fn bench_search_like_rollouts(c: &mut Criterion) {
+    const ROLLOUTS: usize = 64;
+    const TICKS_PER_ROLLOUT: usize = 30;
+
+    for (map_name, map) in load_corpus_maps() {
+        let baseline = two_character_real_world(&map);
+        let spawn_a = baseline
+            .spawn_points
+            .first()
+            .copied()
+            .unwrap_or(Vec2::new(200.0, 200.0));
+        let spawn_b = baseline.spawn_points.get(1).copied().unwrap_or(Vec2::new(264.0, 200.0));
+        let mut scratch = baseline.clone();
+
+        let mut group = c.benchmark_group(format!("search_like_rollouts_{map_name}"));
+        group.throughput(Throughput::Elements(ROLLOUTS as u64));
+        group.bench_function("64_rollouts_30_ticks_2_characters", |b| {
+            b.iter(|| {
+                for r in 0..ROLLOUTS {
+                    scratch.restore_from(&baseline);
+                    for t in 0..TICKS_PER_ROLLOUT {
+                        let tick = (r * TICKS_PER_ROLLOUT + t) as u32;
+                        let target_a = spawn_b - spawn_a;
+                        let target_b = spawn_a - spawn_b;
+                        let inputs = [
+                            ddai_physics::world::TickInput {
+                                id: 0,
+                                input: PlayerInput {
+                                    direction: if (tick / 15).is_multiple_of(2) { 1 } else { -1 },
+                                    target_x: target_a.x as i32 + 1,
+                                    target_y: target_a.y as i32 + 1,
+                                    jump: i32::from(tick.is_multiple_of(5)),
+                                    hook: 1,
+                                    ..Default::default()
+                                },
+                                kill: false,
+                            },
+                            ddai_physics::world::TickInput {
+                                id: 1,
+                                input: PlayerInput {
+                                    direction: if (tick / 15).is_multiple_of(2) { -1 } else { 1 },
+                                    target_x: target_b.x as i32 + 1,
+                                    target_y: target_b.y as i32 + 1,
+                                    jump: i32::from(tick.is_multiple_of(5)),
+                                    hook: 1,
+                                    ..Default::default()
+                                },
+                                kill: false,
+                            },
+                        ];
+                        scratch.step(&inputs);
+                    }
+                }
+                black_box(scratch.tick);
+            });
+        });
+        group.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_world_tick,
     bench_clone,
     bench_world_clone_on_real_maps,
+    bench_world_restore_on_real_maps,
+    bench_search_like_rollouts,
     bench_real_math_black_box,
     bench_world_step_on_real_maps
 );

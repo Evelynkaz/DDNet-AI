@@ -48,15 +48,99 @@ use crate::switch;
 use crate::tuning::TuningParams;
 use crate::vmath::{self, Vec2};
 
+// --- Dev-only phase profiling (task 1.10), `--features phase_profile` only ---------------------
+
+/// Per-phase wall-clock time accumulated inside [`World::world_tick`], read (and reset to zero)
+/// via [`take_phase_profile`]. Only compiled in under `--features phase_profile`; every normal
+/// build (including every other crate's default build, which never enables this feature) pays
+/// nothing for it — not even a branch, since the `Instant::now()` call sites don't exist at all.
+/// A coarse `std::time::Instant`-based breakdown (task 1.10 acceptance criterion 1's documented
+/// fallback for when a real sampling profiler — `perf` — isn't usable: this box's
+/// `perf_event_paranoid=4` blocks it without a system-wide capability change this task doesn't
+/// make), not a substitute for `perf`/`callgrind` — each phase's own `Instant::now()` pair adds a
+/// few ns of overhead per call, negligible next to the phases being measured (all >= tens of ns)
+/// but enough that this must never be enabled in a build anything else measures throughput on.
+#[cfg(feature = "phase_profile")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PhaseProfile {
+    /// The projectile-tick loop (`world_tick`'s `ENTTYPE_PROJECTILE` pass).
+    pub projectiles: std::time::Duration,
+    /// [`fixture_tick`] (Stage-B map fixtures' mover-tile drift).
+    pub fixtures: std::time::Duration,
+    /// The pickup-tick loop (`world_tick`'s `ENTTYPE_PICKUP` pass, including each pickup's
+    /// `find_characters_in_range_into` scan).
+    pub pickups: std::time::Duration,
+    /// The `no_weak_hook` `PreTick` pre-pass (usually a no-op loop — zero on every corpus
+    /// scenario this crate has seen where `sv_no_weak_hook` is off).
+    pub character_pre_tick_pass: std::time::Duration,
+    /// The main per-character `Tick()` pass (`character_tick`: DDRace tiles, weapons, core tick).
+    pub character_tick_pass: std::time::Duration,
+    /// The `TickDeferred()` pass (`Move()` + `Quantize()`).
+    pub character_deferred_pass: std::time::Duration,
+    /// `projectiles.retain(...)`.
+    pub retain: std::time::Duration,
+    /// The `m_StrongWeakId` assignment pass.
+    pub strong_weak_id_pass: std::time::Duration,
+    /// [`switch::tick_switch_expiry`] (called from [`World::step`], not `world_tick`, but
+    /// accumulated into the same thread-local for one combined report).
+    pub switch_expiry: std::time::Duration,
+}
+
+#[cfg(feature = "phase_profile")]
+thread_local! {
+    static PHASE_PROFILE: std::cell::RefCell<PhaseProfile> = std::cell::RefCell::new(PhaseProfile::default());
+}
+
+/// Returns the [`PhaseProfile`] accumulated since the last call (or since startup), zeroing it
+/// back out — so a caller can bracket exactly the ticks it wants measured. `--features
+/// phase_profile` only.
+#[cfg(feature = "phase_profile")]
+pub fn take_phase_profile() -> PhaseProfile {
+    PHASE_PROFILE.with(|p| p.replace(PhaseProfile::default()))
+}
+
+/// Adds `dt` to one [`PhaseProfile`] field, selected by `$field`. `--features phase_profile` only
+/// (every call site below is itself `#[cfg(feature = "phase_profile")]`-gated, so this macro is
+/// never invoked, let alone defined, in a normal build).
+#[cfg(feature = "phase_profile")]
+macro_rules! phase_time {
+    ($field:ident, $body:expr) => {{
+        let __start = std::time::Instant::now();
+        let __result = $body;
+        PHASE_PROFILE.with(|p| p.borrow_mut().$field += __start.elapsed());
+        __result
+    }};
+}
+#[cfg(not(feature = "phase_profile"))]
+macro_rules! phase_time {
+    ($field:ident, $body:expr) => {
+        $body
+    };
+}
+
 /// `TuneZone::NUM` (`engine/shared/protocol.h`): `CGameContext::m_aTuningList`'s size.
 pub const TUNE_ZONE_COUNT: usize = 256;
 
 /// `CGameContext::m_aTuningList[TuneZone::NUM]`: one [`TuningParams`] per tune zone (index `0` is
 /// the default tuning used outside any zone). See [`TuningList::reset_to_baseline`] for the
 /// exact baseline every zone starts at.
+///
+/// `zones` is reference-counted (`Arc`), not owned outright (task 1.10, acceptance criterion 2's
+/// "copy-on-write map", the same idea [`World::collision`] already applies, generalized to this
+/// field too): every one of this crate's own scenarios spends its entire run at whatever tuning
+/// `World::init` left it at (`tune`/`tune_zone`/`sv_solo_server` config-time writes only — never a
+/// per-tick mutation), so a `World::clone()`/`World::restore_from()` that never diverges a
+/// world's tuning from its saved baseline should cost nothing at all for this field, not a
+/// `TUNE_ZONE_COUNT * size_of::<TuningParams>()` (tens of KB) copy every time. `Clone` is left
+/// derived: the default `clone_from` (`*self = source.clone()`) already just clones the `Arc`
+/// handle (an `O(1)` refcount bump — `Arc<T>::clone()` never deep-copies `T`), which is exactly
+/// the fast path wanted here. [`TuningList::zone_mut`]/[`TuningList::zero_player_collision_and_hooking_everywhere`]
+/// use [`std::sync::Arc::make_mut`], which *does* deep-copy — but only the first time a given
+/// `Arc` allocation is actually mutated while shared (`make_mut`'s own documented behavior), so
+/// the cost of a genuine tuning change still lands exactly once, on whichever `World` writes it.
 #[derive(Debug, Clone)]
 pub struct TuningList {
-    zones: Box<[TuningParams; TUNE_ZONE_COUNT]>,
+    zones: std::sync::Arc<[TuningParams; TUNE_ZONE_COUNT]>,
 }
 
 impl TuningList {
@@ -69,7 +153,7 @@ impl TuningList {
     /// `sv_tune_reset` as a separate step (see the module's `BUILD REPORT` for that equivalence
     /// argument).
     pub fn reset_to_baseline() -> Self {
-        let mut zones: Box<[TuningParams; TUNE_ZONE_COUNT]> = Box::new([TuningParams::default(); TUNE_ZONE_COUNT]);
+        let mut zones: [TuningParams; TUNE_ZONE_COUNT] = [TuningParams::default(); TUNE_ZONE_COUNT];
         for zone in zones.iter_mut() {
             zone.set_by_name("gun_curvature", 0.0);
             zone.set_by_name("gun_speed", 1400.0);
@@ -77,7 +161,9 @@ impl TuningList {
             zone.set_by_name("shotgun_speed", 500.0);
             zone.set_by_name("shotgun_speeddiff", 0.0);
         }
-        TuningList { zones }
+        TuningList {
+            zones: std::sync::Arc::new(zones),
+        }
     }
 
     /// Zone `n`'s tuning (`0..256`).
@@ -85,16 +171,17 @@ impl TuningList {
         &self.zones[n as usize]
     }
 
-    /// Mutable zone `n`'s tuning.
+    /// Mutable zone `n`'s tuning. Copy-on-write: see the struct doc comment.
     pub fn zone_mut(&mut self, n: i32) -> &mut TuningParams {
-        &mut self.zones[n as usize]
+        &mut std::sync::Arc::make_mut(&mut self.zones)[n as usize]
     }
 
     /// `sv_solo_server`'s tuning side effect (`gamecontext.cpp:4171-4178`): zeroes
     /// `player_collision`/`player_hooking` in every zone, including zone 0
-    /// (`GlobalTuning()->Set(...)`, applied identically inside the same `if`).
+    /// (`GlobalTuning()->Set(...)`, applied identically inside the same `if`). Copy-on-write: see
+    /// the struct doc comment.
     pub fn zero_player_collision_and_hooking_everywhere(&mut self) {
-        for zone in self.zones.iter_mut() {
+        for zone in std::sync::Arc::make_mut(&mut self.zones).iter_mut() {
             zone.set_by_name("player_collision", 0.0);
             zone.set_by_name("player_hooking", 0.0);
         }
@@ -1056,12 +1143,21 @@ fn reset_switchers_for_team(switchers: &mut [Switcher], team: i32) {
 /// snapshot suitable for save/restore (acceptance criterion 1): every genuinely *mutable* field
 /// is deep-copied (`Copy`/plain data, or a `Vec`/`Box` with its own heap allocation, so nothing
 /// mutable is shared between a clone and its original), while [`World::collision`] — the one
-/// large, immutable-after-construction field — is reference-counted (`Arc`) instead, so cloning
-/// a `World` is `O(character count)`, not `O(map size)`. Review round 1, finding F10: an earlier
-/// revision of this port deep-copied `collision` too, making a single `World::clone()` cost
-/// milliseconds and megabytes on a large map (measured: ~3.25 ms / 21.7 MB for `BlmapChill`) —
-/// roughly 350 `World::step` calls' worth of cost, making save/restore-heavy use (a planner's
-/// search, or an arena that resets between rounds) impractical.
+/// large, immutable-after-construction field — is reference-counted (`Arc`) instead. Review
+/// round 1, finding F10: an earlier revision of this port deep-copied `collision` too, making a
+/// single `World::clone()` cost milliseconds and megabytes on a large map (measured: ~3.25 ms /
+/// 21.7 MB for `BlmapChill`) — roughly 350 `World::step` calls' worth of cost, making
+/// save/restore-heavy use (a planner's search, or an arena that resets between rounds)
+/// impractical.
+///
+/// Task 1.10: `collision` aside, `.clone()` is still `O(map size)`, not `O(character count)` —
+/// several fields (`pickups`/`fixtures`/`doors`/`projectiles`/`tuning`) scale with the *map*
+/// (`BlmapChill`: 140/89/102/12 vs. `CopyLoveBox`'s 47/0/0/0 — measured, this task's `BUILD
+/// REPORT`), not the character count, so a search loop calling `.clone()` (or worse, assigning
+/// `*scratch = source.clone()`) once per rollout still pays that cost every time. Use
+/// [`World::restore_from`] instead for that access pattern: same result, but every `Vec`/`Box`
+/// field reuses its *destination*'s existing allocation once grown to fit, so repeated restores
+/// against one scratch `World` allocate nothing at all (measured effect: same `BUILD REPORT`).
 #[derive(Debug, Clone)]
 pub struct World<R: Real> {
     /// The task-1.3 core array (`CCharacterCore` + id bookkeeping), always sized to
@@ -1294,6 +1390,16 @@ impl<R: Real> World<R> {
             }
         }
 
+        // The scan above places `CDoor` collision (`scan_entity` -> `place_door_collision` ->
+        // `set_door_collision_at`) *after* `Collision::new()` already built its own initial
+        // `tile_exists_cache` from the pre-door-placement `door` layer (`Collision::new`'s own
+        // call — see that field's doc comment). Recompute it now that every door cell for this
+        // whole map is in, and before anything below (the crazy-shotgun loop's own
+        // `get_map_index` call) reads `tile_exists` again — this is the *only* place in this
+        // crate that ever mutates a `Collision` after `Collision::new` returns it, matching the
+        // struct's own doc comment ("mutated only at world construction").
+        collision.recompute_tile_exists_cache();
+
         let mut cores: WorldCore<R, MAX_CLIENTS> = WorldCore::new();
         cores.switchers = switchers;
         cores.prng = Some({
@@ -1496,6 +1602,77 @@ impl<R: Real> World<R> {
             self.tuning.zero_player_collision_and_hooking_everywhere();
         }
         if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+
+    /// Task 1.10, acceptance criterion 2: "save/restore without cloning Vecs" — makes `self` an
+    /// exact copy of every mutable field of `source` (the *result* is identical to `*self =
+    /// source.clone()`), but reuses `self`'s own existing heap allocations wherever the standard
+    /// library's `Vec`/`Box<[T]>` `clone_from` specializations (or this crate's own hand-written
+    /// ones on [`core::WorldCore`]/[`TuningList`], for the same reason) can, instead of freeing
+    /// them and allocating fresh ones: once `self`'s buffers have already grown to fit `source`'s
+    /// (the common case for a search/planner loop calling this repeatedly to reset the *same*
+    /// scratch `World` back to one saved baseline before every rollout — `source` is typically a
+    /// `World` kept around just as that baseline, itself produced by an earlier `.clone()`), a
+    /// `restore_from` call allocates nothing at all. Measured effect: task's `BUILD REPORT`.
+    ///
+    /// [`World::collision`] is **not** touched — nothing in this crate ever mutates it after
+    /// construction (see this struct's own doc comment), so there is nothing to restore; `source`
+    /// must already be a `World` built on the same map (typically: `self`'s own earlier
+    /// `.clone()`), which this does not check (no cheap way to, short of comparing the entire map
+    /// — see this crate's `BUILD REPORT`). Restoring from a `World` built on a *different* map's
+    /// collision silently leaves `self.collision` as whatever it already was, which will not
+    /// match `source`'s own tile layout — build a fresh `World::from_map` instead in that case.
+    pub fn restore_from(&mut self, source: &World<R>) {
+        self.cores.clone_from(&source.cores);
+        self.teams_core = source.teams_core;
+        self.race_teams.clone_from(&source.race_teams);
+        restore_id_indexed_array(&mut self.characters, &source.characters);
+        restore_id_indexed_array(&mut self.players, &source.players);
+        self.entity_order.clone_from(&source.entity_order);
+        // Scratch buffers are never part of the saved state (see each one's own doc comment on
+        // `World`): always empty except transiently inside a call already in progress on this
+        // very `World`, which `restore_from` cannot itself be called from. Cleared defensively
+        // rather than left as whatever `self` already had (a no-op in every real scenario, since
+        // they're already empty whenever `restore_from` could possibly be called).
+        self.entity_order_scratch.clear();
+        self.range_scratch.clear();
+        self.hammer_scratch.clear();
+        self.map_indices_scratch.clear();
+        self.projectiles.clone_from(&source.projectiles);
+        self.team_changed_this_pass = source.team_changed_this_pass;
+        self.pickups.clone_from(&source.pickups);
+        self.doors.clone_from(&source.doors);
+        self.fixtures.clone_from(&source.fixtures);
+        self.tuning.clone_from(&source.tuning);
+        self.config = source.config;
+        self.tick = source.tick;
+        self.spawn_points.clone_from(&source.spawn_points);
+        self.spawn_points_red.clone_from(&source.spawn_points_red);
+        self.spawn_points_blue.clone_from(&source.spawn_points_blue);
+        self.map_settings.clone_from(&source.map_settings);
+        self.command_log.clone_from(&source.command_log);
+        self.active_timed_switchers.clone_from(&source.active_timed_switchers);
+    }
+}
+
+/// [`World::restore_from`]'s helper for its two `[Option<T>; MAX_CLIENTS]` fields
+/// ([`World::characters`]/[`World::players`], indexed directly by client id — unlike
+/// [`core::WorldCore`]'s compact-by-slot arrays, so [`core::WorldCore::clone_from`]'s
+/// "just bound by `len`" trick doesn't apply here directly). Both fields' own doc comments state
+/// the invariant this relies on: once a client id's slot becomes `Some`, it stays `Some` for the
+/// rest of that `World`'s life (a death clears `alive`/`has_character`, never the slot itself) —
+/// so every index past the highest `Some` one in *either* array is already (and stays) `None` on
+/// both sides, and copying only the shared prefix up to that high-water mark reproduces `source`
+/// in `dst` exactly, without reading or writing anything past it. `rposition` scans from the
+/// high end, so this costs at most `MAX_CLIENTS` (128) cheap `is_some()` checks — negligible next
+/// to the `Vec`/array copies elsewhere in `restore_from`, and a large win over always copying the
+/// full 128-slot array (`size_of::<Option<Character<R>>>() * 128` = tens of KB) when, as in every
+/// realistic search/rollout use case, only a handful of ids are ever in play.
+fn restore_id_indexed_array<T: Copy>(dst: &mut [Option<T>; MAX_CLIENTS], source: &[Option<T>; MAX_CLIENTS]) {
+    let dst_hi = dst.iter().rposition(Option::is_some);
+    let src_hi = source.iter().rposition(Option::is_some);
+    if let Some(hi) = dst_hi.into_iter().chain(src_hi).max() {
+        dst[..=hi].copy_from_slice(&source[..=hi]);
     }
 }
 
@@ -3852,16 +4029,44 @@ pub fn intersect_character<R: Real>(
     result
 }
 
+/// Slack (in map pixels) [`could_be_in_range`]'s cheap pre-filter adds on top of the exact search
+/// bound. At this crate's coordinate scale (map extents in the thousands to tens of thousands of
+/// pixels; `f32`'s ULP there is well under 0.01 px) this is enormously more slack than any
+/// conceivable floating-point rounding difference between a Chebyshev (max-abs-coordinate) bound
+/// and the true Euclidean `sqrt`-based one — see [`could_be_in_range`]'s doc comment for why the
+/// filter is exact (not approximate) regardless, and this task's `BUILD REPORT` for the full
+/// argument. Chosen for a comfortable, legible margin, not tightness.
+const RANGE_PREFILTER_SLACK: f64 = 8.0;
+
+/// A cheap, always-safe pre-filter for "could `a` be within `bound` of `b`?" (task 1.10
+/// acceptance criterion 2's "early exits only where it is provable that the result is identical",
+/// applied to the character-range scans below rather than `MoveBox`/`IntersectLine`): `distance(a,
+/// b) = sqrt(dx*dx + dy*dy) >= max(|dx|, |dy|)` always holds, for any correctly-rounded `+`/`*`/
+/// `sqrt` (`dx*dx`/`dy*dy` are both `>= 0`, so their correctly-rounded sum can only round to a
+/// value `>= dx*dx` — rounding is monotonic — and correctly-rounded `sqrt` is monotonic too, so
+/// `sqrt(dx*dx+dy*dy) >= sqrt(dx*dx) ~= |dx|`, off by at most the double-rounding of squaring
+/// `dx` itself — far below [`RANGE_PREFILTER_SLACK`]'s margin at this crate's coordinate scale).
+/// So whenever `|dx| > bound + slack` or `|dy| > bound + slack`, `distance(a, b) < bound` is
+/// certain to be `false` — this can return `false` (skip the expensive exact check) with no
+/// possible effect on any comparison's result, while `true` only means "run the real check",
+/// never "is in range".
+fn could_be_in_range<R: Real>(a: Vec2<R>, b: Vec2<R>, bound: R) -> bool {
+    let limit = bound + R::from_f64(RANGE_PREFILTER_SLACK);
+    (a.x - b.x).abs() <= limit && (a.y - b.y).abs() <= limit
+}
+
 /// `CGameWorld::FindEntities` (`gameworld.cpp:58-77`), `Type == ENTTYPE_CHARACTER`: every alive
 /// character within `radius + pEnt->m_ProximityRadius` of `pos`, in the entity-list order
 /// [`intersect_character`]'s sibling scan would use — but here, unlike `IntersectCharacter`,
 /// order genuinely doesn't matter to any Stage A caller (hammer/ninja/spawn-eval hit everyone in
 /// range, order-independently), so this returns them in ascending client-id order for simplicity.
 pub fn find_characters_in_range<R: Real>(world: &World<R>, pos: Vec2<R>, radius: R) -> Vec<i32> {
+    let bound = radius + character_proximity_radius::<R>();
     characters_in_entity_order(world)
         .filter(|&(cid, core)| {
             world.characters[cid as usize].is_some_and(|c| c.alive)
-                && vmath::distance(core.pos, pos) < radius + character_proximity_radius::<R>()
+                && could_be_in_range(core.pos, pos, bound)
+                && vmath::distance(core.pos, pos) < bound
         })
         .map(|(cid, _)| cid)
         .collect()
@@ -3873,12 +4078,20 @@ pub fn find_characters_in_range<R: Real>(world: &World<R>, pos: Vec2<R>, radius:
 /// 1 finding F9: this is the version every call site inside `World::step`'s own hot path now
 /// uses; the allocating [`find_characters_in_range`] above stays for any caller — none, inside
 /// this crate — that doesn't have a reusable buffer of its own to pass in).
+///
+/// Task 1.10: [`could_be_in_range`]'s cheap Chebyshev pre-filter runs before the exact
+/// `sqrt`-based [`vmath::distance`] check — at real map scale (pickups/projectiles scattered over
+/// a map thousands of pixels wide, only 2-8 characters clustered in one area) most pairs fail it
+/// and never touch `dot`/`sqrt` at all, which is where the bulk of `pickup_tick`'s/
+/// `projectile_tick`'s per-tick cost was going (measured: task's `BUILD REPORT`).
 fn find_characters_in_range_into<R: Real>(world: &World<R>, pos: Vec2<R>, radius: R, out: &mut Vec<i32>) {
+    let bound = radius + character_proximity_radius::<R>();
     out.clear();
     out.extend(characters_in_entity_order(world).filter_map(|(cid, core)| {
         (world.characters[cid as usize].is_some_and(|c| c.alive)
-            && vmath::distance(core.pos, pos) < radius + character_proximity_radius::<R>())
-        .then_some(cid)
+            && could_be_in_range(core.pos, pos, bound)
+            && vmath::distance(core.pos, pos) < bound)
+            .then_some(cid)
     }));
 }
 
@@ -4579,7 +4792,10 @@ impl<R: Real> World<R> {
 
         // 7. Switch-timer expiry (`gamecontext.cpp:1460-1476`), after every player's `Tick()`.
         let tick = self.tick;
-        switch::tick_switch_expiry(&mut self.cores.switchers, &mut self.active_timed_switchers, tick);
+        phase_time!(
+            switch_expiry,
+            switch::tick_switch_expiry(&mut self.cores.switchers, &mut self.active_timed_switchers, tick)
+        );
     }
 
     /// `CGameWorld::Tick()` (`gameworld.cpp:202-263`), Stage A's entity types only (`Projectile`,
@@ -4588,15 +4804,19 @@ impl<R: Real> World<R> {
         // Entity-type order: `ENTTYPE_PROJECTILE` (0), `ENTTYPE_LASER` (1 — every `CDragger`/
         // `CGun`/`CLight`/`CDoor`/`CDraggerBeam`/`CLaser` shares this slot), `ENTTYPE_PICKUP`
         // (2), `ENTTYPE_CHARACTER` (4) — `gameworld.h:24-30`.
-        for i in 0..self.projectiles.len() {
-            if !self.projectiles[i].marked_for_destroy {
-                projectile_tick(self, i);
+        phase_time!(projectiles, {
+            for i in 0..self.projectiles.len() {
+                if !self.projectiles[i].marked_for_destroy {
+                    projectile_tick(self, i);
+                }
             }
-        }
-        fixture_tick(self);
-        for i in 0..self.pickups.len() {
-            pickup_tick(self, i);
-        }
+        });
+        phase_time!(fixtures, fixture_tick(self));
+        phase_time!(pickups, {
+            for i in 0..self.pickups.len() {
+                pickup_tick(self, i);
+            }
+        });
 
         // Both loops below reset then check `team_changed_this_pass` around each of their own
         // passes (not once for both): real DDNet's `m_pNextTraverseEntity` clobber
@@ -4607,40 +4827,52 @@ impl<R: Real> World<R> {
         // so a truncation in one never carries into the other.
         if no_weak_hook {
             self.team_changed_this_pass = false;
-            self.for_each_in_entity_order(|world, _i, id| {
-                // `m_Core.Tick(true, !g_Config.m_SvNoWeakHook)` (`character.cpp:815`): under
-                // `sv_no_weak_hook`, `PreTick()`'s own core tick must *not* run the deferred
-                // (hook-drag) body — `character_tick`'s own `no_weak_hook` branch runs it
-                // separately via `core::tick_deferred`. Passing `true` here (an earlier bug)
-                // applied hook forces twice.
-                character_pre_tick(world, id as i32, false);
-                !world.team_changed_this_pass
-            });
+            phase_time!(
+                character_pre_tick_pass,
+                self.for_each_in_entity_order(|world, _i, id| {
+                    // `m_Core.Tick(true, !g_Config.m_SvNoWeakHook)` (`character.cpp:815`): under
+                    // `sv_no_weak_hook`, `PreTick()`'s own core tick must *not* run the deferred
+                    // (hook-drag) body — `character_tick`'s own `no_weak_hook` branch runs it
+                    // separately via `core::tick_deferred`. Passing `true` here (an earlier bug)
+                    // applied hook forces twice.
+                    character_pre_tick(world, id as i32, false);
+                    !world.team_changed_this_pass
+                })
+            );
         }
         self.team_changed_this_pass = false;
-        self.for_each_in_entity_order(|world, _i, id| {
-            character_tick(world, id as i32, no_weak_hook);
-            !world.team_changed_this_pass
-        });
+        phase_time!(
+            character_tick_pass,
+            self.for_each_in_entity_order(|world, _i, id| {
+                character_tick(world, id as i32, no_weak_hook);
+                !world.team_changed_this_pass
+            })
+        );
 
         // `TickDeferred()`, a separate pass over every entity type (`gameworld.cpp:234-240`) —
         // only characters do anything here in Stage A's scope (`CProjectile`/`CPickup` don't
         // override `TickDeferred`, inheriting `CEntity`'s no-op).
-        self.for_each_in_entity_order(|world, _i, id| {
-            character_tick_deferred(world, id as i32);
-            true
-        });
+        phase_time!(
+            character_deferred_pass,
+            self.for_each_in_entity_order(|world, _i, id| {
+                character_tick_deferred(world, id as i32);
+                true
+            })
+        );
 
         // `RemoveEntities()` (`gameworld.cpp:186-200`): destroy projectiles marked this tick.
-        self.projectiles.retain(|p| !p.marked_for_destroy);
+        phase_time!(retain, self.projectiles.retain(|p| !p.marked_for_destroy));
 
         // `m_StrongWeakId` assignment (`gameworld.cpp:256-262`): entity-list order, head first.
-        self.for_each_in_entity_order(|world, i, id| {
-            if let Some(c) = world.characters[id as usize].as_mut() {
-                c.strong_weak_id = i as i32;
-            }
-            true
-        });
+        phase_time!(
+            strong_weak_id_pass,
+            self.for_each_in_entity_order(|world, i, id| {
+                if let Some(c) = world.characters[id as usize].as_mut() {
+                    c.strong_weak_id = i as i32;
+                }
+                true
+            })
+        );
     }
 
     /// Runs `f(self, index, id)` for each id currently in [`World::entity_order`], over a

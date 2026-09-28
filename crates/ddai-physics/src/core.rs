@@ -924,7 +924,17 @@ impl Default for Switcher {
 /// valid client id (`0..MAX_CLIENTS`) happens to be — the id *range* `CAP` must support is
 /// unrelated to how many characters are actually present (see `docs/formats.md`'s note on
 /// scenario ids not needing to be small or contiguous).
-#[derive(Debug, Clone)]
+///
+/// `Clone` is implemented by hand (not derived) purely to override `clone_from` (task 1.10,
+/// acceptance criterion 2's "save/restore without cloning Vecs"): `ids`/`cores`/`len` are plain
+/// `Copy` data (no heap involved either way), but `switchers` is a `Vec` — `clone_from`'s default
+/// trait-level implementation (`*self = source.clone()`) would still drop this `WorldCore`'s own
+/// `switchers` allocation and replace it with a freshly allocated one every call; delegating to
+/// `Vec::clone_from` instead reuses the destination's existing allocation whenever its capacity
+/// already fits (the common case: a search loop's `World::restore_from` calling this repeatedly
+/// against the same, already-grown `World`). `clone()` itself is unchanged from what `#[derive]`
+/// would generate.
+#[derive(Debug)]
 pub struct WorldCore<R: Real, const CAP: usize> {
     ids: [u8; CAP],
     cores: [CharacterCore<R>; CAP],
@@ -945,6 +955,37 @@ impl<R: Real, const CAP: usize> Default for WorldCore<R, CAP> {
             prng: None,
             switchers: Vec::new(),
         }
+    }
+}
+
+/// See the struct doc comment: hand-written only to override `clone_from`.
+impl<R: Real, const CAP: usize> Clone for WorldCore<R, CAP> {
+    fn clone(&self) -> Self {
+        WorldCore {
+            ids: self.ids,
+            cores: self.cores,
+            len: self.len,
+            prng: self.prng.clone(),
+            switchers: self.switchers.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        // Only `ids[..source.len]`/`cores[..source.len]` are ever read by anything (the struct
+        // doc comment: "compactly (slots 0..len, no gaps)" — every accessor above bounds its own
+        // reads by `self.len`), so copying only that prefix (typically 2-8 characters, not
+        // `CAP` — up to `MAX_CLIENTS` = 128) still reproduces every *observable* bit of `source`
+        // once `self.len` is set to match; the stale tail past `source.len` is exactly as
+        // unreachable in `self` afterward as it already was in `source`. Task 1.10, acceptance
+        // criterion 2 ("save/restore without cloning Vecs" — the same idea applied to a fixed-size
+        // array instead of a `Vec`): measured effect on a `World::restore_from` this feeds into,
+        // this task's `BUILD REPORT`.
+        let len = source.len;
+        self.ids[..len].copy_from_slice(&source.ids[..len]);
+        self.cores[..len].copy_from_slice(&source.cores[..len]);
+        self.len = len;
+        self.prng.clone_from(&source.prng);
+        self.switchers.clone_from(&source.switchers);
     }
 }
 

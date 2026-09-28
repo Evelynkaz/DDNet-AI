@@ -10,6 +10,13 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Dev-only diagnostic: per-phase `World::step` timing (task 1.10's profiling pass), read via
+# `world::take_phase_profile()`. Off by default — zero cost (the `Instant::now()` calls compile
+# out entirely) for every normal build, including the default `release` one every other crate
+# links against.
+phase_profile = []
+
 [dependencies]
 
 [dev-dependencies]
@@ -25,3 +32,10 @@ stats_alloc = "0.1.10"
 [[bench]]
 name = "physics"
 harness = false
+
+[[example]]
+name = "profile_world"
+# Uses `world::take_phase_profile`, only compiled in under this feature (see its own doc
+# comment) — `required-features` keeps a plain `cargo build`/`cargo test` (which builds every
+# example target by default) from failing on this one without it.
+required-features = ["phase_profile"]

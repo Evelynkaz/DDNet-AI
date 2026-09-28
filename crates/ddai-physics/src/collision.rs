@@ -160,6 +160,12 @@ pub struct Collision<R: Real> {
     /// TILE_NOHOOK` for every `(x, y)` — this changes nothing about *what* is computed, only
     /// *when* (once, in [`Collision::new`], instead of on every call).
     solid: Vec<bool>,
+    /// [`Collision::tile_exists`]'s answer for every cell, precomputed once in [`Collision::new`]
+    /// from [`Collision::tile_exists_uncached`] instead of recomputed on every call — same
+    /// reasoning as [`Collision::solid`] above, generalized to a function that reads up to 6
+    /// layers (game/front/tele/speedup/switch/tune, plus `TileExistsNext`'s door/game/front
+    /// neighbor checks) instead of 1. Task 1.10, acceptance criterion 2.
+    tile_exists_cache: Vec<bool>,
     game: Vec<Tile>,
     front: Option<Vec<Tile>>,
     tele: Option<Vec<TeleTile>>,
@@ -186,6 +192,7 @@ impl<R: Real> Collision<R> {
             width: 0,
             height: 0,
             solid: Vec::new(),
+            tile_exists_cache: Vec::new(),
             game: Vec::new(),
             front: None,
             tele: None,
@@ -267,10 +274,11 @@ impl<R: Real> Collision<R> {
             .map(|t| t.index == map::TILE_SOLID || t.index == map::TILE_NOHOOK)
             .collect();
 
-        Collision {
+        let mut result = Collision {
             width,
             height,
             solid,
+            tile_exists_cache: Vec::new(),
             game: map.game.clone(),
             front: map.front.clone(),
             tele: map.tele.clone(),
@@ -284,7 +292,29 @@ impl<R: Real> Collision<R> {
             tele_check_outs,
             tele_others,
             has_hook_tele_ins,
-        }
+        };
+        // Every layer `tile_exists_uncached` reads is already in place above, so it's safe to
+        // evaluate now, once per cell, for the rest of this `Collision`'s life (see
+        // `tile_exists_cache`'s own doc comment) — unless a caller goes on to place `CDoor`
+        // collision afterward (`World::from_map` does, and calls
+        // `recompute_tile_exists_cache` again once it's done — see that method's doc comment).
+        result.recompute_tile_exists_cache();
+        result
+    }
+
+    /// (Re)computes `tile_exists_cache` (the private field [`Collision::tile_exists`] reads) from
+    /// every other layer, which must already
+    /// be in their final state (idempotent — safe to call again after further mutation).
+    /// [`Collision::new`] already calls this once; the only reason to call it again is
+    /// `set_door_collision_at` (`CDoor` collision placement, `World::from_map`'s scan, task 1.6),
+    /// the sole method that mutates a `Collision` after `new` returns it (see `World::collision`'s
+    /// own doc comment) — `World::from_map` calls this once, after every fixture's door cells for
+    /// the whole map are placed, before the result is ever read from or shared via `Arc`. A
+    /// caller that builds a `Collision` directly and never touches `door` afterward (every test/
+    /// bench in this crate but `World::from_map` itself) never needs to call this again.
+    pub fn recompute_tile_exists_cache(&mut self) {
+        let n = self.game.len();
+        self.tile_exists_cache = (0..n as i32).map(|i| self.tile_exists_uncached(i)).collect();
     }
 
     /// The map's width, in tiles.
@@ -1199,11 +1229,28 @@ impl<R: Real> Collision<R> {
 
     // --- `TileExists`/`TileExistsNext`/`GetMapIndex`/`GetMapIndices` ------------------------
 
-    /// `CCollision::TileExists(int Index)`.
+    /// `CCollision::TileExists(int Index)`. Reads the private `tile_exists_cache` field
+    /// (precomputed once, in [`Collision::new`], from `tile_exists_uncached` — see that field's
+    /// doc comment) instead of recomputing the up-to-6-layer walk on every call. Task 1.10,
+    /// acceptance criterion 2's "a single combined per-cell flags array for game + front + tele +
+    /// speedup + switch + tune presence" — this is exactly that, plus `tile_exists_next`'s own
+    /// (game/front/door) neighbor checks folded in too, since the whole function is pure given an
+    /// immutable, already-constructed `Collision` (every layer it reads is frozen after `new`).
+    /// Called every tick a character is on or passes over any such tile (`get_map_indices_into`'s
+    /// doc comment) — measured effect: this task's `BUILD REPORT`.
     pub fn tile_exists(&self, index: i32) -> bool {
         if index < 0 {
             return false;
         }
+        self.tile_exists_cache.get(index as usize).copied().unwrap_or(false)
+    }
+
+    /// [`Collision::tile_exists`]'s actual logic, run once per cell in [`Collision::new`] to fill
+    /// [`Collision::tile_exists_cache`] — moved here verbatim (not simplified, not reordered) so
+    /// it stays traceable to `CCollision::TileExists` 1:1; only *when* it runs changed (`new`
+    /// makes `index` range over every cell up front instead of a caller triggering one evaluation
+    /// per call, review round 2's finding F4 precedent for `is_solid`).
+    fn tile_exists_uncached(&self, index: i32) -> bool {
         let idx = index as usize;
         let in_range = |i: u8| {
             (map::TILE_FREEZE..=map::TILE_TELE_LASER_DISABLE).contains(&i)
