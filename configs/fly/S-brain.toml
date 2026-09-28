@@ -1,0 +1,68 @@
+# Task 7.3: encoder/decoder configuration layered on top of `configs/fly/S.toml`'s compiled
+# `.flyg` (the visual (VPN) channel -> type assignment lives *inside* the `.flyg` itself, task
+# 6.3's `[[input_channels]]` — this file only adds what the `.flyg` format cannot carry: the
+# proprioceptive (AN) channel assignment, since MaleCNS v1.0's real AN type names carry no
+# functional meaning at all (see `ddai-fly/README.md`'s "Проприоцепция" section and
+# `crates/ddai-connectome/README.md`'s AN discussion). Every mapping below is therefore label
+# **П** (arbitrary), not **Б**/**С** — FLY.md §5's "Walk/Rest AN"/"AHN + JO-C/E"/"Foreleg AN"
+# functional names cannot be matched against this dataset's actual per-type identifiers.
+#
+# Partition method (deterministic, reproducible): the S graph's 18 real AN type names
+# (`ddnet-ai fly info --flyg <S.flyg>` after loading, or the task 6.3 build report), sorted
+# alphabetically, round-robin assigned across the 6 proprioception channels in the fixed order
+# below — type index `i` (0-based, sorted) goes to channel `i % 6`. This is arbitrary by
+# construction (see the label above), but *reproducible* arbitrariness: rerunning the same
+# partition procedure on the same graph gives the same file, rather than a one-off hand pick.
+
+[ray_grid]
+# FLY.md §5: "32-64 direction x 3-4 distance bins, ~20 tiles range". Defaults match
+# `ddai_fly::encoder::RayGridConfig::default()` exactly — listed here anyway so this file is a
+# complete, self-contained record of what was actually used, not just "whatever the code
+# defaults to today".
+num_directions = 48
+num_distance_bins = 4
+max_range_tiles = 20.0
+rf_sigma_deg = 20.0
+object_sigma_deg = 12.0
+# Review round 1, F3/F4 (CONFIRMED): the looming feature is an angular rate (rad/tick), not
+# px/s, and `velocity_norm_scale` normalizes a px/tick velocity (not px/s) -- both values below
+# match `RayGridConfig::default()` exactly (see `ddai_fly::encoder`'s module doc comment for the
+# unit derivation and the calibration test case this default was picked from). Listed explicitly
+# here anyway, per this file's own "complete, self-contained record" convention above -- an
+# earlier revision left the *old*, since-corrected defaults (400.0 / 1000.0) hardcoded here,
+# which would have silently reintroduced F3/F4's bug for any run loading this file even after the
+# code's own default changed.
+looming_k = 0.03
+velocity_norm_scale = 30.0
+# Review round 1, F9 (CONFIRMED): folds a real receptive field's elevation into the ring angle
+# with this gain (see `RayGridConfig::elevation_gain`'s own doc comment for the real-S numbers
+# behind `2.0`) -- matches `RayGridConfig::default()` exactly.
+elevation_gain = 2.0
+
+[decoder]
+# FLY.md §6's action table, matching this graph's real `output_groups` (task 6.3,
+# `ddnet-ai fly info`). Identical set for S and M (both graphs keep the same DN roster, per
+# `configs/fly/S.toml`'s own note on this).
+direction_actions = ["direction_left", "direction_stop", "direction_right"]
+jump_action = "jump"
+hook_action = "hook"
+fire_action = "fire"
+aim_action = "aim"
+aim_kappa = 4.0
+min_sigma = 0.05
+z_clip = 10.0
+l1_weight = 1.0e-4
+
+[world_model]
+# `neuron_subset` left unset -> every `Hidden`-role neuron (task spec's stated default).
+loss_weight = 0.2
+
+# П: round-robin partition of S's 18 real AN types (sorted) across the 6 channels — see the
+# module comment above for the exact procedure.
+[proprioception]
+grounded = ["AN01A089", "AN05B102a", "AN08B018"]
+airborne = ["AN02A001", "AN06B009", "AN09B002"]
+own_hook = ["AN02A002", "AN07B004", "AN09B004"]
+jumps_left = ["AN03A008", "AN07B018", "AN09B012"]
+freeze_timer = ["AN04B003", "AN07B037_a", "ANXXX027"]
+speed = ["AN05B099", "AN08B012", "ANXXX250"]

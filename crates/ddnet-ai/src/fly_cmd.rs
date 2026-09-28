@@ -82,6 +82,42 @@ pub enum FlyCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Task 7.3, acceptance criterion 9: the encoder + fly + decoder learning demo — synthetic
+    /// observations (a random spawn on a real block map, an opponent at a random relative
+    /// position/velocity) and a scripted teacher (direction/jump/hook), trained with
+    /// `guarded_adam_step` (fly) / `flat_adam` (encoder, decoder). Prints held-out accuracy
+    /// before/after training, vs chance, and vs a same-size MLP control fed the same raw
+    /// features; writes the per-step loss/grad-norm curve as CSV.
+    BrainDemo {
+        #[arg(long)]
+        flyg: PathBuf,
+        /// `configs/fly/{S,M}-brain.toml` — ray-grid/decoder/world-model/proprioception config.
+        #[arg(long)]
+        brain_config: PathBuf,
+        /// A real DDNet `.map` file (task 7.3: "a random map crop from real block maps via
+        /// ddai-map").
+        #[arg(long)]
+        map: PathBuf,
+        #[arg(long, default_value_t = 16)]
+        batch_size: usize,
+        #[arg(long, default_value_t = 4)]
+        t_decisions: usize,
+        #[arg(long, default_value_t = 200)]
+        steps: usize,
+        #[arg(long, default_value_t = 1.0)]
+        grad_clip_norm: f32,
+        #[arg(long, default_value_t = 2e-4)]
+        lr_fly: f32,
+        #[arg(long, default_value_t = 2e-2)]
+        lr_encoder: f32,
+        #[arg(long, default_value_t = 2e-2)]
+        lr_decoder: f32,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        /// CSV output path. Defaults to `~/aiddnet/data/runs/7.3-demo/<flyg-stem>-brain-demo.csv`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 pub fn run(args: FlyArgs) -> ExitCode {
@@ -123,6 +159,33 @@ pub fn run(args: FlyArgs) -> ExitCode {
             seed,
             left_action,
             right_action,
+            out,
+        }),
+        FlyCommand::BrainDemo {
+            flyg,
+            brain_config,
+            map,
+            batch_size,
+            t_decisions,
+            steps,
+            grad_clip_norm,
+            lr_fly,
+            lr_encoder,
+            lr_decoder,
+            seed,
+            out,
+        } => brain_demo(BrainDemoArgs {
+            flyg,
+            brain_config,
+            map,
+            batch_size,
+            t_decisions,
+            steps,
+            grad_clip_norm,
+            lr_fly,
+            lr_encoder,
+            lr_decoder,
+            seed,
             out,
         }),
     }
@@ -452,4 +515,248 @@ fn write_metrics_csv(path: &Path, metrics: &[ddai_fly::demo::StepMetric]) -> std
         )?;
     }
     Ok(())
+}
+
+struct BrainDemoArgs {
+    flyg: PathBuf,
+    brain_config: PathBuf,
+    map: PathBuf,
+    batch_size: usize,
+    t_decisions: usize,
+    steps: usize,
+    grad_clip_norm: f32,
+    lr_fly: f32,
+    lr_encoder: f32,
+    lr_decoder: f32,
+    seed: u64,
+    out: Option<PathBuf>,
+}
+
+fn default_brain_demo_csv_out_path(flyg_path: &Path) -> Result<PathBuf, ExitCode> {
+    let home = std::env::var("HOME").map_err(|_| {
+        eprintln!("HOME must be set to default --out to ~/aiddnet/data/runs/7.3-demo/");
+        ExitCode::FAILURE
+    })?;
+    let stem = flyg_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "flyg".to_string());
+    Ok(PathBuf::from(home)
+        .join("aiddnet/data/runs/7.3-demo")
+        .join(format!("{stem}-brain-demo.csv")))
+}
+
+fn write_brain_demo_metrics_csv(path: &Path, metrics: &[ddai_fly::demo_brain::StepMetric]) -> std::io::Result<()> {
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "step,loss,grad_norm,fly_applied,fly_lr_scale")?;
+    for m in metrics {
+        writeln!(
+            f,
+            "{},{},{},{},{}",
+            m.step, m.loss, m.grad_norm, m.fly_applied, m.fly_lr_scale
+        )?;
+    }
+    Ok(())
+}
+
+fn brain_demo(args: BrainDemoArgs) -> ExitCode {
+    use ddai_fly::BackwardIndex;
+    use ddai_fly::brain_config::load_brain_config;
+    use ddai_fly::decoder::DecoderModel;
+    use ddai_fly::demo_brain::{BrainDemoConfig, run_brain_demo};
+    use ddai_fly::encoder::EncoderModel;
+
+    let flyg = match load_flyg_or_fail(&args.flyg) {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
+    let brain_cfg = match load_brain_config(&args.brain_config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed to load {}: {e}", args.brain_config.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let map_bytes = match std::fs::read(&args.map) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("failed to read {}: {e}", args.map.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let loaded_map = match ddai_map::load_map(&map_bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("failed to parse {}: {e}", args.map.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "map: {} ({}x{} tiles)",
+        args.map.display(),
+        loaded_map.data.width,
+        loaded_map.data.height
+    );
+
+    let config = ddai_fly::FlyConfig::default();
+    let params = ddai_fly::FlyParams::init_default(&flyg, &config, args.seed);
+    let mut model = match ddai_fly::FlyModel::new(flyg, config, params) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("failed to build model: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let index = BackwardIndex::build(&model);
+
+    let encoder = match EncoderModel::new(&model, brain_cfg.ray_grid, &brain_cfg.proprioception) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("failed to build encoder: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut encoder_params = ddai_fly::encoder::EncoderParams::init_default(encoder.num_params());
+    println!(
+        "encoder: {} inputs, {} (type, channel) params; visual channels with no neurons on this graph: {:?}",
+        encoder.num_inputs(),
+        encoder.num_params(),
+        encoder.visual_channels_with_no_neurons()
+    );
+
+    let decoder = match DecoderModel::new(&model, brain_cfg.decoder) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("failed to build decoder: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let decoder_init = decoder.init_default_params();
+    let mut decoder_params = decoder_init;
+
+    // Calibration (task spec: "frozen per-DN calibration from a resting run"): the one documented
+    // protocol every caller uses (review round 1, F10 -- an earlier revision had a *different*,
+    // undocumented recipe inline here rather than going through `ddai_fly::calibrate_from_rest`,
+    // the module doc comment's own documented protocol). A throwaway warm-up just for the printed
+    // report below (`calibrate_from_rest` does its own warm-up internally, redundant but cheap).
+    let warm_report = ddai_fly::FlyState::new(&model).warm_up(&model);
+    println!(
+        "warm-up: converged={} in {} decisions ({:.0}ms)",
+        warm_report.converged, warm_report.decisions_run, warm_report.elapsed_ms
+    );
+    let calib = match ddai_fly::calibrate_from_rest(&model, args.seed, decoder.config().min_sigma) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed to fit calibration: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let demo_cfg = BrainDemoConfig {
+        batch_size: args.batch_size,
+        t_decisions: args.t_decisions,
+        steps: args.steps,
+        grad_clip_norm: args.grad_clip_norm,
+        lr_fly: args.lr_fly,
+        lr_encoder: args.lr_encoder,
+        lr_decoder: args.lr_decoder,
+        seed: args.seed,
+        ..BrainDemoConfig::default()
+    };
+
+    let start = Instant::now();
+    let report = run_brain_demo(
+        &mut model,
+        &index,
+        &encoder,
+        &mut encoder_params,
+        &decoder,
+        &mut decoder_params,
+        &calib,
+        std::sync::Arc::new(loaded_map.data),
+        &demo_cfg,
+    );
+    let elapsed = start.elapsed();
+
+    println!(
+        "trained {} steps ({} samples/step) in {elapsed:?}",
+        report.metrics.len(),
+        args.batch_size
+    );
+    println!(
+        "fly pipeline trainable params: {} | MLP control trainable params: {} | held-out n={} | guarded steps skipped: {}",
+        report.fly_num_params, report.mlp_num_params, report.held_out_n, report.guarded_steps_skipped
+    );
+    println!(
+        "{:>9} {:>6} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8}",
+        "head", "prev.", "majority", "fly(before)", "fly(after)", "mlp", "bal.acc", "auroc"
+    );
+    println!(
+        "{:>9} {:>6.3} {:>10.3} {:>10.3} {:>10.3} {:>8.3} {:>8.3} {:>8}",
+        "direction",
+        report
+            .metrics_before_fly
+            .direction
+            .class_prevalence
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max),
+        report.metrics_before_fly.direction.majority_baseline_accuracy,
+        report.metrics_before_fly.direction.accuracy,
+        report.metrics_after_fly.direction.accuracy,
+        report.metrics_after_mlp.direction.accuracy,
+        report.metrics_after_fly.direction.balanced_accuracy,
+        "-"
+    );
+    println!(
+        "{:>9} {:>6.3} {:>10.3} {:>10.3} {:>10.3} {:>8.3} {:>8.3} {:>8.3}",
+        "jump",
+        report.metrics_before_fly.jump.prevalence,
+        report.metrics_before_fly.jump.majority_baseline_accuracy,
+        report.metrics_before_fly.jump.accuracy,
+        report.metrics_after_fly.jump.accuracy,
+        report.metrics_after_mlp.jump.accuracy,
+        report.metrics_after_fly.jump.balanced_accuracy,
+        report.metrics_after_fly.jump.auroc
+    );
+    println!(
+        "{:>9} {:>6.3} {:>10.3} {:>10.3} {:>10.3} {:>8.3} {:>8.3} {:>8.3}",
+        "hook",
+        report.metrics_before_fly.hook.prevalence,
+        report.metrics_before_fly.hook.majority_baseline_accuracy,
+        report.metrics_before_fly.hook.accuracy,
+        report.metrics_after_fly.hook.accuracy,
+        report.metrics_after_mlp.hook.accuracy,
+        report.metrics_after_fly.hook.balanced_accuracy,
+        report.metrics_after_fly.hook.auroc
+    );
+    println!(
+        "95% CI (Wilson) fly(after): direction={:?} jump={:?} hook={:?}",
+        report.metrics_after_fly.direction.accuracy_wilson_ci95,
+        report.metrics_after_fly.jump.accuracy_wilson_ci95,
+        report.metrics_after_fly.hook.accuracy_wilson_ci95,
+    );
+
+    let out_path = match args.out {
+        Some(p) => p,
+        None => match default_brain_demo_csv_out_path(&args.flyg) {
+            Ok(p) => p,
+            Err(code) => return code,
+        },
+    };
+    if let Some(parent) = out_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("failed to create {}: {e}", parent.display());
+        return ExitCode::FAILURE;
+    }
+    match write_brain_demo_metrics_csv(&out_path, &report.metrics) {
+        Ok(()) => println!("wrote loss/grad_norm curve to {}", out_path.display()),
+        Err(e) => {
+            eprintln!("failed to write {}: {e}", out_path.display());
+            return ExitCode::FAILURE;
+        }
+    }
+
+    ExitCode::SUCCESS
 }

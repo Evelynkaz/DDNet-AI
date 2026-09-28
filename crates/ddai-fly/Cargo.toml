@@ -17,6 +17,12 @@ workspace = true
 
 [dependencies]
 ddai-flyg = { path = "../ddai-flyg" }
+# Task 7.3: the shared `Brain`/`Observation`/`Action` interface `FlyBrain` implements, plus the
+# map tile types the ray-grid encoder reads (`ddai-brain` re-exports the tuning/hook-state pieces
+# it needs from `ddai-physics`, but the encoder reads `ddai_physics::map::MapData`'s tile constants
+# directly, so both are listed explicitly rather than relying on `ddai-brain` to re-export them).
+ddai-brain = { path = "../ddai-brain" }
+ddai-physics = { path = "../ddai-physics" }
 serde = { version = "1.0.229", features = ["derive"] }
 # Same feature choice as ddai-flyg/ddai-connectome (see their Cargo.toml comments): default-features
 # = false drops the no_std `heapless-cas` feature (and its unmaintained transitive dependency,
@@ -33,9 +39,17 @@ sha2 = "0.11.0"
 # deterministically (see `train.rs`'s doc comment) once all of them finish. The only new runtime
 # dependency this task adds (constraints: "no external autodiff/ML frameworks ... rayon is fine").
 rayon = "1.10"
+# Task 7.3: reads `configs/fly/{S,M}-brain.toml` (ray-grid/decoder/world-model/proprioception
+# config) — same version already used by `ddai-connectome` for `configs/fly/{S,M}.toml`.
+toml = "1.1.6"
 
 [dev-dependencies]
 tempfile = "3.14"
+# `tests/brain_demo_generalization.rs` only (review round 1, F2): loads the real "Copy Love Box"
+# `.map` files for the held-out-maps generalization check. Not a library dependency -- the encoder
+# itself only ever reads `ddai_physics::map::MapData` (already a dependency above), never parses a
+# raw `.map` file.
+ddai-map = { path = "../ddai-map" }
 criterion = { version = "0.7", default-features = false }
 # Thread pinning for the criterion benches only (the realistic 25 Hz duty-cycle loop lives in
 # `ddnet-ai`, which pins independently — see its Cargo.toml comment). Kept a dev-dependency here so

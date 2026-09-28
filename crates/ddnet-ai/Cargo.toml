@@ -20,6 +20,9 @@ ddai-client = { path = "../ddai-client" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-flyg = { path = "../ddai-flyg" }
 ddai-map = { path = "../ddai-map" }
+# Task 7.3's `fly brain-demo`: `ddai_physics::map::MapData` (`ddai-map::load_map`'s own return
+# type) needs to be named directly here (an `Arc<MapData>` is built for `ddai_fly::demo_brain`).
+ddai-physics = { path = "../ddai-physics" }
 ddai-trace = { path = "../ddai-trace" }
 ddai-web = { path = "../ddai-web" }
 serde_json = "1"

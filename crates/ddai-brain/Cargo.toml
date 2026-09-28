@@ -1,0 +1,22 @@
+[package]
+name = "ddai-brain"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Shared controller interface (task 7.3): `Brain`, `Observation`, `Action` — the plain-data contract every decision-maker (planner, scripted bot, the fly, later human-replay) implements against, so the live bot/arena never has to know which one is currently in the driver's seat."
+
+[lib]
+name = "ddai_brain"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# `Observation`'s map handle (`ddai_physics::map::MapData`) and character-state fields (hook state
+# constants, tuning) — this is the only dependency, matching the task spec's "no heavy deps":
+# `ddai-physics` itself has zero dependencies of its own (see its Cargo.toml).
+ddai-physics = { path = "../ddai-physics" }

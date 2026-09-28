@@ -1,0 +1,42 @@
+# Task 7.3: encoder/decoder configuration layered on top of `configs/fly/M.toml`'s compiled
+# `.flyg`. See `configs/fly/S-brain.toml`'s header comment for the full rationale (visual channel
+# assignment lives in the `.flyg` itself; this file adds the proprioceptive assignment, label
+# **П** throughout, same round-robin-over-sorted-AN-type-names procedure, run against M's 45 real
+# AN types instead of S's 18).
+
+[ray_grid]
+num_directions = 48
+num_distance_bins = 4
+max_range_tiles = 20.0
+rf_sigma_deg = 20.0
+object_sigma_deg = 12.0
+# Review round 1, F3/F4 (CONFIRMED) -- see `configs/fly/S-brain.toml`'s header comment for the
+# full rationale; matches `RayGridConfig::default()` exactly.
+looming_k = 0.03
+velocity_norm_scale = 30.0
+# Review round 1, F9 (CONFIRMED) -- see `configs/fly/S-brain.toml`'s comment; matches
+# `RayGridConfig::default()` exactly.
+elevation_gain = 2.0
+
+[decoder]
+direction_actions = ["direction_left", "direction_stop", "direction_right"]
+jump_action = "jump"
+hook_action = "hook"
+fire_action = "fire"
+aim_action = "aim"
+aim_kappa = 4.0
+min_sigma = 0.05
+z_clip = 10.0
+l1_weight = 1.0e-4
+
+[world_model]
+loss_weight = 0.2
+
+# П: round-robin partition of M's 45 real AN types (sorted) across the 6 channels.
+[proprioception]
+grounded = ["AN01A055", "AN04B003", "AN06B011", "AN07B042", "AN08B026", "AN09B023", "AN19B025", "ANXXX154"]
+airborne = ["AN01A086", "AN05B023d", "AN06B040", "AN07B049", "AN08B034", "AN09B024", "AN19B036", "ANXXX191"]
+own_hook = ["AN01A089", "AN05B099", "AN07B004", "AN07B052", "AN09B002", "AN10B019", "AN27X011", "ANXXX250"]
+jumps_left = ["AN02A001", "AN05B102a", "AN07B018", "AN08B012", "AN09B004", "AN17B012", "ANXXX027"]
+freeze_timer = ["AN02A002", "AN05B102c", "AN07B037_a", "AN08B018", "AN09B012", "AN19B017", "ANXXX094"]
+speed = ["AN03A008", "AN06B009", "AN07B037_b", "AN08B024", "AN09B016", "AN19B019", "ANXXX102"]

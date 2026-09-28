@@ -5,19 +5,26 @@
 //! model, the API's shape, and the performance/init-tuning numbers this crate's own tests were
 //! checked against.
 //!
-//! Explicitly **not** here (see `README.md`'s "Scope"): the backward pass (7.2), the ray-grid
-//! input encoder / DN action decoder (7.3), and training (phase 8). What *is* here for those:
-//! [`TrajectoryRecorder`] (a hook for 7.2) and [`FlyModel::output_slot_for_neuron`] /
-//! `flyg().output_groups` (hooks for 7.3).
+//! Task 7.3 adds the ray-grid input encoder ([`encoder`]), the DN action decoder ([`decoder`]),
+//! the world-model head ([`world_model`]), and [`brain::FlyBrain`] (the `ddai_brain::Brain`
+//! implementation that glues all three to 7.1/7.2's forward/backward). Training (phase 8) is
+//! still not here.
 
 pub mod activation;
 pub mod backward;
 mod bench;
+pub mod brain_checkpoint;
+pub mod brain_config;
+pub mod brain_train;
 pub mod checkpoint;
 pub mod config;
+pub mod decoder;
 #[doc(hidden)] // demo/reporting glue shared by tests and the `ddnet-ai fly train-demo` CLI, not covered by semver.
 pub mod demo;
+pub mod demo_brain;
+pub mod encoder;
 mod error;
+pub mod flat_adam;
 mod kernel;
 pub mod model;
 pub mod optim;
@@ -27,7 +34,12 @@ pub mod recorder;
 pub mod rng;
 pub mod state;
 pub mod train;
+pub mod world_model;
 
+pub mod brain;
+
+#[doc(hidden)] // test/bench support only, not covered by semver — see its own doc comment.
+pub mod brain_fixtures;
 #[doc(hidden)] // test/bench support only, not covered by semver — see its own doc comment.
 pub mod test_fixtures;
 
@@ -37,6 +49,7 @@ pub use checkpoint::{
     Checkpoint, CheckpointMeta, load_checkpoint, load_checkpoint_for_flyg, save_checkpoint, sha256_hex_of_file,
 };
 pub use config::FlyConfig;
+pub use decoder::calibrate_from_rest;
 pub use error::FlyError;
 pub use model::FlyModel;
 pub use optim::{

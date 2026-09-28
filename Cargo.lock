@@ -928,6 +928,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
+name = "ddai-brain"
+version = "0.1.0"
+dependencies = [
+ "ddai-physics",
+]
+
+[[package]]
 name = "ddai-client"
 version = "0.1.0"
 dependencies = [
@@ -965,12 +972,16 @@ version = "0.1.0"
 dependencies = [
  "core_affinity",
  "criterion 0.7.0",
+ "ddai-brain",
  "ddai-flyg",
+ "ddai-map",
+ "ddai-physics",
  "postcard",
  "rayon",
  "serde",
  "sha2 0.11.0",
  "tempfile",
+ "toml",
  "zstd",
 ]
 
@@ -1072,6 +1083,7 @@ dependencies = [
  "ddai-fly",
  "ddai-flyg",
  "ddai-map",
+ "ddai-physics",
  "ddai-trace",
  "ddai-web",
  "serde_json",
