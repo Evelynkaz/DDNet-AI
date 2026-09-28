@@ -1044,6 +1044,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-tsworld"
+version = "0.1.0"
+dependencies = [
+ "criterion 0.8.2",
+ "ddai-jsmath",
+ "ddai-map",
+ "ddai-physics",
+ "ddai-trace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ddai-web"
 version = "0.1.0"
 dependencies = [

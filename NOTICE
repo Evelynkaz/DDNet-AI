@@ -108,6 +108,25 @@ platform's own `pow` at runtime (same as Rust's `f64::powf`), which is
 linking against the system's libm, not copying its source.
 
 ------------------------------------------------------------------------
+crates/ddai-tsworld
+------------------------------------------------------------------------
+
+`crates/ddai-tsworld` is a literal Rust port of `src/core/*.ts`
+(`vmath.ts`, `tuning.ts`, `types.ts`, `collision.ts`, `characterCore.ts`,
+`projectile.ts`, `world.ts`) and `src/map/loadMap.ts` — the same TypeScript
+files the "Third-party code" section above already covers, ported one more
+step (TypeScript to Rust) instead of C++ to TypeScript. It exists only to
+prove a future Rust port of the old planner (`src/plan/*.ts`) makes the
+same decisions the TS planner did on the TS physics it was tuned against
+(decision D-035, `docs/DECISIONS.md`); it is not the project's production
+physics (`crates/ddai-physics`, bit-exact with the real DDNet C++ server
+instead). The same zlib-style DDNet notice above applies to this crate's
+ported files (see each file's own header doc comment for the exact
+`src/core/*.ts` file:line it mirrors); the crate itself is licensed
+GPL-3.0-only like the rest of this repository, with credit to the original
+TS project (Wranked1/DDNet-AI) in its own README.
+
+------------------------------------------------------------------------
 Modified version
 ------------------------------------------------------------------------
 

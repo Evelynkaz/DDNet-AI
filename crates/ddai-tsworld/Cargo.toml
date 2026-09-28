@@ -1,0 +1,47 @@
+[package]
+name = "ddai-tsworld"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Literal, bit-exact-with-V8 Rust port of the legacy TS bot's `src/core/*` physics (SimWorld/CharacterCore/Collision/Projectile/Laser), used only to prove the future Rust planner port makes the exact same decisions as the TS planner (decision D-035). NOT the production physics (see ddai-physics)."
+
+[lib]
+name = "ddai_tsworld"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-jsmath = { path = "../ddai-jsmath" }
+ddai-map = { path = "../ddai-map" }
+# Only for the trace-ts v1 replay/comparison test helpers (src/bin/ts-diff.rs, tests/): parses
+# the JSON-lines trace files the Node harness (tools/ts-trace) produces. Not needed by the
+# physics port itself (`SimWorld` et al. never touch JSON).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Fixture `.map` files for the parity tests (a real DDNet datafile, not the rawmap v1 format):
+# `ddai-map`'s test-only writer builds them from `ddai-trace::synthetic`'s recipes so the exact
+# same bytes can be handed to both the real TS `loadMap.ts` and this crate's own map loader — see
+# `README.md` "Синтетические карты как настоящие .map-файлы".
+ddai-map = { path = "../ddai-map", features = ["test-util"] }
+ddai-trace = { path = "../ddai-trace" }
+ddai-physics = { path = "../ddai-physics" }
+criterion = { version = "0.8", default-features = false }
+# Only for `tests/parity_golden.rs`'s own sha256 check against the fixture's recorded `mapSha256`
+# (the library itself never hashes anything — `map_sha256` in `trace_ts.rs` is just a plain
+# `String` field read from the trace's JSON).
+sha2 = "0.10"
+
+[[bin]]
+name = "ts-diff"
+path = "src/bin/ts_diff.rs"
+
+[[bench]]
+name = "step"
+harness = false
