@@ -22,7 +22,9 @@ WorkingDirectory=/home/ubuntu/aiddnet/data
 # Fail closed if the binary is missing (e.g. deploy/install.sh was interrupted before the build
 # step finished) instead of systemd retrying a nonexistent exec forever.
 ExecStartPre=/usr/bin/test -x /home/ubuntu/aiddnet/bin/ddnet-ai
-ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure
+# Task 5.2a: until the live bot exists (phase 4), the live map shows replays of the Oracle B
+# corpus (real DDNet 20.1 server games on real block maps). Read-only paths under ProtectHome.
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure --replay /home/ubuntu/aiddnet/data/traces/oracle-b/v1 --maps-dir /home/ubuntu/aiddnet/data/ddnet-server/maps --maps-dir /home/ubuntu/aiddnet/data/maps/copy-love-box --maps-dir /home/ubuntu/aiddnet/data/maps/cache
 Restart=on-failure
 RestartSec=2
 
