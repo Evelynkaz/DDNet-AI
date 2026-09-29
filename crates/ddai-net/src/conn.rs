@@ -821,6 +821,64 @@ mod tests {
         (client, server)
     }
 
+    /// Task 2.3b: a delayed burst of `CONNECTACCEPT`s (several `CONNECT` resends answered all at
+    /// once, possibly with different tokens) must be handled exactly like the real client: only the
+    /// first one, while `Connecting`, does anything (adopts its token, queues one `ACCEPT`, goes
+    /// online); every later one is a no-op. `CNetConnection::Feed` gates the whole
+    /// `CONNECTACCEPT` branch on `State() == CONNECT` — DDNet 20.1 `network_conn.cpp:455-479`,
+    /// 18.5 `network_conn.cpp:442-465` — so an online connection never re-runs it.
+    #[test]
+    fn burst_of_connect_accepts_yields_exactly_one_connected() {
+        let huffman = Huffman::new();
+        let mut client = Connection::new(Config::default());
+        client.connect(secs(0), &huffman);
+        assert_eq!(client.flush(&huffman, secs(0)).len(), 1);
+
+        // Three servers' worth of CONNECTACCEPT, two sharing token A (a resend answered twice),
+        // one with an unrelated token B.
+        let mut accepts = Vec::new();
+        for token in [0x1111_1111u32, 0x1111_1111, 0x2222_2222, 0x1111_1111] {
+            let mut server = Connection::new(Config::default());
+            server.accept(token, ms(50), &huffman);
+            let dgs = server.flush(&huffman, ms(50));
+            assert_eq!(dgs.len(), 1);
+            accepts.push(dgs.into_iter().next().unwrap());
+        }
+
+        let mut connected = 0;
+        for dg in &accepts {
+            connected += client
+                .feed(dg, &huffman, ms(100))
+                .iter()
+                .filter(|e| matches!(e, Event::Connected))
+                .count();
+        }
+        assert_eq!(
+            connected, 1,
+            "a burst of CONNECTACCEPTs must produce exactly one Connected"
+        );
+        assert!(client.is_online());
+        // Exactly one ACCEPT was queued (by the first CONNECTACCEPT), and it carries token A.
+        let out = client.flush(&huffman, ms(100));
+        assert_eq!(
+            out.len(),
+            1,
+            "exactly one ACCEPT, not one per CONNECTACCEPT: {}",
+            out.len()
+        );
+
+        // A server that adopted token A now completes the handshake from that one ACCEPT.
+        let mut server = Connection::new(Config::default());
+        server.accept(0x1111_1111, ms(50), &huffman);
+        let _ = server.flush(&huffman, ms(50));
+        assert_eq!(server.feed(&out[0], &huffman, ms(100)), vec![Event::Connected]);
+
+        // And a further duplicate arriving later, while online, is still inert.
+        assert!(client.feed(&accepts[0], &huffman, ms(200)).is_empty());
+        assert!(client.feed(&accepts[2], &huffman, ms(200)).is_empty());
+        assert!(client.is_online());
+    }
+
     #[test]
     fn full_handshake_reaches_online_both_sides() {
         let huffman = Huffman::new();

@@ -26,6 +26,12 @@ use tracing_subscriber::prelude::*;
 /// here already uses, so a caller (a supervisor script, `docs/STATUS.md`'s own incident log) can
 /// tell the two apart without parsing log text.
 const EXIT_KICKED_OR_BANNED: u8 = 3;
+/// Task 2.3b: a distinct, non-zero exit code for the handshake watchdog giving up — same
+/// motivation as [`EXIT_KICKED_OR_BANNED`] (D-016: a human should notice and investigate a stalled
+/// session, not have automation see a quiet, ambiguous failure). This is exactly the incident this
+/// task fixes: a session that never reached in-game, silently retried forever, and had to be
+/// stopped by hand after 35s with no explanation in the log.
+const EXIT_HANDSHAKE_TIMEOUT: u8 = 4;
 
 /// `~/aiddnet/data`, per `CLAUDE.md`'s folder layout — same fallback pattern as `ddnet-ai play`.
 fn default_data_dir() -> PathBuf {
@@ -506,6 +512,12 @@ pub fn run(args: RecordArgs) -> ExitCode {
                 current_server_addr = to;
             }
             ClientEvent::RedirectRefused { reason } => tracing::error!(%reason, "redirect refused"),
+            // Task 2.3b (root-cause fix): this transition used to be completely silent (no
+            // `ClientEvent` at all), which is exactly how the Swarfey incident's rapid, unbounded
+            // reconnect loop went unnoticed at info level — see this event's own doc comment.
+            ClientEvent::ServerRequestedReconnect { addr, attempt } => {
+                tracing::info!(%addr, attempt, "server requested reconnect (reconnect@ddnet.org)");
+            }
             ClientEvent::GaveUp { reason, category } => {
                 tracing::error!(%reason, ?category, "driver gave up");
                 ended = true;
@@ -557,9 +569,21 @@ pub fn run(args: RecordArgs) -> ExitCode {
 
     // Review round 1, finding F8: a kick/ban gets its own distinct, non-zero exit code — checked
     // first, since it is the one outcome worth a human's attention regardless of whether a
-    // recording also happened to be produced.
+    // recording also happened to be produced. Task 2.3b: the handshake watchdog giving up gets the
+    // same treatment, for the same reason.
     if matches!(gave_up_category, Some(GaveUpCategory::KickedOrBanned)) {
         return ExitCode::from(EXIT_KICKED_OR_BANNED);
+    }
+    if matches!(
+        gave_up_category,
+        Some(
+            GaveUpCategory::HandshakeTimeout
+                | GaveUpCategory::ReconnectLoop
+                | GaveUpCategory::TooManyAttempts
+                | GaveUpCategory::ReconnectBudgetExhausted
+        )
+    ) {
+        return ExitCode::from(EXIT_HANDSHAKE_TIMEOUT);
     }
     match any_segment_created {
         true => ExitCode::SUCCESS,

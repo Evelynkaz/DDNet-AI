@@ -71,11 +71,11 @@ fn ex_sys_chunk(name: &str, body: impl FnOnce(&mut Packer)) -> Vec<u8> {
 /// Review finding F4: after the driver follows a server-requested reconnect (`reconnect@ddnet.org`
 /// — the same mechanism, and the same fix, applies to a followed redirect; `redirect_double.rs`
 /// covers that case separately), the *old* connection must be gracefully closed (`CLOSE` reaches
-/// this test double) before a *new* connection (a fresh `CONNECT`, necessarily from a different
-/// ephemeral source port — the driver binds a brand-new socket per attempt) ever arrives. This
-/// double tracks exactly one "current peer" `Connection` at a time and fails loudly the instant a
-/// datagram from a *different* address arrives while the current peer's connection has not yet
-/// seen a `CLOSE` — the real, wire-level version of "no second connection starts before the first
+/// this test double) before a *new* connection (a fresh `CONNECT`) ever arrives. Since task 2.3b the driver reuses one
+/// socket for every reconnect (like the real client), so the new `CONNECT` comes from the *same*
+/// source address as the old connection; this double tracks exactly one current `Connection` at a
+/// time and fails loudly the instant a datagram from a *different* address arrives while the
+/// current connection has not yet seen a `CLOSE` — the real, wire-level version of "no second connection starts before the first
 /// closes" (task/CLAUDE.md's "one bot per server" policy).
 #[test]
 fn client_closes_the_old_connection_before_reconnecting_over_real_udp() {
@@ -107,7 +107,9 @@ fn client_closes_the_old_connection_before_reconnecting_over_real_udp() {
         match socket.recv_from(&mut buf) {
             Ok((n, from)) => {
                 let now = start.elapsed();
-                if current_peer.is_some_and(|p| p != from) {
+                // A datagram after the current connection was closed is a new connection, from the
+                // same address (the driver reuses its socket) or, for other drivers, another one.
+                if current_peer.is_some_and(|p| p != from || current_closed) {
                     if !current_closed {
                         violation = Some(format!(
                             "datagram from a new peer {from} arrived while the previous peer {:?} was not yet closed",

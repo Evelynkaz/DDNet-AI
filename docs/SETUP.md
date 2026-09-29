@@ -123,6 +123,78 @@ python3 tools/ddnet-server/econ.py status        # админ-консоль (12
 конфига/секретов, systemd ограничивает трафик loopback'ом. После правки `tools/ddnet-server/local.cfg` — заново
 `install-service.sh` (он копирует конфиг в `~/aiddnet/data/ddnet-server/`). Подробно — `tools/ddnet-server/README.md`.
 
+## 5d. Локальный DDNet-сервер 18.5 (задача 2.3b, разовое расследование)
+
+Разовый (не systemd-юнит) сервер DDNet **18.5** для локального воспроизведения инцидента Swarfey —
+`tools/ddnet-server/build.sh` уже параметризован под тег/коммит/путь, отдельная сборка не понадобилась:
+
+```bash
+DDNET_BUILD_ROOT=~/aiddnet/data/ddnet-18.5 DDNET_TAG=18.5 \
+  DDNET_COMMIT=bae736293a2bd1921dfc121e9c730c3d8e15bc70 DDNET_BUILD_JOBS=4 \
+  tools/ddnet-server/build.sh
+```
+
+**Новый пакет по сравнению с 20.1**: `libpng-dev` 1.6.43-5ubuntu0.6. У тега 18.5 `CMakeLists.txt` требует
+`PNG_FOUND` **безусловно** (`if(NOT(PNG_FOUND)) message(SEND_ERROR ...)`, без `CLIENT`-гейта — в отличие от
+Freetype/Ogg/Opus/Opusfile/SDL2, все — `if(CLIENT AND NOT(...))`), т.е. даже server-only (`-DCLIENT=OFF
+-DTOOLS=OFF`) сборка 18.5 не конфигурируется без libpng; в 20.1 (текущий пиннутый коммит) это ограничение уже
+снято. Собрано без `DDNET_SKIP_APT` до этой находки (упало на `cmake configure`), затем `sudo apt-get install -y
+libpng-dev` и повтор с `DDNET_SKIP_APT=1`. Бинарник: `~/aiddnet/data/ddnet-18.5/build/DDNet-Server` (7,1 МБ),
+сборка ~46 с, пик RSS сборки ≈ 1,47 ГБ.
+
+Рантайм — вручную, не через `setup-runtime.sh`/`install-service.sh` (те жёстко привязаны к путям 20.1 и к
+systemd-юниту `ddnet-local.service`, который принадлежит другой задаче): `~/aiddnet/data/ddnet-18.5-runtime/`
+(`storage.cfg`, `local.cfg`, `maps/Copy Love Box.map` — та же карта, что у 20.1, скопирована туда же,
+`teehistorian/`). Порт игры **8306**, econ **8307** (пароли — временные, только для этого расследования, не
+секреты продукта). Запуск вручную в фоне (`nohup ... &`), лог — `~/aiddnet/data/logs/ddnet-18.5-runtime.log`;
+**не** systemd-юнит и **не** предназначен жить долго — техлид может удалить `~/aiddnet/data/ddnet-18.5-runtime/` и
+`~/aiddnet/data/ddnet-18.5/` после того, как забирёт результаты задачи 2.3b, либо оставить для последующих задач
+(проверено, что и `ddnet-ai record`, и `ddnet-ai play --brain idle` заходят на него без единой правки клиента).
+`bindaddr 127.0.0.1`, `sv_register 0` — тот же loopback-only принцип, что и у 20.1.
+
+**Второй экземпляр 18.5 с эмуляцией «reconnect-петли»** (порт **8309**, econ 8310, рантайм
+`~/aiddnet/data/ddnet-18.5-runtime-flood/`, лог `~/aiddnet/data/logs/ddnet-18.5-flood-runtime.log`, `debug 1`).
+Патч `~/aiddnet/data/ddnet-18.5/reconnect-flood-emulation.patch` (в репозиторий не входит; 18.5 не знает
+`reconnect@ddnet.org` — патч добавляет `UUID(NETMSG_RECONNECT, ...)` в `protocol_ex_msgs.h` и в
+`CServer::ProcessClientPacket` ветку `NETMSG_INFO`: при `DDAI_TEST_RECONNECT_FLOOD=1` отвечать этим сообщением вместо
+карты). Один и тот же бинарник, без переменной ведёт себя как ванильный 18.5:
+
+```bash
+cd ~/aiddnet/data/ddnet-18.5/src && git apply ../reconnect-flood-emulation.patch   # один раз
+cd ../build && ninja DDNet-Server
+cd ~/aiddnet/data/ddnet-18.5-runtime-flood && DDAI_TEST_RECONNECT_FLOOD=1 nohup ../ddnet-18.5/build/DDNet-Server -f local.cfg &
+```
+
+Третий экземпляр — «полный сервер» (порт **8311**, econ 8312, рантайм `~/aiddnet/data/ddnet-18.5-runtime-full/`, тот же
+`local.cfg`, но `sv_max_clients 1`; слот занимает сам тест).
+
+E2E против них (`#[ignore]` + env-гейт, обычный `cargo test` их не запускает):
+
+```bash
+DDAI_E2E_185=1 DDAI_E2E_185_FLOOD_ADDR=127.0.0.1:8309 DDAI_E2E_185_FULL_ADDR=127.0.0.1:8311 \
+  cargo test -p ddai-client --test e2e_ddnet185 -- --ignored --test-threads=1     # 8306 по умолчанию, DDAI_E2E_185_ADDR
+```
+
+Оба сервера слушают только 127.0.0.1; после задачи 2.3b их можно остановить (`kill` по pid из `pgrep -x DDNet-Server`,
+осторожно: `ddnet-local.service` 20.1 — тоже `DDNet-Server`).
+
+**Зависший sccache.** Во время задачи 2.3b общий `sccache`-сервер (`~/.cargo/bin/sccache`, `SCCACHE_DIR=
+~/aiddnet/data/cache/sccache`) завис: сборки стояли на «Compiling libc», нагрузка ≈ 0. Лечение — убить процесс
+сервера (`kill -9 <pid sccache без аргументов>`) и его дочерние `sccache /home/.../rustc`; следующий `cargo` поднимет
+новый.
+
+**Мод «DDFightNet fng» (сервер Swarfey) — исходники не найдены** (повторный поиск 2026-09-29). Что нашлось:
+- `ddfight.net` — «DDFightNetwork», неофициальный хаб блок-серверов; ссылок на код, лицензии и версию DDNet нет.
+- GitHub `swarfeya` (владелец сети): `ddnet-maps` (карты, без лицензии), `teeworlds-library-ts` (клиентская
+  библиотека для ботов), форки `ddnet` (0 коммитов сверх апстрима, ветки — PR-ветки), `F-DDrace`, `libtw2`; кода мода нет.
+  `gh search` по «ddfight» — только README `TaterClient/ddnet-custom-communities` и `Predatorr0/TClient-AI-Bot`.
+- Строка «DDFightNet fng» есть в списке цветов game type (`ddnet/ddnet#12760`, `#12188`) — и всё.
+- Публичные, но **не тождественные** «fng» на DDNet: `Inateblig/dfng`, `ddnet-insta/ddnet-insta`,
+  `Jupeyy/teeworlds-fng2-mod` (не DDNet), `DDNetPP/DDNetPP`. Ни один не заявлен как источник DDFightNet.
+
+Вывод: мод закрытый, собрать его нельзя, лицензия неизвестна. Поведение Swarfey воспроизводится только эмуляцией
+на ванильном 18.5 (см. `docs/formats.md` §14.12).
+
 ## 6. Caddy + HTTPS + ufw (задача 5.3)
 
 Бот (`ddnet-ai web`, задача 5.1) слушает только `127.0.0.1:7788`; наружу его публикует **Caddy**,

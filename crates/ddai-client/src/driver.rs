@@ -10,6 +10,14 @@
 //!   (timeout/protocol error) before reconnecting.
 //! - **Redirect loop protection**: follows `redirect@ddnet.org` at most once per [`Client::connect`]
 //!   call.
+//! - **Reconnect-loop protection** (task 2.3b): follows `reconnect@ddnet.org` at most
+//!   [`MAX_SERVER_RECONNECTS_BEFORE_IN_GAME`] time(s) before the session has been in game, then
+//!   closes gracefully and gives up ([`GaveUpCategory::ReconnectLoop`]). Every request is logged.
+//! - **Handshake watchdog** (task 2.3b): not in game within [`DEFAULT_HANDSHAKE_TIMEOUT`] (15 s,
+//!   [`crate::session::ClientConfig::handshake_timeout`]) of connecting -> graceful `CLOSE` and
+//!   give up ([`GaveUpCategory::HandshakeTimeout`]). Never a silent retry.
+//! - **One socket per [`Client::connect`]**: every reconnect/redirect reuses the same local UDP
+//!   port, like the real client.
 //! - **Never auto-reconnects after a kick/ban** — a peer-initiated `NETMSG_CLOSE`
 //!   ([`crate::session::SessionEvent::Disconnected`] with `by_peer: true`) is final *unless*
 //!   [`should_reconnect_after_peer_close`] classifies its reason as transient (a graceful server
@@ -41,6 +49,34 @@ pub const ATTEMPT_WINDOW: Duration = Duration::from_secs(20);
 /// Backoff after a lost connection (not a redirect/reconnect-request, which are not failures).
 pub const MIN_BACKOFF: Duration = Duration::from_secs(1);
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Task 2.3b's handshake watchdog default — see [`crate::session::ClientConfig::handshake_timeout`]'s
+/// docs for the incident this defends against. 15s comfortably covers a real, healthy join (a fresh
+/// map download over loopback takes low hundreds of ms — `docs/formats.md` §14.11) while being far
+/// short of anything a human waiting on a stalled session would tolerate before wondering what's
+/// wrong.
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Task 2.3b: absolute upper bound for the handshake watchdog, however much map-download progress
+/// keeps extending it (the deadline moves out by `handshake_timeout` each time new map bytes arrive,
+/// never past this cap measured from the start of the join / from an in-game loss).
+pub const HANDSHAKE_HARD_CAP: Duration = Duration::from_secs(120);
+/// Task 2.3b (review F1): total connection attempts allowed before the session has ever reached in
+/// game, whatever ended the earlier ones (a server-requested reconnect, a redirect, a peer `CLOSE`
+/// with a retry reason such as "This server is full", a timeout). Exceeding it is a graceful
+/// `CLOSE` and `GaveUp(TooManyAttempts)`. After the first in-game the cap no longer applies (the
+/// reconnect-after-loss policy and its watchdog budget take over).
+pub const MAX_ATTEMPTS_BEFORE_FIRST_IN_GAME: u32 = 2;
+/// Task 2.3b: how often a join that has not completed logs which step it is waiting in.
+const JOIN_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(1);
+/// Task 2.3b: how many `reconnect@ddnet.org` requests the driver follows before the session has
+/// ever reached in game (the counter resets on [`crate::session::SessionEvent::InGame`]). One is
+/// what a healthy server that wants a single bounce needs; a second one means the peer bounces us
+/// every time and the honest reaction is to stop and leave an explanation, not to loop. This is
+/// the same budget the driver already applies to `redirect@ddnet.org` (one per
+/// [`Client::connect`]).
+pub const MAX_SERVER_RECONNECTS_BEFORE_IN_GAME: u32 = 1;
+/// How often the various wait loops below (attempt-slot queueing, backoff sleeps) wake up to
+/// re-check the handshake watchdog even while otherwise idle — see [`run`]'s own use of this.
+const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// How long `recv` blocks before the driver loop re-checks its channels/timers — this is the
 /// effective granularity of [`crate::timing::InputTiming::advance`]'s cadence (see that module's
 /// docs: a faster poll only lets the predicted tick advance *sooner* within its 20ms window, it
@@ -178,6 +214,7 @@ fn attempt_log() -> &'static Mutex<HashMap<SocketAddr, VecDeque<Instant>>> {
 /// exceed [`MAX_ATTEMPTS_PER_WINDOW`] attempts in the last [`ATTEMPT_WINDOW`], then records this
 /// attempt and returns.
 fn wait_for_attempt_slot(addr: SocketAddr, should_abort: &dyn Fn() -> bool) -> bool {
+    let mut logged_wait = false;
     loop {
         if should_abort() {
             return false;
@@ -195,8 +232,26 @@ fn wait_for_attempt_slot(addr: SocketAddr, should_abort: &dyn Fn() -> bool) -> b
             }
             if entry.len() < MAX_ATTEMPTS_PER_WINDOW {
                 entry.push_back(now);
+                // Task 2.3b: the D-037 rate limit is visible at info level, granted or not.
+                tracing::info!(
+                    %addr,
+                    attempts_in_window = entry.len(),
+                    max = MAX_ATTEMPTS_PER_WINDOW,
+                    window = ?ATTEMPT_WINDOW,
+                    "connection-attempt slot granted"
+                );
                 None
             } else {
+                if !logged_wait {
+                    logged_wait = true;
+                    tracing::warn!(
+                        %addr,
+                        attempts_in_window = entry.len(),
+                        max = MAX_ATTEMPTS_PER_WINDOW,
+                        window = ?ATTEMPT_WINDOW,
+                        "connection-attempt rate limit reached (D-037), waiting for a slot"
+                    );
+                }
                 Some((ATTEMPT_WINDOW - now.duration_since(*entry.front().unwrap())).max(Duration::from_millis(50)))
             }
         };
@@ -226,6 +281,18 @@ pub enum ClientEvent {
     /// Following `redirect@ddnet.org` to `to` (loop protection allows at most one per
     /// [`Client::connect`] call).
     RedirectFollowed { to: SocketAddr },
+    /// Task 2.3b (root-cause fix): the peer sent `reconnect@ddnet.org` and the driver is about to
+    /// reconnect to `addr` immediately (no backoff — a server-requested reconnect is not a
+    /// failure, same reasoning as [`ClientEvent::RedirectFollowed`]). Previously this transition
+    /// produced **no** `ClientEvent` at all (unlike the sibling redirect case) — a caller had no
+    /// way to tell a rapid, healthy-looking string of `Connected` events apart from a peer that
+    /// keeps bouncing the client via repeated reconnect requests without ever completing the join
+    /// sequence, which is exactly what happened in the incident this event fixes (see
+    /// `crate::session::ClientConfig::handshake_timeout`'s docs). `attempt` is this session's own
+    /// monotonically increasing connection-attempt counter (task 2.3b acceptance criterion 4: "a
+    /// per-session counter of connection attempts ... logged") — distinct from the process-wide
+    /// rate-limiter window `wait_for_attempt_slot` enforces.
+    ServerRequestedReconnect { addr: SocketAddr, attempt: u32 },
     /// A second redirect was requested; refused (loop protection) — the driver thread ends.
     RedirectRefused { reason: String },
     /// The driver thread is ending and will not reconnect (a kick/ban, an explicit
@@ -304,6 +371,29 @@ pub enum GaveUpCategory {
     /// before a stop was requested, or (review round 1, finding F1) the D-027/D-038 live-servers
     /// safety switch refused the target address.
     LocalError,
+    /// Task 2.3b: [`crate::session::ClientConfig::handshake_timeout`] elapsed without ever
+    /// reaching [`crate::session::SessionEvent::InGame`] — the handshake watchdog gave up on its
+    /// own rather than silently retrying forever. See that field's docs for the incident this
+    /// defends against (a peer that keeps sending `reconnect@ddnet.org`/`redirect@ddnet.org` right
+    /// after every handshake, or one that simply never completes the join sequence at all).
+    /// Distinct from [`GaveUpCategory::LocalError`] (this is a *remote* peer's behaviour, not a
+    /// local resource failure) and from [`GaveUpCategory::KickedOrBanned`] (the peer here never
+    /// actually refused us — it kept letting us connect, just never let the session progress) —
+    /// CLAUDE.md/D-016: this is a stop condition for a human to investigate, same as a kick/ban.
+    HandshakeTimeout,
+    /// Task 2.3b: the peer asked for a reconnect (`reconnect@ddnet.org`) more than
+    /// [`MAX_SERVER_RECONNECTS_BEFORE_IN_GAME`] time(s) without the session ever reaching in game
+    /// — the shape of the Swarfey incident (10 handshakes, no map). A stop condition for a human
+    /// to investigate, same as a kick/ban.
+    ReconnectLoop,
+    /// Task 2.3b (review F1): [`MAX_ATTEMPTS_BEFORE_FIRST_IN_GAME`] connection attempts were made
+    /// without the session ever reaching in game, whatever ended them (peer `CLOSE` "This server is
+    /// full", "Server shutdown", a timeout, a reconnect request, ...).
+    TooManyAttempts,
+    /// Task 2.3b (review F2): the session *had* been in game, was lost, and did not get back in game
+    /// within the reconnect budget (`ClientConfig::handshake_timeout`, extended by map-download
+    /// progress). Distinct from [`GaveUpCategory::HandshakeTimeout`] (a join that never completed).
+    ReconnectBudgetExhausted,
 }
 
 impl ClientEvent {
@@ -831,6 +921,7 @@ fn send_all(socket: &UdpSocket, datagrams: Vec<Vec<u8>>) {
     }
 }
 
+#[derive(Debug)]
 enum ConnectionOutcome {
     Stop,
     Reconnect,
@@ -843,6 +934,11 @@ enum ConnectionOutcome {
     /// forever against a server that is simply sending us garbage is not "staying connected", see
     /// that event's own docs.
     ProtocolViolation,
+    /// Task 2.3b: the handshake watchdog expired inside this very connection attempt (still
+    /// waiting on the TKEN handshake, or online but never reaching in-game) — see
+    /// [`GaveUpCategory::HandshakeTimeout`]'s docs. Always final, same shape as the two outcomes
+    /// above.
+    HandshakeTimedOut,
 }
 
 /// Intercepts the two events the driver must act on itself ([`SessionEvent::MapChanging`]'s cache
@@ -963,9 +1059,63 @@ fn run_one_connection(
     // [`SessionEvent::InGame`] — `run`'s caller uses this to decide whether a later
     // `LostConnection` should reset the backoff/attempt-count state.
     reached_in_game: &mut bool,
+    // Task 2.3b: the handshake watchdog's absolute deadline — accumulates across every connection
+    // attempt within the same logical session (see `ClientConfig::handshake_timeout`'s docs), so
+    // this single connection attempt may itself have little or no time left on it. Extended
+    // (never past `hard_deadline`) while map bytes keep arriving.
+    handshake_deadline: &mut Instant,
+    hard_deadline: Instant,
 ) -> ConnectionOutcome {
     let mut buf = [0u8; RECV_BUF_SIZE];
+    // Task 2.3b: while the join has not completed, say once per second (info level) which step it
+    // is waiting in, so a stalled session explains itself without trace logging.
+    let mut next_progress_log = Instant::now() + JOIN_PROGRESS_LOG_INTERVAL;
+    let mut last_download_bytes = 0usize;
+    // Task 2.3b, per the tech lead's explicit request while investigating the Swarfey incident:
+    // a hard safety invariant, independent of (and in addition to) the handshake watchdog above.
+    // `ddai_net::conn::Connection::feed` only ever transitions `Connecting -> Online` — see that
+    // module's own docs and `conn.rs`'s `ControlMsg::ConnectAccept` arm — so a *second*
+    // `SessionEvent::Connected` within the same `run_one_connection` call (i.e. without this
+    // driver itself having made an explicit reconnect/redirect decision and started a *new*
+    // `Session`/socket) should be structurally impossible with the code as written today. It is
+    // checked anyway, unconditionally, as defense in depth: if a future change to `ddai-net`/
+    // `ddai-client`, an unanticipated server behaviour (e.g. a delayed burst of `CONNECTACCEPT`
+    // replies answering several of this client's own `CONNECT` resends, arriving after this
+    // connection is already online), or a bug we have not found yet ever violates that invariant,
+    // this must never be silently absorbed — it must stop the session loudly rather than continue
+    // as if nothing happened, which is exactly the failure mode this whole task exists to close.
+    let mut seen_connected = false;
     loop {
+        // Task 2.3b: checked before anything else in the loop body, so a connection attempt that
+        // is itself hanging (stuck in the TKEN handshake, or online but never in-game) cannot
+        // sit here past the deadline just because nothing else in the loop happened to trip it.
+        // A slow but progressing map download must not be killed by the watchdog: every time new
+        // map bytes have arrived, push the deadline out by a full timeout, capped absolutely.
+        if let Some(bytes) = session.download_progress()
+            && bytes > last_download_bytes
+        {
+            last_download_bytes = bytes;
+            let extended = (Instant::now() + config.handshake_timeout).min(hard_deadline);
+            if extended > *handshake_deadline {
+                *handshake_deadline = extended;
+            }
+        }
+        if !*reached_in_game && !session.is_in_game() && Instant::now() >= next_progress_log {
+            tracing::info!(
+                phase = session.join_phase(),
+                elapsed = ?Instant::now().duration_since(start),
+                watchdog_left = ?handshake_deadline.saturating_duration_since(Instant::now()),
+                map_bytes = session.download_progress(),
+                "join in progress"
+            );
+            next_progress_log += JOIN_PROGRESS_LOG_INTERVAL;
+        }
+        if !*reached_in_game && Instant::now() >= *handshake_deadline {
+            let now = Instant::now().duration_since(start);
+            session.disconnect(Some("handshake watchdog: not in game in time"));
+            send_all(socket, session.flush(now));
+            return ConnectionOutcome::HandshakeTimedOut;
+        }
         // Review finding F5: an explicit `Control::Disconnect` *or* the channel having been
         // dropped entirely (the `Client` was dropped without an explicit `disconnect()`/`join()`
         // — [`Client`]'s own `Drop` impl already sends `Disconnect` proactively, but treating a
@@ -1000,6 +1150,12 @@ fn run_one_connection(
                 for ev in session.feed(&buf[..n], now) {
                     if matches!(ev, SessionEvent::InGame) {
                         *reached_in_game = true;
+                    }
+                    if matches!(ev, SessionEvent::Connected)
+                        && let Some(outcome) =
+                            reject_duplicate_connected(&mut seen_connected, socket, session, now, events_tx)
+                    {
+                        return outcome;
                     }
                     if let Some(outcome) = handle_session_event(ev, session, config, now, events_tx) {
                         // Review finding F4: flush before returning — a terminal event (e.g. the
@@ -1043,12 +1199,117 @@ fn run_one_connection(
         let now = Instant::now().duration_since(start);
         send_all(socket, session.flush(now));
         for ev in session.take_events() {
+            // Belt-and-suspenders, same as the identical check above: `Connection::take_events`'s
+            // own docs say it never actually produces a `Connected`-mapped event, but this is
+            // cheap enough to check unconditionally rather than trust that documentation forever.
+            if matches!(ev, SessionEvent::Connected)
+                && let Some(outcome) = reject_duplicate_connected(&mut seen_connected, socket, session, now, events_tx)
+            {
+                return outcome;
+            }
             if let Some(outcome) = handle_session_event(ev, session, config, now, events_tx) {
                 // See the comment on the identical pattern above.
                 send_all(socket, session.flush(now));
                 return outcome;
             }
         }
+    }
+}
+
+/// Task 2.3b's hard safety invariant (see `run_one_connection`'s own doc comment on
+/// `seen_connected` for the full reasoning): the first `SessionEvent::Connected` this connection
+/// attempt ever sees is recorded and allowed through (returns `None`); a *second* one is treated
+/// as a fatal, self-detected protocol anomaly — logged loudly, surfaced as a proper
+/// `SessionEvent::ProtocolViolation` (so it reaches a caller/log the exact same way any other
+/// protocol violation does, not as a special case), and the connection is torn down gracefully.
+/// Returns `Some(outcome)` when the caller must stop and return that outcome immediately.
+fn reject_duplicate_connected(
+    seen_connected: &mut bool,
+    socket: &UdpSocket,
+    session: &mut Session,
+    now: Duration,
+    events_tx: &event_channel::Sender,
+) -> Option<ConnectionOutcome> {
+    if !*seen_connected {
+        *seen_connected = true;
+        return None;
+    }
+    let reason = "protocol invariant violated: a second Connected event fired within one \
+                  connection attempt, without this driver making an explicit reconnect/redirect \
+                  decision — stopping rather than continuing silently"
+        .to_string();
+    tracing::error!(%reason, "connection: duplicate Connected event — hard safety stop");
+    events_tx.send(ClientEvent::Session(Box::new(SessionEvent::ProtocolViolation {
+        reason: reason.clone(),
+    })));
+    session.disconnect(Some(&reason));
+    send_all(socket, session.flush(now));
+    Some(ConnectionOutcome::ProtocolViolation)
+}
+
+/// The watchdog's give-up, shared by the between-attempts and the mid-attempt paths. Before the
+/// first in-game it is a join that never completed ([`GaveUpCategory::HandshakeTimeout`]); after an
+/// in-game loss it is an exhausted reconnect budget ([`GaveUpCategory::ReconnectBudgetExhausted`]).
+fn give_up_on_watchdog(
+    events_tx: &event_channel::Sender,
+    target: SocketAddr,
+    attempts: u32,
+    timeout: Duration,
+    ever_in_game: bool,
+) {
+    let (reason, category) = if ever_in_game {
+        (
+            format!(
+                "reconnect budget exhausted after in-game loss: not back in game within {timeout:?} of the loss ({attempts} connection attempt(s) in total)"
+            ),
+            GaveUpCategory::ReconnectBudgetExhausted,
+        )
+    } else {
+        (
+            format!("handshake watchdog: not in game within {timeout:?} after {attempts} connection attempt(s)"),
+            GaveUpCategory::HandshakeTimeout,
+        )
+    };
+    tracing::warn!(addr = %target, attempts, ?timeout, ever_in_game, "{reason} (no further retries)");
+    events_tx.send(ClientEvent::GaveUp { reason, category });
+}
+
+/// Review F1: whether one more connection attempt would exceed
+/// [`MAX_ATTEMPTS_BEFORE_FIRST_IN_GAME`].
+fn attempt_cap_reached(ever_in_game: bool, connection_attempt: u32) -> bool {
+    !ever_in_game && connection_attempt >= MAX_ATTEMPTS_BEFORE_FIRST_IN_GAME
+}
+
+fn give_up_on_attempt_cap(events_tx: &event_channel::Sender, target: SocketAddr, attempts: u32) {
+    let reason = format!(
+        "too many attempts: {attempts} connection attempt(s) without ever reaching in game (limit {MAX_ATTEMPTS_BEFORE_FIRST_IN_GAME}) — not retrying"
+    );
+    tracing::error!(addr = %target, attempts, "{reason}");
+    events_tx.send(ClientEvent::GaveUp {
+        reason,
+        category: GaveUpCategory::TooManyAttempts,
+    });
+}
+
+/// Discards anything still queued on the (reused) socket from the previous connection, so a stale
+/// `CLOSE`/`CONNECTACCEPT` from the old connection can never be mistaken for a reply to the new
+/// `CONNECT` (a `Connecting` connection has no token to check yet). Beyond the real client, which
+/// does not do this; strictly safer.
+fn drain_stale_datagrams(socket: &UdpSocket) {
+    if socket.set_nonblocking(true).is_err() {
+        return;
+    }
+    let mut buf = [0u8; RECV_BUF_SIZE];
+    let mut drained = 0u32;
+    while socket.recv(&mut buf).is_ok() {
+        drained += 1;
+    }
+    let _ = socket.set_nonblocking(false);
+    if drained > 0 {
+        tracing::info!(
+            drained,
+            "driver: discarded stale datagrams from the previous connection"
+        );
     }
 }
 
@@ -1062,18 +1323,82 @@ fn run(
 ) {
     let mut target = initial_addr;
     let mut redirects_followed = 0u32;
+    // Task 2.3b: ONE socket (one local UDP port) for the whole `Client::connect` call, reused for
+    // every reconnect/redirect/retry, exactly like the real client — `CClient::InitNetworkClient`
+    // opens its `CNetClient` once (`client.cpp:3619`, `m_aNetClient[Conn].Open(BindAddr)`), and
+    // `CClient::Connect` (`client.cpp:622-723`), which `NETMSG_RECONNECT` (`client.cpp:1979-1982`)
+    // and `NETMSG_REDIRECT` (`client.cpp:1991-2004`) both call, merely `Disconnect()`s and
+    // `Connect()`s that same `CNetClient`. Before this fix every attempt bound a fresh ephemeral
+    // port; a server or anti-bot layer that keys its state on the client's `ip:port` then sees a
+    // brand-new client on every reconnect and can never conclude the handshake.
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(e) => {
+            events_tx.send(ClientEvent::GaveUp {
+                reason: format!("failed to bind a local socket: {e}"),
+                category: GaveUpCategory::LocalError,
+            });
+            return;
+        }
+    };
+    if let Err(e) = socket.set_read_timeout(Some(POLL_TIMEOUT)) {
+        events_tx.send(ClientEvent::GaveUp {
+            reason: format!("failed to configure the socket: {e}"),
+            category: GaveUpCategory::LocalError,
+        });
+        return;
+    }
+    if let Ok(local) = socket.local_addr() {
+        tracing::info!(
+            local_port = local.port(),
+            "driver: local UDP socket bound (reused for every reconnect)"
+        );
+    }
+    // Server-requested reconnects followed since the last time we were in game — see
+    // `MAX_SERVER_RECONNECTS_BEFORE_IN_GAME`.
+    let mut server_reconnects_pending: u32 = 0;
     let mut backoff = MIN_BACKOFF;
     let mut latest_input = default_player_input();
     let mut reconnect_attempt: u32 = 0;
+    // Task 2.3b acceptance criterion 4: "a per-session counter of connection attempts ... logged"
+    // — every time this loop is about to start a new connection, for *any* reason (the very first
+    // connect, a server-requested reconnect/redirect, or a retry after a lost connection). Never
+    // reset (unlike `backoff`/`reconnect_attempt`, which reset on reaching in-game): a caller
+    // reading the log wants "how many times has this process tried to reach the wire, ever",
+    // regardless of how many of those attempts briefly succeeded in between.
+    let mut connection_attempt: u32 = 0;
+    // Task 2.3b's handshake watchdog: accumulates across every attempt below (reconnects,
+    // redirects, lost-connection retries) and only resets once `SessionEvent::InGame` actually
+    // fires — see `ClientConfig::handshake_timeout`'s docs for the incident this defends against.
+    let mut handshake_deadline = Instant::now() + config.handshake_timeout;
+    // Absolute cap on how far map-download progress may push `handshake_deadline` out.
+    let mut hard_deadline = Instant::now() + config.handshake_hard_cap;
+    // Whether any connection of this `Client::connect` call has ever reached in game.
+    let mut ever_in_game = false;
 
     loop {
+        // Task 2.3b: checked first, before anything else this loop iteration would do — a flood
+        // of Reconnect/Redirect outcomes (or a long run of lost-connection backoffs, see that
+        // outcome's own now-deadline-aware sleep below) must not be able to keep this loop
+        // spinning past the watchdog just because each individual step happens to complete fast.
+        if Instant::now() >= handshake_deadline {
+            give_up_on_watchdog(
+                &events_tx,
+                target,
+                connection_attempt,
+                config.handshake_timeout,
+                ever_in_game,
+            );
+            return;
+        }
+
         // Review finding F5: a dropped channel means the same thing as an explicit `Disconnect`
         // here too — see `run_one_connection`'s identical check for why.
         let should_abort = || {
             matches!(
                 control_rx.try_recv(),
                 Ok(Control::Disconnect) | Err(mpsc::TryRecvError::Disconnected)
-            )
+            ) || Instant::now() >= handshake_deadline
         };
         // Review round 1, finding F1: checked before *every* connect attempt this loop ever makes
         // — the first one, every reconnect, and every redirect target — not just once against the
@@ -1089,30 +1414,28 @@ fn run(
         }
 
         if !wait_for_attempt_slot(target, &should_abort) {
+            // Task 2.3b: tell the two ways `should_abort` can have fired apart — the watchdog
+            // expiring while queued for a slot is not the same "local" condition as the channel
+            // having been dropped/an explicit disconnect, and deserves its own category/log line
+            // rather than a misleading generic "local error".
+            if Instant::now() >= handshake_deadline {
+                continue; // the top-of-loop check above will report it uniformly.
+            }
             events_tx.send(ClientEvent::GaveUp {
                 reason: "disconnected while waiting for a connection-attempt slot".to_string(),
                 category: GaveUpCategory::LocalError,
             });
             return;
         }
+        connection_attempt += 1;
+        tracing::info!(
+            addr = %target,
+            attempt = connection_attempt,
+            "connecting"
+        );
 
-        let socket = match UdpSocket::bind("0.0.0.0:0") {
-            Ok(s) => s,
-            Err(e) => {
-                events_tx.send(ClientEvent::GaveUp {
-                    reason: format!("failed to bind a local socket: {e}"),
-                    category: GaveUpCategory::LocalError,
-                });
-                return;
-            }
-        };
-        if let Err(e) = socket.set_read_timeout(Some(POLL_TIMEOUT)) {
-            events_tx.send(ClientEvent::GaveUp {
-                reason: format!("failed to configure the socket: {e}"),
-                category: GaveUpCategory::LocalError,
-            });
-            return;
-        }
+        // Re-associate the one long-lived socket with this attempt's target (a no-op for a plain
+        // reconnect; a new port for a redirect). See `socket` above for why it is reused.
         if let Err(e) = socket.connect(target) {
             events_tx.send(ClientEvent::GaveUp {
                 reason: format!("failed to connect the socket to {target}: {e}"),
@@ -1120,6 +1443,7 @@ fn run(
             });
             return;
         }
+        drain_stale_datagrams(&socket);
 
         let start = Instant::now();
         let mut session = Session::new(config.clone());
@@ -1137,6 +1461,8 @@ fn run(
             &control_rx,
             &mut latest_input,
             &mut reached_in_game,
+            &mut handshake_deadline,
+            hard_deadline,
         );
 
         // Review finding F7: a connection that made it in-game (even briefly) before ending is
@@ -1145,9 +1471,18 @@ fn run(
         // an earlier, now-irrelevant string of failures left behind. Applied unconditionally here
         // (harmless for the outcomes that already reset it themselves below) rather than
         // duplicated into just the `LostConnection` arm.
+        //
+        // Task 2.3b: the handshake watchdog resets the same way and for the same reason — once a
+        // session has genuinely reached in-game, a *later*, unrelated disconnection gets a full
+        // fresh `handshake_timeout` budget to reconnect within, rather than inheriting whatever is
+        // left over from a budget that already did its job once.
         if reached_in_game {
+            ever_in_game = true;
             backoff = MIN_BACKOFF;
             reconnect_attempt = 0;
+            handshake_deadline = Instant::now() + config.handshake_timeout;
+            hard_deadline = Instant::now() + config.handshake_hard_cap;
+            server_reconnects_pending = 0;
         }
 
         match outcome {
@@ -1175,15 +1510,73 @@ fn run(
                 });
                 return;
             }
+            ConnectionOutcome::HandshakeTimedOut => {
+                // Task 2.3b: the watchdog fired *inside* this connection attempt (still mid
+                // handshake, or online but never in-game) rather than between attempts — same
+                // final shape as `KickedOrBanned`/`ProtocolViolation` above.
+                events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                give_up_on_watchdog(
+                    &events_tx,
+                    target,
+                    connection_attempt,
+                    config.handshake_timeout,
+                    ever_in_game,
+                );
+                return;
+            }
             ConnectionOutcome::Reconnect => {
                 // Review finding F4: the *server* asked us to reconnect, but our own connection
                 // is still technically open from its point of view — gracefully close it first
                 // (one bot per server: the old slot must be seen closing before/without a new one
                 // appearing) rather than abandoning it mid-flight and simply opening a fresh
-                // socket underneath.
+                // connection underneath.
+                //
+                // Task 2.3b (root cause of the Swarfey incident, see the BUILD REPORT): this arm
+                // used to be silent and unbounded — no log, no `ClientEvent`, no backoff — so a
+                // peer answering every handshake with `reconnect@ddnet.org` made this loop spin
+                // until the process-wide rate limiter stalled it, and nothing above ever noticed.
+                // Now: every request is logged and surfaced, and only
+                // `MAX_SERVER_RECONNECTS_BEFORE_IN_GAME` of them are followed before the session
+                // has been in game.
+                server_reconnects_pending += 1;
+                if server_reconnects_pending > MAX_SERVER_RECONNECTS_BEFORE_IN_GAME {
+                    session.disconnect(Some("driver: reconnect loop, giving up"));
+                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    tracing::error!(
+                        addr = %target,
+                        attempts = connection_attempt,
+                        requests = server_reconnects_pending,
+                        "server requested reconnect again before we were ever in game: reconnect loop, giving up (no further retries)"
+                    );
+                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    events_tx.send(ClientEvent::GaveUp {
+                        reason: format!(
+                            "reconnect loop: the server sent reconnect@ddnet.org {} times without the session ever reaching in game ({} connection attempt(s))",
+                            server_reconnects_pending, connection_attempt
+                        ),
+                        category: GaveUpCategory::ReconnectLoop,
+                    });
+                    return;
+                }
+                if attempt_cap_reached(ever_in_game, connection_attempt) {
+                    session.disconnect(Some("driver: attempt budget exhausted"));
+                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    give_up_on_attempt_cap(&events_tx, target, connection_attempt);
+                    return;
+                }
                 session.disconnect(Some("driver: server requested reconnect"));
                 send_all(&socket, session.flush(Instant::now().duration_since(start)));
                 backoff = MIN_BACKOFF; // a server-requested reconnect is not a failure
+                tracing::info!(
+                    addr = %target,
+                    attempt = connection_attempt,
+                    "server requested reconnect (reconnect@ddnet.org); reconnecting once on the same socket"
+                );
+                events_tx.send(ClientEvent::ServerRequestedReconnect {
+                    addr: target,
+                    attempt: connection_attempt,
+                });
                 continue;
             }
             ConnectionOutcome::Redirect(port) => {
@@ -1200,6 +1593,13 @@ fn run(
                     });
                     return;
                 }
+                if attempt_cap_reached(ever_in_game, connection_attempt) {
+                    session.disconnect(Some("driver: attempt budget exhausted"));
+                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    give_up_on_attempt_cap(&events_tx, target, connection_attempt);
+                    return;
+                }
                 // Review finding F4: same reasoning as `Reconnect` above — close the old
                 // connection before opening a new one to the redirect target.
                 session.disconnect(Some("driver: following a redirect"));
@@ -1211,6 +1611,15 @@ fn run(
                 continue;
             }
             ConnectionOutcome::LostConnection => {
+                // Review F1: a retry-worthy peer `CLOSE` ("This server is full", "Server shutdown",
+                // ...) or a timeout before the session was ever in game gets exactly one retry.
+                if attempt_cap_reached(ever_in_game, connection_attempt) {
+                    session.disconnect(Some("driver: attempt budget exhausted"));
+                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    give_up_on_attempt_cap(&events_tx, target, connection_attempt);
+                    return;
+                }
                 reconnect_attempt += 1;
                 events_tx.send(ClientEvent::ReconnectAttempt {
                     attempt: reconnect_attempt,
@@ -1224,24 +1633,120 @@ fn run(
                 // arriving mid-backoff (task 8.4a — there is no live connection to send it on
                 // right now) does not end the wait early either: it is simply dropped, and the
                 // remaining backoff keeps counting down.
+                //
+                // Task 2.3b: also capped at `WATCHDOG_POLL_INTERVAL` per wait, independent of
+                // `Control::SetTeam` arriving at all — `MAX_BACKOFF` (30s) is far longer than the
+                // default handshake watchdog (15s), so a single uninterrupted `recv_timeout(backoff)`
+                // could sleep straight through the deadline without ever re-checking it. The
+                // deadline is re-checked once per wake, same as the loop this is nested inside.
                 let backoff_deadline = Instant::now() + backoff;
                 loop {
+                    if Instant::now() >= handshake_deadline {
+                        break;
+                    }
                     let remaining = backoff_deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         break;
                     }
-                    match control_rx.recv_timeout(remaining) {
+                    match control_rx.recv_timeout(remaining.min(WATCHDOG_POLL_INTERVAL)) {
                         Ok(Control::Disconnect) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                             events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
                             return;
                         }
                         Ok(Control::SetTeam(_)) => continue,
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     }
                 }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod duplicate_connected_invariant_tests {
+    use super::*;
+    use crate::session::{ClientConfig, Session};
+
+    /// Task 2.3b's hard safety invariant (`reject_duplicate_connected`), tested directly rather
+    /// than by trying to coax a real `Session`/`Connection` into actually firing `Connected`
+    /// twice — per `ddai_net::conn::Connection`'s own docs (and this task's own investigation,
+    /// see the BUILD REPORT), that is not something the current code can do at all, which is
+    /// exactly why this is defense-in-depth: the function's own contract ("first call: pass;
+    /// second call: hard stop") is what matters here, independent of whether anything can trigger
+    /// it today.
+    #[test]
+    fn first_connected_passes_second_is_a_hard_stop() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind a throwaway socket");
+        let (events_tx, events_rx) = event_channel::channel();
+        let mut session = Session::new(ClientConfig::default());
+        let mut seen_connected = false;
+
+        let first = reject_duplicate_connected(&mut seen_connected, &socket, &mut session, Duration::ZERO, &events_tx);
+        assert!(first.is_none(), "the first Connected must be allowed through");
+        assert!(seen_connected);
+
+        let second = reject_duplicate_connected(&mut seen_connected, &socket, &mut session, Duration::ZERO, &events_tx);
+        assert!(
+            matches!(second, Some(ConnectionOutcome::ProtocolViolation)),
+            "a second Connected must be a hard ProtocolViolation stop, got {second:?}"
+        );
+
+        // A `SessionEvent::ProtocolViolation` must have been surfaced through the event channel,
+        // the same path every other protocol violation uses — not a silent internal-only stop.
+        let mut saw_violation = false;
+        while let Some(ev) = events_rx.try_recv() {
+            if let ClientEvent::Session(inner) = &ev
+                && matches!(**inner, SessionEvent::ProtocolViolation { .. })
+            {
+                saw_violation = true;
+            }
+        }
+        assert!(
+            saw_violation,
+            "expected a SessionEvent::ProtocolViolation to have been sent"
+        );
+    }
+}
+
+#[cfg(test)]
+mod give_up_message_tests {
+    use super::*;
+
+    fn last_gave_up(events_rx: &event_channel::Receiver) -> (String, GaveUpCategory) {
+        match events_rx.try_recv() {
+            Some(ClientEvent::GaveUp { reason, category }) => (reason, category),
+            other => panic!("expected GaveUp, got {other:?}"),
+        }
+    }
+
+    /// Review F2: an outage after being in game must not be reported as a failed handshake.
+    #[test]
+    fn watchdog_after_an_in_game_loss_reports_an_exhausted_reconnect_budget() {
+        let (tx, rx) = event_channel::channel();
+        let addr: SocketAddr = "127.0.0.1:8303".parse().unwrap();
+
+        give_up_on_watchdog(&tx, addr, 3, Duration::from_secs(15), true);
+        let (reason, category) = last_gave_up(&rx);
+        assert_eq!(category, GaveUpCategory::ReconnectBudgetExhausted);
+        assert!(
+            reason.starts_with("reconnect budget exhausted after in-game loss"),
+            "{reason}"
+        );
+        assert!(!reason.contains("handshake watchdog"), "{reason}");
+
+        give_up_on_watchdog(&tx, addr, 1, Duration::from_secs(15), false);
+        let (reason, category) = last_gave_up(&rx);
+        assert_eq!(category, GaveUpCategory::HandshakeTimeout);
+        assert!(reason.starts_with("handshake watchdog: not in game"), "{reason}");
+    }
+
+    #[test]
+    fn attempt_cap_applies_only_before_the_first_in_game() {
+        assert!(!attempt_cap_reached(false, 0));
+        assert!(!attempt_cap_reached(false, 1));
+        assert!(attempt_cap_reached(false, 2));
+        assert!(!attempt_cap_reached(true, 50));
     }
 }

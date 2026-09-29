@@ -483,6 +483,11 @@ fn log_event(
         }
         ClientEvent::RedirectFollowed { to } => tracing::info!(%to, "following redirect"),
         ClientEvent::RedirectRefused { reason } => tracing::error!(%reason, "redirect refused"),
+        // Task 2.3b (root-cause fix): previously silent — see this event's own doc comment for
+        // the incident this info-level line exists to prevent from happening unnoticed again.
+        ClientEvent::ServerRequestedReconnect { addr, attempt } => {
+            tracing::info!(%addr, attempt, "server requested reconnect (reconnect@ddnet.org)");
+        }
         ClientEvent::GaveUp { reason, category } => {
             tracing::error!(%reason, ?category, "driver gave up");
             *ended = true;

@@ -153,6 +153,23 @@ pub struct ClientConfig {
     /// [`ddai_net::conn::DEFAULT_TIMEOUT`] (100s); tests/tooling that want faster timeout
     /// detection (e.g. task 2.3's server-restart scenario) may override it.
     pub timeout: Duration,
+    /// Task 2.3b's handshake watchdog: if [`crate::driver::Client`] has not reached
+    /// [`SessionEvent::InGame`] within this long after it first started connecting, it disconnects
+    /// gracefully (`CLOSE`) and gives up (`ClientEvent::GaveUp { category:
+    /// GaveUpCategory::HandshakeTimeout, .. }`) rather than retrying silently forever. This is a
+    /// self-protection measure, not a per-attempt timeout: it accumulates across *any* number of
+    /// reconnects/redirects/lost-connection retries within the same logical session (mirroring the
+    /// existing `reached_in_game`-driven backoff reset — see `crate::driver::run`), and only resets
+    /// once `SessionEvent::InGame` actually fires. Root cause this defends against (task 2.3b's
+    /// incident): a peer that keeps sending `reconnect@ddnet.org` right after every handshake used
+    /// to drive an unconditional, silent, un-backed-off reconnect loop that nothing but the
+    /// process-wide 5-attempts/20s rate limiter ever bounded, and that limiter does not by itself
+    /// count as "noticing" anything is wrong — see `crate::driver`'s module docs.
+    pub handshake_timeout: Duration,
+    /// Task 2.3b: absolute cap for the watchdog above — map-download progress extends its deadline
+    /// by `handshake_timeout` each time new map bytes arrive, but never past this long after the
+    /// join started (or after an in-game loss). See `crate::driver::HANDSHAKE_HARD_CAP`.
+    pub handshake_hard_cap: Duration,
     /// Where [`crate::driver`] looks for/writes cached maps
     /// (`<cache_dir>/<name>_<sha256-hex>.map` — see `crate::map_cache`). [`Session`] itself never
     /// touches this (sans-IO); only [`crate::driver::Client`] reads it.
@@ -226,6 +243,8 @@ impl Default for ClientConfig {
             prediction_margin_ms: crate::timing::DEFAULT_PREDICTION_MARGIN_MS,
             max_map_size_bytes: DEFAULT_MAX_MAP_SIZE_BYTES,
             timeout: conn::DEFAULT_TIMEOUT,
+            handshake_timeout: crate::driver::DEFAULT_HANDSHAKE_TIMEOUT,
+            handshake_hard_cap: crate::driver::HANDSHAKE_HARD_CAP,
             cache_dir: default_cache_dir(),
             emit_snapshot_data: false,
             emit_input_sent: false,
@@ -647,6 +666,7 @@ impl Session {
     /// Starts the TKEN handshake (`Connection::connect`) — the very first step of the join
     /// sequence.
     pub fn connect(&mut self, now: Duration) {
+        tracing::info!("control: sending CONNECT (starting TKEN handshake)");
         self.state = JoinState::Handshaking;
         self.connection.connect(now, &self.huffman);
     }
@@ -655,6 +675,7 @@ impl Session {
     /// offline). Does *not* itself produce a [`SessionEvent`] — the caller already knows it asked
     /// for this; call [`Session::flush`] afterwards to actually send the `CLOSE`.
     pub fn disconnect(&mut self, reason: Option<&str>) {
+        tracing::info!(reason = ?reason, "control: sending CLOSE");
         self.connection.disconnect(reason, &self.huffman);
     }
 
@@ -684,6 +705,29 @@ impl Session {
 
     pub fn is_in_game(&self) -> bool {
         matches!(self.state, JoinState::InGame)
+    }
+
+    /// Task 2.3b: bytes of the map received so far while a download is in progress (`None`
+    /// otherwise) — the driver's handshake watchdog extends its deadline while this keeps growing.
+    pub fn download_progress(&self) -> Option<usize> {
+        match &self.state {
+            JoinState::Downloading(dl) => Some(dl.buffer.len()),
+            _ => None,
+        }
+    }
+
+    /// Task 2.3b: a short, stable name of the join phase this session is waiting in, for the
+    /// driver's periodic "still waiting for X" info line (a stalled join must say where it stalled).
+    pub fn join_phase(&self) -> &'static str {
+        match self.state {
+            JoinState::Handshaking => "waiting for CONNECTACCEPT (TKEN handshake; CONNECT resent every 500ms)",
+            JoinState::AwaitingMapChange => "waiting for MAP_CHANGE after CLIENTVER+INFO",
+            JoinState::AwaitingMapBytes(_) => "waiting for the map cache lookup",
+            JoinState::Downloading(_) => "downloading the map",
+            JoinState::AwaitingConReady => "waiting for CON_READY after READY",
+            JoinState::AwaitingReadyToEnter => "waiting for Sv_ReadyToEnter after Cl_StartInfo",
+            JoinState::InGame => "in game",
+        }
     }
 
     pub fn server_capabilities(&self) -> ServerCapabilities {
@@ -727,6 +771,13 @@ impl Session {
         for ev in self.connection.feed(datagram, &self.huffman, now) {
             match ev {
                 conn::Event::Connected => {
+                    // Task 2.3b acceptance criterion 4: an info-level line for every connection
+                    // state transition, logged here at the library level (not only via the
+                    // `SessionEvent` a caller might or might not have a handler for) — this is
+                    // exactly the gap the task 2.3b incident fell through: a caller-side match
+                    // arm silently downgraded an unhandled event to debug level, so nothing at
+                    // info level ever showed the reconnect loop happening at all.
+                    tracing::info!("connection: received CONNECTACCEPT, sent ACCEPT, online (TKEN handshake complete)");
                     self.on_connected(now);
                     events.push(SessionEvent::Connected);
                 }
@@ -738,12 +789,14 @@ impl Session {
                     events.extend(self.handle_msg(msg, vital, now));
                 }
                 conn::Event::ClosedByPeer(reason) => {
+                    tracing::info!(reason = %reason, "connection: closed by peer (CLOSE received)");
                     events.push(SessionEvent::Disconnected {
                         reason: if reason.is_empty() { None } else { Some(reason) },
                         by_peer: true,
                     });
                 }
                 conn::Event::Error(reason) => {
+                    tracing::info!(reason = %reason, "connection: local error/timeout");
                     events.push(SessionEvent::Disconnected {
                         reason: Some(reason),
                         by_peer: false,
@@ -786,14 +839,20 @@ impl Session {
     pub fn take_events(&mut self) -> Vec<SessionEvent> {
         let mut events: Vec<SessionEvent> = self.pending_events.drain(..).collect();
         events.extend(self.connection.take_events().into_iter().map(|ev| match ev {
-            conn::Event::Error(reason) => SessionEvent::Disconnected {
-                reason: Some(reason),
-                by_peer: false,
-            },
-            conn::Event::ClosedByPeer(reason) => SessionEvent::Disconnected {
-                reason: if reason.is_empty() { None } else { Some(reason) },
-                by_peer: true,
-            },
+            conn::Event::Error(reason) => {
+                tracing::info!(%reason, "connection: local error/timeout (detected by flush)");
+                SessionEvent::Disconnected {
+                    reason: Some(reason),
+                    by_peer: false,
+                }
+            }
+            conn::Event::ClosedByPeer(reason) => {
+                tracing::info!(%reason, "connection: closed by peer (CLOSE received, detected by flush)");
+                SessionEvent::Disconnected {
+                    reason: if reason.is_empty() { None } else { Some(reason) },
+                    by_peer: true,
+                }
+            }
             // `Connection::take_events` never actually produces these two (see its own docs:
             // only state transitions *outside* `feed()` — timeouts and similar — end up
             // here), kept for an exhaustive match rather than a wildcard so a future
@@ -830,6 +889,7 @@ impl Session {
     fn on_connected(&mut self, now: Duration) {
         self.state = JoinState::AwaitingMapChange;
         self.can_receive_capabilities = true;
+        tracing::info!("control: sending CLIENTVER, then INFO");
         let client_ver = ExSysMsg::ClientVer {
             connection_id: self.connection_id,
             ddnet_version: self.config.ddnet_version,
@@ -975,10 +1035,26 @@ impl Session {
                 Vec::new()
             }
             ExSysMsg::Redirect { port } => match u16::try_from(port) {
-                Ok(port) if port != 0 => vec![SessionEvent::RedirectRequested { port }],
-                _ => Vec::new(),
+                Ok(port) if port != 0 => {
+                    tracing::info!(port, "control: received redirect@ddnet.org");
+                    vec![SessionEvent::RedirectRequested { port }]
+                }
+                _ => {
+                    tracing::info!(
+                        port,
+                        "control: received redirect@ddnet.org with an invalid port, ignoring"
+                    );
+                    Vec::new()
+                }
             },
-            ExSysMsg::Reconnect => vec![SessionEvent::ReconnectRequested],
+            ExSysMsg::Reconnect => {
+                // Task 2.3b acceptance criterion 4: logged here, at the library level, for the
+                // same reason `conn::Event::Connected`/`ClosedByPeer`/`Error` are above — this is
+                // the exact control message the incident's root cause hinges on (see
+                // `crate::driver`'s `ConnectionOutcome::Reconnect` docs).
+                tracing::info!("control: received reconnect@ddnet.org");
+                vec![SessionEvent::ReconnectRequested]
+            }
             _ => Vec::new(),
         }
     }
@@ -1013,14 +1089,17 @@ impl Session {
         // or actively hostile input.
         if !map_cache::is_valid_map_filename(&name) {
             let reason = "map name is not a valid filename".to_string();
+            tracing::warn!(map = %name, %reason, "control: protocol violation on MAP_CHANGE");
             self.disconnect(Some(&reason));
             return vec![SessionEvent::ProtocolViolation { reason }];
         }
         if !(0..=self.config.max_map_size_bytes as i64).contains(&i64::from(size)) {
             let reason = "invalid map size".to_string();
+            tracing::warn!(map = %name, size, %reason, "control: protocol violation on MAP_CHANGE");
             self.disconnect(Some(&reason));
             return vec![SessionEvent::ProtocolViolation { reason }];
         }
+        tracing::info!(map = %name, crc, size, "control: received MAP_CHANGE");
 
         let matched = details.filter(|d| d.name == name && d.crc == crc && d.size == size);
         let sha256 = matched.as_ref().map(|d| d.sha256);
@@ -1180,6 +1259,7 @@ impl Session {
 
         self.state = JoinState::AwaitingConReady;
         self.send_system_chunk(&SysMsg::Ready, true, now);
+        tracing::info!(map = %pending.name, source = ?source, "control: map loaded and verified, sent READY");
 
         let bytes_to_cache = matches!(source, MapSource::Downloaded).then_some(bytes);
         Ok(MapLoadedEvent {
@@ -1200,6 +1280,7 @@ impl Session {
         if !matches!(self.state, JoinState::AwaitingConReady) {
             return Vec::new();
         }
+        tracing::info!("control: received CON_READY, sending Cl_StartInfo");
         self.state = JoinState::AwaitingReadyToEnter;
         self.send_start_info(now);
         Vec::new()
@@ -1230,6 +1311,7 @@ impl Session {
         if !matches!(self.state, JoinState::AwaitingReadyToEnter) {
             return Vec::new();
         }
+        tracing::info!("control: received Sv_ReadyToEnter, sending NETMSG_ENTERGAME");
         self.send_system_chunk(&SysMsg::EnterGame, true, now);
         self.snap_assembler.reset();
         self.timing.reset();

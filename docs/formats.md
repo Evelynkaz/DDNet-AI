@@ -2657,6 +2657,103 @@ failed. Живые логи подтверждают саму суть нахо�
 
 ---
 
+### 14.12 Инцидент Swarfey: 10 `Connected` без карты (задача 2.3b)
+
+**Симптом** (`~/aiddnet/data/logs/record/swarfey-first-20260929.log`, info): `connecting` в +0,00 с; 5× `connected`
+в +2,03 с через 7 мс; 1× в +20,00 с; 4× в +22,06 с; ни `map changing`, ни `in game`, ни `disconnected`, ни
+`reconnecting`, ни `following redirect`; 0 входов; остановлен нашим SIGTERM на 35 с.
+
+**Разбор.** `conn::Event::Connected` бывает только на переходе `Connecting → Online` (`conn.rs`, ветка
+`ConnectAccept if state == Connecting`), а повторный `CONNECTACCEPT` в `Online` — no-op, как в DDNet: вся ветка
+`CONNECTACCEPT` в `CNetConnection::Feed` под `State() == CONNECT` (20.1 `network_conn.cpp:455-479`, 18.5
+`network_conn.cpp:442-465`). Значит 10 `Connected` — это **10 разных `Session`** (10 сокетов), а не 10 ответов на одно
+соединение (тест `conn::tests::burst_of_connect_accepts_yields_exactly_one_connected`: серия из 4 `CONNECTACCEPT`,
+в т.ч. с разными токенами, даёт ровно один `Connected` и один `ACCEPT`). Драйвер начинает новое соединение без
+записи в лог и без `ClientEvent` ровно в одном месте — ветка `ConnectionOutcome::Reconnect` (`reconnect@ddnet.org`):
+`LostConnection` печатает `reconnecting` (warn), `Redirect` печатает `following redirect` и разрешён один раз.
+Времена сходятся с лимитером D-037 (≤ 5 попыток / 20 с): попытки в t≈0, 2,03, 2,04, 2,05, 2,06 (5 штук), шестая
+ждёт истечения первой (+20,00), 7-10-я — истечения 2-5-й (+22,03…22,06). Цикл 7 мс ≈ 2 RTT (CONNECT → ACCEPT →
+INFO → `reconnect`). Первые 2 с до первого ответа — CONNECT без ответа (у нас ресенд каждые 500 мс, как у
+клиента: 20.1 `network_conn.cpp:567`). Вывод: **сервер (или что-то перед ним) отвечал на каждое рукопожатие
+сообщением `reconnect@ddnet.org`, а драйвер шёл на него бесконечно, без бэкоффа и без единой строки в логе**;
+останавливал его только лимитер. В 18.5 такого сообщения нет вообще (`protocol_ex_msgs.h:35` — только
+`redirect@ddnet.org`), значит отправитель — модифицированный сервер или прокси. Сам Swarfey мы не трогали:
+причина, по которой он это делает, не проверена (см. ниже про порт-паритет).
+
+**Воспроизведение** (локально, только loopback): патч `~/aiddnet/data/ddnet-18.5/reconnect-flood-emulation.patch`
+к серверу 18.5 (env `DDAI_TEST_RECONNECT_FLOOD=1` — на каждый `NETMSG_INFO` отвечать `reconnect@ddnet.org`). До фикса
+(сборка HEAD a978f45): 10× `connected` — 5 за 3 мс, пауза 20,00 с, ещё 5; сервер видит **10 принятых соединений с 10
+разных портов** (`security: client accepted 127.0.0.1:<порт>` × 10, `closed reason='driver: server requested
+reconnect'` × 10). После фикса: 2 соединения с одного порта, `GaveUp(ReconnectLoop)`, код выхода 4.
+
+**Фикс** (`crates/ddai-client/src/driver.rs`):
+- `reconnect@ddnet.org` теперь логируется (info) и виден как `ClientEvent::ServerRequestedReconnect`; исполняется не
+  больше `MAX_SERVER_RECONNECTS_BEFORE_IN_GAME` (1) раз, пока сессия не дошла до `InGame`; второй → graceful `CLOSE` +
+  `GaveUp(ReconnectLoop)`, без ретраев.
+- **Не больше 2 попыток подключения до первого `InGame`** (`MAX_ATTEMPTS_BEFORE_FIRST_IN_GAME`, ревью 2.3b F1), чем бы
+  ни закончилась предыдущая: `reconnect@ddnet.org`, `redirect`, `CLOSE` с «повторяемой» причиной («This server is
+  full», «Server shutdown», «Timeout»…), таймаут. Третья не начинается: graceful `CLOSE` + `GaveUp(TooManyAttempts)`.
+  Проверено на настоящем 18.5 с `sv_max_clients 1` и занятым слотом: `connecting attempt=1` → `CLOSE "This server is
+  full"` → `reconnecting attempt=1 backoff=1s` → `attempt=2` → `CLOSE` → `too many attempts`, код выхода 4. (Полный 18.5
+  отвечает `CONNECTACCEPT`, а `CLOSE` шлёт после `INFO`: `server.cpp:1541-1544`; на уровне сети — сразу `CLOSE`,
+  `network_server.cpp:237`.) После первого `InGame` лимит не действует.
+- **Сторожевой таймер рукопожатия**: не в игре за `ClientConfig::handshake_timeout` (15 с) с момента
+  `Client::connect` → graceful `CLOSE` + `GaveUp(HandshakeTimeout)`. Считает и время, пока сервер молчит на `CONNECT`,
+  и ожидание слота лимитера, и backoff. Пока идёт скачивание карты и приходят новые байты, дедлайн сдвигается на
+  `handshake_timeout` вперёд, но не дальше `handshake_hard_cap` (120 с) от начала входа (ревью F3). После потери
+  соединения *в игре* тот же таймер — бюджет переподключения (сбрасывается в момент потери); его исчерпание — не
+  «рукопожатие», а `GaveUp(ReconnectBudgetExhausted)` с текстом «reconnect budget exhausted after in-game loss»
+  (ревью F2; для записывающего бота принято, живому боту нужен отдельный бюджет на простой — задача 4.1).
+- Второй `Connected` внутри одного соединения — жёсткая остановка (`ProtocolViolation`, `CLOSE`); структурно
+  невозможен, оставлен как защита.
+- **Один сокет (один локальный UDP-порт) на весь `Client::connect`**, как у настоящего клиента: `CNetClient`
+  открывается один раз (`client.cpp:3619`, `m_aNetClient[Conn].Open(BindAddr)`), а `NETMSG_RECONNECT`
+  (`client.cpp:1979-1982`) и `NETMSG_REDIRECT` (`client.cpp:1991-2004`) зовут `CClient::Connect` (`client.cpp:622-723`)
+  на том же `CNetClient`. Раньше каждая попытка занимала новый эфемерный порт; сервер/анти-бот, различающий клиентов
+  по `ip:порт`, каждый раз видел «нового». **Это гипотеза о причине поведения Swarfey, а не установленный факт.**
+  Перед новой попыткой очередь сокета вычищается (`drain_stale_datagrams`), чтобы запоздавший `CLOSE` старого
+  соединения не приняли за ответ на новый `CONNECT`.
+- Логи уровня info: каждая смена состояния и управляющее сообщение (`CONNECT`, `CONNECTACCEPT`/`ACCEPT`,
+  `CLIENTVER`+`INFO`, `MAP_CHANGE`, `READY`, `CON_READY`, `ENTERGAME`, `CLOSE` с причиной, `reconnect`/`redirect`,
+  таймауты), номер попытки, слот лимитера (`connection-attempt slot granted`, `attempts_in_window`), раз в секунду
+  «join in progress: <на каком шаге ждём>» и оставшееся время сторожа.
+- `ddnet-ai record` выходит с кодом 4 при `HandshakeTimeout`/`ReconnectLoop`/`TooManyAttempts`/
+  `ReconnectBudgetExhausted`.
+
+**Сравнение входа с клиентом 20.1 и 18.5 (файл:строка).**
+
+| Шаг | 20.1 (`ref/ddnet/src`) | 18.5 (`data/ddnet-18.5/src/src`) | У нас |
+|---|---|---|---|
+| `CONNECT` (+ `TKEN`-магия), ресенд | `network_conn.cpp:204-212`, ресенд раз в 500 мс `:567-568` | `:163-169`, `:554-555` | `conn.rs` `connect()`, `HANDSHAKE_RETRY_INTERVAL` = 500 мс |
+| `CONNECTACCEPT` (только в `CONNECT`), токен | `:455-479` | `:442-465` | ветка `ConnectAccept if state == Connecting`; повторные — no-op |
+| `ACCEPT`, переход в `ONLINE` | `:474-476` (`SendControl(ACCEPT)`, `m_State = ONLINE`) | `:462-464` | одна `ACCEPT` в очередь на первый `CONNECTACCEPT` (тест `burst_of_connect_accepts_yields_exactly_one_connected`) |
+| Первые сообщения после `ONLINE`: `NETMSG_CLIENTVER` (ex-UUID `clientver@ddnet.tw`), затем `NETMSG_INFO` | `client.cpp:2716-2718` → `SendInfo` `:240-258` (CLIENTVER `:242`, INFO `:250/258`) | `client.cpp:2493-2495` → `SendInfo` `:212-232` (CLIENTVER `:214`, INFO `:222/230`) | `Session::on_connected`: CLIENTVER, потом INFO (оба vital) |
+| Сервер: CLIENTVER (только vital, `STATE_PREAUTH` → `AUTH`) → INFO → `MAP_CHANGE`/`CAPABILITIES`/`MAP_DETAILS` | `server.cpp:1792`, `:1802` | `server.cpp:1481`, `:1500` | — |
+| Ex-UUID клиента→сервера при входе: только `clientver@ddnet.tw` (остальные — ответы: `what-is`/`it-is`, `checksum-response`, `pong`) | `client.cpp:242`, `:1676` (`MAP_DETAILS`), `:1701` (`CAPABILITIES`) | `client.cpp:214`, `:1469`, `:1493` | `message::decode` отвечает на `what-is`; `clientver` уходит из `on_connected` |
+| Ресенд vital-чанка: 1 с, таймаут `conn_timeout` (100 с) | `network_conn.cpp:536-548`, `:523` | `:523-535`, `:510` | `RESEND_INTERVAL` = 1 с, `DEFAULT_TIMEOUT` = 100 с |
+| Keepalive, если ничего не слали 1 с | `:562` | `:549` | `KEEPALIVE_INTERVAL` = 1 с |
+| `NETMSG_RECONNECT` | `client.cpp:1977-1982` → `Connect(m_aConnectAddressStr)` на **том же** `CNetClient`, сразу, без задержки | **отсутствует** (`protocol_ex_msgs.h:35` — только `redirect@ddnet.org`) | `ExSysMsg::Reconnect` → `SessionEvent::ReconnectRequested` |
+| `NETMSG_REDIRECT` | `client.cpp:1991-2004` | `client.cpp:1744` | `RedirectRequested`, не больше одного раза |
+
+**Подтверждение от владельца сервера** (через владельца проекта, 2026-09-29): админ Swarfey разрешил всё и сказал «просто
+переподключайтесь». Значит `reconnect@ddnet.org` при входе — задуманный шлюз (вероятно, анти-бот «войди дважды» перед
+сервером), а не сбой. Поэтому политика такая, как у клиента: **ровно один** запрошенный сервером реконнект до
+`InGame`, **сразу** (без backoff — в логе проверки 0,09 мс между `server requested reconnect` и `connecting attempt=2`),
+с **того же** локального порта; второй запрос или третья попытка — остановка.
+
+Различие, которое было бы видно на проводе, одно: до фикса каждая попытка шла с нового локального порта; после —
+с одного, как у клиента.
+
+**Наблюдение ревью (2.3b, F4).** В логе Swarfey первый `CONNECTACCEPT` пришёл в +2,03 с, то есть первые 4 `CONNECT`
+(t = 0; 0,5; 1,0; 1,5 с) были проигнорированы, а пятый (t = 2,0 с) ответили сразу; при этом новые порты после этого
+отвечали мгновенно. Это похоже на шлюз/фильтр перед игровым сервером (он «прогревается» для нового адреса ~2 с и
+дальше пропускает), а не на поведение самого DDNet-сервера. Не проверено — Swarfey не трогали.
+
+**Исходник мода DDFightNet не найден** (повторный поиск 2026-09-29): у `swarfeya` на GitHub — только `ddnet-maps`,
+`teeworlds-library-ts`, форки `ddnet` (0 коммитов сверх апстрима; ветки — PR-ветки), `libtw2`, `F-DDrace`; поиск кода по
+`ddfight` даёт только README `TaterClient/ddnet-custom-communities` и `TClient-AI-Bot`; `ddfight.net` ссылок на код
+не содержит. Мод закрытый, лицензия неизвестна.
+
 ## 15. Веб: живая карта (задача 5.2a) — `crates/ddai-web/src/live/`
 
 Первый настоящий экран страницы бота (вкладка «Игра», `docs/research/orig-web.md` §7.2): карта +
