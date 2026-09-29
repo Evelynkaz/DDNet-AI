@@ -4,6 +4,7 @@
 //! real one — synthetic maps, scenario generation, and trace comparison for the DDNet physics
 //! parity work (see `docs/formats.md`).
 
+mod arena_cmd;
 mod dataset_cmd;
 mod demo_cmd;
 mod fly_cmd;
@@ -31,6 +32,9 @@ enum Command {
     Trace(trace_cmd::TraceArgs),
     /// The fly's inference engine (phase 7.1): bench and info tooling for a compiled `.flyg`.
     Fly(fly_cmd::FlyArgs),
+    /// Offline evaluation arena (task 8.1): N-player block matches on the bit-exact world,
+    /// W:L:D:T with Wilson CIs, JSONL + summary output, technique scenarios.
+    Arena(arena_cmd::ArenaArgs),
     /// Real DDNet `.map` file inspection (task 1.4, `ddai-map`).
     Map(map_cmd::MapArgs),
     /// Real DDNet `.demo` file inspection (task 8.4b, `ddai-demo`): info/dump/stats.
@@ -58,6 +62,7 @@ fn main() -> ExitCode {
         None => ExitCode::SUCCESS,
         Some(Command::Trace(args)) => trace_cmd::run(args),
         Some(Command::Fly(args)) => fly_cmd::run(args),
+        Some(Command::Arena(args)) => arena_cmd::run(args),
         Some(Command::Map(args)) => map_cmd::run(args),
         Some(Command::Demo(args)) => demo_cmd::run(args),
         Some(Command::Dataset(args)) => dataset_cmd::run(args),

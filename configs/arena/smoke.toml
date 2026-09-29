@@ -1,0 +1,19 @@
+# Quick smoke run (a few seconds): scripted vs scripted and planner-free matchups on the synthetic arenas.
+name = "smoke"
+base_seed = 1
+games = 40
+
+[[condition]]
+name = "pit scripted-vs-scripted"
+arena = "pit"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "platform scripted-vs-scripted"
+arena = "platform"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "pit idle-vs-scripted"
+arena = "pit"
+players = [{ brain = "idle" }, { brain = "scripted" }]

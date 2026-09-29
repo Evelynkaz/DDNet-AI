@@ -1,0 +1,47 @@
+# T5 -- body push at the edge (block-knowledge.md §2.1 T5; mechanic, DDNet++ counts a push as a
+# touch).
+#
+# B stands on the last floor tile before a freeze pit (its centre 16 units from the pit edge);
+# A runs at it from 7 tiles away. Tees collide, so running into B shoves it into the pit. A must
+# stop before the edge itself. A body push is not a hook or a hammer hit, so it is not `credited`
+# by the arena's rule; the scenario only asks for the outcome. Success: B goes out within 80
+# ticks, A never out.
+id = "T5"
+name = "Body push at the edge"
+source = "block-knowledge.md §2.1 T5; DDNet++ block attribution"
+description = "B stands on the edge of a freeze pit; run into it and stop in time."
+horizon = 80
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 30, y0 = 10, x1 = 35, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [22.5, 9.5]
+jitter = [0.5, 0.0]
+
+[[tee]]
+pos = [29.5, 9.5]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 80 },
+    { kind = "not_out", tee = 0 },
+]
+
+# Run at B, then back off once it is over the edge.
+[[reference]]
+from = 0
+direction = 1
+
+[[reference]]
+from = 56
+direction = -1

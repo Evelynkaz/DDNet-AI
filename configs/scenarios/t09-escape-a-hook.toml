@@ -1,0 +1,424 @@
+# T9 -- get out of an opponent's hook (block-knowledge.md §2.1 T9; Steam guide "DDNet basics":
+# hook the floor, hit the blocker; bot v3 "stay strong": walk against the pull).
+#
+# B has hooked A from across a 5-wide freeze pit and walks away, dragging A towards the pit; a
+# solid pillar stands two tiles behind A. A player hook lasts at most about 60 ticks. Success: A is
+# never out for the whole horizon.
+id = "T9"
+name = "Escape an opponent's hook"
+source = "block-knowledge.md §2.1 T9; Steam guide 'DDNet basics'; bot v3 'stay strong'"
+description = "B drags A towards a freeze pit with its hook; resist, break the hook or anchor to the pillar."
+horizon = 130
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 33, y0 = 10, x1 = 37, y1 = 11, tile = "freeze" },
+    { x0 = 25, y0 = 6, x1 = 26, y1 = 9, tile = "solid" },
+]
+
+[[tee]]
+pos = [29.5, 9.5]
+jitter = [0.4, 0.0]
+
+[[tee]]
+pos = [40.5, 9.5]
+hooking = 0
+script = [{ from = 0, direction = 1, hook = true, aim = [-300, 0] }]
+
+[success]
+kind = "not_out"
+tee = 0
+
+# Recorded from the fixed-iteration planner's run on the exact (jitter-free) start: the opponent's
+# timeline is open-loop, so replaying these inputs reproduces the run.
+[[reference]]
+from = 0
+direction = 1
+aim = [277, -115]
+weapon = 0
+
+[[reference]]
+from = 2
+direction = 1
+aim = [299, -29]
+weapon = 0
+
+[[reference]]
+from = 4
+direction = 1
+jump = true
+hook = true
+aim = [186, -235]
+weapon = 0
+
+[[reference]]
+from = 6
+direction = 1
+jump = true
+hook = true
+aim = [135, -268]
+weapon = 0
+
+[[reference]]
+from = 8
+direction = 1
+jump = true
+hook = true
+aim = [121, -274]
+weapon = 0
+
+[[reference]]
+from = 10
+direction = 1
+jump = true
+hook = true
+aim = [118, -276]
+weapon = 0
+
+[[reference]]
+from = 12
+direction = 1
+jump = true
+hook = true
+aim = [117, -276]
+weapon = 0
+
+[[reference]]
+from = 26
+direction = 1
+aim = [300, 10]
+weapon = 0
+
+[[reference]]
+from = 28
+direction = -1
+hook = true
+aim = [281, 106]
+weapon = 0
+
+[[reference]]
+from = 30
+direction = -1
+hook = true
+aim = [300, -6]
+weapon = 0
+
+[[reference]]
+from = 32
+direction = -1
+hook = true
+aim = [263, 144]
+weapon = 0
+
+[[reference]]
+from = 34
+direction = -1
+hook = true
+aim = [276, -117]
+weapon = 0
+
+[[reference]]
+from = 36
+direction = -1
+hook = true
+aim = [117, 276]
+weapon = 0
+
+[[reference]]
+from = 38
+direction = -1
+hook = true
+aim = [284, 96]
+weapon = 0
+
+[[reference]]
+from = 40
+direction = -1
+hook = true
+aim = [298, -30]
+weapon = 0
+
+[[reference]]
+from = 42
+direction = -1
+hook = true
+aim = [289, -81]
+weapon = 0
+
+[[reference]]
+from = 44
+direction = -1
+hook = true
+aim = [279, -109]
+weapon = 0
+
+[[reference]]
+from = 46
+direction = -1
+hook = true
+aim = [277, -115]
+weapon = 0
+
+[[reference]]
+from = 48
+direction = -1
+hook = true
+aim = [285, -93]
+weapon = 0
+
+[[reference]]
+from = 50
+direction = -1
+hook = true
+aim = [298, -38]
+weapon = 0
+
+[[reference]]
+from = 52
+direction = 1
+jump = true
+hook = true
+aim = [184, -237]
+weapon = 0
+
+[[reference]]
+from = 54
+direction = 1
+jump = true
+hook = true
+aim = [135, -268]
+weapon = 0
+
+[[reference]]
+from = 56
+direction = 1
+jump = true
+hook = true
+aim = [121, -274]
+weapon = 0
+
+[[reference]]
+from = 58
+direction = 1
+jump = true
+hook = true
+aim = [118, -276]
+weapon = 0
+
+[[reference]]
+from = 60
+direction = 1
+jump = true
+hook = true
+aim = [117, -276]
+weapon = 0
+
+[[reference]]
+from = 72
+direction = 1
+hook = true
+aim = [221, 203]
+weapon = 0
+
+[[reference]]
+from = 74
+direction = 1
+hook = true
+aim = [28, 299]
+weapon = 0
+
+[[reference]]
+from = 76
+direction = 1
+hook = true
+aim = [16, 300]
+weapon = 0
+
+[[reference]]
+from = 78
+direction = -1
+aim = [-90, 286]
+weapon = 0
+
+[[reference]]
+from = 80
+direction = -1
+hook = true
+aim = [-117, 276]
+weapon = 0
+
+[[reference]]
+from = 82
+direction = -1
+jump = true
+hook = true
+aim = [-276, -117]
+weapon = 0
+
+[[reference]]
+from = 84
+direction = -1
+jump = true
+hook = true
+aim = [-168, -249]
+weapon = 0
+
+[[reference]]
+from = 86
+direction = -1
+hook = true
+aim = [-167, -249]
+weapon = 0
+
+[[reference]]
+from = 88
+direction = -1
+hook = true
+aim = [-194, -229]
+weapon = 0
+
+[[reference]]
+from = 90
+direction = -1
+hook = true
+aim = [-214, -211]
+weapon = 0
+
+[[reference]]
+from = 92
+direction = -1
+hook = true
+aim = [-226, -197]
+weapon = 0
+
+[[reference]]
+from = 94
+direction = -1
+hook = true
+aim = [-239, -181]
+weapon = 0
+
+[[reference]]
+from = 96
+direction = -1
+hook = true
+aim = [-254, -159]
+weapon = 0
+
+[[reference]]
+from = 98
+direction = -1
+hook = true
+aim = [-272, -126]
+weapon = 0
+
+[[reference]]
+from = 100
+direction = -1
+hook = true
+aim = [-290, -77]
+weapon = 0
+
+[[reference]]
+from = 102
+direction = -1
+hook = true
+aim = [-300, -10]
+weapon = 0
+
+[[reference]]
+from = 104
+direction = -1
+hook = true
+aim = [-291, 74]
+weapon = 0
+
+[[reference]]
+from = 106
+direction = -1
+hook = true
+aim = [-258, 153]
+weapon = 0
+
+[[reference]]
+from = 108
+direction = -1
+hook = true
+aim = [-214, 210]
+weapon = 0
+
+[[reference]]
+from = 110
+direction = -1
+hook = true
+aim = [-173, 245]
+weapon = 0
+
+[[reference]]
+from = 112
+direction = -1
+hook = true
+aim = [-142, 264]
+weapon = 0
+
+[[reference]]
+from = 114
+direction = -1
+hook = true
+aim = [-121, 274]
+weapon = 0
+
+[[reference]]
+from = 116
+direction = -1
+hook = true
+aim = [-110, 279]
+weapon = 0
+
+[[reference]]
+from = 118
+direction = -1
+hook = true
+aim = [-105, 281]
+weapon = 0
+
+[[reference]]
+from = 120
+direction = -1
+hook = true
+aim = [-107, 280]
+weapon = 0
+
+[[reference]]
+from = 122
+direction = -1
+hook = true
+aim = [-114, 277]
+weapon = 0
+
+[[reference]]
+from = 124
+direction = -1
+hook = true
+aim = [-125, 273]
+weapon = 0
+
+[[reference]]
+from = 126
+direction = -1
+hook = true
+aim = [-136, 267]
+weapon = 0
+
+[[reference]]
+from = 128
+direction = -1
+hook = true
+aim = [-150, 260]
+weapon = 0

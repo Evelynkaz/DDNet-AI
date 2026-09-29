@@ -1,0 +1,45 @@
+# T7 -- push the frozen opponent into a "perma" pit (block-knowledge.md §2.1 T7;
+# chillblock5_blocker.cpp: block a frozen tee for good).
+#
+# B lies frozen on the floor 10-11 tiles from A with a freeze pit between them; it thaws after
+# 120 ticks and would simply walk away. Hooking and dragging it into the pit keeps it frozen for
+# good (a frozen tee in a freeze tile is frozen again the moment it thaws). Success: B is out at
+# every tick from 150 to 200, A never out. Doing nothing lets B thaw at tick 120.
+id = "T7"
+name = "Finish a frozen opponent in a pit"
+source = "block-knowledge.md §2.1 T7; chillblock5_blocker.cpp"
+description = "B is frozen for 120 ticks beyond a freeze pit; drag it in so it stays frozen."
+horizon = 200
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 24, y0 = 10, x1 = 28, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [20.5, 9.5]
+jitter = [0.5, 0.0]
+
+[[tee]]
+pos = [30.5, 9.5]
+jitter = [0.5, 0.0]
+freeze_ticks = 120
+
+[success]
+kind = "all"
+of = [
+    { kind = "stays_out", tee = 1, from = 150, to = 200 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+direction = -1
+hook = true
+aim = [300, 0]

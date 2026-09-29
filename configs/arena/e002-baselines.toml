@@ -1,0 +1,77 @@
+# E-002, part 1: baselines of the fixed-iteration planner and the scripted bot, >= 200 games per
+# condition (docs/EXPERIMENTS.md E-002). Run:
+#   ddnet-ai arena run --config configs/arena/e002-baselines.toml --out ~/aiddnet/data/runs/E-002/baselines --threads 6
+name = "E-002 baselines"
+base_seed = 1
+games = 200
+
+# --- scripted vs scripted / planner vs scripted / planner vs planner on the three train arenas ---
+
+[[condition]]
+name = "pit scripted vs scripted"
+arena = "pit"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "pit planner vs scripted"
+arena = "pit"
+players = [{ brain = "planner" }, { brain = "scripted" }]
+
+[[condition]]
+name = "pit planner vs planner"
+arena = "pit"
+players = [{ brain = "planner" }, { brain = "planner" }]
+
+[[condition]]
+name = "platform scripted vs scripted"
+arena = "platform"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "platform planner vs scripted"
+arena = "platform"
+players = [{ brain = "planner" }, { brain = "scripted" }]
+
+[[condition]]
+name = "platform planner vs planner"
+arena = "platform"
+players = [{ brain = "planner" }, { brain = "planner" }]
+
+[[condition]]
+name = "clb-left scripted vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left planner vs scripted"
+arena = "clb-left"
+players = [{ brain = "planner" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left planner vs planner"
+arena = "clb-left"
+players = [{ brain = "planner" }, { brain = "planner" }]
+
+# --- holdouts: planner vs scripted on the mirror hall and on ChillBlock5 ---
+
+[[condition]]
+name = "clb-right planner vs scripted"
+arena = "clb-right"
+players = [{ brain = "planner" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler planner vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "planner" }, { brain = "scripted" }]
+
+# --- 1vN: the planner against several scripted attackers on the CLB left hall ---
+
+[[condition]]
+name = "clb-left planner vs 2 scripted"
+arena = "clb-left"
+players = [{ brain = "planner" }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "clb-left planner vs 3 scripted"
+arena = "clb-left"
+players = [{ brain = "planner" }, { brain = "scripted", count = 3 }]

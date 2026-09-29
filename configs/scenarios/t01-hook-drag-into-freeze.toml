@@ -1,0 +1,44 @@
+# T1 -- hook drag across the edge into freeze (docs/research/block-knowledge.md §2.1; mechanic,
+# old bot v3 "hook down").
+#
+# A (the subject) stands on a flat floor 10-11 tiles from B; a 5-wide freeze pit lies between them
+# (x 24..28). B stands on the far side. Hooking B and walking away drags B along the floor into the
+# pit. Success: B goes out within 100 ticks, credited to A (its hook), and A is never out.
+id = "T1"
+name = "Hook drag across the edge into freeze"
+source = "block-knowledge.md §2.1 T1; bot v3 'hook down'"
+description = "B stands 10-11 tiles away behind a 5-wide freeze pit; hook it and drag it in."
+horizon = 120
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 24, y0 = 10, x1 = 28, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [20.5, 9.5]
+jitter = [0.5, 0.0]
+
+[[tee]]
+pos = [30.5, 9.5]
+jitter = [0.5, 0.0]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 100, credited_to = 0 },
+    { kind = "not_out", tee = 0 },
+]
+
+# Open-loop solution: hook towards B and walk away from it.
+[[reference]]
+from = 0
+direction = -1
+hook = true
+aim = [300, 0]

@@ -1,0 +1,42 @@
+# T14 -- panic hook: no jumps left over freeze, hook the wall (block-knowledge.md §2.1 T14;
+# blmapv3_arena.cpp: "no jumps == rip").
+#
+# A falls beside a solid wall over a freeze floor with both jumps spent. Success: A's hook grabs
+# the wall within 5 ticks and A is never out for the whole horizon (it hangs on the rope).
+id = "T14"
+name = "Panic hook on a wall"
+source = "block-knowledge.md §2.1 T14; blmapv3_arena.cpp"
+description = "Falling over freeze with no jumps; hook the wall within 5 ticks and hang."
+horizon = 90
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 20
+border = true
+rects = [
+    { x0 = 1, y0 = 1, x1 = 20, y1 = 18, tile = "solid" },
+    { x0 = 21, y0 = 16, x1 = 58, y1 = 18, tile = "freeze" },
+]
+
+[[tee]]
+pos = [23.5, 8.0]
+jitter = [0.5, 0.5]
+vel = [0.0, 3.0]
+air_jump = "spent"
+
+[[tee]]
+pos = [45.5, 14.5]
+
+[success]
+kind = "all"
+of = [
+    { kind = "hook_grabbed", tee = 0, target = "wall", within = 5 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+hook = true
+aim = [-100, -20]

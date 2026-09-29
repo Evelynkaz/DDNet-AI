@@ -1,0 +1,47 @@
+# T15 -- hook duel: strong vs weak hook (block-knowledge.md §2.1 T15; wiki Hook, "Strong and Weak
+# Hook Explained"), role A: the subject is spawned first.
+#
+# A and B stand on opposite sides of a 5-wide freeze pit and hook each other; B also walks away.
+# Which hook wins depends on the spawn order (`m_StrongWeakId`), so the scenario exists in both
+# orders (T15a: the subject spawns first, T15b: last). Success: B goes out within 100 ticks,
+# credited to A, and A is never out.
+id = "T15a"
+name = "Hook duel, subject spawned first"
+source = "block-knowledge.md §2.1 T15"
+description = "Mutual hooks over a freeze pit; the subject was spawned first."
+horizon = 130
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 24, y0 = 10, x1 = 28, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [20.5, 9.5]
+jitter = [0.5, 0.0]
+
+[[tee]]
+pos = [30.5, 9.5]
+jitter = [0.5, 0.0]
+script = [{ from = 0, direction = 1, hook = true, aim = [-300, 0] }]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 100, credited_to = 0 },
+    { kind = "not_out", tee = 0 },
+]
+
+
+# Hook and walk away (the T1 solution): with this spawn order the subject wins the duel.
+[[reference]]
+from = 0
+direction = -1
+hook = true
+aim = [300, 0]

@@ -1,0 +1,257 @@
+# T11 -- edge stance under pressure (block-knowledge.md §2.1 T11; DDNet wiki "Edge").
+#
+# A stands on the last tile before a one-tile freeze pit; B, 7 tiles away on the far side, hooks A
+# and walks away, dragging it over the pit. Success: A is never out for 100 ticks. (The catalogue
+# asks for time spent on the edge without a freeze; standing still there is what the drag punishes.)
+id = "T11"
+name = "Edge stance under pressure"
+source = "block-knowledge.md §2.1 T11; DDNet wiki Edge"
+description = "A stands at the edge of a one-tile pit while B drags it with a hook from the far side."
+horizon = 100
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 30, y0 = 10, x1 = 30, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [29.5, 9.5]
+jitter = [0.3, 0.0]
+
+[[tee]]
+pos = [36.5, 9.5]
+script = [{ from = 0, direction = 1, hook = true, aim = [-300, 0] }]
+
+[success]
+kind = "not_out"
+tee = 0
+
+
+# Recorded from the fixed-iteration planner's run on the exact (jitter-free) start: the opponent's
+# timeline is open-loop, so replaying these inputs reproduces the run.
+[[reference]]
+from = 0
+aim = [277, -115]
+weapon = 0
+
+[[reference]]
+from = 2
+direction = 1
+hook = true
+aim = [299, -29]
+weapon = 0
+
+[[reference]]
+from = 4
+direction = 1
+jump = true
+hook = true
+aim = [186, -235]
+weapon = 0
+
+[[reference]]
+from = 6
+direction = 1
+jump = true
+hook = true
+aim = [135, -268]
+weapon = 0
+
+[[reference]]
+from = 8
+direction = 1
+jump = true
+hook = true
+aim = [121, -274]
+weapon = 0
+
+[[reference]]
+from = 10
+direction = 1
+jump = true
+hook = true
+aim = [118, -276]
+weapon = 0
+
+[[reference]]
+from = 12
+direction = 1
+jump = true
+hook = true
+aim = [117, -276]
+weapon = 0
+
+[[reference]]
+from = 50
+direction = 1
+hook = true
+fire = true
+aim = [135, -268]
+weapon = 0
+
+[[reference]]
+from = 52
+direction = 1
+jump = true
+hook = true
+aim = [121, -274]
+weapon = 0
+
+[[reference]]
+from = 54
+direction = 1
+aim = [285, -93]
+weapon = 0
+
+[[reference]]
+from = 56
+direction = 1
+hook = true
+aim = [299, 22]
+weapon = 0
+
+[[reference]]
+from = 58
+direction = 1
+jump = true
+hook = true
+aim = [196, -227]
+weapon = 0
+
+[[reference]]
+from = 60
+direction = 1
+jump = true
+hook = true
+aim = [138, -266]
+weapon = 0
+
+[[reference]]
+from = 62
+direction = 1
+jump = true
+hook = true
+aim = [122, -274]
+weapon = 0
+
+[[reference]]
+from = 64
+direction = 1
+jump = true
+hook = true
+aim = [118, -276]
+weapon = 0
+
+[[reference]]
+from = 66
+direction = 1
+jump = true
+hook = true
+aim = [117, -276]
+weapon = 0
+
+[[reference]]
+from = 72
+direction = 1
+hook = true
+aim = [161, -253]
+weapon = 0
+
+[[reference]]
+from = 74
+direction = 1
+hook = true
+aim = [214, -210]
+weapon = 0
+
+[[reference]]
+from = 76
+direction = 1
+hook = true
+aim = [264, -142]
+weapon = 0
+
+[[reference]]
+from = 78
+direction = 1
+hook = true
+aim = [296, -51]
+weapon = 0
+
+[[reference]]
+from = 80
+direction = 1
+hook = true
+aim = [297, 39]
+weapon = 0
+
+[[reference]]
+from = 82
+direction = 1
+hook = true
+aim = [275, 120]
+weapon = 0
+
+[[reference]]
+from = 84
+direction = 1
+hook = true
+aim = [239, 182]
+weapon = 0
+
+[[reference]]
+from = 86
+direction = -1
+jump = true
+hook = true
+aim = [76, -290]
+weapon = 0
+
+[[reference]]
+from = 88
+direction = -1
+jump = true
+hook = true
+aim = [-70, -292]
+weapon = 0
+
+[[reference]]
+from = 90
+direction = -1
+hook = true
+aim = [53, -295]
+weapon = 0
+
+[[reference]]
+from = 92
+direction = -1
+hook = true
+aim = [109, -279]
+weapon = 0
+
+[[reference]]
+from = 94
+direction = -1
+hook = true
+aim = [144, -263]
+weapon = 0
+
+[[reference]]
+from = 96
+direction = -1
+hook = true
+aim = [174, -244]
+weapon = 0
+
+[[reference]]
+from = 98
+direction = -1
+hook = true
+aim = [204, -220]
+weapon = 0

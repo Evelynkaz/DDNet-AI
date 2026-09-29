@@ -1,0 +1,39 @@
+# T10 -- defence against a throw into a freeze ceiling (block-knowledge.md §2.1 T10;
+# chillblock5_blocker.cpp: if launched at the ceiling, hook the opponent below).
+#
+# A has just been thrown upward (vy -9) under a freeze ceiling whose underside is 2.5 tiles above;
+# B stands on the floor below. Rising on its own reaches the ceiling. Success: A is never out for
+# the whole horizon -- hooking B below pulls A down before it touches the ceiling.
+id = "T10"
+name = "Defence against a throw up into the ceiling"
+source = "block-knowledge.md §2.1 T10; chillblock5_blocker.cpp"
+description = "Launched upward towards a freeze ceiling with the opponent below; hook it and pull yourself down."
+horizon = 80
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 20, y0 = 3, x1 = 40, y1 = 4, tile = "freeze" },
+]
+
+[[tee]]
+pos = [30.5, 7.0]
+jitter = [0.4, 0.0]
+vel = [0.0, -9.0]
+
+[[tee]]
+pos = [30.5, 9.5]
+
+[success]
+kind = "not_out"
+tee = 0
+
+[[reference]]
+from = 0
+hook = true
+aim = [0, 100]

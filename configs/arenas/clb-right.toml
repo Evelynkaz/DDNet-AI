@@ -1,0 +1,22 @@
+# Copy Love Box, right wayblock hall: the mirror image of `clb-left` -- HOLDOUT.
+#
+# The map is built around x = 117 (hub x 108..126), so a tile column x maps to 234 - x. The boxes
+# are the left hall's L1 and L2 mirrored with that formula (E-000's `mirror()`): L1 -> x 130..155,
+# L2 -> x 130..156. The geometry is *not* bit-for-bit symmetric (floors/no-hook rows differ), which
+# is what makes it a fair holdout for a brain tuned on the left hall.
+name = "clb-right"
+tag = "holdout"
+description = "Copy Love Box right WB hall (mirror of the left hall's boxes), holdout."
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[spawn]
+min_tiles = 3.0
+max_tiles = 12.0
+boxes = [
+    { x0 = 130, y0 = 67, x1 = 155, y1 = 79 },
+    { x0 = 130, y0 = 79, x1 = 156, y1 = 87 },
+]

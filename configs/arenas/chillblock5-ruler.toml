@@ -1,0 +1,31 @@
+# ChillBlock5, the "ruler area" hall -- HOLDOUT (a second real block map, never used for tuning).
+#
+# Map: ChillBlock5 (943x1075 tiles; copied from ~/aiddnet/data/ddnet-server/maps/ into the map directory), sha256 44f8343a...b378.
+#
+# Why this box. ChillBlock5 is huge and mostly empty; the block fights happen in one hall, which the
+# DDNet++ ChillBlock5 blocker bot (data/research/block/ddnetpp/chillblock5_blocker.cpp) names "ruler
+# area" and guards with these bounds: WB spot around x = 427 (lines 336-344), tunnel into the area
+# at x >= 415 (lines 729, 972), "too far right in the ruler area" at x > 469 (line 744), "freeze
+# basin below the area" at y > 222 (line 734), "freeze right of the freeze basin" y > 213 && x > 436.
+# Rendering the game layer (rows 199..230) shows exactly one hall inside those bounds: a roof of
+# freeze/no-hook at rows 199-200, a freeze-lined left wall at x = 415, open air rows 201..212, and a
+# floor at row 213 of no-hook blocks broken by freeze pits (x 429..435, 440..449, 451..457) with a
+# raised ledge at x 449..457 (row 212). That is the same kind of place as the Copy Love Box hall:
+# a flat block floor over freeze with a hookable-or-not ceiling. The box below is the air of that
+# hall (x 416..468, y 201..212); tees stand on the no-hook floor blocks (row 212 above row 213).
+# Spawn distance 3..12 tiles, like the CLB halls.
+name = "chillblock5-ruler"
+tag = "holdout"
+description = "ChillBlock5 'ruler area' hall (x 416..468, y 201..212), holdout."
+
+[map]
+kind = "file"
+file = "chillblock5/ChillBlock5.map"
+sha256 = "44f8343a686a05afc8f61e7ca90d95bf8fc97f4074b0f3f6d5f8cff60d1cb378"
+
+[spawn]
+min_tiles = 3.0
+max_tiles = 12.0
+boxes = [
+    { x0 = 416, y0 = 201, x1 = 468, y1 = 212 },
+]

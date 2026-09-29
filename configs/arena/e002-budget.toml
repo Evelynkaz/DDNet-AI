@@ -1,0 +1,54 @@
+# E-002, part 2 (moved here from task 3.2 by D-044): does the planner get stronger with a larger
+# time budget? The deadline planner (`decide_production`) at 1/2/4/8 ms per decision against the
+# scripted bot and against the fixed-iteration planner, on the Copy Love Box left hall. The
+# fixed-iteration rows for the same arena are in e002-baselines.toml ("clb-left planner vs
+# scripted" / "planner vs planner"). Wall-clock deadlines: the numbers depend on the machine's load,
+# see the stall baseline in the run record. Run:
+#   ddnet-ai arena run --config configs/arena/e002-budget.toml --out ~/aiddnet/data/runs/E-002/budget --threads 6 --stall-ms 2000
+name = "E-002 budget grid"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left planner 1ms vs scripted"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "deadline", budget_ms = 1.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left planner 2ms vs scripted"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "deadline", budget_ms = 2.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left planner 4ms vs scripted"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "deadline", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left planner 8ms vs scripted"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "deadline", budget_ms = 8.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left planner 1ms vs planner fixed"
+arena = "clb-left"
+games = 400
+players = [{ brain = "planner", mode = "deadline", budget_ms = 1.0 }, { brain = "planner" }]
+
+[[condition]]
+name = "clb-left planner 2ms vs planner fixed"
+arena = "clb-left"
+games = 400
+players = [{ brain = "planner", mode = "deadline", budget_ms = 2.0 }, { brain = "planner" }]
+
+[[condition]]
+name = "clb-left planner 4ms vs planner fixed"
+arena = "clb-left"
+games = 400
+players = [{ brain = "planner", mode = "deadline", budget_ms = 4.0 }, { brain = "planner" }]
+
+[[condition]]
+name = "clb-left planner 8ms vs planner fixed"
+arena = "clb-left"
+games = 400
+players = [{ brain = "planner", mode = "deadline", budget_ms = 8.0 }, { brain = "planner" }]

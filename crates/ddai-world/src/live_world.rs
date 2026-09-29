@@ -963,7 +963,7 @@ pub fn character_observation(world: &World<f32>, id: i32) -> Option<CharacterObs
         is_deep_frozen: core.deep_frozen,
         is_live_frozen: core.live_frozen,
         freeze_ticks_remaining: character.freeze_time,
-        jumps_left: core.jumps,
+        jumps_left: ddai_brain::jumps_left(core.jumps, core.jumped, core.jumped_total, core.endless_jump, grounded),
         jumps_used: core.jumped_total,
         grounded,
         weapon: core.active_weapon,
@@ -975,6 +975,76 @@ pub fn character_observation(world: &World<f32>, id: i32) -> Option<CharacterObs
 mod tests {
     use super::*;
     use ddai_physics::map::{SwitchTile, TILE_SOLID, Tile};
+
+    /// A tall room with a floor: tee 0 stands, jumps, then double-jumps. `jumps_left` must follow
+    /// the HUD: 2 on the ground, 1 airborne after the ground jump, 0 after the air jump (it used to
+    /// report the constant jump capacity `core.jumps`).
+    #[test]
+    fn jumps_left_counts_jumps_not_capacity() {
+        use ddai_physics::core::PlayerInput;
+        use ddai_physics::world::{TickInput, spawn_character};
+        let (w, h) = (12usize, 20usize);
+        let mut game = vec![Tile::default(); w * h];
+        for x in 0..w {
+            game[(h - 1) * w + x] = Tile {
+                index: TILE_SOLID,
+                ..Default::default()
+            };
+        }
+        let map = MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        };
+        let mut world = World::<f32>::from_map(&map, 1);
+        let _ = world.init(std::iter::empty::<&str>());
+        spawn_character(
+            &mut world,
+            0,
+            ddai_physics::vmath::Vec2::new(5.0 * 32.0, 19.0 * 32.0 - 14.0),
+        );
+        let input = |jump: i32| PlayerInput {
+            jump,
+            target_y: -1,
+            ..PlayerInput::default()
+        };
+        let left = |world: &World<f32>| character_observation(world, 0).unwrap().jumps_left;
+        for _ in 0..3 {
+            world.step(&[TickInput {
+                id: 0,
+                input: input(0),
+                kill: false,
+            }]);
+        }
+        assert_eq!(left(&world), 2, "standing");
+        for _ in 0..4 {
+            world.step(&[TickInput {
+                id: 0,
+                input: input(1),
+                kill: false,
+            }]);
+        }
+        assert_eq!(left(&world), 1, "airborne after the ground jump");
+        world.step(&[TickInput {
+            id: 0,
+            input: input(0),
+            kill: false,
+        }]);
+        for _ in 0..3 {
+            world.step(&[TickInput {
+                id: 0,
+                input: input(1),
+                kill: false,
+            }]);
+        }
+        assert_eq!(left(&world), 0, "air jump spent");
+    }
 
     /// A flat 4x2 room with switch numbers 0-5 laid out on the game layer's row 0 (`number = x`)
     /// — enough for [`apply_switch_state`]/[`rebuild_active_timed_switchers`] to have real

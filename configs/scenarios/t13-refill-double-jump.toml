@@ -1,0 +1,42 @@
+# T13 -- get the double jump back before the fight (block-knowledge.md §2.1 T13;
+# chillblock5_blocker.cpp: "always fails ... because he doesn't refill his dj").
+#
+# A is in the air beside a platform with both jumps spent, drifting away from it, over a freeze
+# floor; B waits on the platform 10 tiles away. Landing refills the jumps. Success: A stands on
+# the ground within 50 ticks and is never out. Doing nothing drifts on into the freeze floor.
+id = "T13"
+name = "Refill the double jump before the fight"
+source = "block-knowledge.md §2.1 T13; chillblock5_blocker.cpp"
+description = "Jumps spent, drifting away from a platform over freeze; steer onto it."
+horizon = 90
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 12, x1 = 58, y1 = 13, tile = "freeze" },
+    { x0 = 27, y0 = 10, x1 = 40, y1 = 11, tile = "solid" },
+]
+
+[[tee]]
+pos = [24.5, 7.0]
+jitter = [0.5, 0.5]
+vel = [-2.0, 0.0]
+air_jump = "spent"
+
+[[tee]]
+pos = [37.5, 9.5]
+
+[success]
+kind = "all"
+of = [
+    { kind = "grounded", tee = 0, within = 50 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+direction = 1

@@ -1,0 +1,45 @@
+# T6 -- hold the wayblock spot and drop what arrives (block-knowledge.md §2.1 T6; old bot
+# wayblock.ts, chillblock5_blocker.cpp) -- a Copy Love Box point scenario.
+#
+# The left wayblock hall's lower floor (row 84, x 93..104) ends at a freeze pillar (x 105..106).
+# B stands one and a half tiles from the pillar; A stands next to it on the far side. A hammer
+# blow throws B into the pillar. Success: B goes out within 40 ticks, credited to A; A never out.
+# (The original catalogue row also counts blocks per minute over a long stay; that is measured by
+# the games in `clb-left`, this is the single-block skill on the real geometry.)
+id = "T6"
+name = "Hold the wayblock spot (Copy Love Box hall)"
+source = "block-knowledge.md §2.1 T6; wayblock.ts"
+description = "Copy Love Box left hall, lower floor: hammer the arrival into the freeze pillar."
+horizon = 60
+trials = 20
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[[tee]]
+pos = [101.9, 84.5]
+jitter = [0.15, 0.0]
+weapon = "gun"
+
+[[tee]]
+pos = [103.5, 84.5]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 40, credited_to = 0 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+weapon = 0
+aim = [100, 0]
+
+[[reference]]
+from = 2
+fire = true
+weapon = 0
+aim = [100, 0]

@@ -585,6 +585,26 @@ after-run1,after-run2}.log`.
 - **`env/obs.ts`/`encodeHumanTarget`/`nn/{mlp,gru}.ts`.** Нужны только для `policy`/`learned`/
   `valueNet` — см. выше.
 
+## Адаптеры `Brain` (задача 8.1, `brains.rs`)
+
+`ScriptedBrain`, `PlannerBrain` и `IdleBrain` (из `ddai-brain`) — то, чем арена `ddai-env` играет за игроков.
+
+- Оба мозга **копируют** точный мир из `WorldView` в свой планировочный `PhysicsWorld` (`PhysicsWorld::sync_from`:
+  `World::restore_from` без аллокаций + учёт присутствия и удерживаемых вводов) и мир вызывающего не трогают
+  (тест `planner_brain_never_modifies_the_callers_world`). Без вида (`decide(obs)`, реплей) планировочный мир
+  собирается из `Observation`, как `syncPlanningWorld` из снапшота.
+- **`ScriptedBrain`**: `scriptedAction` как есть; RNG `Rng((seed * 7919 + 17) >>> 0)` из `ResetContext.seed` (как
+  `ScriptedController` харнесса) — игра воспроизводится по сиду. Тест `scripted_brain_equals_scripted_action_on_the_same_world`.
+- **`PlannerBrain`**: пресеты `normal`/`low`/`strong` (`preset_normal`/`preset_low_cpu`/`preset_strong_wb`), режимы
+  `Fixed` (`Planner::decide`, детерминирован, TS-паритетный путь) и `Deadline { budget_ms }` (`decide_production`) с часами
+  `Wall` или детерминированными `Step` (для тестов). `set_search_seed(ctx.seed)`. Ввод соперника — по
+  **видимому** состоянию (`enemy_input_from_tee` = `enemyInputFromSnapshot`: направление, «хук выпущен», прицел), так что
+  результат арены отражает то, что может знать живой бот. Лаг: мир прокручивается вперёд на `lag_ticks` шагов вводами
+  `in_flight` (`syncPlanningWorld`). В 1vN замороженные соседи в 160 px передаются как `frozen bystanders`.
+  `telemetry()` — накопительные счётчики (решения, поиск, выход по времени, щит, кандидаты).
+- **Не перенесено** из `livePlan`/`bot.ts`: путевая цель `pathGoal`/`findRoute` (граф маршрутов придёт с `ddai-nav`) —
+  в арене `travel_goal` не задаётся; на `pit`/`platform` при дальнем спавне это единственное отличие от харнесса E-000.
+
 ## `physics_adapter` — известные упрощения (НЕ параметр паритета, см. его doc-comment)
 
 Бэкенд `ddai_physics::World<f32>` уже побитово точен с сервером DDNet (задача 1.6) — паритет
@@ -602,13 +622,21 @@ after-run1,after-run2}.log`.
   (F3). `apply_tee_state` на отсутствующее ядро теперь возрождает персонажа
   (`spawn_character`) вместо тихого no-op'а — иначе после первой смерти любой `noThaw`-роллаут
   в кеш-мире был обречён навсегда решать «поймали».
-- `step()` теперь восстанавливает `WorldEvent::HammerHit`/`HammerFire` эвристически: у
-  `World<f32>` нет готового списка событий (как у `SimWorld::step()`), поэтому попадание/промах
-  молота определяются по наблюдаемому состоянию — `attack_tick == tick` (сигнал «ударил
-  молотом», не зависит от текущего оружия) плюс порог `reload_timer` между
-  `hammer_fire_delay_ms` (промах) и `hammer_hit_fire_delay_ms` (попадание); цель попадания —
-  ближайший ти в радиусе поражения молота. Явной альтернативы в публичном API `ddai_physics`
-  нет — см. doc-comment `PhysicsWorld::step`.
+- `step()` восстанавливает `WorldEvent::HammerHit`/`HammerFire` **выводом из наблюдаемого состояния**: у
+  `World<f32>` нет списка событий (как у `SimWorld::step()`). Удар молотом виден по смене
+  `attack_tick` (пишет только `fire_weapon`); попадание/промах — по `reload_timer` между
+  `hammer_fire_delay_ms` (промах) и `hammer_hit_fire_delay_ms` (попадание); жертвы — по геометрии самого
+  `fire_hammer`: все ти в радиусе 14 + 28 px от точки в `proximity * 0.75` впереди бьющего вдоль прицела, по
+  позициям **до** шага (удар разрешается до тиков персонажей).
+  **Исправлено в 8.1** (первая же проверка на настоящих ударах): раньше удар определялся условием
+  `attack_tick == world.tick` уже после шага, а свежее нажатие обрабатывается **до** инкремента тика — так что
+  выводились почти только удары из ветки «кнопка зажата, перезарядка кончилась»; жертву искали по позициям
+  **после** шага (отброшенный ти уже дальше 42 px) и брали только ближайшего. Тест `tests/brains.rs` (попадание с
+  отбросом, промах, стрельба из пистолета не считается ударом, два ти одним ударом) на старом коде падает.
+  Последствие для прежних замеров: production-планировщик (`decide_production`, режим арены) до этого не видел
+  большинства своих ударов ни как попадание, ни как штраф `wasted_hammer` — числа 3.2 (50 игр) сняты со старой
+  моделью. TS-паритетный путь (`ts_adapter`) не затронут. Предложение на будущее — настоящий хук событий в
+  `World::step` (см. отчёт 8.1): тогда вывод не нужен вовсе.
 - `set_held_input` ведёт себя как `set_input` (не заводит отдельно `prevInput`/
   `latestPrevInput` для детекции фронта смены оружия) — не влияет на то, что реально читает
   ported-планировщик (только уровни direction/jump/hook/aim).

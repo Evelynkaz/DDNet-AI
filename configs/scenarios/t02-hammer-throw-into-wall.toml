@@ -1,0 +1,48 @@
+# T2 -- hammer throw into a side freeze wall (block-knowledge.md §2.1 T2; blmapv3_arena.cpp: the
+# opponent is closer than 90 units and moves towards a wall -> hit).
+#
+# B stands one and a half tiles from a 4-tall freeze wall (x 25, rows 6..9). A stands 1.5 tiles to
+# B's other side. A hammer blow throws B up and away from A (impulse about (4, -7) px/tick), into
+# the wall. Success: B goes out within 40 ticks, credited to A; A never out.
+id = "T2"
+name = "Hammer throw into a side freeze wall"
+source = "block-knowledge.md §2.1 T2; blmapv3_arena.cpp"
+description = "B stands next to a freeze wall; a hammer blow from the far side throws it into the wall."
+horizon = 60
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 40
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 38, y1 = 13, tile = "solid" },
+    { x0 = 25, y0 = 6, x1 = 25, y1 = 9, tile = "freeze" },
+]
+
+[[tee]]
+pos = [22.0, 9.5]
+jitter = [0.25, 0.0]
+weapon = "gun"
+
+[[tee]]
+pos = [23.5, 9.5]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 40, credited_to = 0 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+weapon = 0
+aim = [100, 0]
+
+[[reference]]
+from = 2
+fire = true
+weapon = 0
+aim = [100, 0]

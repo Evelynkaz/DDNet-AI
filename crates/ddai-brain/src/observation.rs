@@ -18,6 +18,41 @@ pub use ddai_physics::core::{
     HOOK_FLYING, HOOK_GRABBED, HOOK_IDLE, HOOK_RETRACT_END, HOOK_RETRACT_START, HOOK_RETRACTED,
 };
 
+/// Jumps the character can still use, as DDNet's own HUD counts them (`hud.cpp:868-889`): `jumps` is
+/// the character's jump *capacity* (`m_Jumps`, 2 on normal maps, changed by jump tiles, never
+/// decremented by jumping), `jumped_total` the air jumps used since it last touched the ground
+/// (`m_JumpedTotal`), `jumped` the `m_Jumped` bit set (`2` = the air jump is spent). Being airborne
+/// means the ground jump is gone too, so it counts as one used jump; a single-jump character
+/// (`jumps == 1`) has "used" iff `jumped & 2`, and `jumps == -1` is one ground jump only. Never
+/// negative. One helper for every producer of a [`CharacterObservation`] (the arena and
+/// `LiveWorld`), so they cannot disagree.
+pub fn jumps_left(jumps: i32, jumped: i32, jumped_total: i32, endless_jump: bool, grounded: bool) -> i32 {
+    if jumps == 0 {
+        // The HUD's "at least one unused" fix-up is for a character that just got a new jump count; one
+        // with no jumps at all has none.
+        return 0;
+    }
+    let capacity = jumps.abs();
+    let mut used = jumped_total;
+    if jumps > 1 {
+        used += i32::from(!grounded);
+    } else if jumps == 1 {
+        used = jumped & 2;
+    } else if jumps == -1 {
+        used = i32::from(!grounded);
+    }
+    if endless_jump && used >= capacity {
+        used = capacity - 1;
+    }
+    let mut unused = capacity - used;
+    // The HUD's fix-up for a character that just got a new jump count: with the air jump unspent
+    // (`jumped & 2 == 0`) at least one is left. Only meaningful for multi-jump characters.
+    if jumps > 1 && jumped & 2 == 0 && unused <= 0 {
+        unused = 1;
+    }
+    unused.max(0)
+}
+
 /// One character's observable state — used both for [`Observation::self_state`] and for every
 /// entry of [`Observation::others`] (same fields, per the task spec: "other characters (same
 /// fields + id/team)").
@@ -174,6 +209,30 @@ mod tests {
             tune: None,
             settings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn jumps_left_follows_the_hud_rules() {
+        // Standing: both jumps ready.
+        assert_eq!(jumps_left(2, 0, 0, false, true), 2);
+        // Walked off a ledge (no jump used, but the ground jump is gone): one left.
+        assert_eq!(jumps_left(2, 0, 0, false, false), 1);
+        // Ground jump made, airborne: one air jump left.
+        assert_eq!(jumps_left(2, 1, 0, false, false), 1);
+        // Air jump used as well: none.
+        assert_eq!(jumps_left(2, 3, 1, false, false), 0);
+        // Capacity is not "left": a 4-jump tile character, fresh on the ground.
+        assert_eq!(jumps_left(4, 0, 0, false, true), 4);
+        assert_eq!(jumps_left(4, 3, 2, false, false), 1);
+        // Single jump: left until the air jump bit is set; one ground jump only (-1) likewise.
+        assert_eq!(jumps_left(1, 0, 0, false, false), 1);
+        assert_eq!(jumps_left(1, 3, 1, false, false), 0);
+        assert_eq!(jumps_left(-1, 1, 0, false, true), 1);
+        assert_eq!(jumps_left(-1, 1, 0, false, false), 0);
+        // No jumps at all.
+        assert_eq!(jumps_left(0, 0, 0, false, true), 0);
+        // Endless jump never runs out.
+        assert_eq!(jumps_left(2, 3, 5, true, false), 1);
     }
 
     #[test]

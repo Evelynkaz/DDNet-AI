@@ -1,0 +1,119 @@
+//! Batches: many games of one condition in parallel (rayon), and whole runs of many conditions.
+//!
+//! Reproducibility: game `g` of a condition is a pure function of `(base_seed, g, condition)`;
+//! results are collected in index order, so the output is identical at any thread count (timing
+//! fields aside, and provided the brains are deterministic -- a wall-clock deadline planner is
+//! not).
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+
+use rayon::prelude::*;
+
+use crate::EnvError;
+use crate::arena::{Arena, load_arena_defs};
+use crate::config::{BrainFactory, Condition, PlayerSpec, Rules, RunConfig};
+use crate::game::{GameReport, Layout, play_game};
+use crate::sim::PlayerSetup;
+
+/// Builds the players of one game from the condition's slot specs.
+fn setups(slots: &[PlayerSpec], factory: &BrainFactory) -> Result<Vec<PlayerSetup>, EnvError> {
+    slots
+        .iter()
+        .map(|spec| {
+            let brain = factory(spec)?;
+            let label = spec.label.clone().unwrap_or_else(|| brain.name().to_string());
+            Ok(PlayerSetup {
+                brain,
+                lag: spec.lag,
+                label,
+            })
+        })
+        .collect()
+}
+
+/// Plays game number `g` of a condition: seed `base_seed + g` and a 4-way balanced layout -- sides
+/// swapped on odd games (the harness's `swap: g % 2 === 1`), spawn order reversed on games
+/// `g % 4 >= 2`. Positions and spawn order (client-id/entity order, strong/weak hook) are thereby
+/// crossed evenly in every block of four games.
+pub fn play_indexed(
+    arena: &Arena,
+    rules: &Rules,
+    slots: &[PlayerSpec],
+    factory: &BrainFactory,
+    base_seed: u64,
+    g: u32,
+) -> Result<GameReport, EnvError> {
+    play_game(
+        arena,
+        rules,
+        base_seed.wrapping_add(u64::from(g)),
+        Layout {
+            swap: g % 2 == 1,
+            reverse_order: (g / 2) % 2 == 1,
+        },
+        setups(slots, factory)?,
+    )
+}
+
+/// The outcome of one condition.
+pub struct ConditionRun {
+    pub condition: Condition,
+    pub arena: String,
+    pub games: Vec<GameReport>,
+    /// Wall seconds the batch took (all threads).
+    pub wall_s: f64,
+}
+
+/// Runs `games` games of `cond` on `threads` worker threads.
+pub fn run_condition(
+    cfg: &RunConfig,
+    cond: &Condition,
+    arena: &Arena,
+    games: u32,
+    factory: &BrainFactory,
+    threads: usize,
+) -> Result<ConditionRun, EnvError> {
+    let rules = &cfg.rules_for(cond);
+    let slots = cond.slots();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .build()
+        .map_err(|e| EnvError::new(format!("thread pool: {e}")))?;
+    let t0 = Instant::now();
+    let results: Vec<Result<GameReport, EnvError>> = pool.install(|| {
+        (0..games)
+            .into_par_iter()
+            .map(|g| play_indexed(arena, rules, &slots, factory, cfg.base_seed, g))
+            .collect()
+    });
+    let games = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+    Ok(ConditionRun {
+        condition: cond.clone(),
+        arena: arena.name.clone(),
+        games,
+        wall_s: t0.elapsed().as_secs_f64(),
+    })
+}
+
+/// Loads every arena the config uses (each map is read and hashed once).
+pub fn load_arenas(cfg: &RunConfig, arenas_dir: &Path, map_dir: &Path) -> Result<BTreeMap<String, Arena>, EnvError> {
+    let defs = load_arena_defs(arenas_dir)?;
+    let mut out = BTreeMap::new();
+    for c in &cfg.condition {
+        if out.contains_key(&c.arena) {
+            continue;
+        }
+        let def = defs.get(&c.arena).ok_or_else(|| {
+            EnvError::new(format!(
+                "condition {:?}: unknown arena {:?} (known: {})",
+                c.name,
+                c.arena,
+                defs.keys().cloned().collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+        out.insert(c.arena.clone(), Arena::build(def, map_dir)?);
+    }
+    Ok(out)
+}

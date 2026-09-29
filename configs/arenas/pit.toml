@@ -1,0 +1,29 @@
+# Synthetic "pit" arena: a literal port of `arenaPit()` in the phase-0 harness
+# (~/aiddnet/data/research/harness/lib.mjs, docs/research/orig-run.md §4).
+#
+# 48x24 tiles. Flat floor (row 17 is the first floor row, tees stand on row 16), a 6-wide, 5-deep
+# freeze pit in the middle whose top row is flush with the floor, a thick ceiling whose underside
+# is at row 6 (11 tiles above the floor = 352 px, inside the 380 px hook length, so it is
+# hookable). Two tees spawn on the floor 4..20 tiles apart, never in columns 20..27 (over the pit).
+name = "pit"
+tag = "train"
+description = "Flat floor with a 6x5 freeze pit in the middle and a hookable ceiling (harness arenaPit)."
+
+[map]
+kind = "synthetic"
+width = 48
+height = 24
+border = true
+rects = [
+    { x0 = 0, y0 = 0, x1 = 47, y1 = 5, tile = "solid" },    # thick ceiling, underside at row 6
+    { x0 = 1, y0 = 17, x1 = 46, y1 = 22, tile = "solid" },  # ground
+    { x0 = 21, y0 = 17, x1 = 26, y1 = 21, tile = "freeze" }, # the pit
+]
+
+[spawn]
+min_tiles = 4.0
+max_tiles = 20.0
+rows = [
+    { y = 16, x0 = 2, x1 = 19 },
+    { y = 16, x0 = 28, x1 = 45 },
+]

@@ -1,0 +1,41 @@
+# T8 -- do not thaw a frozen opponent by hammering it (block-knowledge.md §2.1 T8;
+# chillblock5_blocker.cpp: never hit a frozen tee that lies low). A discipline scenario.
+#
+# B lies frozen (200 ticks) two tiles from A, who holds the hammer. A hammer blow thaws it (the
+# physics port unfreezes a hit target, as DDNet does). Success: B stays out for the whole horizon.
+# Doing nothing passes; the scripted bot walks up and hammers it and fails.
+id = "T8"
+name = "Do not thaw a frozen opponent"
+source = "block-knowledge.md §2.1 T8; chillblock5_blocker.cpp"
+description = "A frozen B lies next to A (hammer in hand); leave it frozen."
+horizon = 100
+trials = 20
+idle_should_pass = true
+
+[map]
+kind = "synthetic"
+width = 40
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 38, y1 = 13, tile = "solid" },
+]
+
+[[tee]]
+pos = [20.0, 9.5]
+jitter = [0.5, 0.0]
+weapon = "hammer"
+
+[[tee]]
+pos = [22.0, 9.5]
+freeze_ticks = 200
+
+[success]
+kind = "all"
+of = [
+    { kind = "stays_out", tee = 1, from = 1, to = 100 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0

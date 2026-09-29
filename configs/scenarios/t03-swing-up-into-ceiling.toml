@@ -1,0 +1,50 @@
+# T3 -- swing up: throw the opponent upward into a freeze ceiling (block-knowledge.md §2.1 T3;
+# blmapv3_arena.cpp: from above/beside, hold the rope, then hammer at speed).
+#
+# Simplified to the part that decides the outcome: B stands on a one-tile step under a low freeze
+# ceiling (rows 5..6 above its head), A stands one tile lower and next to the step. A hammer blow
+# from below-left throws B up and away, into the ceiling. Success: B goes out within 40 ticks,
+# credited to A; A never out. Hitting B from above or from level ground on the step's far side
+# throws it down or sideways and fails.
+id = "T3"
+name = "Swing up into a freeze ceiling"
+source = "block-knowledge.md §2.1 T3; blmapv3_arena.cpp"
+description = "B stands on a step under a freeze ceiling; a hammer blow from below throws it up into the ceiling."
+horizon = 60
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 40
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 11, x1 = 38, y1 = 13, tile = "solid" },
+    { x0 = 24, y0 = 10, x1 = 38, y1 = 10, tile = "solid" },
+    { x0 = 20, y0 = 6, x1 = 30, y1 = 7, tile = "freeze" },
+]
+
+[[tee]]
+pos = [23.0, 10.5]
+jitter = [0.2, 0.0]
+
+[[tee]]
+pos = [24.6, 9.5]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 40, credited_to = 0 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+weapon = 0
+aim = [100, -40]
+
+[[reference]]
+from = 2
+fire = true
+weapon = 0
+aim = [100, -40]

@@ -1027,6 +1027,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-env"
+version = "0.1.0"
+dependencies = [
+ "ddai-brain",
+ "ddai-jsmath",
+ "ddai-map",
+ "ddai-physics",
+ "ddai-planner",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "ddai-fly"
 version = "0.1.0"
 dependencies = [
@@ -1199,6 +1217,7 @@ dependencies = [
  "ddai-client",
  "ddai-dataset",
  "ddai-demo",
+ "ddai-env",
  "ddai-fly",
  "ddai-flyg",
  "ddai-map",

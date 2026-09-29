@@ -1,0 +1,48 @@
+# T15b -- hook duel, role B: the same setup as t15a but the tees are spawned in the reverse order
+# (the subject last), which flips which hook is strong (`m_StrongWeakId`).
+#
+# A and B stand on opposite sides of a 5-wide freeze pit and hook each other; B also walks away.
+# Which hook wins depends on the spawn order (`m_StrongWeakId`), so the scenario exists in both
+# orders (T15a: the subject spawns first, T15b: last). Success: B goes out within 100 ticks,
+# credited to A, and A is never out.
+id = "T15b"
+name = "Hook duel, subject spawned last"
+source = "block-knowledge.md §2.1 T15"
+description = "Mutual hooks over a freeze pit; the subject was spawned last."
+horizon = 130
+trials = 20
+spawn_reverse = true
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 24, y0 = 10, x1 = 28, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [20.5, 9.5]
+jitter = [0.5, 0.0]
+
+[[tee]]
+pos = [30.5, 9.5]
+jitter = [0.5, 0.0]
+script = [{ from = 0, direction = 1, hook = true, aim = [-300, 0] }]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 100, credited_to = 0 },
+    { kind = "not_out", tee = 0 },
+]
+
+
+# Found by trying: in this spawn order the same "hook and walk away" that wins T15a drags A into the
+# pit as well (both out); hooking and standing still wins.
+[[reference]]
+from = 0
+hook = true
+aim = [300, 0]

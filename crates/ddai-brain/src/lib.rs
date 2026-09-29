@@ -10,13 +10,15 @@
 
 mod action;
 mod brain;
+mod idle;
 mod mirror;
 mod observation;
 
 pub use action::{Action, IVec2};
-pub use brain::{Brain, ResetContext};
+pub use brain::{Brain, ResetContext, WorldView};
+pub use idle::IdleBrain;
 pub use mirror::mirror_map_data;
 pub use observation::{
     CharacterObservation, HOOK_FLYING, HOOK_GRABBED, HOOK_IDLE, HOOK_RETRACT_END, HOOK_RETRACT_START, HOOK_RETRACTED,
-    Observation,
+    Observation, jumps_left,
 };

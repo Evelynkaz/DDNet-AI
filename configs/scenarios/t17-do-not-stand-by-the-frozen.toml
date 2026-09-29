@@ -1,0 +1,358 @@
+# T17 -- do not stand next to a frozen opponent when a free third tee is around (block-knowledge.md
+# §2.1 T17): the third can drag you into the freeze behind you.
+#
+# A stands beside the frozen B with a five-wide freeze pit to A's right and the free third tee C
+# on the pit's far side, at hook range, hooking A and walking away. Success: A is never out for 110
+# ticks. Standing still lets C drag A over the pit.
+id = "T17"
+name = "Do not stand by the frozen opponent with a free third around"
+source = "block-knowledge.md §2.1 T17"
+description = "A next to a frozen B; the free third tee drags A with a hook across a freeze pit."
+horizon = 110
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 25, y0 = 10, x1 = 29, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [23.5, 9.5]
+jitter = [0.4, 0.0]
+
+[[tee]]
+pos = [21.5, 9.5]
+freeze_ticks = 400
+
+[[tee]]
+pos = [33.5, 9.5]
+script = [{ from = 0, direction = 1, hook = true, aim = [-300, 0] }]
+
+[success]
+kind = "not_out"
+tee = 0
+
+
+# Recorded from the fixed-iteration planner's run on the exact (jitter-free) start: the opponent's
+# timeline is open-loop, so replaying these inputs reproduces the run.
+[[reference]]
+from = 0
+aim = [277, -115]
+weapon = 0
+
+[[reference]]
+from = 2
+jump = true
+hook = true
+aim = [300, 11]
+weapon = 0
+
+[[reference]]
+from = 4
+hook = true
+aim = [285, 94]
+weapon = 0
+
+[[reference]]
+from = 6
+hook = true
+aim = [295, 57]
+weapon = 0
+
+[[reference]]
+from = 8
+jump = true
+hook = true
+aim = [202, -221]
+weapon = 0
+
+[[reference]]
+from = 10
+direction = 1
+jump = true
+hook = true
+aim = [140, -265]
+weapon = 0
+
+[[reference]]
+from = 12
+direction = 1
+jump = true
+hook = true
+aim = [123, -274]
+weapon = 0
+
+[[reference]]
+from = 14
+direction = 1
+hook = true
+aim = [181, -239]
+weapon = 0
+
+[[reference]]
+from = 16
+direction = 1
+hook = true
+aim = [62, -293]
+weapon = 0
+
+[[reference]]
+from = 18
+direction = 1
+aim = [294, 62]
+weapon = 0
+
+[[reference]]
+from = 20
+direction = 1
+jump = true
+hook = true
+aim = [203, -221]
+weapon = 0
+
+[[reference]]
+from = 22
+direction = 1
+fire = true
+aim = [282, 103]
+weapon = 0
+
+[[reference]]
+from = 24
+direction = 1
+aim = [-103, 282]
+weapon = 0
+
+[[reference]]
+from = 26
+direction = 1
+hook = true
+aim = [-241, 179]
+weapon = 0
+
+[[reference]]
+from = 28
+direction = 1
+hook = true
+aim = [-273, 125]
+weapon = 0
+
+[[reference]]
+from = 30
+direction = 1
+hook = true
+aim = [-260, 150]
+weapon = 0
+
+[[reference]]
+from = 32
+direction = 1
+jump = true
+hook = true
+aim = [-281, -104]
+weapon = 0
+
+[[reference]]
+from = 34
+direction = 1
+jump = true
+hook = true
+aim = [-298, 35]
+weapon = 0
+
+[[reference]]
+from = 36
+direction = 1
+jump = true
+hook = true
+aim = [-217, -207]
+weapon = 0
+
+[[reference]]
+from = 38
+direction = 1
+hook = true
+aim = [-298, 31]
+weapon = 0
+
+[[reference]]
+from = 40
+direction = 1
+hook = true
+aim = [-80, -289]
+weapon = 0
+
+[[reference]]
+from = 42
+direction = 1
+hook = true
+aim = [-298, 30]
+weapon = 0
+
+[[reference]]
+from = 44
+direction = 1
+hook = true
+aim = [-288, 83]
+weapon = 0
+
+[[reference]]
+from = 46
+direction = 1
+hook = true
+aim = [-271, 129]
+weapon = 0
+
+[[reference]]
+from = 48
+direction = 1
+hook = true
+aim = [-265, 140]
+weapon = 0
+
+[[reference]]
+from = 50
+direction = 1
+hook = true
+aim = [-264, 143]
+weapon = 0
+
+[[reference]]
+from = 52
+direction = 1
+hook = true
+aim = [-263, 144]
+weapon = 0
+
+[[reference]]
+from = 76
+direction = 1
+hook = true
+aim = [-209, -216]
+weapon = 0
+
+[[reference]]
+from = 78
+direction = 1
+hook = true
+aim = [-268, -134]
+weapon = 0
+
+[[reference]]
+from = 80
+direction = 1
+hook = true
+aim = [-244, -174]
+weapon = 0
+
+[[reference]]
+from = 82
+direction = 1
+hook = true
+fire = true
+aim = [-295, 55]
+weapon = 0
+
+[[reference]]
+from = 84
+direction = 1
+hook = true
+fire = true
+aim = [-107, -280]
+weapon = 0
+
+[[reference]]
+from = 86
+direction = 1
+fire = true
+aim = [11, -300]
+weapon = 0
+
+[[reference]]
+from = 88
+direction = -1
+jump = true
+hook = true
+aim = [-86, -287]
+weapon = 0
+
+[[reference]]
+from = 90
+direction = -1
+jump = true
+hook = true
+aim = [-109, -279]
+weapon = 0
+
+[[reference]]
+from = 92
+direction = -1
+jump = true
+hook = true
+aim = [-115, -277]
+weapon = 0
+
+[[reference]]
+from = 94
+direction = -1
+jump = true
+hook = true
+aim = [-116, -277]
+weapon = 0
+
+[[reference]]
+from = 96
+direction = -1
+hook = true
+aim = [-170, -247]
+weapon = 0
+
+[[reference]]
+from = 98
+direction = -1
+jump = true
+hook = true
+aim = [-131, -270]
+weapon = 0
+
+[[reference]]
+from = 100
+direction = -1
+hook = true
+aim = [-42, -297]
+weapon = 0
+
+[[reference]]
+from = 102
+direction = -1
+hook = true
+aim = [89, -287]
+weapon = 0
+
+[[reference]]
+from = 104
+direction = -1
+jump = true
+hook = true
+fire = true
+aim = [204, -220]
+weapon = 0
+
+[[reference]]
+from = 106
+direction = -1
+hook = true
+aim = [132, -269]
+weapon = 0
+
+[[reference]]
+from = 108
+direction = -1
+hook = true
+aim = [160, -253]
+weapon = 0

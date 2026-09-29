@@ -1,0 +1,49 @@
+# T16 -- rescue by hammer (block-knowledge.md §2.1 T16; wiki Hammerhit, blmapchill_police.cpp).
+# Low priority in a no-team-mates project; kept as a scenario for completeness.
+#
+# B lies frozen (500 ticks) in a one-tile freeze pit. A hammer blow thaws it and throws it out
+# of the pit. Success: 50 ticks in, B is free (not out) and lies at least 1.2 tiles beyond the
+# pit; A never out.
+id = "T16"
+name = "Rescue by hammer"
+source = "block-knowledge.md §2.1 T16; DDNet wiki Hammerhit; blmapchill_police.cpp"
+description = "B is frozen in a one-tile pit; hammer it out."
+horizon = 60
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 30, y0 = 10, x1 = 30, y1 = 10, tile = "freeze" },
+]
+
+[[tee]]
+pos = [28.6, 9.5]
+jitter = [0.2, 0.0]
+
+[[tee]]
+pos = [30.5, 9.5]
+freeze_ticks = 500
+
+[success]
+kind = "all"
+of = [
+    { kind = "free", tee = 1, tick = 50 },
+    { kind = "in_box", tee = 1, tick = 50, x0 = 31.7, y0 = 0.0, x1 = 58.0, y1 = 16.0 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+weapon = 0
+aim = [100, 0]
+
+[[reference]]
+from = 2
+fire = true
+weapon = 0
+aim = [100, 0]

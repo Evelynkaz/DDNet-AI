@@ -7,6 +7,7 @@
 //! `docs/DECISIONS.md` D-017/D-018/D-021/D-035/D-041 for the design rationale.
 
 pub mod action;
+pub mod brains;
 pub mod clock;
 pub mod config;
 pub mod fields;

@@ -1,0 +1,23 @@
+# Copy Love Box, left wayblock hall (E-000 "clb"): the bot's own home ground.
+#
+# Map: Copy Love Box, archive build of 2020-09-03, sha256 6e79ef43...fd25 (387x250; its game layer is
+# tile-for-tile identical to the official DDNet build, docs/research/block-knowledge.md §3.1).
+# Boxes are the WB zones L1 = {79..104, 67..79} and L2 = {78..104, 79..87} from the old bot's
+# src/bot/wayblock.ts. Tees stand on any standing tile of the two boxes (free centre, solid ground
+# below), 3..12 tiles apart.
+name = "clb-left"
+tag = "train"
+description = "Copy Love Box left WB hall (boxes L1 + L2), the E-000 'clb' arena."
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[spawn]
+min_tiles = 3.0
+max_tiles = 12.0
+boxes = [
+    { x0 = 79, y0 = 67, x1 = 104, y1 = 79 },
+    { x0 = 78, y0 = 79, x1 = 104, y1 = 87 },
+]

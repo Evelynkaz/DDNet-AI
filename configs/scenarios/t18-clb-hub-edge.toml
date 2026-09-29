@@ -1,0 +1,44 @@
+# T18 -- Copy Love Box hub: knock a tee off the central platform's edge (block-knowledge.md §2.1
+# T18, §3.3 situation 1) -- a real-map point scenario.
+#
+# The hub (x 108..126) has a central platform (x 113..121, top at row 50, tees stand on row 49)
+# over a freeze floor (row 51). B stands on the platform's left edge tile; A stands to its right.
+# A hammer blow throws B off the edge and it falls two tiles into the freeze floor. Success: B goes
+# out within 50 ticks (about one second), credited to A; A never out (it must not follow B off
+# the edge).
+id = "T18"
+name = "Copy Love Box hub: knock a tee off the platform edge"
+source = "block-knowledge.md §2.1 T18, §3.3"
+description = "Hub platform edge: hammer B off the left edge into the freeze floor."
+horizon = 70
+trials = 20
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[[tee]]
+pos = [115.2, 49.5]
+jitter = [0.2, 0.0]
+
+[[tee]]
+pos = [113.5, 49.5]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 50, credited_to = 0 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+weapon = 0
+aim = [-100, 0]
+
+[[reference]]
+from = 2
+fire = true
+weapon = 0
+aim = [-100, 0]

@@ -1,0 +1,18 @@
+# Technique scenarios T1-T18: success rate per brain (`ddnet-ai arena scenarios --config ...`).
+name = "scenarios"
+seed = 1
+# trials = 20   # uncomment to override every scenario's own trial count
+
+[[brain]]
+label = "idle"
+brain = "idle"
+
+[[brain]]
+label = "scripted"
+brain = "scripted"
+
+[[brain]]
+label = "planner-fixed"
+brain = "planner"
+preset = "normal"
+mode = "fixed"

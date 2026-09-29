@@ -1,0 +1,37 @@
+[package]
+name = "ddai-env"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Task 8.1: the offline evaluation arena -- N-player block matches on the bit-exact ddai-physics World<f32>, every player driven by any ddai-brain Brain; phase-0 harness rules, Wilson-CI statistics, rayon batches, technique scenarios (T1-T18)."
+
+[lib]
+name = "ddai_env"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-brain = { path = "../ddai-brain" }
+ddai-jsmath = { path = "../ddai-jsmath" }
+ddai-map = { path = "../ddai-map" }
+ddai-physics = { path = "../ddai-physics" }
+ddai-planner = { path = "../ddai-planner" }
+# Games are independent, so a batch is one `par_iter` over game indices (per-game seeds, results
+# collected in index order => identical output at any thread count).
+rayon = "1.10"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+# TOML for run configs, arena definitions and scenarios (arenas/scenarios are data, not code).
+toml = "1.1.6"
+# sha256: map identity and the effective-config hash. sha1: the per-player decision-stream hash,
+# the same construction as the phase-0 harness (`orig-run.md` §9), so the two are comparable.
+sha1 = "0.10"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.14"

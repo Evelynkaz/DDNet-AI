@@ -211,6 +211,23 @@ fn to_ddnet_input(i: &PlayerInput) -> ddai_physics::core::PlayerInput {
     }
 }
 
+/// Inverse of [`to_ddnet_input`]: the wire-format input a `World<f32>` character holds, as the
+/// planner's plain [`PlayerInput`] (task 8.1: seeding a planning world from a live/arena world).
+pub fn from_ddnet_input(i: &ddai_physics::core::PlayerInput) -> PlayerInput {
+    PlayerInput {
+        direction: i.direction,
+        target_x: f64::from(i.target_x),
+        target_y: f64::from(i.target_y),
+        jump: i.jump,
+        fire: i.fire,
+        hook: i.hook,
+        player_flags: i.player_flags,
+        wanted_weapon: i.wanted_weapon,
+        next_weapon: i.next_weapon,
+        prev_weapon: i.prev_weapon,
+    }
+}
+
 /// [`PlanWorld::SavedState`] for [`PhysicsWorld`]: a full `World<f32>` clone (cheap -- `O(character
 /// count)`, not `O(map size)`, per that type's own doc comment) plus this wrapper's own pending-
 /// input/present bookkeeping, which `World` itself knows nothing about.
@@ -263,6 +280,45 @@ impl PhysicsWorld {
             pending_input: neutral_input_array(),
             present: Box::new([false; MAX_CLIENTS]),
             last_known: no_last_known(),
+        }
+    }
+
+    /// Wraps an already-built `World<f32>` (task 8.1): the arena builds one template world per
+    /// map (`World::from_map` + `init` is milliseconds on a real block map) and clones it per
+    /// game, so games must not pay the map scan again. No tee is registered as present -- add
+    /// them with [`PlanWorld::add_tee`], or seed everything from another world with
+    /// [`PhysicsWorld::sync_from`].
+    pub fn from_world(world: World<f32>, map: Arc<MapData>) -> Self {
+        PhysicsWorld {
+            world,
+            map,
+            pending_input: neutral_input_array(),
+            present: Box::new([false; MAX_CLIENTS]),
+            last_known: no_last_known(),
+        }
+    }
+
+    /// Makes this planning world an exact copy of `src` (task 8.1, `Brain::decide_in`): the
+    /// physics state via `World::restore_from` (allocation-free once warm; `src` must be built
+    /// on the same map), and the wrapper's own bookkeeping from it -- every character that still
+    /// has a core is present, its held input is what `src` last applied to it, and the dead-tee
+    /// fallback cache is refreshed. A character `src` has already killed is *not* present (its
+    /// [`PlanWorld::get_tee`] is `None`), which every planner entry point reads as "no such
+    /// tee".
+    pub fn sync_from(&mut self, src: &World<f32>) {
+        self.world.restore_from(src);
+        for id in 0..MAX_CLIENTS {
+            let alive_core = self.world.cores.slot_of(id as u8).is_some();
+            self.present[id] = alive_core;
+            self.pending_input[id] = match (alive_core, self.world.characters[id].as_ref()) {
+                (true, Some(character)) => from_ddnet_input(&character.input),
+                _ => crate::types::empty_input(),
+            };
+            if alive_core {
+                self.refresh_cache(id as i32);
+            } else {
+                self.last_known[id] = None;
+            }
         }
     }
 
@@ -395,17 +451,25 @@ impl PlanWorld for PhysicsWorld {
 
     /// Review round 1, F9: derives `WorldEvent::HammerFire`/`HammerHit` from observable
     /// `World<f32>` state (it has no built-in event list -- see the module doc comment), on top
-    /// of the existing `Death` detection. **Heuristic, documented, production-path-only**:
-    /// `fire_weapon` (`world.rs`) sets `character.attack_tick = tick` on *every* fire attempt
+    /// of the existing `Death` detection. **Derivation, production-path-only**:
+    /// `fire_weapon` (`world.rs`) sets `character.attack_tick` on *every* fire attempt
     /// (weapon-agnostic) and, only for the hammer, leaves `character.reload_timer` at one of two
     /// distinct values depending on whether it hit anything: `hammer_fire_delay_ms` (miss) or the
-    /// much longer `hammer_hit_fire_delay_ms` (hit) -- `fire_hammer` itself has no other externally
-    /// observable "did it hit, and whom" signal at all (checked directly against its source; see
-    /// this crate's BUILD REPORT). A fired hammer whose `reload_timer` lands past the midpoint of
-    /// those two delays is treated as a hit; the "whom" is the nearest *other* present tee within
-    /// the same 42px search radius `fire_hammer` itself uses (`character_proximity_radius` +
-    /// `search_radius`) -- unambiguous for this crate's actual usage (self + enemy + a handful of
-    /// bystanders, never a crowd), but not a general N-target solution.
+    /// much longer `hammer_hit_fire_delay_ms` (hit). A fire attempt with the hammer in hand whose
+    /// `reload_timer` lands past the midpoint of those two delays is a hit.
+    ///
+    /// Task 8.1 (arena review of the derivation, four fixes): (0) a fire attempt is detected by
+    /// `attack_tick` *changing*: comparing it with the post-step tick counter (as this used to)
+    /// only ever matched swings made from the held-button path, never a fresh press, i.e. almost
+    /// no real hammer blow was seen at all; (1) the weapon is read *after* the
+    /// step (the weapon that actually fired; a switch requested in the same input only takes effect
+    /// one input later, so a gun shot is never mistaken for a hammer blow); (2) "whom" is
+    /// resolved with *pre-step* positions -- a swing is resolved before the character ticks, and
+    /// the victim has already been thrown out of reach by the time `step` returns (post-step
+    /// positions missed real hits at 45 px); (3) it uses `fire_hammer`'s own geometry -- everybody
+    /// within 14 + 28 px of the point `proximity * 0.75` in front of the swinger along its aim --
+    /// and reports every victim, not only the nearest. A proposal for a real event hook in
+    /// `World::step` (which would make this derivation unnecessary) is in the task-8.1 report.
     fn step(&mut self) -> Vec<WorldEvent> {
         let ids: Vec<i32> = (0..MAX_CLIENTS as i32)
             .filter(|&id| self.present[id as usize])
@@ -414,16 +478,21 @@ impl PlanWorld for PhysicsWorld {
             .iter()
             .map(|&id| self.world.characters[id as usize].as_ref().is_some_and(|c| c.alive))
             .collect();
-        let fire_before: Vec<(i32, i32)> = ids
+        let fire_before: Vec<i32> = ids
+            .iter()
+            .map(|&id| self.world.characters[id as usize].map_or(-1, |c| c.attack_tick))
+            .collect();
+        // Task 8.1: positions *before* the step. A hammer swing is resolved in the direct-input
+        // phase, ahead of the character ticks, so the swinger's origin and every candidate
+        // victim's position are exactly these -- a hit victim has already been thrown away from
+        // where the swing found it by the time `step` returns.
+        let pos_before: Vec<Option<PVec2<f32>>> = ids
             .iter()
             .map(|&id| {
-                let weapon = self
-                    .world
+                self.world
                     .cores
                     .slot_of(id as u8)
-                    .map_or(-1, |slot| self.world.cores.core_at(slot).active_weapon);
-                let attack_tick = self.world.characters[id as usize].map_or(-1, |c| c.attack_tick);
-                (weapon, attack_tick)
+                    .map(|slot| self.world.cores.core_at(slot).pos)
             })
             .collect();
 
@@ -436,18 +505,18 @@ impl PlanWorld for PhysicsWorld {
             });
         }
         self.world.step(&inputs);
-        let tick = self.world.tick;
-
         let mut events = Vec::new();
         for (i, &id) in ids.iter().enumerate() {
             let now_alive = self.world.characters[id as usize].as_ref().is_some_and(|c| c.alive);
             if alive_before[i] && !now_alive {
                 events.push(WorldEvent::Death { id, by: -1 });
             }
-            let (weapon_before, attack_tick_before) = fire_before[i];
-            let fired_this_tick = weapon_before == ddai_physics::core::WEAPON_HAMMER
-                && self.world.characters[id as usize]
-                    .is_some_and(|c| c.attack_tick == tick && c.attack_tick != attack_tick_before);
+            // `attack_tick` is written only by `fire_weapon`, so a changed value means a fire
+            // attempt in this step. It cannot be compared with the tick counter: the direct-input
+            // fire (a fresh press) runs *before* the counter increments, the `handle_weapons`
+            // fire (held button, reload done) after. The weapon is the one that fired (read after
+            // the step).
+            let fired_this_tick = self.world.characters[id as usize].is_some_and(|c| c.attack_tick != fire_before[i]);
             if !fired_this_tick {
                 continue;
             }
@@ -455,28 +524,62 @@ impl PlanWorld for PhysicsWorld {
                 continue;
             };
             let core = self.world.cores.core_at(slot);
+            if core.active_weapon != ddai_physics::core::WEAPON_HAMMER {
+                continue;
+            }
             let miss_ticks = core.tuning.hammer_fire_delay_ms() / 1000.0 * ddai_physics::core::SERVER_TICK_SPEED as f32;
             let hit_ticks =
                 core.tuning.hammer_hit_fire_delay_ms() / 1000.0 * ddai_physics::core::SERVER_TICK_SPEED as f32;
-            let reload = self.world.characters[id as usize].map_or(0, |c| c.reload_timer);
+            let character = self.world.characters[id as usize].as_ref();
+            let reload = character.map_or(0, |c| c.reload_timer);
             let hit = reload as f32 > (miss_ticks + hit_ticks) / 2.0;
-            let target = hit.then(|| {
-                let me_pos = self.snapshot_live(id).map(|t| t.pos);
-                me_pos.and_then(|me_pos| {
-                    ids.iter()
-                        .filter(|&&other| other != id)
-                        .filter_map(|&other| self.snapshot_live(other).map(|t| (other, t.pos)))
-                        .map(|(other, pos)| (other, ((pos.x - me_pos.x).powi(2) + (pos.y - me_pos.y).powi(2)).sqrt()))
-                        .filter(|&(_, d)| d < 42.0)
-                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                        .map(|(other, _)| other)
-                })
-            });
+            let mut victims: Vec<i32> = Vec::new();
+            if hit && let (Some(origin), Some(character)) = (pos_before[i], character) {
+                // `fire_hammer`'s own search: everybody within `proximity/2 + proximity` (14 + 28)
+                // of the swing's start point, `proximity * 0.75` in front of the swinger along the
+                // aim (`character.cpp:520-526`), using pre-step positions.
+                let aim = PVec2::new(
+                    character.latest_input.target_x as f32,
+                    character.latest_input.target_y as f32,
+                );
+                let aim_len = (aim.x * aim.x + aim.y * aim.y).sqrt();
+                let dir = if aim_len > 0.0 {
+                    PVec2::new(aim.x / aim_len, aim.y / aim_len)
+                } else {
+                    PVec2::new(0.0, 0.0)
+                };
+                let start = PVec2::new(origin.x + dir.x * 28.0 * 0.75, origin.y + dir.y * 28.0 * 0.75);
+                let reach = 28.0 * 0.5 + 28.0;
+                for (j, &other) in ids.iter().enumerate() {
+                    if other == id {
+                        continue;
+                    }
+                    if let Some(p) = pos_before[j]
+                        && alive_before[j]
+                        && ((p.x - start.x).powi(2) + (p.y - start.y).powi(2)).sqrt() < reach
+                    {
+                        victims.push(other);
+                    }
+                }
+                if victims.is_empty() {
+                    // The reload says it hit but the geometry found nobody (an aim edge case):
+                    // credit the nearest tee rather than lose the hit.
+                    let nearest = ids
+                        .iter()
+                        .enumerate()
+                        .filter(|&(j, &other)| other != id && alive_before[j])
+                        .filter_map(|(j, &other)| {
+                            pos_before[j].map(|p| (other, (p.x - origin.x).hypot(p.y - origin.y)))
+                        })
+                        .min_by(|a, b| a.1.total_cmp(&b.1));
+                    victims.extend(nearest.map(|(other, _)| other));
+                }
+            }
             events.push(WorldEvent::HammerFire {
                 from: id,
-                hits: i32::from(hit),
+                hits: victims.len().max(usize::from(hit)) as i32,
             });
-            if let Some(Some(to)) = target {
+            for to in victims {
                 events.push(WorldEvent::HammerHit { from: id, to });
             }
         }

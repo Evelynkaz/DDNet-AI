@@ -1,0 +1,27 @@
+# Synthetic "platform" arena: a literal port of `arenaPlatform()` in the phase-0 harness
+# (lib.mjs, docs/research/orig-run.md §4).
+#
+# 50x28 tiles. A floating 26-wide platform (top surface row 14, tees stand on row 13) over a
+# freeze lake (rows 22..26), hookable ceiling with its underside at row 4 (10 tiles above the
+# platform), solid side walls. Two tees spawn on the platform 3..16 tiles apart.
+name = "platform"
+tag = "train"
+description = "Floating platform over a freeze lake, hookable ceiling above (harness arenaPlatform)."
+
+[map]
+kind = "synthetic"
+width = 50
+height = 28
+border = true
+rects = [
+    { x0 = 0, y0 = 0, x1 = 49, y1 = 3, tile = "solid" },     # ceiling, underside at row 4
+    { x0 = 12, y0 = 14, x1 = 37, y1 = 15, tile = "solid" },  # platform
+    { x0 = 1, y0 = 22, x1 = 48, y1 = 26, tile = "freeze" },  # freeze lake
+]
+
+[spawn]
+min_tiles = 3.0
+max_tiles = 16.0
+rows = [
+    { y = 13, x0 = 13, x1 = 36 },
+]

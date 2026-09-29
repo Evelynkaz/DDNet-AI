@@ -1,0 +1,45 @@
+# T4 -- pull a jumper down (block-knowledge.md §2.1 T4; blmapv3_arena.cpp: the opponent is falling
+# from a side platform with vy > 4.2, hook him).
+#
+# B jumps from the left across a 6-wide freeze gap towards the right platform and would land
+# safely on it. A stands at the gap's near edge. Success: B goes out within 70 ticks, credited to
+# A (hook), and A never out -- hooking B in mid-air and pulling it back into the gap. Doing
+# nothing lets B land on the far platform.
+id = "T4"
+name = "Pull a jumper down into the gap"
+source = "block-knowledge.md §2.1 T4; blmapv3_arena.cpp"
+description = "B flies across a freeze gap; hook it mid-air and pull it back into the gap."
+horizon = 90
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 24, y0 = 10, x1 = 29, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [22.5, 9.5]
+jitter = [0.3, 0.0]
+
+[[tee]]
+pos = [27.0, 6.0]
+jitter = [0.4, 0.3]
+vel = [4.0, -1.0]
+script = [{ from = 0, direction = 1 }]
+
+[success]
+kind = "all"
+of = [
+    { kind = "out", tee = 1, within = 70, credited_to = 0 },
+    { kind = "not_out", tee = 0 },
+]
+
+[[reference]]
+from = 0
+hook = true
+aim = [170, -110]

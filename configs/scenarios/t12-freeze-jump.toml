@@ -1,0 +1,43 @@
+# T12 -- freeze jump: save yourself with the second jump (block-knowledge.md §2.1 T12; wiki
+# Freeze/Jump).
+#
+# A falls straight towards a one-tile freeze pit (32 units wide, A is 28), two air jumps in hand.
+# Doing nothing lands in the
+# pit. Success: A is never out for the whole horizon (a save without a single freeze).
+id = "T12"
+name = "Freeze jump (save with the second jump)"
+source = "block-knowledge.md §2.1 T12; DDNet wiki Freeze, Jump"
+description = "A falls onto a one-tile freeze pit; jump out sideways before touching it."
+horizon = 100
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 30, y0 = 10, x1 = 30, y1 = 11, tile = "freeze" },
+]
+
+[[tee]]
+pos = [30.5, 6.5]
+jitter = [0.0, 0.3]
+vel = [0.0, 2.0]
+
+[[tee]]
+pos = [50.5, 9.5]
+
+[success]
+kind = "not_out"
+tee = 0
+
+[[reference]]
+from = 0
+direction = 1
+jump = true
+
+[[reference]]
+from = 2
+direction = 1
