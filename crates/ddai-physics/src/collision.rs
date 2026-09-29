@@ -143,6 +143,32 @@ fn move_restrictions_for(direction: usize, tile: u8, flags: u8) -> i32 {
 /// `m_TeleCheckOuts`/`m_TeleOthers`'s `std::map<int, ...>` keys in `collision.cpp`).
 type TeleNumber = u8;
 
+/// Largest coordinate magnitude (px) the `intersect_line`/`move_box` early-outs will reason about
+/// (2^22 px = 131072 tiles, far beyond any real map): past it they decline and the exact loop
+/// runs. Keeps `to_i32_trunc` far from saturating (task 1.10b review R4) and keeps an `f32`
+/// coordinate's own `ulp` (0.5 px at 2^23) well below the 1 px pads.
+const EARLY_OUT_COORD_LIMIT: f64 = 4_194_304.0;
+
+/// Builds [`Collision::solid_sat`] from `solid` — see that field's doc comment for the table's
+/// exact layout. `width`/`height` `<= 0` (an [`Collision::empty`] map) yields an empty table.
+fn build_solid_sat(solid: &[bool], width: i32, height: i32) -> Vec<u32> {
+    if width <= 0 || height <= 0 {
+        return Vec::new();
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let stride = w + 1;
+    let mut sat = vec![0u32; stride * (h + 1)];
+    for y in 0..h {
+        let mut row_sum: u32 = 0;
+        for x in 0..w {
+            row_sum += u32::from(solid[y * w + x]);
+            sat[(y + 1) * stride + (x + 1)] = row_sum + sat[y * stride + (x + 1)];
+        }
+    }
+    sat
+}
+
 /// Port of 20.1 `CCollision`: the map's tile layers plus everything `CCollision::Init`
 /// precomputes from them (tele in/out/checkpoint tables, the door array, the highest switch
 /// number). Built once from a [`MapData`] via [`Collision::new`] and shared (by reference) across
@@ -160,6 +186,19 @@ pub struct Collision<R: Real> {
     /// TILE_NOHOOK` for every `(x, y)` — this changes nothing about *what* is computed, only
     /// *when* (once, in [`Collision::new`], instead of on every call).
     solid: Vec<bool>,
+    /// A summed-area table (2D prefix sum) over [`Collision::solid`] (task 1.10b, speed-up 2):
+    /// `solid_sat[y * (width+1) + x]` (`0 <= x <= width`, `0 <= y <= height`, so this is
+    /// `(width+1) * (height+1)` entries, one extra all-zero row/column as the base case) is the
+    /// count of solid cells in the tile rectangle `[0, x) x [0, y)`. Lets
+    /// [`Collision::solid_count_in_tile_rect`] answer "how many solid cells in this axis-aligned
+    /// tile rectangle?" in `O(1)` (4 lookups, 3 additions) instead of `O(rectangle area)` —
+    /// [`Collision::intersect_line`]'s own early-out (its doc comment) is built on this. Rebuilt
+    /// in full whenever [`Collision::set_collision_at`] changes `solid` — a summed-area table
+    /// doesn't support a cheap single-cell incremental update the way a per-cell cache does (every
+    /// entry at or after the changed cell, in both directions, depends on it), and
+    /// `set_collision_at` isn't called anywhere in this crate yet (Stage B), so this cost is
+    /// currently theoretical, not a real per-tick or even per-call one.
+    solid_sat: Vec<u32>,
     /// [`Collision::tile_exists`]'s answer for every cell, precomputed once in [`Collision::new`]
     /// from [`Collision::tile_exists_uncached`] instead of recomputed on every call — same
     /// reasoning as [`Collision::solid`] above, generalized to a function that reads up to 6
@@ -192,6 +231,7 @@ impl<R: Real> Collision<R> {
             width: 0,
             height: 0,
             solid: Vec::new(),
+            solid_sat: Vec::new(),
             tile_exists_cache: Vec::new(),
             game: Vec::new(),
             front: None,
@@ -268,16 +308,18 @@ impl<R: Real> Collision<R> {
             }
         }
 
-        let solid = map
+        let solid: Vec<bool> = map
             .game
             .iter()
             .map(|t| t.index == map::TILE_SOLID || t.index == map::TILE_NOHOOK)
             .collect();
+        let solid_sat = build_solid_sat(&solid, width, height);
 
         let mut result = Collision {
             width,
             height,
             solid,
+            solid_sat,
             tile_exists_cache: Vec::new(),
             game: map.game.clone(),
             front: map.front.clone(),
@@ -377,6 +419,62 @@ impl<R: Real> Collision<R> {
         let nx = (x / 32).clamp(0, self.width - 1);
         let ny = (y / 32).clamp(0, self.height - 1);
         self.solid[(ny * self.width + nx) as usize]
+    }
+
+    /// The count of solid cells in the *tile* rectangle `[x0, x1] x [y0, y1]` (both inclusive) —
+    /// `O(1)` via [`Collision::solid_sat`]. `x0`/`y0`/`x1`/`y1` must already be clamped to
+    /// `0..width`/`0..height` with `x0 <= x1` and `y0 <= y1` (the only caller,
+    /// `pixel_box_is_solid_free`, guarantees both).
+    fn solid_count_in_tile_rect(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> u32 {
+        let stride = (self.width + 1) as usize;
+        let at = |y: i32, x: i32| self.solid_sat[y as usize * stride + x as usize];
+        at(y1 + 1, x1 + 1) + at(y0, x0) - at(y0, x1 + 1) - at(y1 + 1, x0)
+    }
+
+    /// `true` only if the pixel-space box `[min_x, max_x] x [min_y, max_y]` is *provably* free of
+    /// solid cells: every tile the box touches (converted with the same truncating `/ 32` and
+    /// clamp [`Collision::is_solid`] applies to a sampled integer pixel) has `solid == false`.
+    /// This is the one place the `intersect_line`/`move_box` early-outs turn a float box into a
+    /// tile rectangle, so it carries every "fall back to the exact path" guard (task 1.10b review
+    /// R4): an empty `Collision`, a non-finite bound, a bound beyond `EARLY_OUT_COORD_LIMIT`
+    /// (where `to_i32_trunc` could saturate to `i32::MIN` and *invert* the rectangle — an inverted
+    /// rectangle has no cells, which would otherwise read as "free" — and where an `f32` pixel's
+    /// own rounding is no longer negligible against the 1 px pads the callers use), and, as a
+    /// belt-and-braces check, any inverted rectangle. All of those return `false` ("not free"),
+    /// so the caller runs the exact loop.
+    fn pixel_box_is_solid_free(&self, min_x: R, max_x: R, min_y: R, max_y: R) -> bool {
+        let limit = R::from_f64(EARLY_OUT_COORD_LIMIT);
+        let in_range = |v: R| v.is_finite() && v.abs() <= limit;
+        if self.solid_sat.is_empty() || !(in_range(min_x) && in_range(max_x) && in_range(min_y) && in_range(max_y)) {
+            return false;
+        }
+        let tx0 = (min_x.to_i32_trunc() / 32).clamp(0, self.width - 1);
+        let tx1 = (max_x.to_i32_trunc() / 32).clamp(0, self.width - 1);
+        let ty0 = (min_y.to_i32_trunc() / 32).clamp(0, self.height - 1);
+        let ty1 = (max_y.to_i32_trunc() / 32).clamp(0, self.height - 1);
+        if tx0 > tx1 || ty0 > ty1 {
+            return false;
+        }
+        self.solid_count_in_tile_rect(tx0, ty0, tx1, ty1) == 0
+    }
+
+    /// `true` if the *tile* rectangle covering the segment `pos0..pos1`, padded by 1 px on every
+    /// side, contains not a single solid cell — in which case nothing along the segment can be
+    /// solid either, since every point `intersect_line`'s per-sample marching loop ever visits
+    /// (`mix(pos0, pos1, a)` for `a` in `[0, 1]`) lies within `[min(pos0, pos1), max(pos0,
+    /// pos1)]` on each axis (a convex combination; the single `mix` evaluation's own rounding is
+    /// a few `ulp` of a coordinate below `EARLY_OUT_COORD_LIMIT`, i.e. far under a pixel), and the
+    /// 1 px pad covers `round_to_int`'s up-to-0.5-px rounding on top of that. `false` if either
+    /// endpoint isn't finite or is beyond the coordinate limit (see `pixel_box_is_solid_free`) —
+    /// the caller must fall back to the exact loop then.
+    fn segment_bbox_is_solid_free(&self, pos0: Vec2<R>, pos1: Vec2<R>) -> bool {
+        let pad = R::ONE;
+        self.pixel_box_is_solid_free(
+            pos0.x.min(pos1.x) - pad,
+            pos0.x.max(pos1.x) + pad,
+            pos0.y.min(pos1.y) - pad,
+            pos0.y.max(pos1.y) + pad,
+        )
     }
 
     /// `CCollision::CheckPoint(float x, float y)`: `IsSolid(round_to_int(x), round_to_int(y))`.
@@ -552,6 +650,13 @@ impl<R: Real> Collision<R> {
         // Keep the `solid` cache (see its doc comment) in sync — this is the only method that
         // ever mutates `game[..].index` after construction.
         self.solid[i] = index == map::TILE_SOLID || index == map::TILE_NOHOOK;
+        // Task 1.10b, speed-up 2: `solid_sat` (see its own doc comment on why a full rebuild,
+        // not an incremental patch, is the right call here) must stay in sync with `solid` too.
+        self.solid_sat = build_solid_sat(&self.solid, self.width, self.height);
+        // Task 1.10b, finding F1: `game[i]` feeds both `tile_exists_uncached(i)` directly and
+        // `tile_exists_next(j)` for every neighbor `j` of `i` — keep `tile_exists_cache` in sync
+        // the same way, not just `solid`.
+        self.refresh_tile_exists_cache_around(i as i32);
     }
 
     /// `CCollision::SetDoorCollisionAt(float x, float y, unsigned char Type, unsigned char
@@ -560,10 +665,48 @@ impl<R: Real> Collision<R> {
         let Some(door) = self.door.as_mut() else { return };
         let nx = (vmath::round_to_int(x) / 32).clamp(0, self.width - 1);
         let ny = (vmath::round_to_int(y) / 32).clamp(0, self.height - 1);
-        let d = &mut door[(ny * self.width + nx) as usize];
+        let i = ny * self.width + nx;
+        let d = &mut door[i as usize];
         d.index = kind;
         d.flags = flags;
         d.number = number;
+        // Task 1.10b, finding F1: same reasoning as `set_collision_at` above, for the `door`
+        // layer (`switch::place_door_collision`'s only mutation site, called from
+        // `World::from_map`'s scan for every `CDoor` fixture — previously relied on that caller
+        // remembering to call `recompute_tile_exists_cache()` again afterward; now this setter
+        // keeps itself consistent regardless of caller).
+        self.refresh_tile_exists_cache_around(i);
+    }
+
+    /// Recomputes `tile_exists_cache` at cell `index` and every cell whose own
+    /// [`Collision::tile_exists_next`] neighbor set can include `index` — the minimal safe set to
+    /// refresh after a single-cell `game`/`door` write ([`Collision::set_collision_at`]/
+    /// [`Collision::set_door_collision_at`]), without a full `O(map size)` rebuild.
+    ///
+    /// Task 1.10b review R3: the `> 0` quirk in `tile_exists_next` (`index - 1 > 0`, not `>= 0`)
+    /// belongs to the *reader* `j` deciding whether to look at `j - 1`, not to the cell being
+    /// refreshed: reader `j = 1` does not read cell 0, but reader `j = 0` reads cells `1` and
+    /// `width` (its `left`/`above` fall back to itself). So a write to cell `1` or `width` must
+    /// refresh cell `0`, and the candidates `index - 1` / `index - width` are therefore admitted
+    /// down to `>= 0`. Over-refreshing a cell that turns out not to depend on `index` is harmless
+    /// (it recomputes to the same value); missing one is not.
+    fn refresh_tile_exists_cache_around(&mut self, index: i32) {
+        let n = self.game.len() as i32;
+        if !(0..n).contains(&index) {
+            return;
+        }
+        let width = self.width;
+        let candidates = [
+            Some(index),
+            (index >= 1).then_some(index - 1),
+            (index + 1 < n).then_some(index + 1),
+            (index >= width).then_some(index - width),
+            (index + width < n).then_some(index + width),
+        ];
+        for c in candidates.into_iter().flatten() {
+            let v = self.tile_exists_uncached(c);
+            self.tile_exists_cache[c as usize] = v;
+        }
     }
 
     // --- `GetMoveRestrictions` --------------------------------------------------------------
@@ -634,7 +777,28 @@ impl<R: Real> Collision<R> {
     /// `CCollision::IntersectLine`'s three output values, always computed (the C++ out-params
     /// are all optional pointers; here every field is always populated — callers that don't need
     /// `before_collision`/`tele_nr` simply ignore them).
+    ///
+    /// Task 1.10b, speed-up 2: `segment_bbox_is_solid_free` (private) first — if the segment's
+    /// own (padded) tile bounding box has zero solid cells, the loop below is certain to run to
+    /// completion without ever finding one (see that method's doc comment for the exact argument),
+    /// so this returns the same `{hit: 0, collision: pos1, before_collision: pos1}` that loop
+    /// would eventually produce, without running it at all. Every input the loop *would* have
+    /// produced a hit for still runs the loop exactly as before (this only ever substitutes for
+    /// the "no hit" outcome, never changes which inputs hit or what they hit).
     pub fn intersect_line(&self, pos0: Vec2<R>, pos1: Vec2<R>) -> LineHit<R> {
+        self.intersect_line_impl(pos0, pos1, true)
+    }
+
+    /// [`Collision::intersect_line`]'s body; `allow_early_out = false` is the pre-1.10b loop
+    /// verbatim — the reference the differential tests compare the early-out against.
+    fn intersect_line_impl(&self, pos0: Vec2<R>, pos1: Vec2<R>, allow_early_out: bool) -> LineHit<R> {
+        if allow_early_out && self.segment_bbox_is_solid_free(pos0, pos1) {
+            return LineHit {
+                hit: 0,
+                collision: pos1,
+                before_collision: pos1,
+            };
+        }
         let distance = vmath::distance(pos0, pos1);
         let end = (distance + R::ONE).to_i32_trunc();
         let mut last = pos0;
@@ -972,10 +1136,85 @@ impl<R: Real> Collision<R> {
         }
     }
 
+    /// `true` if a `size`-sized box's *entire* swept path from `pos` to `pos + vel` (the full
+    /// displacement [`Collision::move_box`]'s loop accumulates toward across its `steps`
+    /// sub-steps) provably cannot touch a solid cell, so every `test_box` the loop would make
+    /// returns `false` and can be skipped. Task 1.10b review R1: the pad is a *proven* bound on
+    /// the loop's float drift, not "negligible at this scale" (it is not: see below).
+    ///
+    /// **Proof, per axis** (`p` = start, `v` = velocity, `n = steps` = `max + 1` iterations,
+    /// `S = |p| + |v| + 1`, `EPS = 2^-23`, `u = EPS/2` an upper bound on the unit roundoff of
+    /// `f32` *and* `f64`). The loop computes `f = fl(1/n)`, `d = fl(v*f)`, then
+    /// `x_{k+1} = fl(x_k + d)`; the exact path it approximates is `P_k = p + k*v/n`, which stays
+    /// between `p` and `p + v` (a convex combination), so every `test_box` corner
+    /// (`x_k ± half`, then `round_to_int`, i.e. at most 0.5 px more) lies within
+    /// `[min(p, p+v) - half - B - 1, max(p, p+v) + half + B + 1]` **if** `|x_k - P_k| <= B`.
+    /// (a) `f` and `d` each carry a relative error `<= u`, so `|d - v/n| <= 3u|v|/n` and, summed
+    ///     over the `n` steps, `<= 3u|v|`.
+    /// (b) Each addition rounds by `<= u|x_{k+1}|`; by induction `|x_k| <= |P_k| + B <= 2S`
+    ///     whenever `B <= S`, so all `n` additions contribute `<= n * u * 2S = n * EPS * S`.
+    /// (c) `end = pos + vel` (used for the box extent) differs from the exact `p + v` by
+    ///     `<= u|end| <= EPS * S / 2`, and the corner arithmetic (`x ± half`) by `<= u|x|`.
+    /// Total `<= (n + 3) * EPS * S`, and we use `B = (n + 4) * EPS * S`, the extra `EPS * S`
+    /// absorbing the rounding in evaluating `B` itself. The induction in (b) needs `B <= S`, i.e.
+    /// `(n + 4) * EPS <= 1`; otherwise this returns `false` (the exact loop runs). At real scales
+    /// `B` is tiny (`n = 31`, `|p| = 2000` gives ~0.008 px), but it is **not** negligible in
+    /// general: on the non-principal axis, with `|x| >= 16384` and `n > 512` (a fast fall past a
+    /// far-right wall) it exceeds 0.5 px — the review's Oracle A counterexample. Also `false` if
+    /// any input is non-finite or beyond `EARLY_OUT_COORD_LIMIT`.
+    ///
+    /// Why one decision up front stays valid for the whole loop: `vel` is only written inside the
+    /// collision branch, which this fact makes dead, so `vel` (and therefore `d` and every path
+    /// above) never changes mid-loop.
+    fn swept_box_is_solid_free(&self, pos: Vec2<R>, vel: Vec2<R>, size: Vec2<R>, steps: i32) -> bool {
+        if !(pos.x.is_finite() && pos.y.is_finite() && vel.x.is_finite() && vel.y.is_finite()) || steps < 1 {
+            return false;
+        }
+        let eps = R::from_f64(1.1920928955078125e-7); // 2^-23, exact in f32 and f64
+        let n_plus_4 = R::from_i32(steps) + R::from_f64(4.0);
+        if n_plus_4 * eps > R::ONE {
+            return false;
+        }
+        let half = size * R::from_f64(0.5);
+        let end = pos + vel;
+        // Per-axis drift bound `B = (n + 4) * EPS * S`.
+        let drift = |p: R, v: R| n_plus_4 * eps * (p.abs() + v.abs() + R::ONE);
+        let pad_x = half.x + R::ONE + drift(pos.x, vel.x);
+        let pad_y = half.y + R::ONE + drift(pos.y, vel.y);
+        self.pixel_box_is_solid_free(
+            pos.x.min(end.x) - pad_x,
+            pos.x.max(end.x) + pad_x,
+            pos.y.min(end.y) - pad_y,
+            pos.y.max(end.y) + pad_y,
+        )
+    }
+
     /// `CCollision::MoveBox(vec2*, vec2*, vec2, vec2, bool*)`. Returns `(new_pos, new_vel,
     /// grounded)` — `grounded` mirrors the C++ `bool *pGrounded` output param, always computed
     /// (the C++ caller may pass `nullptr` to skip it; here it's simply ignored if unwanted).
+    ///
+    /// Task 1.10b, speed-up 3: `swept_box_is_solid_free` (private) computed once, before the
+    /// loop — when it holds, every `test_box` call below is skipped (never even evaluated), but
+    /// the float accumulation loop itself (the `pos = new_pos` steps, the `vel ==
+    /// Vec2::zero()`/`new_pos == pos` early exits) runs exactly as it otherwise would; this is
+    /// deliberately *not* collapsed to a single `pos + vel` — see `swept_box_is_solid_free`'s own
+    /// doc comment for why skipping only the collision queries (not the loop shape) is what stays
+    /// bit-exact.
     pub fn move_box(&self, pos: Vec2<R>, vel: Vec2<R>, size: Vec2<R>, elasticity: Vec2<R>) -> (Vec2<R>, Vec2<R>, bool) {
+        self.move_box_impl(pos, vel, size, elasticity, true)
+    }
+
+    /// [`Collision::move_box`]'s body; `allow_skip = false` is the pre-1.10b loop verbatim (every
+    /// sub-step runs its `test_box` queries) — the reference the differential tests compare the
+    /// `swept_box_is_solid_free` skip against.
+    fn move_box_impl(
+        &self,
+        pos: Vec2<R>,
+        vel: Vec2<R>,
+        size: Vec2<R>,
+        elasticity: Vec2<R>,
+        allow_skip: bool,
+    ) -> (Vec2<R>, Vec2<R>, bool) {
         let mut pos = pos;
         let mut vel = vel;
         let mut grounded = false;
@@ -987,6 +1226,7 @@ impl<R: Real> Collision<R> {
             let fraction = R::ONE / R::from_i32(max + 1);
             let elasticity_x = elasticity.x.clamp(-R::ONE, R::ONE);
             let elasticity_y = elasticity.y.clamp(-R::ONE, R::ONE);
+            let skip_test_box = allow_skip && self.swept_box_is_solid_free(pos, vel, size, max.saturating_add(1));
 
             for _ in 0..=max {
                 if vel == Vec2::zero() {
@@ -996,7 +1236,7 @@ impl<R: Real> Collision<R> {
                 if new_pos == pos {
                     break;
                 }
-                if self.test_box(new_pos, size) {
+                if !skip_test_box && self.test_box(new_pos, size) {
                     let mut hits = 0;
                     if self.test_box(Vec2::new(pos.x, new_pos.y), size) {
                         if elasticity_y > R::ZERO && vel.y > R::ZERO {
@@ -1920,6 +2160,73 @@ mod tests {
         );
     }
 
+    /// Task 1.10b, finding F1: `set_collision_at` (`CCollision::SetCollisionAt`) must keep
+    /// `tile_exists_cache` in sync — both for the cell it directly writes, and for any neighbor
+    /// whose own `tile_exists_next` result depends on that cell (mirrors
+    /// `tile_exists_next_below_stops_quirk_ignores_flags` above, but going through
+    /// `set_collision_at` *after* construction instead of the map's own initial tile data, and
+    /// checking the cached `tile_exists` wrapper instead of `tile_exists_next` directly).
+    #[test]
+    fn set_collision_at_keeps_tile_exists_cache_in_sync() {
+        let map = bordered_map(10, 10);
+        let index = 5 * 10 + 5;
+
+        // The mutated cell's own direct check (TILE_FREEZE is in `tile_exists_uncached`'s first
+        // `in_range` check, no neighbor involved at all).
+        let mut c: Collision<f32> = Collision::new(&map);
+        assert!(
+            !c.tile_exists(index),
+            "sanity: a plain air cell must start with tile_exists == false"
+        );
+        let pos = Vec2::new(5.0 * 32.0 + 16.0, 5.0 * 32.0 + 16.0);
+        c.set_collision_at(pos.x, pos.y, map::TILE_FREEZE);
+        assert!(
+            c.tile_exists(index),
+            "set_collision_at must refresh tile_exists_cache for the cell it just wrote"
+        );
+
+        // A neighbor's cache entry: `TILE_STOPS` directly below (5,5) makes `tile_exists_next`
+        // (hence `tile_exists`) true for (5,5) itself via the "below STOPS" quirk (flags-
+        // independent — see `tile_exists_next_below_stops_quirk_ignores_flags`), even though
+        // (5,5) itself was never written.
+        let mut c2: Collision<f32> = Collision::new(&map);
+        assert!(
+            !c2.tile_exists(index),
+            "sanity: same starting point for the neighbor case"
+        );
+        let pos_below = Vec2::new(5.0 * 32.0 + 16.0, 6.0 * 32.0 + 16.0);
+        c2.set_collision_at(pos_below.x, pos_below.y, map::TILE_STOPS);
+        assert!(
+            c2.tile_exists(index),
+            "set_collision_at must also refresh the neighbor cell's cache entry, not just the \
+             mutated cell's own"
+        );
+    }
+
+    /// Task 1.10b, finding F1: same requirement as `set_collision_at_keeps_tile_exists_cache_in_sync`,
+    /// for `set_door_collision_at` (`switch::place_door_collision`'s only mutation site) and the
+    /// `door` layer.
+    #[test]
+    fn set_door_collision_at_keeps_tile_exists_cache_in_sync() {
+        let mut map = bordered_map(10, 10);
+        map.switch = Some(vec![crate::map::SwitchTile::default(); 100]);
+        let index = 5 * 10 + 5;
+
+        let mut c: Collision<f32> = Collision::new(&map);
+        assert!(
+            !c.tile_exists(index),
+            "sanity: a plain air cell must start with tile_exists == false"
+        );
+        let pos = Vec2::new(5.0 * 32.0 + 16.0, 5.0 * 32.0 + 16.0);
+        // Any nonzero `kind` makes `tile_exists_uncached`'s own `door[idx].index != 0` check true
+        // — `TILE_STOPA` matches what `switch::place_door_collision` actually writes.
+        c.set_door_collision_at(pos.x, pos.y, map::TILE_STOPA, 0, 1);
+        assert!(
+            c.tile_exists(index),
+            "set_door_collision_at must refresh tile_exists_cache for the cell it just wrote"
+        );
+    }
+
     #[test]
     fn tele_tables_are_populated_by_number_and_type() {
         let mut map = bordered_map(10, 10);
@@ -2061,5 +2368,271 @@ mod tests {
             !c_last.is_through(i32::MIN, y, -32, 0, dummy, dummy),
             "the pre-fix shortcut would have wrongly matched the width-1 column here"
         );
+    }
+
+    // --- Task 1.10b review round 1 (R1/R3/R4): early-out exactness ----------------------------
+
+    /// A `w`x`h` map: solid border on the left/top/right and from `floor_row` down, an optional
+    /// solid wall column, air elsewhere (the review's `mkmap`).
+    fn wall_map(w: i32, h: i32, floor_row: i32, wall_col: Option<i32>) -> MapData {
+        let mut game = vec![tile(map::TILE_AIR); (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                if x == 0 || x == w - 1 || y == 0 || y >= floor_row || Some(x) == wall_col {
+                    game[(y * w + x) as usize] = tile(map::TILE_SOLID);
+                }
+            }
+        }
+        MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        }
+    }
+
+    type MoveOut = (Vec2<f32>, Vec2<f32>, bool);
+
+    fn move_bits(o: MoveOut) -> [u32; 5] {
+        [
+            o.0.x.to_bits(),
+            o.0.y.to_bits(),
+            o.1.x.to_bits(),
+            o.1.y.to_bits(),
+            u32::from(o.2),
+        ]
+    }
+
+    /// R1 regression, direct form: the review's Oracle A counterexample (800x1500 map, wall at
+    /// x = 22400, fast fall with a small `vel.x`). The 1 px pad alone let the skip fire although the
+    /// accumulated non-principal-axis drift (`~ (n+1) * ulp(22380)/2`, `n = 963`) carries the box
+    /// into the wall; `move_box` must equal the no-skip loop bit for bit — and the no-skip loop
+    /// must actually hit the wall here (so this cannot pass vacuously).
+    #[test]
+    fn move_box_skip_is_exact_for_the_review_r1_counterexample() {
+        let map = wall_map(800, 1500, 1490, Some(700));
+        let c: Collision<f32> = Collision::new(&map);
+        let pos = Vec2::new(22380.0f32, 34092.0);
+        let vel = Vec2::new(4.9f32, 962.10);
+        let size = Vec2::new(28.0f32, 28.0);
+        let elasticity = Vec2::new(0.0f32, 0.0);
+        let exact = c.move_box_impl(pos, vel, size, elasticity, false);
+        assert!(
+            exact.1.x != vel.x,
+            "sanity: the exact loop must hit the wall (vel.x zeroed): {exact:?}"
+        );
+        let fast = c.move_box(pos, vel, size, elasticity);
+        assert_eq!(move_bits(fast), move_bits(exact), "skip {fast:?} vs exact {exact:?}");
+        assert!(
+            !c.swept_box_is_solid_free(pos, vel, size, 963),
+            "the drift-widened swept box must reach the wall column here"
+        );
+    }
+
+    /// xorshift64*: deterministic, dependency-free randomness for the differential tests.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn unit(&mut self) -> f32 {
+            (self.next() >> 40) as f32 / (1u64 << 24) as f32
+        }
+        fn range(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (hi - lo) * self.unit()
+        }
+    }
+
+    /// Differential fuzz for the `move_box` skip: random positions (incl. far-right, fractional),
+    /// speeds up to a few thousand px/tick with a small non-principal component (the drift case),
+    /// sizes and elasticities; skip and no-skip must be bit-identical. Returns (cases, skips taken).
+    fn fuzz_move_box(cases: u32, seed: u64) -> (u32, u32) {
+        let maps = [
+            (wall_map(800, 1500, 1490, Some(700)), Some(700)),
+            (wall_map(800, 1500, 1490, None), None),
+            (wall_map(60, 60, 55, Some(30)), Some(30)),
+        ];
+        let collisions: Vec<Collision<f32>> = maps.iter().map(|(m, _)| Collision::new(m)).collect();
+        let mut rng = Rng(seed);
+        let mut skips = 0;
+        for k in 0..cases {
+            let mi = (rng.next() % 3) as usize;
+            let (m, wall) = &maps[mi];
+            let c = &collisions[mi];
+            let (w, h) = (m.width as f32 * 32.0, m.height as f32 * 32.0);
+            let mut pos = Vec2::new(rng.range(40.0, w - 40.0), rng.range(40.0, h - 200.0));
+            let mut vel = match rng.next() % 4 {
+                0 => Vec2::new(rng.range(-20.0, 20.0), rng.range(-20.0, 20.0)),
+                1 => Vec2::new(rng.range(-300.0, 300.0), rng.range(-300.0, 300.0)),
+                2 => Vec2::new(rng.range(-3000.0, 3000.0), rng.range(-3000.0, 3000.0)),
+                // the review's drift shape: fast on one axis, small (like 4.9) on the other
+                _ => {
+                    let (fast, slow) = (rng.range(-3000.0, 3000.0), rng.range(-12.0, 12.0));
+                    if rng.next() & 1 == 0 {
+                        Vec2::new(slow, fast)
+                    } else {
+                        Vec2::new(fast, slow)
+                    }
+                }
+            };
+            if let Some(col) = wall
+                && rng.next().is_multiple_of(2)
+            {
+                // adversarial: hug the wall column from either side
+                let wx = *col as f32 * 32.0;
+                pos.x = if rng.next() & 1 == 0 {
+                    wx - rng.range(0.0, 60.0)
+                } else {
+                    wx + 32.0 + rng.range(0.0, 60.0)
+                };
+            }
+            if rng.next().is_multiple_of(3) {
+                pos = Vec2::new(pos.x.round(), pos.y.round());
+            }
+            if rng.next().is_multiple_of(5) {
+                vel = Vec2::new((vel.x * 256.0).round() / 256.0, (vel.y * 256.0).round() / 256.0);
+            }
+            let size = Vec2::new(28.0f32, if rng.next().is_multiple_of(4) { 40.0 } else { 28.0 });
+            let elasticity = match rng.next() % 3 {
+                0 => Vec2::new(0.0, 0.0),
+                1 => Vec2::new(rng.range(-1.5, 1.5), rng.range(-1.5, 1.5)),
+                _ => Vec2::new(0.5, 0.5),
+            };
+            let steps = vmath::length(vel).to_i32_trunc().saturating_add(1);
+            if c.swept_box_is_solid_free(pos, vel, size, steps) {
+                skips += 1;
+            }
+            let fast = c.move_box(pos, vel, size, elasticity);
+            let exact = c.move_box_impl(pos, vel, size, elasticity, false);
+            assert_eq!(
+                move_bits(fast),
+                move_bits(exact),
+                "case {k} (seed {seed}): map {mi} pos {pos:?} vel {vel:?} size {size:?} elasticity {elasticity:?}: skip {fast:?} vs exact {exact:?}"
+            );
+        }
+        (cases, skips)
+    }
+
+    #[test]
+    fn move_box_skip_matches_no_skip_on_random_cases() {
+        let (cases, skips) = fuzz_move_box(40_000, 0x5EED_0001);
+        assert!(
+            skips * 20 > cases,
+            "the fuzz must actually exercise the skip ({skips}/{cases})"
+        );
+    }
+
+    /// Long-running version of the fuzz above; run with `cargo test -p ddai-physics --release --
+    /// --ignored move_box_skip_matches_no_skip_heavy_fuzz`.
+    #[test]
+    #[ignore]
+    fn move_box_skip_matches_no_skip_heavy_fuzz() {
+        for seed in 1..=8u64 {
+            let (cases, skips) = fuzz_move_box(2_000_000, seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            eprintln!("seed {seed}: {cases} cases, {skips} skipped, 0 divergences");
+        }
+    }
+
+    /// Same idea for `intersect_line`: random segments (finite, up to +-3e9 px so past-2^31 and
+    /// far-outside-the-map inputs are covered) must give identical `LineHit`s with and without
+    /// the early-out.
+    #[test]
+    fn intersect_line_early_out_matches_exact_loop_on_random_segments() {
+        let map = wall_map(800, 1500, 1490, Some(700));
+        let c: Collision<f32> = Collision::new(&map);
+        let mut rng = Rng(0x11AE_0002);
+        let (mut free, total) = (0u32, 40_000u32);
+        for k in 0..total {
+            let scale = [50.0f32, 2000.0, 25_600.0, 3.0e9][(rng.next() % 4) as usize];
+            let (w, h) = (800.0 * 32.0, 1500.0 * 32.0);
+            let p0 = Vec2::new(rng.range(-0.1, 1.1) * w, rng.range(-0.1, 1.1) * h);
+            let p1 = if scale > 1.0e6 {
+                Vec2::new(rng.range(-scale, scale), rng.range(-scale, scale))
+            } else {
+                Vec2::new(p0.x + rng.range(-scale, scale), p0.y + rng.range(-scale, scale))
+            };
+            if c.segment_bbox_is_solid_free(p0, p1) {
+                free += 1;
+            }
+            let fast = c.intersect_line(p0, p1);
+            let exact = c.intersect_line_impl(p0, p1, false);
+            assert_eq!(fast, exact, "case {k}: {p0:?} -> {p1:?}");
+        }
+        assert!(
+            free * 20 > total,
+            "the fuzz must actually exercise the early-out ({free}/{total})"
+        );
+    }
+
+    /// R4 regression: past 2^31 `to_i32_trunc` saturates to `i32::MIN`, which used to invert the
+    /// tile rectangle (0 cells counted -> "free") although the exact loop hits the solid last
+    /// column immediately. Non-finite and beyond-limit inputs must decline the early-out.
+    #[test]
+    fn early_outs_decline_out_of_range_and_non_finite_coordinates() {
+        let map = bordered_map(10, 10); // solid right border
+        let c: Collision<f32> = Collision::new(&map);
+        let (a, b) = (Vec2::new(2.1e9f32, 150.0), Vec2::new(2.2e9f32, 150.0));
+        let hit = c.intersect_line(a, b);
+        assert_ne!(hit.hit, 0, "the exact loop hits the clamped right border: {hit:?}");
+        assert_eq!(hit, c.intersect_line_impl(a, b, false));
+        assert!(!c.segment_bbox_is_solid_free(a, b));
+        let inf = f32::INFINITY;
+        for bad in [
+            (Vec2::new(f32::NAN, 1.0), Vec2::new(2.0, 2.0)),
+            (Vec2::new(1.0, 1.0), Vec2::new(inf, 2.0)),
+            (Vec2::new(-5.0e6, 1.0), Vec2::new(2.0, 2.0)),
+        ] {
+            assert!(!c.segment_bbox_is_solid_free(bad.0, bad.1), "{bad:?}");
+        }
+        let size = Vec2::new(28.0f32, 28.0);
+        assert!(!c.swept_box_is_solid_free(Vec2::new(2.1e9, 150.0), Vec2::new(10.0, 0.0), size, 11));
+        assert!(!c.swept_box_is_solid_free(Vec2::new(100.0, 100.0), Vec2::new(f32::NAN, 0.0), size, 1));
+        assert!(!c.swept_box_is_solid_free(Vec2::new(100.0, 100.0), Vec2::new(1.0, 0.0), size, 0));
+        // a huge step count would break the drift proof's `(n + 4) * EPS <= 1` premise
+        assert!(!c.swept_box_is_solid_free(Vec2::new(100.0, 100.0), Vec2::new(1.0, 0.0), size, 9_000_000));
+        // and an empty collision never claims "free"
+        let empty = Collision::<f32>::empty();
+        assert!(!empty.segment_bbox_is_solid_free(Vec2::new(1.0, 1.0), Vec2::new(2.0, 2.0)));
+    }
+
+    /// R3 regression: `tile_exists_next(0)` reads cells `1` and `width` (its `left`/`above` fall
+    /// back to itself, the documented `> 0` quirk), so a write to either must refresh cell 0's
+    /// cache entry — the earlier `index - 1 > 0` candidate filter skipped it.
+    #[test]
+    fn writes_next_to_cell_zero_refresh_its_tile_exists_cache() {
+        let mut map = bordered_map(10, 10);
+        map.switch = Some(vec![crate::map::SwitchTile::default(); 100]);
+        for (label, x, y, index) in [("index 1", 1, 0, 1), ("index width", 0, 1, 10)] {
+            let mut c: Collision<f32> = Collision::new(&map);
+            assert!(!c.tile_exists(0), "{label}: sanity");
+            c.set_door_collision_at(x as f32 * 32.0 + 16.0, y as f32 * 32.0 + 16.0, map::TILE_STOPA, 0, 1);
+            assert!(c.tile_exists(index), "{label}: the written cell itself");
+            assert_eq!(
+                c.tile_exists(0),
+                c.tile_exists_uncached(0),
+                "{label}: cache vs recompute for cell 0"
+            );
+            assert!(
+                c.tile_exists(0),
+                "{label}: cell 0 reads the STOPA next to it via `tile_exists_next`"
+            );
+            // and the same through `set_collision_at`
+            let mut c2: Collision<f32> = Collision::new(&map);
+            c2.set_collision_at(x as f32 * 32.0 + 16.0, y as f32 * 32.0 + 16.0, map::TILE_STOPA);
+            assert_eq!(
+                c2.tile_exists(0),
+                c2.tile_exists_uncached(0),
+                "{label}: set_collision_at"
+            );
+            assert!(c2.tile_exists(0), "{label}: set_collision_at");
+        }
     }
 }

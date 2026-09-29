@@ -419,11 +419,11 @@ fn bench_world_restore_on_real_maps(c: &mut Criterion) {
 
 /// Task 1.10, acceptance criterion 4: a "search-like" benchmark — from one saved state, run 64
 /// rollouts x 30 ticks each (restoring the shared state between rollouts, not re-cloning it),
-/// 2 characters, on the same two real maps. Reports rollouts/s (criterion's own throughput line,
-/// `Throughput::Elements(64)`) and this function also prints ms/decision-equivalent (wall time
-/// for one full batch of 64 rollouts, i.e. what one live decision's search would cost if it
-/// needed exactly this many rollouts) directly, since criterion has no built-in "per-batch"
-/// summary distinct from its own per-iteration/throughput numbers.
+/// 2 characters, on the same two real maps. Reports rollouts/s via criterion's own throughput
+/// line (`Throughput::Elements(64)`); ms/decision-equivalent (what one live decision's search
+/// would cost if it needed exactly this many rollouts) isn't printed by this function itself —
+/// it's `Throughput`'s "time" column (one full `b.iter()` batch of 64 rollouts) reported as-is,
+/// read straight off criterion's own output rather than recomputed and printed here.
 fn bench_search_like_rollouts(c: &mut Criterion) {
     const ROLLOUTS: usize = 64;
     const TICKS_PER_ROLLOUT: usize = 30;

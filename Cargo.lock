@@ -41,6 +41,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocation-counter"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1003,6 +1009,7 @@ dependencies = [
 name = "ddai-fly"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "core_affinity",
  "criterion 0.7.0",
  "ddai-brain",
@@ -1060,10 +1067,10 @@ dependencies = [
 name = "ddai-physics"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "criterion 0.8.2",
  "ddai-trace",
  "serde_json",
- "stats_alloc",
 ]
 
 [[package]]
@@ -1152,13 +1159,13 @@ dependencies = [
 name = "ddai-world"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "ddai-brain",
  "ddai-client",
  "ddai-map",
  "ddai-net",
  "ddai-physics",
  "ddai-trace",
- "stats_alloc",
 ]
 
 [[package]]
@@ -3010,12 +3017,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "stats_alloc"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "strsim"

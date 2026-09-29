@@ -3,9 +3,9 @@
 //!
 //! - Wall-clock cost (µs), warmed up, over many iterations, for a realistic character count
 //!   (6: our own tee plus 5 opponents — D-041's "up to 5+ opponents in radius").
-//! - Heap allocations via a counting allocator (`stats_alloc`, the same pattern
+//! - Heap allocations via `allocation_counter::measure` (per-*thread* counting, the same approach
 //!   `ddai-physics/tests/world_no_alloc.rs` uses, for the same "this crate has no `unsafe`, so it
-//!   cannot implement `GlobalAlloc` itself" reason). Review round 1's API note: `predict()` now
+//!   cannot implement `GlobalAlloc` itself" reason; task 1.10b review R2). Review round 1's API note: `predict()` now
 //!   uses task 1.10's `World::restore_from` (a save/restore reusing every buffer) instead of
 //!   `Clone`, so the whole call — not just its step loop — is zero-allocation in steady state,
 //!   verified below at both 10 and 40 stepped ticks.
@@ -13,21 +13,18 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use allocation_counter::{AllocationInfo, measure};
 use ddai_net::generated::enums::playerflagflag;
 use ddai_net::generated::objects;
 use ddai_net::tuning::DEFAULT_TUNE_PARAMS;
 use ddai_net::view::CharacterView;
 use ddai_physics::core::PlayerInput;
 use ddai_world::LiveWorld;
-use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
-use std::alloc::System;
 
-#[global_allocator]
-static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
-
-/// Serializes every test in this file against `stats_alloc`'s process-global counters — same
-/// reasoning as `ddai-physics/tests/world_no_alloc.rs`'s own `ALLOC_TEST_LOCK`.
-static ALLOC_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Serializes the tests in this file against each other so the wall-clock test's timing isn't
+/// distorted by another test running concurrently on the same cores. (Allocation counting no
+/// longer needs it: `measure` is per-thread.)
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn neutral_character(id: i32, x: i32, y: i32) -> CharacterView {
     let character = objects::Character {
@@ -90,7 +87,7 @@ fn build_live_world() -> LiveWorld {
 
 #[test]
 fn predict_wall_clock_cost_for_a_realistic_character_count() {
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut live = build_live_world();
 
     // Warm-up: first calls may pay for page faults on freshly-grown Vec capacity.
@@ -138,7 +135,7 @@ fn predict_wall_clock_cost_for_a_realistic_character_count() {
 
 #[test]
 fn predict_is_fully_zero_allocation_once_warmed_up() {
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // `predict`'s `self.scratch.restore_from(&self.world)` (task 1.10's `World::restore_from`,
     // review round 1's API note) reuses every one of `scratch`'s own buffers — including its
@@ -153,28 +150,31 @@ fn predict_is_fully_zero_allocation_once_warmed_up() {
         let _ = live.predict(live.base_tick() + 40, &[]);
     }
 
-    let measure = |live: &mut LiveWorld, extra_ticks: i32| -> stats_alloc::Stats {
+    // One window per measurement, exactly zero required (task 1.10b review R2: `measure` counts
+    // only this thread, so there is no cross-thread noise to average away, and taking a minimum
+    // over several windows would hide an allocation that only happens sometimes).
+    let measure_predict = |live: &mut LiveWorld, extra_ticks: i32| -> AllocationInfo {
         let base_tick = live.base_tick();
-        let region = Region::new(GLOBAL);
-        let world = live.predict(base_tick + extra_ticks, &[]);
-        std::hint::black_box(world.tick);
-        region.change()
+        measure(|| {
+            let world = live.predict(base_tick + extra_ticks, &[]);
+            std::hint::black_box(world.tick);
+        })
     };
 
-    let restore_only = measure(&mut live, 0);
+    let restore_only = measure_predict(&mut live, 0);
     eprintln!(
         "predict() restore-only (0 step ticks): {} allocations, {} bytes",
-        restore_only.allocations, restore_only.bytes_allocated
+        restore_only.count_total, restore_only.bytes_total
     );
-    let restore_plus_10 = measure(&mut live, 10);
+    let restore_plus_10 = measure_predict(&mut live, 10);
     eprintln!(
         "predict() restore + 10 step ticks: {} allocations, {} bytes",
-        restore_plus_10.allocations, restore_plus_10.bytes_allocated
+        restore_plus_10.count_total, restore_plus_10.bytes_total
     );
-    let restore_plus_40 = measure(&mut live, 40);
+    let restore_plus_40 = measure_predict(&mut live, 40);
     eprintln!(
         "predict() restore + 40 step ticks: {} allocations, {} bytes",
-        restore_plus_40.allocations, restore_plus_40.bytes_allocated
+        restore_plus_40.count_total, restore_plus_40.bytes_total
     );
 
     for (label, stats) in [
@@ -183,21 +183,21 @@ fn predict_is_fully_zero_allocation_once_warmed_up() {
         ("restore + 40 ticks", restore_plus_40),
     ] {
         assert_eq!(
-            stats.allocations, 0,
+            stats.count_total, 0,
             "{label}: expected 0 allocations, got {}",
-            stats.allocations
+            stats.count_total
         );
         assert_eq!(
-            stats.bytes_allocated, 0,
+            stats.bytes_total, 0,
             "{label}: expected 0 bytes allocated, got {}",
-            stats.bytes_allocated
+            stats.bytes_total
         );
     }
 }
 
 #[test]
 fn own_inputs_in_flight_lookup_adds_no_allocation_of_its_own() {
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut live = build_live_world();
     let in_flight: Vec<(i32, PlayerInput)> = (1..=10)
         .map(|i| {
@@ -219,22 +219,18 @@ fn own_inputs_in_flight_lookup_adds_no_allocation_of_its_own() {
     }
 
     let base_tick = live.base_tick();
-    let without_in_flight = {
-        let region = Region::new(GLOBAL);
+    let without_in_flight = measure(|| {
         let world = live.predict(base_tick + 10, &[]);
         std::hint::black_box(world.tick);
-        region.change()
-    };
-    let with_in_flight = {
-        let region = Region::new(GLOBAL);
+    });
+    let with_in_flight = measure(|| {
         let world = live.predict(base_tick + 10, &in_flight);
         std::hint::black_box(world.tick);
-        region.change()
-    };
+    });
     // Same restore, same 10 real ticks stepped either way — `own_inputs_in_flight`'s own linear
     // `.find()` scan (`predict`'s doc comment) must not itself cost an allocation on top of that,
     // and (task 1.10's `World::restore_from`) neither must anything else: both sides are zero.
-    assert_eq!(with_in_flight.allocations, without_in_flight.allocations);
-    assert_eq!(with_in_flight.bytes_allocated, without_in_flight.bytes_allocated);
-    assert_eq!(with_in_flight.allocations, 0);
+    assert_eq!(with_in_flight.count_total, without_in_flight.count_total);
+    assert_eq!(with_in_flight.bytes_total, without_in_flight.bytes_total);
+    assert_eq!(with_in_flight.count_total, 0);
 }

@@ -1,9 +1,10 @@
 //! Review round 1, finding F9: `World::step` must perform zero heap allocations per tick in
 //! *steady state* (acceptance criterion 1: "zero heap allocations per tick in steady state
 //! (entity lists may use pre-reserved capacity; document any unavoidable allocation)"). Mirrors
-//! `no_alloc.rs`'s pattern (a counting allocator via the `stats_alloc` dev-dependency, since
-//! `ddai-physics` itself has no `unsafe` and so cannot implement `GlobalAlloc` — see that file's
-//! own doc comment) but drives the full `World::step`, not just `core::tick`/`Move`/`Quantize`,
+//! `no_alloc.rs`'s pattern (per-thread allocation counting via the `allocation-counter`
+//! dev-dependency, since `ddai-physics` itself has no `unsafe` and so cannot implement
+//! `GlobalAlloc` — see that file's own doc comment) but drives the full `World::step`, not just
+//! `core::tick`/`Move`/`Quantize`,
 //! on a map with pickups (to exercise `pickup_tick`'s own `find_characters_in_range_into` path
 //! every tick regardless of gameplay pattern) and with a mix of walking/jumping/hooking/firing/
 //! hammering input (to exercise `fire_hammer`/`projectile_tick`/`create_explosion`'s own scratch
@@ -14,30 +15,24 @@
 //! `can_spawn` (only on an actual respawn — see its own doc comment) and `World::init`/
 //! `apply_commands`'s `Vec<UnknownCommand>` (config parsing, once per scenario, not per tick).
 //!
-//! **`ALLOC_TEST_LOCK`**: `StatsAlloc`'s counters are process-global, not per-thread, and
-//! `cargo test` runs every test in this file on its own thread by default — without
-//! serialization, one test's own (measured or not) allocations bleed into another's `Region`
-//! window, producing a spurious nonzero count that has nothing to do with `World::step` (found
-//! empirically once this file grew a second `#[test]`: `--test-threads=1` alone made the
-//! "failure" disappear). Every test here holds this lock for its entire body, not just its
-//! measured region, since even an *unmeasured* warm-up phase running concurrently with another
-//! test's `Region` window would still pollute it.
-static ALLOC_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+//! **Measurement (task 1.10b review R2).** `allocation_counter::measure` counts only the calling
+//! thread's allocations, so neither the other test in this file, nor libtest's own threads, nor
+//! anything else in the process can bleed into a window (the previous process-global counter
+//! needed a mutex between this file's tests and *still* flaked in CI; a min-of-N patch over
+//! continuing windows then hid conditional allocations, e.g. one that only fires at a given tick).
+//! Each test therefore measures **one** window and asserts it is exactly zero — an allocation
+//! that happens at *any* point inside it fails the run.
 
+use allocation_counter::measure;
 use ddai_physics::core::PlayerInput;
 use ddai_physics::vmath::Vec2;
 use ddai_physics::world::{self, Player, TickInput, World};
 use ddai_trace::synthetic;
-use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
-use std::alloc::System;
 use std::path::{Path, PathBuf};
 
 #[path = "common/oracle_b_format.rs"]
 mod oracle_b_format;
 use oracle_b_format::{ScenarioV3, TraceBReader, metadata_seed};
-
-#[global_allocator]
-static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 /// A mix of walking, jumping, hooking, firing (gun, so `projectile_tick` runs every tick once
 /// any shot is in flight) and hammering (so `fire_hammer`'s own scratch path runs too).
@@ -57,7 +52,6 @@ fn active_input(tick: u32, other_target: (i32, i32)) -> PlayerInput {
 
 #[test]
 fn world_step_performs_zero_heap_allocations_in_steady_state() {
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // "freeze" (task 1.2's synthetic recipes) places freeze/health pickups on the map, so
     // `pickup_tick`'s `find_characters_in_range_into` scratch path runs every tick regardless of
     // where the characters are standing.
@@ -93,16 +87,15 @@ fn world_step_performs_zero_heap_allocations_in_steady_state() {
         step(&mut world, t);
     }
 
-    let region = Region::new(GLOBAL);
-    for t in 500..3_000u32 {
-        step(&mut world, t);
-    }
-    let stats = region.change();
+    let info = measure(|| {
+        for t in 500..3_000u32 {
+            step(&mut world, t);
+        }
+    });
 
-    assert_eq!(stats.allocations, 0, "World::step allocated: {stats:?}");
-    assert_eq!(stats.reallocations, 0, "World::step reallocated: {stats:?}");
-    assert_eq!(stats.deallocations, 0, "World::step deallocated: {stats:?}");
-    assert_eq!(stats.bytes_allocated, 0, "{stats:?}");
+    assert_eq!(info.count_total, 0, "World::step allocated: {info:?}");
+    assert_eq!(info.count_current, 0, "World::step deallocated: {info:?}");
+    assert_eq!(info.bytes_total, 0, "{info:?}");
 }
 
 fn resolve_rawmap_path(scn_path: &Path, rawmap_path_in_file: &str) -> PathBuf {
@@ -159,7 +152,6 @@ fn tick_inputs(ids: &[u32], reference: &oracle_b_format::TraceBTick) -> Vec<Tick
 /// second, fresh `World` replays up to it under measurement.
 #[test]
 fn world_step_performs_zero_heap_allocations_replaying_a_real_map_trace() {
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = std::env::var("HOME").expect("HOME must be set");
     let dir = PathBuf::from(home).join("aiddnet/data/traces/oracle-b/v1");
     let trb_path = dir
@@ -224,18 +216,17 @@ fn world_step_performs_zero_heap_allocations_replaying_a_real_map_trace() {
         world.step(inputs);
     }
 
-    let region = Region::new(GLOBAL);
-    for inputs in &all_inputs[warm_up..measured_end] {
-        world.step(inputs);
-    }
-    let stats = region.change();
+    let info = measure(|| {
+        for inputs in &all_inputs[warm_up..measured_end] {
+            world.step(inputs);
+        }
+    });
 
     assert_eq!(
-        stats.allocations, 0,
+        info.count_total, 0,
         "World::step allocated replaying Copy Love Box seed 10001 (ticks {warm_up}..{measured_end}, \
-         first_death_tick={first_death_tick:?}): {stats:?}"
+         first_death_tick={first_death_tick:?}): {info:?}"
     );
-    assert_eq!(stats.reallocations, 0, "World::step reallocated: {stats:?}");
-    assert_eq!(stats.deallocations, 0, "World::step deallocated: {stats:?}");
-    assert_eq!(stats.bytes_allocated, 0, "{stats:?}");
+    assert_eq!(info.count_current, 0, "World::step deallocated: {info:?}");
+    assert_eq!(info.bytes_total, 0, "{info:?}");
 }

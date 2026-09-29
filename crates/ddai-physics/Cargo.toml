@@ -27,7 +27,13 @@ phase_profile = []
 ddai-trace = { path = "../ddai-trace" }
 serde_json = "1"
 criterion = { version = "0.8", default-features = false }
-stats_alloc = "0.1.10"
+# Per-*thread* allocation counting for the no-alloc tests (`tests/no_alloc*.rs`): `measure(|| ..)`
+# counts only allocations made by the calling thread, so libtest's own worker/output-capture
+# threads and other concurrently running tests can never leak into a measured window (task 1.10b
+# review R2 — the previous process-global counters flaked in CI). Dev-dependency only; MIT/Apache-2.0
+# (both already in `deny.toml`'s allow-list); the `unsafe` `GlobalAlloc` impl lives inside the crate,
+# so none of *our* code needs `unsafe`. It installs itself as the test binary's `#[global_allocator]`.
+allocation-counter = "0.8.1"
 
 [[bench]]
 name = "physics"

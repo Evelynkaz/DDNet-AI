@@ -45,6 +45,9 @@ toml = "1.1.6"
 
 [dev-dependencies]
 tempfile = "3.14"
+# Per-thread allocation counting for `tests/no_alloc.rs`/`no_alloc_brain.rs` — see `ddai-physics`'s
+# Cargo.toml (task 1.10b review R2).
+allocation-counter = "0.8.1"
 # `tests/brain_demo_generalization.rs` only (review round 1, F2): loads the real "Copy Love Box"
 # `.map` files for the held-out-maps generalization check. Not a library dependency -- the encoder
 # itself only ever reads `ddai_physics::map::MapData` (already a dependency above), never parses a

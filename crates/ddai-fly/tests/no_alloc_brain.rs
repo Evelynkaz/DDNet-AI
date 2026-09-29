@@ -1,13 +1,12 @@
 //! Acceptance criterion 7: "allocation-free per decision" for the *whole* `FlyBrain::decide`
 //! call (encode -> `step_decision` -> decode), not just 7.1's own `step_decision` (already covered
-//! by `tests/no_alloc.rs`). Same counting-allocator technique as that file; see its own doc
-//! comment for the unsafe-impl justification (this is a separate integration-test binary, so its
-//! own `#[global_allocator]` doesn't conflict with that file's).
-#![allow(unsafe_code)]
+//! by `tests/no_alloc.rs`). Same per-thread `allocation_counter::measure` technique as that file
+//! (see its doc comment for why one exactly-zero window, task 1.10b review R2); this is a separate
+//! integration-test binary, so its own counting `#[global_allocator]` (installed by the crate)
+//! doesn't conflict with that file's.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use allocation_counter::measure;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ddai_brain::{Brain, CharacterObservation, Observation};
 use ddai_fly::brain::{ActionSelection, FlyBrain, FlyBrainConfig};
@@ -18,24 +17,6 @@ use ddai_fly::encoder::{EncoderModel, EncoderParams, ProprioceptionConfig, RayGr
 use ddai_fly::model::FlyModel;
 use ddai_fly::params::FlyParams;
 use ddai_flyg::{NeuronRole, Side, Sign};
-
-struct CountingAllocator;
-static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-static DEALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        DEALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
 
 // A `vec![...]` literal here would need every field of every one of ~14 `FxNeuron`s
 // spelled out positionally with no per-neuron comment anchor -- individual `.push()`
@@ -286,25 +267,19 @@ fn decide_allocates_nothing() {
     // `decide()` must be allocation-free for — only the call being measured below is.
     let observations: Vec<Observation> = (0..100).map(|i| sample_observation(300.0 + i as f32)).collect();
 
-    let allocs_before = ALLOC_COUNT.load(Ordering::SeqCst);
-    let deallocs_before = DEALLOC_COUNT.load(Ordering::SeqCst);
-    for obs in &observations {
-        let action = brain.decide(obs);
-        std::hint::black_box(action);
-    }
-    let allocs_after = ALLOC_COUNT.load(Ordering::SeqCst);
-    let deallocs_after = DEALLOC_COUNT.load(Ordering::SeqCst);
+    let info = measure(|| {
+        for obs in &observations {
+            let action = brain.decide(obs);
+            std::hint::black_box(action);
+        }
+    });
 
     assert_eq!(
-        allocs_after,
-        allocs_before,
-        "FlyBrain::decide must not allocate: {} allocation(s) observed over 100 calls",
-        allocs_after - allocs_before
+        info.count_total, 0,
+        "FlyBrain::decide must not allocate: {info:?} over 100 calls"
     );
     assert_eq!(
-        deallocs_after,
-        deallocs_before,
-        "FlyBrain::decide must not deallocate either: {} deallocation(s) observed over 100 calls",
-        deallocs_after - deallocs_before
+        info.count_current, 0,
+        "FlyBrain::decide must not deallocate either: {info:?} over 100 calls"
     );
 }

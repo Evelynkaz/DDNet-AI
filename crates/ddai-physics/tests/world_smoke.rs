@@ -121,7 +121,7 @@ fn kill_bit_respawns_within_a_few_ticks() {
     // finds no spawn points here. Populate `spawn_points` directly (a `pub` field) so
     // `try_respawn`'s `CanSpawn` has somewhere to put a respawning character — a real map always
     // has at least one `ENTITY_SPAWN` tile (`docs/formats.md`'s corpus notes).
-    world.spawn_points.push(Vec2::new(200.0, 200.0));
+    std::sync::Arc::make_mut(&mut world.spawn_points).push(Vec2::new(200.0, 200.0));
     spawn_two(&mut world);
 
     // Kill id 1 on tick 0 (input applied on the tick-1 step); it holds fire the whole time so
@@ -356,9 +356,9 @@ fn can_spawn_stops_at_default_type_when_player_collision_is_off() {
     assert!(world.tuning.zone_mut(0).set_by_name("player_collision", 0.0));
 
     let default_point = Vec2::new(100.0, 100.0);
-    world.spawn_points = vec![default_point];
-    world.spawn_points_red = vec![Vec2::new(9000.0, 9000.0)];
-    world.spawn_points_blue = vec![];
+    world.spawn_points = std::sync::Arc::new(vec![default_point]);
+    world.spawn_points_red = std::sync::Arc::new(vec![Vec2::new(9000.0, 9000.0)]);
+    world.spawn_points_blue = std::sync::Arc::new(vec![]);
 
     // A character sitting exactly on the default point gives it a huge (`1e9`) score —
     // `EvaluateSpawnPos`'s `d == 0` case — while the (empty-of-neighbors) red point scores `0`,
@@ -387,9 +387,9 @@ fn can_spawn_still_considers_red_type_when_player_collision_is_on() {
 
     let default_point = Vec2::new(100.0, 100.0);
     let red_point = Vec2::new(9000.0, 9000.0);
-    world.spawn_points = vec![default_point];
-    world.spawn_points_red = vec![red_point];
-    world.spawn_points_blue = vec![];
+    world.spawn_points = std::sync::Arc::new(vec![default_point]);
+    world.spawn_points_red = std::sync::Arc::new(vec![red_point]);
+    world.spawn_points_blue = std::sync::Arc::new(vec![]);
 
     world.players[0] = Some(Player::new(0));
     world::spawn_character(&mut world, 0, default_point);
@@ -421,7 +421,8 @@ fn armor_pickup_strips_ninja_too() {
         mcore: Vec2::new(0.0, 0.0),
     });
     let idx = world.pickups.len() - 1;
-    world::pickup_tick(&mut world, idx);
+    let bbox = world::alive_characters_bbox(&world);
+    world::pickup_tick(&mut world, idx, bbox);
 
     let ninja = world.cores.get(0).unwrap().weapons[ddai_physics::core::WEAPON_NINJA as usize];
     assert!(!ninja.got, "an armor pickup must strip WEAPON_NINJA's `got` flag too");

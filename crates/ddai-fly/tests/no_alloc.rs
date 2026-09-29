@@ -1,44 +1,20 @@
-//! Acceptance criterion "hot path: zero heap allocations per `step_decision`" — a counting global
-//! allocator wrapping the system allocator, checked around a `step_decision` call (after a warm-up
-//! call that's allowed to allocate: `FlyState::new`'s own buffers are already allocated by then,
-//! but the very first call sometimes still triggers unrelated one-time lazy init in the standard
-//! library/backtraces, so this test warms up once, resets the counter, then asserts strictly on
-//! the *next* call).
+//! Acceptance criterion "hot path: zero heap allocations per `step_decision`" — per-thread
+//! allocation counting (`allocation_counter::measure`, a dev-dependency; it installs the test
+//! binary's counting `#[global_allocator]` itself, so this file needs no `unsafe`), checked around
+//! a window of `step_decision` calls after a warm-up call that's allowed to allocate:
+//! `FlyState::new`'s own buffers are already allocated by then, but the very first call sometimes
+//! still triggers unrelated one-time lazy init in the standard library/backtraces, so this test
+//! warms up once and then asserts strictly on the following window.
 //!
-//! Unsafe justification: implementing `GlobalAlloc` requires an `unsafe impl` (the trait itself is
-//! `unsafe` — a safe wrapper can't express "correctly forwards every call to a real allocator").
-//! This is test-only code in its own integration-test binary (never linked into the `ddai-fly`
-//! library, which stays `unsafe_code = "deny"` per the workspace lint policy), and it does nothing
-//! but count calls and delegate to `System` — no pointer arithmetic or manual memory management of
-//! its own.
-#![allow(unsafe_code)]
+//! Task 1.10b review R2: `measure` counts only the *calling thread's* allocations, so libtest's own
+//! threads and other concurrently running tests cannot leak into the window (the previous
+//! process-global counter flaked in CI, and a min-of-N patch over continuing windows would have
+//! hidden allocations that only happen sometimes). One window, exactly zero.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
+use allocation_counter::measure;
 use ddai_fly::test_fixtures::{FxEdge, FxNeuron, FxType, build_flyg};
 use ddai_fly::{FlyConfig, FlyModel, FlyParams, FlyState};
 use ddai_flyg::{NeuronRole, Side, Sign};
-
-struct CountingAllocator;
-
-static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-static DEALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        DEALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
 
 fn build_graph_with_a_few_neurons() -> ddai_flyg::Flyg {
     let types = [
@@ -127,25 +103,19 @@ fn step_decision_allocates_nothing() {
     // `step_decision` allocation.
     let _ = state.step_decision(&model, &inputs);
 
-    let allocs_before = ALLOC_COUNT.load(Ordering::SeqCst);
-    let deallocs_before = DEALLOC_COUNT.load(Ordering::SeqCst);
-    for _ in 0..100 {
-        let out = state.step_decision(&model, &inputs);
-        std::hint::black_box(out.dn_rates[0]);
-    }
-    let allocs_after = ALLOC_COUNT.load(Ordering::SeqCst);
-    let deallocs_after = DEALLOC_COUNT.load(Ordering::SeqCst);
+    let info = measure(|| {
+        for _ in 0..100 {
+            let out = state.step_decision(&model, &inputs);
+            std::hint::black_box(out.dn_rates[0]);
+        }
+    });
 
     assert_eq!(
-        allocs_after,
-        allocs_before,
-        "step_decision must not allocate: {} allocation(s) observed over 100 calls",
-        allocs_after - allocs_before
+        info.count_total, 0,
+        "step_decision must not allocate: {info:?} over 100 calls"
     );
     assert_eq!(
-        deallocs_after,
-        deallocs_before,
-        "step_decision must not deallocate either: {} deallocation(s) observed over 100 calls",
-        deallocs_after - deallocs_before
+        info.count_current, 0,
+        "step_decision must not deallocate either: {info:?} over 100 calls"
     );
 }

@@ -147,6 +147,13 @@ pub trait Real:
     /// `std::abs(Self)`.
     fn abs(self) -> Self;
 
+    /// `std::isfinite(Self)` — task 1.10b, speed-up 2: guards the `intersect_line`/
+    /// `intersect_character` bounding-box early-outs (a `NaN`/`±inf` endpoint makes "the segment's
+    /// bounding box" undefined, so those early-outs fall back to the exact per-sample loop
+    /// instead of reasoning about it). Never used by any bit-exactness-relevant computation
+    /// itself — only to decide whether a *skip* is safe to take.
+    fn is_finite(self) -> bool;
+
     /// Rust's `f32`/`f64::min` — **not** C++ `std::min` (IEEE-754 `minNum`-style: if exactly one
     /// operand is `NaN`, returns the *other* one; C++'s `std::min` is comparison-based and would
     /// return its first argument for any `NaN` involved). No ported call site's bit-exactness
@@ -235,6 +242,9 @@ impl Real for f32 {
     fn abs(self) -> Self {
         f32::abs(self)
     }
+    fn is_finite(self) -> bool {
+        f32::is_finite(self)
+    }
     fn min(self, other: Self) -> Self {
         f32::min(self, other)
     }
@@ -298,6 +308,9 @@ impl Real for f64 {
     }
     fn abs(self) -> Self {
         f64::abs(self)
+    }
+    fn is_finite(self) -> bool {
+        f64::is_finite(self)
     }
     fn min(self, other: Self) -> Self {
         f64::min(self, other)

@@ -24,10 +24,8 @@ ddai-brain = { path = "../ddai-brain" }
 # Synthetic map recipes (task 1.2/1.6's own test maps) for offline determinism/accuracy tests —
 # no third-party map bytes, matching every other crate's test-fixture policy.
 ddai-trace = { path = "../ddai-trace" }
-# Counting allocator for `tests/predict_cost.rs` (this crate itself has no `unsafe`, so it cannot
-# implement `GlobalAlloc` on its own — same reasoning/dependency `ddai-physics` uses for its own
-# `tests/world_no_alloc.rs`).
-stats_alloc = "0.1.10"
+# Per-thread allocation counting for `tests/predict_cost.rs` — see `ddai-physics`'s Cargo.toml.
+allocation-counter = "0.8.1"
 # Live e2e test only (`tests/e2e_local_server.rs`, `#[ignore]` + `DDAI_E2E=1`): drives a real
 # `ddai_client::session::Session` (sans-IO) over a real UDP socket against the local DDNet
 # server, and loads the server's own map file via `ddai-map`.
