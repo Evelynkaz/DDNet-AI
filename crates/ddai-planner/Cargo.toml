@@ -1,0 +1,39 @@
+[package]
+name = "ddai-planner"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Task 3.2: Rust port of the legacy TS block planner (CEM search, shield/seal/throwLines, scripted-bot opponent model), generic over a PlanWorld trait — ddai-tsworld (bit-exact TS parity, feature ts-parity) and ddai-physics::World<f32> (production/teaching) implementations, plus a deadline-driven production search mode (D-041)."
+
+[lib]
+name = "ddai_planner"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables the `ddai-tsworld::SimWorld` `PlanWorld` impl, used only to prove decision-for-decision
+# parity with the real TS planner (acceptance criterion 3). Not part of the production build: the
+# live bot only ever needs the `ddai-physics::World<f32>` impl (always compiled).
+ts-parity = ["dep:ddai-tsworld"]
+
+[dependencies]
+ddai-jsmath = { path = "../ddai-jsmath" }
+ddai-brain = { path = "../ddai-brain" }
+ddai-physics = { path = "../ddai-physics" }
+ddai-tsworld = { path = "../ddai-tsworld", optional = true }
+
+[dev-dependencies]
+ddai-tsworld = { path = "../ddai-tsworld" }
+ddai-map = { path = "../ddai-map", features = ["test-util"] }
+ddai-trace = { path = "../ddai-trace" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Only for `tests/parity_planner.rs`'s own sha256 check against the dump's recorded `mapSha256`
+# (guards against replaying against a map file that has since changed on disk).
+sha2 = "0.10"

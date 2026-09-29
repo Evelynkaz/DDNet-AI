@@ -1,0 +1,547 @@
+//! BFS hazard/dead-zone fields (`docs/research/orig-plan.md` §1.11) and the geometry heuristics
+//! built on top of them (§1.9): `hazardField`/`unfreezeField`/`travelField`, `hazardNearness`,
+//! `dragCrossesHazard`, `launchLandsInHazard`, `launchFlightLandsInHazard`, `flightEndsInHazard`,
+//! `freezeGapPx`, `ropeCatchAlong`. Every function is a literal, line-for-line port of its
+//! `planner.ts` counterpart (cited by name); numeric ops go through `ddai_jsmath`.
+//!
+//! **Descoped, on purpose:** `travelDistance`/`travelDistanceSmooth` (exported by TS, called by
+//! nothing in `src/plan`/`src/env` — `docs/research/orig-plan.md` §1.11/§11.1) and `route.ts`'s
+//! `deadZoneOf`/Dijkstra routing are not ported here. `routeDistance` (feeds `travel` into
+//! `scoreTick`) and `deadZoneCost`/`enemyDeadZoneBonus` (feed `dead`) all default to `false`/`0`
+//! in every preset this task's acceptance criteria names (normal/low-cpu/strong/WB/bold — none of
+//! them touch these fields), so `travel`/`dead` are always `None` for every teacher-forced/parity
+//! decision this crate proves against TS, exactly matching what TS itself computes for those
+//! configs (the `travel` field it *does* still compute when `routeDistance: true` is a
+//! `docs/research/orig-plan.md` §11.1 dead-code bug: the result is threaded into `scoreTick` but
+//! never read there — reproducing that unread computation would only cost cycles for zero
+//! observable effect). If a future task needs `deadZoneCost > 0` live, `route.ts`'s BFS dead zone
+//! needs its own port first; [`crate::planner::Planner::set_dead_zone`] accepts an
+//! externally-computed grid in the meantime (same shape TS's `Bot.setDeadZone` passes in).
+
+use crate::plan_world::PlanCollision;
+use crate::tuning::{HAMMER_STRENGTH, PHYSICAL_SIZE, TILE_DEATH, TILE_FREEZE, TILE_NOHOOK, TILE_SOLID, TILE_UNFREEZE};
+use crate::vmath::{Vec2, vec2};
+use ddai_jsmath as js;
+
+const TILE_PX: f64 = 32.0;
+const HAZARD_HORIZON_TILES: i32 = 20;
+
+/// `HazardField` (`planner.ts:341`): a full-map BFS distance grid, in tiles, capped at
+/// `0x3fffffff` ("unreached").
+#[derive(Debug, Clone)]
+pub struct HazardField {
+    pub width: i32,
+    pub height: i32,
+    pub dist: Vec<i32>,
+}
+
+const UNREACHED: i32 = 0x3fff_ffff;
+
+fn is_wall(t: u8) -> bool {
+    t == TILE_SOLID || t == TILE_NOHOOK
+}
+
+/// `bfsField(collision, isSource)` (`planner.ts:354-385`): 4-connected BFS over the game-layer
+/// tile grid, walls are `TILE_SOLID`/`TILE_NOHOOK` (freeze/death are *not* walls — the field
+/// propagates straight through them, matching TS). Neighbour order `(+1,0),(-1,0),(0,+1),(0,-1)`
+/// matters for which of several equal-distance predecessors is enqueued first, though the
+/// resulting *distance* grid is order-independent (BFS on an unweighted graph).
+fn bfs_field(col: &impl PlanCollision, is_source: impl Fn(u8) -> bool) -> HazardField {
+    let width = col.width();
+    let height = col.height();
+    let n = (width * height) as usize;
+    let mut dist = vec![UNREACHED; n];
+    let mut queue: Vec<i32> = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            if is_source(col.game_tile(x, y)) {
+                dist[idx] = 0;
+                queue.push(y * width + x);
+            }
+        }
+    }
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        let idx = queue[qi];
+        qi += 1;
+        let x = idx % width;
+        let y = (idx - x) / width;
+        let d = dist[idx as usize];
+        for k in 0..4 {
+            let nx = x + if k == 0 {
+                1
+            } else if k == 1 {
+                -1
+            } else {
+                0
+            };
+            let ny = y + if k == 2 {
+                1
+            } else if k == 3 {
+                -1
+            } else {
+                0
+            };
+            if nx < 0 || ny < 0 || nx >= width || ny >= height {
+                continue;
+            }
+            let ni = (ny * width + nx) as usize;
+            if is_wall(col.game_tile(nx, ny)) {
+                continue;
+            }
+            if dist[ni] > d + 1 {
+                dist[ni] = d + 1;
+                queue.push(ny * width + nx);
+            }
+        }
+    }
+    HazardField { width, height, dist }
+}
+
+/// `hazardField(collision)` (`planner.ts:454-490`): sources are `TILE_FREEZE`/`TILE_DEATH` (game
+/// layer only — front-layer freeze/deep-freeze/live-freeze are deliberately invisible to this
+/// field, matching TS, `docs/research/orig-plan.md` §9/§11 item 9).
+pub fn hazard_field(col: &impl PlanCollision) -> HazardField {
+    bfs_field(col, |t| t == TILE_FREEZE || t == TILE_DEATH)
+}
+
+/// `unfreezeField(collision)` (`planner.ts:346-352`).
+pub fn unfreeze_field(col: &impl PlanCollision) -> HazardField {
+    bfs_field(col, |t| t == TILE_UNFREEZE)
+}
+
+/// `travelField(collision, fromX, fromY)` (`planner.ts:389-425`): single-source BFS from the tile
+/// containing `(from_x, from_y)`, walls are solid/nohook/freeze/death. Kept for structural
+/// completeness (the module doc comment explains why nothing feeds it into a live decision).
+pub fn travel_field(col: &impl PlanCollision, from_x: f64, from_y: f64) -> HazardField {
+    let width = col.width();
+    let height = col.height();
+    let n = (width * height) as usize;
+    let mut dist = vec![UNREACHED; n];
+    let sx = js::min((width - 1) as f64, js::max(0.0, js::trunc(from_x / TILE_PX))) as i32;
+    let sy = js::min((height - 1) as f64, js::max(0.0, js::trunc(from_y / TILE_PX))) as i32;
+    let mut queue: Vec<i32> = Vec::new();
+    let start = sy * width + sx;
+    dist[start as usize] = 0;
+    queue.push(start);
+    let mut qi = 0usize;
+    while qi < queue.len() {
+        let idx = queue[qi];
+        qi += 1;
+        let x = idx % width;
+        let y = (idx - x) / width;
+        let d = dist[idx as usize];
+        for k in 0..4 {
+            let nx = x + if k == 0 {
+                1
+            } else if k == 1 {
+                -1
+            } else {
+                0
+            };
+            let ny = y + if k == 2 {
+                1
+            } else if k == 3 {
+                -1
+            } else {
+                0
+            };
+            if nx < 0 || ny < 0 || nx >= width || ny >= height {
+                continue;
+            }
+            let ni = (ny * width + nx) as usize;
+            let nt = col.game_tile(nx, ny);
+            if is_wall(nt) || nt == TILE_FREEZE || nt == TILE_DEATH {
+                continue;
+            }
+            if dist[ni] > d + 1 {
+                dist[ni] = d + 1;
+                queue.push(ny * width + nx);
+            }
+        }
+    }
+    HazardField { width, height, dist }
+}
+
+/// `hazardNearness(field, x, y)` (`planner.ts:500-507`): `floor(x/32)` tile addressing (not the
+/// collision's own `indexAt`/`getMapIndex`), out of bounds -> `0`.
+pub fn hazard_nearness(field: &HazardField, x: f64, y: f64) -> f64 {
+    let tx = js::floor(x / TILE_PX) as i32;
+    let ty = js::floor(y / TILE_PX) as i32;
+    if tx < 0 || ty < 0 || tx >= field.width || ty >= field.height {
+        return 0.0;
+    }
+    let d = field.dist[(ty * field.width + tx) as usize];
+    if d >= HAZARD_HORIZON_TILES {
+        return 0.0;
+    }
+    f64::from(HAZARD_HORIZON_TILES - d) / f64::from(HAZARD_HORIZON_TILES)
+}
+
+/// `wrapAngle(a)` (`planner.ts:492-496`): while-loop wrap into `[-pi, pi]`, not a single `rem`
+/// (matches TS's own loop exactly, including its behavior for already-huge inputs).
+pub fn wrap_angle(mut a: f64) -> f64 {
+    while a > js::PI {
+        a -= 2.0 * js::PI;
+    }
+    while a < -js::PI {
+        a += 2.0 * js::PI;
+    }
+    a
+}
+
+/// `dragCrossesHazard(collision, at, from, separation)` (`planner.ts:610-621`).
+pub fn drag_crosses_hazard(col: &impl PlanCollision, at: Vec2, from: Vec2, separation: f64) -> f64 {
+    let dx = (from.x - at.x) / separation;
+    let dy = (from.y - at.y) / separation;
+    for px in [TILE_PX, 2.0 * TILE_PX, 3.0 * TILE_PX] {
+        if px >= separation {
+            return 0.0;
+        }
+        let x = at.x + dx * px;
+        let y = at.y + dy * px;
+        if col.is_solid(x, y) {
+            return 0.0;
+        }
+        if col.is_freeze(x, y) || col.is_death(x, y) {
+            return 1.0;
+        }
+    }
+    0.0
+}
+
+/// `launchLandsInHazard(collision, at, from, separation)` (`planner.ts:623-639`).
+pub fn launch_lands_in_hazard(col: &impl PlanCollision, at: Vec2, from: Vec2, separation: f64) -> f64 {
+    let hx = if separation > 0.0 {
+        (at.x - from.x) / separation
+    } else {
+        0.0
+    };
+    let hy = if separation > 0.0 {
+        (at.y - from.y) / separation
+    } else {
+        -1.0
+    };
+    let bx = hx;
+    let by = hy - 1.1;
+    let bl_raw = js::hypot2(bx, by);
+    let bl = if bl_raw == 0.0 { 1.0 } else { bl_raw };
+    let dx = bx / bl;
+    let dy = by / bl;
+    for px in [3.0 * TILE_PX, 5.0 * TILE_PX, 7.0 * TILE_PX] {
+        let x = at.x + dx * px;
+        let y = at.y + dy * px;
+        if col.is_solid(x, y) {
+            return 0.0;
+        }
+        if col.is_freeze(x, y) || col.is_death(x, y) {
+            return 1.0;
+        }
+    }
+    0.0
+}
+
+pub const ROPE_CATCH_PX: f64 = PHYSICAL_SIZE + 6.0;
+
+/// `ropeCatchAlong(from, dir, at)` (`planner.ts:642-648`).
+pub fn rope_catch_along(from: Vec2, dir: Vec2, at: Vec2, hook_length: f64) -> f64 {
+    let rx = at.x - from.x;
+    let ry = at.y - from.y;
+    let along = rx * dir.x + ry * dir.y;
+    if along < 0.0 || along > hook_length {
+        return f64::INFINITY;
+    }
+    if js::abs(rx * dir.y - ry * dir.x) <= ROPE_CATCH_PX {
+        along
+    } else {
+        f64::INFINITY
+    }
+}
+
+const LAUNCH_FLIGHT_TICKS: i32 = 50;
+const LAUNCH_PROBE_STEP_PX: f64 = TILE_PX / 2.0;
+const NO_VEL: Vec2 = vec2(0.0, 0.0);
+
+/// `freeFraction(collision, x, y, dx, dy)` (`planner.ts:697-711`): fraction of `(dx, dy)` the
+/// 28x28 tee box can move before it would first overlap solid ground, via 5 rounds of bisection.
+fn free_fraction(col: &impl PlanCollision, x: f64, y: f64, dx: f64, dy: f64) -> f64 {
+    let box_size = vec2(PHYSICAL_SIZE, PHYSICAL_SIZE);
+    if !col.test_box(vec2(x + dx, y + dy), box_size) {
+        return 1.0;
+    }
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..5 {
+        let mid = (lo + hi) / 2.0;
+        if col.test_box(vec2(x + dx * mid, y + dy * mid), box_size) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    lo
+}
+
+/// `launchFlightLandsInHazard(collision, at, from, separation, vel)` (`planner.ts:650-695`): a
+/// simplified (not real-physics) 50-tick hammer-launch simulation. Deliberately not real DDNet
+/// physics (`docs/research/orig-plan.md` §11 item 13) — reproduced as-is, on the parity path.
+pub fn launch_flight_lands_in_hazard(
+    col: &impl PlanCollision,
+    at: Vec2,
+    from: Vec2,
+    separation: f64,
+    vel: Vec2,
+) -> f64 {
+    let hx = if separation > 0.0 {
+        (at.x - from.x) / separation
+    } else {
+        0.0
+    };
+    let hy = if separation > 0.0 {
+        (at.y - from.y) / separation
+    } else {
+        -1.0
+    };
+    let bx = hx;
+    let by = hy - 1.1;
+    let bl_raw = js::hypot2(bx, by);
+    let bl = if bl_raw == 0.0 { 1.0 } else { bl_raw };
+    let k = *HAMMER_STRENGTH;
+    let mut vx = vel.x + (k * 10.0 * bx) / bl;
+    let mut vy = vel.y + k * (-1.0 + (10.0 * by) / bl);
+    let mut x = at.x;
+    let mut y = at.y;
+
+    let half = PHYSICAL_SIZE / 2.0;
+    let mut grounded = col.is_solid(x + half, y + half + 5.0) || col.is_solid(x - half, y + half + 5.0);
+    for _t in 0..LAUNCH_FLIGHT_TICKS {
+        vy += *crate::tuning::GRAVITY;
+        vx *= if grounded {
+            *crate::tuning::GROUND_FRICTION
+        } else {
+            *crate::tuning::AIR_FRICTION
+        };
+        grounded = false;
+
+        let speed = js::hypot2(vx, vy) * 50.0;
+        let ramp = if speed < *crate::tuning::VELRAMP_START {
+            1.0
+        } else {
+            1.0 / js::pow(
+                *crate::tuning::VELRAMP_CURVATURE,
+                (speed - *crate::tuning::VELRAMP_START) / *crate::tuning::VELRAMP_RANGE,
+            )
+        };
+        let n = js::max(1.0, js::ceil(js::max(js::abs(vx), js::abs(vy)) / LAUNCH_PROBE_STEP_PX)) as i32;
+        for _i in 0..n {
+            let sx = (vx * ramp) / f64::from(n);
+            if sx != 0.0 {
+                let f = free_fraction(col, x, y, sx, 0.0);
+                x += sx * f;
+                if f < 1.0 {
+                    vx = 0.0;
+                }
+            }
+            let mut landed = false;
+            let sy = vy / f64::from(n);
+            if sy != 0.0 {
+                let f = free_fraction(col, x, y, 0.0, sy);
+                y += sy * f;
+                if f < 1.0 {
+                    landed = vy > 0.0;
+                    vy = 0.0;
+                }
+            }
+            if col.is_freeze(x, y) || col.is_death(x, y) {
+                return 1.0;
+            }
+            if landed {
+                return 0.0;
+            }
+        }
+    }
+    0.0
+}
+
+const FLIGHT_PROBE_TICKS: [f64; 4] = [6.0, 12.0, 18.0, 24.0];
+
+/// `flightEndsInHazard(collision, pos, vel)` (`planner.ts:778-790`).
+pub fn flight_ends_in_hazard(col: &impl PlanCollision, pos: Vec2, vel: Vec2) -> f64 {
+    let half = PHYSICAL_SIZE / 2.0;
+    let grounded = col.is_solid(pos.x + half, pos.y + half + 5.0) || col.is_solid(pos.x - half, pos.y + half + 5.0);
+    for t in FLIGHT_PROBE_TICKS {
+        let x = pos.x + vel.x * t;
+        let y = if grounded {
+            pos.y
+        } else {
+            pos.y + vel.y * t + 0.5 * *crate::tuning::GRAVITY * t * t
+        };
+        if col.is_solid(x, y) {
+            return 0.0;
+        }
+        if col.is_freeze(x, y) || col.is_death(x, y) {
+            return 1.0;
+        }
+    }
+    0.0
+}
+
+const EDGE_GAP_TILES: i32 = 3;
+pub const EDGE_GAP_PX: f64 = (EDGE_GAP_TILES as i64 as f64) * TILE_PX;
+
+/// `freezeGapPx(collision, x, y)` (`planner.ts:797-815`).
+pub fn freeze_gap_px(col: &impl PlanCollision, x: f64, y: f64) -> f64 {
+    let tx = js::floor(x / TILE_PX) as i32;
+    let ty = js::floor(y / TILE_PX) as i32;
+    let mut best = EDGE_GAP_PX;
+    for oy in -EDGE_GAP_TILES..=EDGE_GAP_TILES {
+        for ox in -EDGE_GAP_TILES..=EDGE_GAP_TILES {
+            let left = f64::from(tx + ox) * TILE_PX;
+            let top = f64::from(ty + oy) * TILE_PX;
+            let cx = left + TILE_PX / 2.0;
+            let cy = top + TILE_PX / 2.0;
+            if !col.is_freeze(cx, cy) && !col.is_death(cx, cy) {
+                continue;
+            }
+            let dx = js::max_n(&[left - x, 0.0, x - (left + TILE_PX)]);
+            let dy = js::max_n(&[top - y, 0.0, y - (top + TILE_PX)]);
+            let d = js::hypot2(dx, dy);
+            if d < best {
+                best = d;
+            }
+        }
+    }
+    best
+}
+
+/// Unused function silencer: `NO_VEL` is a documentation-only default used by callers in
+/// `crate::planner` (kept here since it's this module's own vocabulary constant).
+pub const fn no_vel() -> Vec2 {
+    NO_VEL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan_world::LineHit;
+    use crate::vmath::vdistance;
+
+    struct FlatCol {
+        w: i32,
+        h: i32,
+        tiles: Vec<u8>,
+    }
+    impl PlanCollision for FlatCol {
+        fn identity(&self) -> u64 {
+            0
+        }
+        fn width(&self) -> i32 {
+            self.w
+        }
+        fn height(&self) -> i32 {
+            self.h
+        }
+        fn game_tile(&self, tx: i32, ty: i32) -> u8 {
+            self.tiles[(ty * self.w + tx) as usize]
+        }
+        fn is_solid(&self, x: f64, y: f64) -> bool {
+            self.tile_at(x, y) == TILE_SOLID
+        }
+        fn is_death(&self, x: f64, y: f64) -> bool {
+            self.tile_at(x, y) == TILE_DEATH
+        }
+        fn is_freeze(&self, x: f64, y: f64) -> bool {
+            self.tile_at(x, y) == TILE_FREEZE
+        }
+        fn is_un_freeze(&self, x: f64, y: f64) -> bool {
+            self.tile_at(x, y) == TILE_UNFREEZE
+        }
+        fn is_no_hook(&self, x: f64, y: f64) -> bool {
+            self.tile_at(x, y) == TILE_NOHOOK
+        }
+        fn test_box(&self, _pos: Vec2, _size: Vec2) -> bool {
+            false
+        }
+        fn intersect_line(&self, _a: Vec2, _b: Vec2) -> LineHit {
+            LineHit {
+                collision: 0,
+                out_pos: _b,
+                out_before_pos: _b,
+            }
+        }
+        fn intersect_line_hook(&self, a: Vec2, b: Vec2) -> LineHit {
+            self.intersect_line(a, b)
+        }
+        fn has_tele(&self) -> bool {
+            false
+        }
+        fn tele_at(&self, _x: f64, _y: f64) -> (i32, i32) {
+            (0, 0)
+        }
+        fn tele_outs_for(&self, _n: i32) -> Vec<Vec2> {
+            Vec::new()
+        }
+    }
+    impl FlatCol {
+        fn tile_at(&self, x: f64, y: f64) -> u8 {
+            let tx = js::floor(x / TILE_PX) as i32;
+            let ty = js::floor(y / TILE_PX) as i32;
+            if tx < 0 || ty < 0 || tx >= self.w || ty >= self.h {
+                return TILE_SOLID;
+            }
+            self.tiles[(ty * self.w + tx) as usize]
+        }
+    }
+
+    fn strip_with_freeze() -> FlatCol {
+        // 5x3: row 0 air, row 1 freeze in the middle column, row 2 solid floor.
+        let w = 5;
+        let h = 3;
+        let mut tiles = vec![TILE_SOLID; (w * h) as usize];
+        for x in 0..w {
+            tiles[x as usize] = TILE_AIR_FOR_TEST;
+            tiles[(w + x) as usize] = TILE_AIR_FOR_TEST;
+        }
+        tiles[(w + 2) as usize] = TILE_FREEZE;
+        FlatCol { w, h, tiles }
+    }
+    const TILE_AIR_FOR_TEST: u8 = 0;
+
+    #[test]
+    fn hazard_nearness_is_1_at_the_freeze_tile_itself() {
+        let col = strip_with_freeze();
+        let field = hazard_field(&col);
+        // Tile (2,1) center.
+        let n = hazard_nearness(&field, 2.0 * TILE_PX + 16.0, 1.0 * TILE_PX + 16.0);
+        assert_eq!(n, 1.0);
+    }
+
+    #[test]
+    fn hazard_nearness_decays_with_distance_and_is_zero_far_away() {
+        let col = strip_with_freeze();
+        let field = hazard_field(&col);
+        let near = hazard_nearness(&field, 2.0 * TILE_PX + 16.0, 0.0 * TILE_PX + 16.0);
+        let far = hazard_nearness(&field, 0.0, 0.0);
+        assert!(
+            near > 0.0 && near < 1.0,
+            "adjacent tile should be a partial nearness: {near}"
+        );
+        assert!(far < near);
+    }
+
+    #[test]
+    fn wrap_angle_normalizes_into_pi_range() {
+        let w = wrap_angle(3.0 * js::PI);
+        assert!((-js::PI..=js::PI).contains(&w));
+    }
+
+    #[test]
+    fn drag_crosses_hazard_detects_freeze_between_two_points() {
+        let col = strip_with_freeze();
+        let at = vec2(0.0 * TILE_PX + 16.0, 1.0 * TILE_PX + 16.0);
+        let from = vec2(4.0 * TILE_PX + 16.0, 1.0 * TILE_PX + 16.0);
+        let sep = vdistance(at, from);
+        assert_eq!(drag_crosses_hazard(&col, at, from, sep), 1.0);
+    }
+}

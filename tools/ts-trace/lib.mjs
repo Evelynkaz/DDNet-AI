@@ -36,6 +36,15 @@ export function f64Bits(x) {
   return hi.toString(16).padStart(8, "0") + lo.toString(16).padStart(8, "0");
 }
 
+/** Inverse of {@link f64Bits}: the exact `f64` whose bit pattern is this 16-hex-char string. */
+export function bitsToF64(s) {
+  const hi = parseInt(s.slice(0, 8), 16) >>> 0;
+  const lo = parseInt(s.slice(8, 16), 16) >>> 0;
+  f64view.setUint32(0, hi, false);
+  f64view.setUint32(4, lo, false);
+  return f64view.getFloat64(0, false);
+}
+
 // --- SplitMix64 (public domain, Vigna) — see docs/formats.md §4's Rust port for the same
 // algorithm; this is an independent JS implementation of the identical spec, not shared code —
 // two implementations of the same well-specified generator agreeing is a stronger determinism

@@ -127,6 +127,21 @@ GPL-3.0-only like the rest of this repository, with credit to the original
 TS project (Wranked1/DDNet-AI) in its own README.
 
 ------------------------------------------------------------------------
+crates/ddai-planner
+------------------------------------------------------------------------
+
+`crates/ddai-planner` is a literal Rust port of the old block planner
+(`src/plan/{planner,shield,seal,throwLines,memory,livePlan}.ts`, the BFS
+fields in `planner.ts`, and the scripted bot / opponent models in
+`src/env/{scripted,action}.ts`) — the same TypeScript project the sections
+above already cover (Wranked1/DDNet-AI, GPL-3.0). It proves the port makes
+the exact same decisions the TS planner did (decision D-035), and, on
+`ddai-physics::World<f32>`, is the precise-search half of the live bot's
+decision-making (decision D-041). Licensed GPL-3.0-only like the rest of
+this repository, with credit to the original TS project (Wranked1/DDNet-AI)
+in its own README.
+
+------------------------------------------------------------------------
 Modified version
 ------------------------------------------------------------------------
 

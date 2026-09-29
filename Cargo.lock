@@ -1067,6 +1067,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-planner"
+version = "0.1.0"
+dependencies = [
+ "ddai-brain",
+ "ddai-jsmath",
+ "ddai-map",
+ "ddai-physics",
+ "ddai-trace",
+ "ddai-tsworld",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ddai-recorder"
 version = "0.1.0"
 dependencies = [
