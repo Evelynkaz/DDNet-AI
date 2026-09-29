@@ -68,6 +68,7 @@
 //!    [`Session::maybe_send_ping_ex`].
 
 use crate::allowlist;
+use crate::live_servers;
 use crate::map_cache;
 use crate::timing::{InputTiming, MarginSummary};
 use ddai_net::assembly::{self, SnapAssembler};
@@ -156,13 +157,46 @@ pub struct ClientConfig {
     /// (`<cache_dir>/<name>_<sha256-hex>.map` — see `crate::map_cache`). [`Session`] itself never
     /// touches this (sans-IO); only [`crate::driver::Client`] reads it.
     pub cache_dir: std::path::PathBuf,
-    /// Task 2.4 review round 1, finding F5 (naming/shape kept compatible with task 8.4a's own,
-    /// not-yet-merged, identical addition — see [`SessionEvent::InputSent`]'s doc comment): when
-    /// `true`, [`Session::send_input`] also queues a [`SessionEvent::InputSent`] for every
-    /// `NETMSG_INPUT` actually sent (~50/s while in-game). `false` by default — a caller that
-    /// never needs its own exact sent-input history (e.g. `LiveWorld::predict`'s
-    /// `own_inputs_in_flight`) pays nothing for it.
+    /// Task 8.4a: when `true`, every assembled snapshot also produces a
+    /// [`SessionEvent::SnapshotData`] (the full, owned snapshot — every player/character, not
+    /// just this client's own) alongside the existing [`SessionEvent::Snapshot`] (just the tick).
+    /// `false` by default: cloning every snapshot's items is wasted work for a caller that only
+    /// ever needs its own position (`ddnet-ai play`'s `ClientEvent::OwnPosition`, already served
+    /// without this) — `ddnet-ai record` (the first, and so far only, caller that needs the whole
+    /// snapshot) is the one place this is turned on.
+    pub emit_snapshot_data: bool,
+    /// Review round 1, finding F7 (task 8.4a) / task 2.4 review round 1, finding F5 — both tasks
+    /// added this independently with the same name and shape; merged into one field on origin/main
+    /// (task 2.4 landed first). When `true`, [`Session::send_input`] also queues a
+    /// [`SessionEvent::InputSent`] for every `NETMSG_INPUT` actually sent (~50/s while in-game).
+    /// `false` by default — a caller that never reads `--input-log`-style ground truth, or never
+    /// needs its own exact sent-input history (e.g. `LiveWorld::predict`'s
+    /// `own_inputs_in_flight`), pays nothing for it; `ddnet-ai play --brain random-scripted
+    /// --input-log` and `ddnet-ai record --input-log` are task 8.4a's own callers, turned on only
+    /// when `--input-log` is actually given.
     pub emit_input_sent: bool,
+    /// `Cl_ShowOthers`'s `show` value (`SHOW_OTHERS_OFF=0`/`SHOW_OTHERS_ON=1`/
+    /// `SHOW_OTHERS_ONLY_TEAM=2`), sent once after entering alongside `Cl_ShowDistance` — `0` by
+    /// default (a fresh, default-config real client's own value, `config_variables.h:669` —
+    /// task 2.3's own reasoning for why this crate mirrors that default rather than tracking real
+    /// HUD state it doesn't have). Review round 1, finding F13: `ddnet-ai record` sets this to
+    /// `1` — a spectator whose `Cl_SetTeam(TEAM_SPECTATORS)` request is refused (an unfamiliar mod,
+    /// spam/kill-protection) falls back to *playing*, where `show_others=0`'s "only my own
+    /// collision group" filtering (`character.cpp:1220-1222`, task 8.4a §16.1's own citation)
+    /// would otherwise hide every other player from exactly the session this bot exists to
+    /// observe.
+    pub show_others: i32,
+    /// Review round 1, finding F1: the D-027/D-038 safety switch, checked by
+    /// [`crate::driver::Client`] before **every** socket connect it ever makes for this
+    /// `ClientConfig` — the very first one, every reconnect, and every redirect (a server that
+    /// redirects a client to a second, non-loopback, non-listed address must not be able to
+    /// bypass a check that only ran once, against the original `--server` argument). Loopback is
+    /// always allowed regardless of this list's contents (see [`live_servers::check`]). Defaults
+    /// to loading [`live_servers::LiveServers::default_path`]
+    /// (`~/aiddnet/data/live-servers.toml`) via [`Default::default`] — a missing file is an empty
+    /// list (refuses every non-loopback address, the safe direction), and so, deliberately, is a
+    /// file that fails to parse (logged as a warning, never a panic or a silent "allow anything").
+    pub live_servers: live_servers::LiveServers,
 }
 
 /// `~/aiddnet/data/maps/cache`, per `CLAUDE.md`'s folder layout, falling back to a relative
@@ -193,7 +227,24 @@ impl Default for ClientConfig {
             max_map_size_bytes: DEFAULT_MAX_MAP_SIZE_BYTES,
             timeout: conn::DEFAULT_TIMEOUT,
             cache_dir: default_cache_dir(),
+            emit_snapshot_data: false,
             emit_input_sent: false,
+            show_others: 0,
+            live_servers: default_live_servers(),
+        }
+    }
+}
+
+/// Loads [`live_servers::LiveServers::default_path`], falling back to an empty list (refusing
+/// every non-loopback address) on any error — a missing file (`load_or_empty`'s own contract) or
+/// one that fails to parse (logged here, once, as a warning: silently treating a malformed
+/// allow-list as "allow everything" would be exactly backwards for a safety switch).
+fn default_live_servers() -> live_servers::LiveServers {
+    match live_servers::LiveServers::load_or_empty(&live_servers::LiveServers::default_path()) {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load live-servers.toml; defaulting to an empty allow-list");
+            live_servers::LiveServers::default()
         }
     }
 }
@@ -294,6 +345,18 @@ pub enum SessionEvent {
     /// A complete snapshot was assembled for `tick` — [`Session::latest_view`] returns a typed
     /// view over it.
     Snapshot { tick: i32 },
+    /// Task 8.4a: the same snapshot as the preceding [`SessionEvent::Snapshot`], but as an owned
+    /// [`ddai_net::snapshot::Snapshot`] rather than "go look it up via `Session::latest_view`" —
+    /// only produced when [`ClientConfig::emit_snapshot_data`] is `true` (see that field's docs
+    /// for why this is opt-in). Exists because [`crate::driver::Client`]'s cross-thread event
+    /// channel cannot hand out a borrowed [`View`] (it would borrow `Session`'s own state, which
+    /// never leaves the driver thread) — a caller that needs the *whole* snapshot (every
+    /// player/character, not just its own — `ddnet-ai record`) builds `View::new(&snapshot)` over
+    /// this event's payload on whichever thread it likes.
+    SnapshotData {
+        tick: i32,
+        snapshot: ddai_net::snapshot::Snapshot,
+    },
     /// A non-UUID game message the caller might care about (chat to *read* is fine — D-007 only
     /// forbids *sending* it; see `crate::allowlist`).
     GameMessage(msgs::GameMsg),
@@ -332,12 +395,15 @@ pub enum SessionEvent {
     /// caller wanting a "this looks like a captcha lobby" heuristic can inspect those directly
     /// (e.g. an implausibly small `size` for a known map name).
     Anomaly(String),
-    /// Task 2.4 review round 1, finding F5 (name/shape kept compatible with task 8.4a's own,
-    /// not-yet-merged, identical addition, so the two are easy to reconcile at merge time): the
-    /// exact `PlayerInput` just embedded in a `NETMSG_INPUT` for `tick` (the same `tick`/`input`
-    /// [`Session::send_input`] just packed onto the wire). Gated by
-    /// [`ClientConfig::emit_input_sent`] — this is `LiveWorld::predict`'s own
-    /// `own_inputs_in_flight` ground truth: without it, a caller has no way to know what input it
+    /// Task 8.4a's own addition, and task 2.4 review round 1's finding F5, independently added the
+    /// same event with the same name and shape (task 2.4 landed on `main` first — see this enum's
+    /// module docs on merging). The exact `PlayerInput` just embedded in a `NETMSG_INPUT` for
+    /// `tick` (the same `tick`/`input` [`Session::send_input`] just packed onto the wire). Gated
+    /// by [`ClientConfig::emit_input_sent`] — task 8.4a's own use is ground truth for `ddnet-ai
+    /// play --brain random-scripted`'s input log (acceptance criterion 3's validation harness:
+    /// reconstructed inputs, derived offline from a *recording* of this same session, are compared
+    /// against this event's log); task 2.4's own use is `LiveWorld::predict`'s
+    /// `own_inputs_in_flight` ground truth — without it, a caller has no way to know what input it
     /// actually queued for a given future tick, only the *current* input `Client::set_input` last
     /// set (which may have changed since). Emitted from [`Session::flush`] (where the real send
     /// happens) but delivered through [`Session::take_events`], not `flush`'s own return value —
@@ -350,7 +416,9 @@ pub enum SessionEvent {
     /// tick, so the server kept using the *previous* input for it instead. Gated by the same
     /// [`ClientConfig::emit_input_sent`] flag as [`SessionEvent::InputSent`] — the two only make
     /// sense used together, correcting `own_inputs_in_flight` for a `LiveWorld::predict` accuracy
-    /// measurement (a late tick's sent input never actually took effect on that exact tick).
+    /// measurement (a late tick's sent input never actually took effect on that exact tick). Task
+    /// 2.4's own addition — task 8.4a does not currently read this event, but it costs nothing
+    /// extra beyond what `emit_input_sent` already pays for.
     InputTiming { tick: i32, time_left: i32 },
 }
 
@@ -527,10 +595,11 @@ pub struct Session {
     /// When to next originate a `PINGEX` (`client.cpp:527,2982-3004`) — `None` until `ENTERGAME`,
     /// review finding F9.
     next_ping_ex_at_ns: Option<i64>,
-    /// Events produced outside [`Session::feed`]'s own control flow (currently only
-    /// [`SessionEvent::InputSent`], queued by [`Session::send_input`] from inside [`Session::flush`])
-    /// — drained by [`Session::take_events`], the same channel [`ddai_net::conn::Connection`]'s own
-    /// out-of-band events already use.
+    /// Events produced outside [`Session::feed`]'s own control flow (currently
+    /// [`SessionEvent::InputSent`]/[`SessionEvent::InputTiming`], queued by [`Session::send_input`]
+    /// from inside [`Session::flush`], and `on_input_timing`) — drained by
+    /// [`Session::take_events`], the same channel [`ddai_net::conn::Connection`]'s own out-of-band
+    /// events already use.
     pending_events: VecDeque<SessionEvent>,
 }
 
@@ -595,6 +664,22 @@ impl Session {
     /// client sends whatever `OnSnapInput` last produced.
     pub fn set_input(&mut self, input: objects::PlayerInput) {
         self.current_input = input;
+    }
+
+    /// Sends `Cl_SetTeam` (task 8.4a acceptance criterion 1: "after entering, it joins spectators
+    /// the way the real 20.1 client does" — `gamecontext.cpp:2684-2730`,
+    /// `CGameContext::OnSetTeamNetMessage`, server side). `NETMSGTYPE_CL_SETTEAM` has been on
+    /// [`crate::allowlist`]'s allow-list since task 2.3 (kept there "for a future public setter",
+    /// per that module's doc comment) but had no builder until now — nothing else in this file
+    /// ever sent it. Does not itself gate on [`Session::is_in_game`]: a caller racing this against
+    /// the join sequence gets exactly what a real client sending it too early would (the server
+    /// drops an `NETMSGTYPE_CL_SETTEAM` from a client it does not yet have a player slot for), not
+    /// a panic or a queued-forever message.
+    pub fn request_team(&mut self, team: i32, now: Duration) {
+        let payload = build_numbered_game_payload(msgs::id::NETMSGTYPE_CL_SETTEAM, |p| {
+            msgs::encode_cl_set_team(&msgs::ClSetTeam { team }, p);
+        });
+        self.send_game_chunk(payload, true, now, "Cl_SetTeam");
     }
 
     pub fn is_in_game(&self) -> bool {
@@ -694,8 +779,10 @@ impl Session {
 
     /// Drains events produced by something other than [`Session::feed`] (a
     /// [`ddai_net::conn::Connection`]-detected timeout/too-weak-connection, observed via its own
-    /// `take_events`, plus [`Session::pending_events`] — currently only [`SessionEvent::InputSent`],
-    /// queued by [`Session::send_input`]) — call this after [`Session::flush`].
+    /// `take_events`, plus [`Session::pending_events`] — currently [`SessionEvent::InputSent`]/
+    /// [`SessionEvent::InputTiming`], queued by [`Session::send_input`]/`on_input_timing`) — call
+    /// this after [`Session::flush`]; `pending_events` entries, if any, come first (they were
+    /// produced first, by that same `flush()` call).
     pub fn take_events(&mut self) -> Vec<SessionEvent> {
         let mut events: Vec<SessionEvent> = self.pending_events.drain(..).collect();
         events.extend(self.connection.take_events().into_iter().map(|ev| match ev {
@@ -1184,7 +1271,13 @@ impl Session {
             assembly::Event::Snapshot { tick, snap } => {
                 self.timing.on_snapshot(tick, to_ns(now));
                 self.last_snapshot_tick = Some(tick);
-                let events = vec![SessionEvent::Snapshot { tick }];
+                let mut events = vec![SessionEvent::Snapshot { tick }];
+                if self.config.emit_snapshot_data {
+                    events.push(SessionEvent::SnapshotData {
+                        tick,
+                        snapshot: snap.clone(),
+                    });
+                }
                 if matches!(self.state, JoinState::InGame) && !self.sent_post_enter_extras {
                     let view = View::new(&snap);
                     if view.players().iter().any(|p| p.info.local == 1) {
@@ -1251,9 +1344,18 @@ impl Session {
         // midpoint, i.e. 1.0x/no zoom) with `cl_dyncam = 0` (`camera.cpp:623-631`,
         // `config_variables.h:112,113,171` for the deadzone/followfactor/zoom defaults this
         // mirrors). Purely informational either way (nothing server-side gates on these — see
-        // `crate::allowlist`'s docs on why they're allow-listed regardless).
+        // `crate::allowlist`'s docs on why they're allow-listed regardless) — `show` itself is the
+        // one field this crate does let a caller override (`ClientConfig::show_others`, review
+        // round 1 finding F13): `ddnet-ai record` needs `1`, not the real client's own `0` default,
+        // so that a spectate request the server refused (falling back to *playing*) still sees
+        // every other player instead of only its own collision group.
         let show_others = build_ex_game_payload("showothers@netmsg.ddnet.tw", |p| {
-            msgs::encode_cl_show_others(&msgs::ClShowOthers { show: 0 }, p);
+            msgs::encode_cl_show_others(
+                &msgs::ClShowOthers {
+                    show: self.config.show_others,
+                },
+                p,
+            );
         });
         self.send_game_chunk(show_others, true, now, "Cl_ShowOthers");
 
@@ -1284,9 +1386,9 @@ impl Session {
             data: ints.to_vec(),
         };
         self.send_system_chunk(&msg, false, now);
-        // Review round 1, finding F5, gated by `ClientConfig::emit_input_sent` (same reasoning as
-        // task 8.4a's own identical addition — see `SessionEvent::InputSent`'s doc comment): must
-        // stay opt-in and cheap-when-off.
+        // Task 8.4a review round 1, finding F7 / task 2.4 review round 1, finding F5 — both gated
+        // by `ClientConfig::emit_input_sent`, both must stay opt-in and cheap-when-off (see
+        // `SessionEvent::InputSent`'s doc comment for both tasks' reasoning).
         if self.config.emit_input_sent {
             self.pending_events.push_back(SessionEvent::InputSent {
                 tick,
@@ -1865,6 +1967,22 @@ mod tests {
                 .recent_outgoing()
                 .any(|e| e.label == "Cl_CameraInfo" && e.accepted)
         );
+
+        // Task 8.4a: `Session::request_team` reaches the *real* wire, over the same connected
+        // session the rest of this test already drove through a full join — not just a payload
+        // built in isolation (see `request_team_is_logged_as_accepted_and_round_trips` for that).
+        now += ms(5);
+        session.request_team(-1, now);
+        let mut saw_set_team = false;
+        for dg in session.flush(now) {
+            for msg in server.feed(&dg, now) {
+                if let Msg::Game(msgs::GameMsg::ClSetTeam(t)) = msg {
+                    assert_eq!(t.team, -1);
+                    saw_set_team = true;
+                }
+            }
+        }
+        assert!(saw_set_team, "expected Cl_SetTeam(-1) to reach the server");
     }
 
     fn session_default_name() -> String {
@@ -1891,6 +2009,31 @@ mod tests {
         assert_eq!(entries[0].label, "Cl_StartInfo");
     }
 
+    /// Task 8.4a: `Session::request_team` is the only builder for `Cl_SetTeam` — this pins down
+    /// both that it reaches the allow-list guard as an accepted message and that the payload it
+    /// builds decodes back to exactly the team requested (the observer recorder always requests
+    /// `TEAM_SPECTATORS = -1`, but the method itself is not spectator-specific).
+    #[test]
+    fn request_team_is_logged_as_accepted_and_round_trips() {
+        let mut session = Session::new(ClientConfig::default());
+        session.request_team(-1, secs(0));
+        let entries: Vec<_> = session.recent_outgoing().collect();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].accepted);
+        assert_eq!(entries[0].label, "Cl_SetTeam");
+
+        let payload = build_numbered_game_payload(msgs::id::NETMSGTYPE_CL_SETTEAM, |p| {
+            msgs::encode_cl_set_team(&msgs::ClSetTeam { team: -1 }, p);
+        });
+        let mut unpacker = ddai_net::packer::Unpacker::new(&payload);
+        let registry = Registry::new();
+        let (id, sys) = uuid::unpack_msg_id(&mut unpacker, registry.uuids()).expect("decodable id");
+        assert!(!sys);
+        assert_eq!(id, MsgId::Numbered(msgs::id::NETMSGTYPE_CL_SETTEAM));
+        let decoded = msgs::decode_cl_set_team(&mut unpacker).expect("decodable Cl_SetTeam body");
+        assert_eq!(decoded.team, -1);
+    }
+
     #[test]
     fn outgoing_log_is_bounded() {
         let mut session = Session::new(ClientConfig::default());
@@ -1900,9 +2043,10 @@ mod tests {
         assert_eq!(session.recent_outgoing().count(), OUTGOING_LOG_CAP);
     }
 
-    /// Review round 1, finding F5: `Session::send_input` queues a matching
+    /// Task 2.4 review round 1, finding F5 / task 8.4a: `Session::send_input` queues a matching
     /// `SessionEvent::InputSent`, delivered through `take_events` — `LiveWorld::predict`'s own
-    /// `own_inputs_in_flight` ground truth.
+    /// `own_inputs_in_flight` ground truth, and also the ground truth `ddnet-ai play --brain
+    /// random-scripted` logs for task 8.4a's input-reconstruction accuracy report.
     #[test]
     fn send_input_is_observable_via_take_events() {
         let mut session = Session::new(ClientConfig {

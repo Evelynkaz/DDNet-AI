@@ -230,12 +230,25 @@ pub enum ClientEvent {
     RedirectRefused { reason: String },
     /// The driver thread is ending and will not reconnect (a kick/ban, an explicit
     /// [`Client::disconnect`], or a fatal local error such as failing to bind a socket at all).
-    GaveUp { reason: String },
+    /// `category` (review round 1, finding F8) lets a caller tell a kick/ban apart from every
+    /// other final outcome without parsing `reason`'s free text — `ddnet-ai play`/`record` use it
+    /// to pick a distinct process exit code for "the server itself ended this" (D-016: a human
+    /// should notice and decide, not have the process quietly exit `0`).
+    GaveUp { reason: String, category: GaveUpCategory },
     /// A convenience alongside every [`SessionEvent::Snapshot`]: our own tee's position, when
     /// that snapshot's `PlayerInfo::local == 1` character could be found (task e2e scenario b —
     /// "the tee's own position in snapshots changes as expected" — needs this without every
     /// caller re-deriving it from [`Session::latest_view`] itself).
     OwnPosition { tick: i32, x: i32, y: i32 },
+    /// Task 8.4a: a convenience alongside every [`SessionEvent::Snapshot`], mirroring
+    /// [`ClientEvent::OwnPosition`] but from `PlayerInfo::team` rather than a `Character` — unlike
+    /// position, this fires whenever our own player slot is known at all, *including* while
+    /// spectating (no `Character` object exists for a spectator, so `OwnPosition` alone cannot
+    /// tell a caller "the spectate request was granted" from "no snapshot has arrived yet"). Used
+    /// by `ddnet-ai record` to confirm/log whether `Client::set_team(TEAM_SPECTATORS)` actually
+    /// took effect, without needing a new synchronous query path into the driver thread's
+    /// `Session` (see this module's docs on why `Session` stays thread-local).
+    OwnTeam { tick: i32, team: i32 },
     /// Emitted once, right before the driver thread ends (for any reason) — the whole session's
     /// `NETMSG_INPUTTIMING` margin distribution (task e2e scenario h: "measure the fraction of
     /// inputs arriving in time ... report the margin distribution").
@@ -269,6 +282,30 @@ pub struct LiveWorldSnapshot {
     pub teams: Option<ddai_net::tuning::TeamsState>,
 }
 
+/// Review round 1, finding F8: categorizes [`ClientEvent::GaveUp`] so a caller can pick a distinct
+/// process exit code (or otherwise branch) without matching on `reason`'s free text, which exists
+/// only for a human/log to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaveUpCategory {
+    /// [`Client::disconnect`] was called, or `Client` was dropped — a normal, requested stop.
+    Requested,
+    /// A peer-initiated close the driver's policy classified as final (kick, ban, or any other
+    /// reason `should_reconnect_after_peer_close` did not recognise as transient) — CLAUDE.md/
+    /// D-016: never auto-reconnect from this, and a caller should treat it as distinctly
+    /// noteworthy (not the same as an ordinary "duration elapsed, we disconnected on purpose").
+    KickedOrBanned,
+    /// A local, self-detected protocol violation (a hostile/invalid `MAP_CHANGE`, a map that
+    /// failed hash/CRC verification, …) — see [`crate::session::SessionEvent::ProtocolViolation`].
+    ProtocolViolation,
+    /// A second redirect was requested in the same session; refused (loop protection).
+    RedirectLoop,
+    /// A local, non-protocol failure before or during a connection attempt: a socket could not be
+    /// bound/configured/connected, a connection-attempt-rate-limit slot never became available
+    /// before a stop was requested, or (review round 1, finding F1) the D-027/D-038 live-servers
+    /// safety switch refused the target address.
+    LocalError,
+}
+
 impl ClientEvent {
     /// Review finding F11 (round 2 — round 1 only covered `Snapshot`/`OwnPosition`, but
     /// `GameMessage`/`ExGameMessage` are exactly as high-frequency and just as capable of growing
@@ -278,26 +315,52 @@ impl ClientEvent {
     /// where losing an old one under sustained backpressure just means missing one stale
     /// position/tick/chat line, never a missed state transition or terminal event.
     ///
-    /// `SessionEvent::InputSent`/`InputTiming` (round 3, finding F12): task 2.4's round 1/2 gave
-    /// these their own top-level, non-droppable `ClientEvent` variants — which turned out to
-    /// conflict with task 8.4a's own, independently-designed and already-reviewed
-    /// `SessionEvent::InputSent` (droppable, delivered the plain `ClientEvent::Session` way, for
-    /// exactly the same unbounded-queue-growth reason as `Snapshot`/`GameMessage` above). Adopting
-    /// 8.4a's shape here (droppable, wrapped) keeps the two crates' events reconcilable at merge
-    /// time without a name/shape clash; a caller that cares about not silently losing one (this
-    /// crate's own `LiveWorld::on_snapshot`'s `own_input_at_tick`) must tolerate a drop by holding
-    /// the previous known input — see `ddai-world`'s own `BUILD REPORT` (round 3) for how its e2e
+    /// `SessionEvent::SnapshotData` (task 8.4a) is droppable, exactly like the plain `Snapshot` it
+    /// accompanies — `ddnet-ai record` is precisely the long, possibly unattended (Swarfey, hours)
+    /// session this cap exists for, so process stability wins over completeness here: losing one
+    /// snapshot under sustained backpressure (e.g. a slow disk) is far better than the driver
+    /// thread's memory growing without bound. A recording is already an inherently sampled view of
+    /// the game (the server itself does not snapshot every tick to every client — D-031's own
+    /// "~25 Hz" estimate), so one more occasionally-missing snapshot is not a new category of gap
+    /// `crate::reconstruct` has to handle.
+    ///
+    /// `ClientEvent::OwnTeam` (task 8.4a) is droppable for the same reason as `OwnPosition` right
+    /// above it: one per snapshot, and a caller only ever cares about the *latest* value.
+    ///
+    /// `SessionEvent::InputSent` (task 8.4a) **is** droppable too, as of review round 1's finding
+    /// F7: round 1 made it non-droppable reasoning that its only consumer (a short, actively
+    /// drained `--brain random-scripted` validation run) would never see backpressure — round 1's
+    /// review found this was the wrong call regardless, because non-droppable events are *never*
+    /// evicted even past `EVENT_QUEUE_CAP` (by design — see `event_channel`'s own docs): at
+    /// `Session::flush`'s own ~50/s rate, any consumer stall of more than a few seconds would grow
+    /// the sticky queue past the cap indefinitely and, worse, starve genuinely important
+    /// `SnapshotData` frames sitting behind a long backlog of old `InputSent` entries. Now paired
+    /// with `ClientConfig::emit_input_sent` being off by default (no caller pays for this at all
+    /// unless it asked for `--input-log`), the residual risk of a gap in a *deliberately opted-in*
+    /// validation log is an acceptable trade for never letting this destabilize a long recording
+    /// session.
+    ///
+    /// `SessionEvent::InputTiming` (task 2.4) and `ClientEvent::LiveWorldSnapshot` (task 2.4) are
+    /// droppable for the identical reason (round 3, finding F12): task 2.4's own round 1/2 had
+    /// given `InputSent`/`InputTiming` their own top-level, non-droppable `ClientEvent` variants —
+    /// which conflicted with task 8.4a's own, independently-designed and already-reviewed
+    /// `SessionEvent::InputSent` (droppable, delivered the plain `ClientEvent::Session` way).
+    /// Adopting 8.4a's shape (droppable, wrapped) keeps the two tasks' events reconcilable at merge
+    /// time without a name/shape clash; a caller that cares about not silently losing one (task
+    /// 2.4's own `LiveWorld::on_snapshot`'s `own_input_at_tick`) must tolerate a drop by holding
+    /// the previous known input — see `ddai-world`'s own BUILD REPORT (round 3) for how its e2e
     /// test does exactly that.
     fn is_droppable(&self) -> bool {
         matches!(
             self,
-            ClientEvent::OwnPosition { .. } | ClientEvent::LiveWorldSnapshot(_)
+            ClientEvent::OwnPosition { .. } | ClientEvent::OwnTeam { .. } | ClientEvent::LiveWorldSnapshot(_)
         ) || matches!(
             self,
             ClientEvent::Session(ev)
                 if matches!(
                     **ev,
                     SessionEvent::Snapshot { .. }
+                        | SessionEvent::SnapshotData { .. }
                         | SessionEvent::GameMessage(_)
                         | SessionEvent::ExGameMessage(_)
                         | SessionEvent::InputSent { .. }
@@ -438,6 +501,7 @@ mod event_channel {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::driver::GaveUpCategory;
         use crate::session::SessionEvent;
 
         #[test]
@@ -559,6 +623,7 @@ mod event_channel {
             tx.send(ClientEvent::OwnPosition { tick: 3, x: 0, y: 0 });
             tx.send(ClientEvent::GaveUp {
                 reason: "test".to_string(),
+                category: GaveUpCategory::Requested,
             });
             tx.send(ClientEvent::OwnPosition { tick: 4, x: 0, y: 0 });
 
@@ -569,6 +634,7 @@ mod event_channel {
                 ClientEvent::OwnPosition { tick: 3, x: 0, y: 0 },
                 ClientEvent::GaveUp {
                     reason: "test".to_string(),
+                    category: GaveUpCategory::Requested,
                 },
                 ClientEvent::OwnPosition { tick: 4, x: 0, y: 0 },
             ];
@@ -577,6 +643,63 @@ mod event_channel {
                 actual.push(ev);
             }
             assert_eq!(actual, expected);
+        }
+
+        /// Task 8.4a: `OwnTeam` is exactly as flood-prone as `OwnPosition` (one per snapshot,
+        /// while a `Character` may or may not exist) and must be droppable too.
+        #[test]
+        fn own_team_is_droppable_too() {
+            let (tx, rx) = channel();
+            for i in 0..(EVENT_QUEUE_CAP + 10) {
+                tx.send(ClientEvent::OwnTeam {
+                    tick: i as i32,
+                    team: -1,
+                });
+            }
+            let queued = tx.0.queues.lock().unwrap().len();
+            assert_eq!(
+                queued, EVENT_QUEUE_CAP,
+                "a flood of OwnTeam events must still respect the cap"
+            );
+            let front = rx.try_recv().unwrap();
+            assert!(matches!(front, ClientEvent::OwnTeam { tick, .. } if tick >= 10));
+        }
+
+        /// Task 8.4a / 2.3-review carry-over finding F15: when the queue is full of *only*
+        /// control (non-droppable/"sticky") events — no droppable event anywhere in it for
+        /// `Sender::send`'s eviction to fall back on — none of them are ever evicted. [`Sender::send`]
+        /// only ever pops from `queues.droppable`, never `queues.sticky` (see its own source
+        /// above); this test pins that property down directly rather than relying on
+        /// `non_droppable_events_are_never_evicted`'s coverage, which always mixes in at least one
+        /// droppable event. The queue is allowed to grow past [`EVENT_QUEUE_CAP`] in this case
+        /// (documented as a bounded, self-limiting edge case on [`Sender::send`]'s own docs) — the
+        /// property under test is "never evicted", not "stays at the cap".
+        #[test]
+        fn control_events_are_never_evicted_when_the_queue_is_full_of_control_events_only() {
+            let (tx, rx) = channel();
+            let total = EVENT_QUEUE_CAP * 3;
+            for i in 0..total {
+                tx.send(ClientEvent::ReconnectAttempt {
+                    attempt: i as u32,
+                    addr: "127.0.0.1:8303".parse().unwrap(),
+                    backoff: Duration::from_secs(1),
+                });
+            }
+            let mut drained = Vec::new();
+            while let Some(ev) = rx.try_recv() {
+                drained.push(ev);
+            }
+            assert_eq!(
+                drained.len(),
+                total,
+                "every control event must survive when the queue holds only control events"
+            );
+            for (i, ev) in drained.iter().enumerate() {
+                assert!(
+                    matches!(ev, ClientEvent::ReconnectAttempt { attempt, .. } if *attempt == i as u32),
+                    "control events must also come out in the exact order they were sent"
+                );
+            }
         }
     }
 }
@@ -598,6 +721,11 @@ fn default_player_input() -> PlayerInput {
 
 enum Control {
     Disconnect,
+    /// Task 8.4a: requests `Cl_SetTeam(team)` on the current connection (see
+    /// [`crate::session::Session::request_team`]) — [`Client::set_team`]'s wire-side plumbing,
+    /// the same shape as [`Client::set_input`]'s `input_tx` but routed through the control channel
+    /// since a team change is a one-off request, not a per-tick value to keep resending.
+    SetTeam(i32),
 }
 
 /// The real-time client — task acceptance criterion 1's public entry point.
@@ -632,6 +760,18 @@ impl Client {
     /// this silently (nothing left to send it to).
     pub fn set_input(&self, input: PlayerInput) {
         let _ = self.input_tx.send(input);
+    }
+
+    /// Requests `Cl_SetTeam(team)` on the current connection (task 8.4a acceptance criterion 1:
+    /// "after entering, it joins spectators the way the real 20.1 client does" —
+    /// [`crate::session::Session::request_team`]). Best-effort and asynchronous, like
+    /// [`Client::set_input`]: a driver that has already stopped simply drops this; a caller that
+    /// wants confirmation should watch for [`ClientEvent::OwnTeam`] in the event stream instead of
+    /// assuming this call alone means the server actually granted the change (see
+    /// `gamecontext.cpp:2684-2730`'s `CanJoinTeam`/spam-protection/kill-protection checks, any of
+    /// which can silently refuse it).
+    pub fn set_team(&self, team: i32) {
+        let _ = self.control_tx.send(Control::SetTeam(team));
     }
 
     /// Requests a graceful, permanent disconnect — the driver thread will not reconnect
@@ -743,14 +883,22 @@ fn handle_session_event(
     }
     if let SessionEvent::Snapshot { tick } = &ev
         && let Some(view) = session.latest_view()
-        && let Some(own_id) = view.players().iter().find(|p| p.info.local == 1).map(|p| p.id)
-        && let Some(character) = view.character(own_id)
+        && let Some(own) = view.players().iter().find(|p| p.info.local == 1)
     {
-        synthesized.push(ClientEvent::OwnPosition {
+        // Task 8.4a: `OwnTeam` fires whenever our player slot is known at all (spectating or
+        // not); `OwnPosition` stays conditional on an actual `Character` existing, which a
+        // spectator never has — see `ClientEvent::OwnTeam`'s docs.
+        synthesized.push(ClientEvent::OwnTeam {
             tick: *tick,
-            x: character.character.x,
-            y: character.character.y,
+            team: own.info.team,
         });
+        if let Some(character) = view.character(own.id) {
+            synthesized.push(ClientEvent::OwnPosition {
+                tick: *tick,
+                x: character.character.x,
+                y: character.character.y,
+            });
+        }
     }
     if let SessionEvent::Snapshot { tick } = &ev
         && let Some(view) = session.latest_view()
@@ -829,6 +977,14 @@ fn run_one_connection(
                 session.disconnect(Some("client requested disconnect"));
                 send_all(socket, session.flush(now));
                 return ConnectionOutcome::Stop;
+            }
+            // Task 8.4a: not terminal — send the request now (rather than waiting for the next
+            // `flush()` below, which only runs after this loop's `socket.recv` — up to
+            // `POLL_TIMEOUT` later) and keep driving this connection.
+            Ok(Control::SetTeam(team)) => {
+                let now = Instant::now().duration_since(start);
+                session.request_team(team, now);
+                send_all(socket, session.flush(now));
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -919,9 +1075,23 @@ fn run(
                 Ok(Control::Disconnect) | Err(mpsc::TryRecvError::Disconnected)
             )
         };
+        // Review round 1, finding F1: checked before *every* connect attempt this loop ever makes
+        // — the first one, every reconnect, and every redirect target — not just once against the
+        // caller's original argument. A server that redirects (or, on a future non-loopback
+        // caller, a DNS/routing change that reconnect somehow lands on a different address) must
+        // not be able to walk this driver onto an address D-027/D-038's allow-list never approved.
+        if let Err(e) = crate::live_servers::check(target, &config.name, &config.live_servers) {
+            events_tx.send(ClientEvent::GaveUp {
+                reason: format!("live-servers safety switch refused {target}: {e}"),
+                category: GaveUpCategory::LocalError,
+            });
+            return;
+        }
+
         if !wait_for_attempt_slot(target, &should_abort) {
             events_tx.send(ClientEvent::GaveUp {
                 reason: "disconnected while waiting for a connection-attempt slot".to_string(),
+                category: GaveUpCategory::LocalError,
             });
             return;
         }
@@ -931,6 +1101,7 @@ fn run(
             Err(e) => {
                 events_tx.send(ClientEvent::GaveUp {
                     reason: format!("failed to bind a local socket: {e}"),
+                    category: GaveUpCategory::LocalError,
                 });
                 return;
             }
@@ -938,12 +1109,14 @@ fn run(
         if let Err(e) = socket.set_read_timeout(Some(POLL_TIMEOUT)) {
             events_tx.send(ClientEvent::GaveUp {
                 reason: format!("failed to configure the socket: {e}"),
+                category: GaveUpCategory::LocalError,
             });
             return;
         }
         if let Err(e) = socket.connect(target) {
             events_tx.send(ClientEvent::GaveUp {
                 reason: format!("failed to connect the socket to {target}: {e}"),
+                category: GaveUpCategory::LocalError,
             });
             return;
         }
@@ -989,6 +1162,7 @@ fn run(
                 events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
                 events_tx.send(ClientEvent::GaveUp {
                     reason: "disconnected by the server (kick/ban) — not reconnecting".to_string(),
+                    category: GaveUpCategory::KickedOrBanned,
                 });
                 return;
             }
@@ -997,6 +1171,7 @@ fn run(
                 events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
                 events_tx.send(ClientEvent::GaveUp {
                     reason: "local protocol violation — not reconnecting".to_string(),
+                    category: GaveUpCategory::ProtocolViolation,
                 });
                 return;
             }
@@ -1021,6 +1196,7 @@ fn run(
                     });
                     events_tx.send(ClientEvent::GaveUp {
                         reason: "redirect loop protection".to_string(),
+                        category: GaveUpCategory::RedirectLoop,
                     });
                     return;
                 }
@@ -1043,13 +1219,25 @@ fn run(
                 });
                 // Review finding F7: interruptible — `Client::disconnect()` (or `Client` simply
                 // being dropped, review finding F5) must not have to wait out a full, up-to-30s
-                // backoff sleep before this thread actually notices and stops.
-                match control_rx.recv_timeout(backoff) {
-                    Ok(Control::Disconnect) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
-                        return;
+                // backoff sleep before this thread actually notices and stops. A deadline-based
+                // loop (rather than one `recv_timeout(backoff)` call) so a `Control::SetTeam`
+                // arriving mid-backoff (task 8.4a — there is no live connection to send it on
+                // right now) does not end the wait early either: it is simply dropped, and the
+                // remaining backoff keeps counting down.
+                let backoff_deadline = Instant::now() + backoff;
+                loop {
+                    let remaining = backoff_deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    match control_rx.recv_timeout(remaining) {
+                        Ok(Control::Disconnect) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                            return;
+                        }
+                        Ok(Control::SetTeam(_)) => continue,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    }
                 }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;

@@ -1,0 +1,30 @@
+[package]
+name = "ddai-recorder"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Observer recording (task 8.4a): rec v1 format (zstd-compressed chunks, sha256), a Client-driven recorder, anonymized export, and offline trajectory/input reconstruction."
+
+[lib]
+name = "ddai_recorder"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-client = { path = "../ddai-client" }
+ddai-net = { path = "../ddai-net" }
+thiserror = "2"
+tracing = "0.1"
+# Same crate/version every other rec-format-shaped part of this workspace already uses
+# (`ddai-fly`'s checkpoint format, `ddai-connectome`) — zstd chunks, sha256 for corruption
+# detection.
+zstd = "0.14.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.14"

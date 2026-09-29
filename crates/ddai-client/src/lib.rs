@@ -34,14 +34,16 @@
 
 pub mod allowlist;
 pub mod driver;
+pub mod live_servers;
 pub mod map_cache;
 pub mod session;
+pub mod single_instance;
 pub mod smooth_time;
 pub mod timing;
 
 pub use ddai_net::generated::enums;
 pub use ddai_net::generated::objects::PlayerInput;
 pub use ddai_net::view;
-pub use driver::{Client, ClientEvent, LiveWorldSnapshot};
+pub use driver::{Client, ClientEvent, GaveUpCategory, LiveWorldSnapshot};
 pub use session::{ClientConfig, MapLoadedEvent, MapSource, ServerCapabilities, Session, SessionEvent};
 pub use timing::{MarginStats, MarginSummary};

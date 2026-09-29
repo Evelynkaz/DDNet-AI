@@ -21,12 +21,19 @@ ddai-demo = { path = "../ddai-demo" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-flyg = { path = "../ddai-flyg" }
 ddai-map = { path = "../ddai-map" }
+# Task 8.4a's `ddai_net::generated::messages::{GameMsg,ExGameMsg}`/`ddai_net::snapshot::Snapshot`
+# need to be named directly in `record_cmd` (the type `ddai-client` re-exports,
+# `ddai_client::view::View`, borrows one) — same pattern as `ddai-physics` below.
 ddai-net = { path = "../ddai-net" }
 # Task 7.3's `fly brain-demo`: `ddai_physics::map::MapData` (`ddai-map::load_map`'s own return
 # type) needs to be named directly here (an `Arc<MapData>` is built for `ddai_fly::demo_brain`).
 ddai-physics = { path = "../ddai-physics" }
+# Task 8.4a: rec v1 format/writer/reader/anonymize/reconstruct (`record_cmd`/`rec_cmd`).
+ddai-recorder = { path = "../ddai-recorder" }
 ddai-trace = { path = "../ddai-trace" }
 ddai-web = { path = "../ddai-web" }
+# Task 8.4a's `rec reconstruct --validate` deserializes `ddnet-ai play --input-log`'s JSON lines.
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 # `demo stats`/`demo info`: falls back to hashing the embedded map's own bytes when a pre-v6 demo
 # has no SHA256 extension, matching `CDemoPlayer::ExtractMap`'s fallback (`demo.cpp:940-950`,
@@ -36,6 +43,10 @@ sha2 = "0.10"
 # criterion 4's methodology) — kept out of `ddai-fly` itself, which only takes it as a
 # dev-dependency for its own criterion benches (see that crate's Cargo.toml comment).
 core_affinity = "0.8"
+# `record`/`play`'s graceful SIGINT/SIGTERM shutdown (review round 1, F8): finishes the current
+# recording segment (sidecar sha256 included) and sends a real `NETMSG_CLOSE` instead of a bare
+# `kill` leaving the slot connected server-side until the silence timeout.
+ctrlc = { version = "3.5.2", features = ["termination"] }
 tokio = { version = "1.53", features = ["rt-multi-thread"] }
 tracing = "0.1"
 tracing-appender = "0.2"

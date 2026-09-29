@@ -8,6 +8,8 @@ mod demo_cmd;
 mod fly_cmd;
 mod map_cmd;
 mod play_cmd;
+mod rec_cmd;
+mod record_cmd;
 mod trace_cmd;
 mod web_cmd;
 
@@ -39,6 +41,12 @@ enum Command {
     /// Connects to a real DDNet 20.x server and plays with a trivial built-in brain (task 2.3;
     /// the real bot's brain is a later phase) — `--server 127.0.0.1:8303 --brain idle|circle`.
     Play(play_cmd::PlayArgs),
+    /// Observer recorder (task 8.4a): connects as a pure spectator (never sends non-neutral input
+    /// or chat) and records the session into rec v1 — `--server <addr> --name Muha --duration <s>
+    /// --out ~/aiddnet/data/recordings/<date>/`.
+    Record(record_cmd::RecordArgs),
+    /// Offline rec v1 tooling (task 8.4a): `rec inspect|reconstruct|anonymize`.
+    Rec(rec_cmd::RecArgs),
 }
 
 fn main() -> ExitCode {
@@ -52,6 +60,8 @@ fn main() -> ExitCode {
         Some(Command::Web(args)) => web_cmd::run_web(args),
         Some(Command::WebPasswd(args)) => web_cmd::run_web_passwd(args),
         Some(Command::Play(args)) => play_cmd::run(args),
+        Some(Command::Record(args)) => record_cmd::run(args),
+        Some(Command::Rec(args)) => rec_cmd::run(args),
     }
 }
 
@@ -655,6 +665,225 @@ mod tests {
     #[test]
     fn play_rejects_invalid_brain() {
         let result = Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303", "--brain", "planner"]);
+        assert!(result.is_err());
+    }
+
+    /// Task 8.4a: `--brain random-scripted`, `--seed`, `--input-log`.
+    #[test]
+    fn play_parses_random_scripted_brain_with_seed_and_input_log() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "play",
+            "--server",
+            "127.0.0.1:8303",
+            "--brain",
+            "random-scripted",
+            "--seed",
+            "7",
+            "--input-log",
+            "/tmp/inputs.jsonl",
+        ])
+        .expect("play --brain random-scripted should parse");
+        match cli.command {
+            Some(super::Command::Play(args)) => {
+                assert!(matches!(args.brain, super::play_cmd::Brain::RandomScripted));
+                assert_eq!(args.seed, 7);
+                assert_eq!(args.input_log, Some(std::path::PathBuf::from("/tmp/inputs.jsonl")));
+            }
+            other => panic!("expected Play command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn play_seed_defaults_when_omitted() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303"]).expect("play should parse");
+        match cli.command {
+            Some(super::Command::Play(args)) => {
+                assert_eq!(args.seed, 42);
+                assert_eq!(args.input_log, None);
+            }
+            other => panic!("expected Play command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_parses_with_defaults() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "record",
+            "--server",
+            "127.0.0.1:8303",
+            "--out",
+            "/tmp/recordings",
+        ])
+        .expect("record should parse");
+        match cli.command {
+            Some(super::Command::Record(args)) => {
+                assert_eq!(args.server, "127.0.0.1:8303".parse().unwrap());
+                assert_eq!(args.name, "Muha");
+                assert_eq!(args.duration, 30);
+                assert_eq!(args.out, std::path::PathBuf::from("/tmp/recordings"));
+                assert_eq!(args.show_distance, 2_000_000);
+                assert_eq!(args.input_log, None);
+                assert_eq!(args.live_servers, None);
+            }
+            other => panic!("expected Record command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_rejects_missing_out() {
+        let result = Cli::try_parse_from(["ddnet-ai", "record", "--server", "127.0.0.1:8303"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn record_parses_all_flags() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "record",
+            "--server",
+            "45.141.57.35:8308",
+            "--name",
+            "TestObserver",
+            "--duration",
+            "60",
+            "--out",
+            "/tmp/recordings",
+            "--live-servers",
+            "/tmp/live-servers.toml",
+            "--input-log",
+            "/tmp/inputs.jsonl",
+            "--show-distance",
+            "5000",
+        ])
+        .expect("record should parse with all flags");
+        match cli.command {
+            Some(super::Command::Record(args)) => {
+                assert_eq!(args.name, "TestObserver");
+                assert_eq!(args.duration, 60);
+                assert_eq!(
+                    args.live_servers,
+                    Some(std::path::PathBuf::from("/tmp/live-servers.toml"))
+                );
+                assert_eq!(args.input_log, Some(std::path::PathBuf::from("/tmp/inputs.jsonl")));
+                assert_eq!(args.show_distance, 5000);
+            }
+            other => panic!("expected Record command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rec_inspect_parses() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "rec", "inspect", "in.rec", "--verify"])
+            .expect("rec inspect should parse");
+        match cli.command {
+            Some(super::Command::Rec(args)) => match args.command {
+                super::rec_cmd::RecCommand::Inspect { recording, verify } => {
+                    assert_eq!(recording, std::path::PathBuf::from("in.rec"));
+                    assert!(verify);
+                }
+                other => panic!("expected Inspect, got {other:?}"),
+            },
+            other => panic!("expected Rec command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rec_reconstruct_parses_with_and_without_validate() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "rec", "reconstruct", "in.rec", "--out", "out.json"])
+            .expect("rec reconstruct should parse");
+        match cli.command {
+            Some(super::Command::Rec(args)) => match args.command {
+                super::rec_cmd::RecCommand::Reconstruct {
+                    recording,
+                    out,
+                    validate,
+                    client_id,
+                    player_name,
+                } => {
+                    assert_eq!(recording, std::path::PathBuf::from("in.rec"));
+                    assert_eq!(out, Some(std::path::PathBuf::from("out.json")));
+                    assert_eq!(validate, None);
+                    assert_eq!(client_id, None);
+                    assert_eq!(player_name, None);
+                }
+                other => panic!("expected Reconstruct, got {other:?}"),
+            },
+            other => panic!("expected Rec command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "rec",
+            "reconstruct",
+            "in.rec",
+            "--validate",
+            "truth.jsonl",
+            "--client-id",
+            "2",
+        ])
+        .expect("rec reconstruct --validate should parse");
+        match cli.command {
+            Some(super::Command::Rec(args)) => match args.command {
+                super::rec_cmd::RecCommand::Reconstruct {
+                    validate, client_id, ..
+                } => {
+                    assert_eq!(validate, Some(std::path::PathBuf::from("truth.jsonl")));
+                    assert_eq!(client_id, Some(2));
+                }
+                other => panic!("expected Reconstruct, got {other:?}"),
+            },
+            other => panic!("expected Rec command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rec_reconstruct_parses_player_name() {
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "rec",
+            "reconstruct",
+            "in.rec",
+            "--validate",
+            "truth.jsonl",
+            "--player-name",
+            "RSValid",
+        ])
+        .expect("rec reconstruct --player-name should parse");
+        match cli.command {
+            Some(super::Command::Rec(args)) => match args.command {
+                super::rec_cmd::RecCommand::Reconstruct {
+                    client_id, player_name, ..
+                } => {
+                    assert_eq!(client_id, None);
+                    assert_eq!(player_name, Some("RSValid".to_string()));
+                }
+                other => panic!("expected Reconstruct, got {other:?}"),
+            },
+            other => panic!("expected Rec command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rec_anonymize_parses() {
+        let cli = Cli::try_parse_from(["ddnet-ai", "rec", "anonymize", "in.rec", "--out", "out.rec"])
+            .expect("rec anonymize should parse");
+        match cli.command {
+            Some(super::Command::Rec(args)) => match args.command {
+                super::rec_cmd::RecCommand::Anonymize { recording, out } => {
+                    assert_eq!(recording, std::path::PathBuf::from("in.rec"));
+                    assert_eq!(out, std::path::PathBuf::from("out.rec"));
+                }
+                other => panic!("expected Anonymize, got {other:?}"),
+            },
+            other => panic!("expected Rec command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rec_requires_a_subcommand() {
+        let result = Cli::try_parse_from(["ddnet-ai", "rec"]);
         assert!(result.is_err());
     }
 }

@@ -24,6 +24,17 @@ tracing = "0.1"
 # e.g. to check a cache hit *before* paying for a full `load_map`/CRC/sha256 verification pass);
 # same crate `ddai-map` already depends on, so this adds no new dependency to the tree.
 sha2 = "0.10"
+# `live_servers` (task 8.4a): parses `~/aiddnet/data/live-servers.toml` (D-027/D-038's owner-
+# curated non-loopback allow-list) — same `serde`+`toml` pattern `ddai-connectome`'s
+# `manifest.rs`/`ddai-fly`'s `brain_config.rs` already use for their own TOML config files.
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+# `single_instance` (review round 1, F8): a per-server advisory file lock shared by `ddnet-ai
+# play`/`record` (CLAUDE.md/D-016: "never more than one bot on a server") — a small, safe (no
+# `unsafe` needed from us), cross-platform wrapper over the OS's own file-descriptor locking,
+# which the OS releases automatically on process exit/crash/SIGKILL (no stale-lock cleanup logic
+# needed, unlike a PID file).
+fd-lock = "4.0.4"
 
 [dev-dependencies]
 tempfile = "3.14"
