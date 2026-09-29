@@ -15,12 +15,15 @@
 //!   dead-reckoned data a `CNetObj_Character` actually carries (`character.cpp:859-868`/
 //!   `gameclient.cpp:1727-1742`).
 //! - [`live_world`]: [`LiveWorld`] itself — snapshot ingestion, prediction, `Observation` building.
+//! - [`projectiles`]: snapshot projectile items -> physics `Projectile`s, the way the DDNet client's
+//!   prediction builds them (task 2.4b — replaces the map-spawned cannons of `World::from_map`).
 //! - [`accuracy`]: the "measurement mode" acceptance criterion 1 asks for — logs predicted-vs-
 //!   actual differences and summarizes them (own tee: bit-exact fraction; others: an error-px
 //!   distribution at chosen horizons).
 
 pub mod accuracy;
 pub mod live_world;
+pub mod projectiles;
 pub mod reckoning;
 
 pub use live_world::{

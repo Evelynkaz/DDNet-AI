@@ -269,14 +269,17 @@ fn interval_inputs(ids: &[u8], derived: &[Derived], ticks: usize) -> Vec<Vec<Tic
 /// outcome of each requested id.
 fn run(scratch: &mut World<f32>, start: &World<f32>, inputs: &[Vec<TickInput>], ids: &[u8]) -> Vec<Option<Outcome>> {
     scratch.restore_from(start);
-    // Map-native projectiles (cannon/turret entities) come from `World::from_map` with
-    // `start_tick == 0`; `LiveWorld` sets the world tick to the demo's server tick (millions on a
-    // server that had been up for a while), and stepping such a projectile is very slow (0.2-1 s
-    // per `step` on BlmapChill with 12 turrets at tick 8.4M, measured; the cost grows with the
-    // tick times the shotgun curvature). Their real state is not in the snapshots and `LiveWorld`
-    // does not reconstruct projectiles, so the replay world starts without them. This drops real
-    // hazards (crazy-shotgun freezes) from the replay; projectiles fired by players inside the
-    // replay window are still simulated.
+    // The replay world starts without projectiles. Since task 2.4b `LiveWorld` itself holds none
+    // unless its caller passes the snapshot's projectile items (`LiveWorld::set_projectiles`); this
+    // pipeline does not, on purpose: the recording client strips the DDNet extra info from legacy
+    // projectile items (`gameclient.cpp:1409-1413`), leaving plain owner-less items with no
+    // bounce/freeze/explosive flags (most of the archive's projectile items are of that
+    // shape, counted with `View::projectiles()`) — replaying those would fly inert bullets, not
+    // the cannons' freeze hazard. Projectiles fired by players inside the replay window are still
+    // simulated.
+    // (Before 2.4b the map-native cannons spawned at `start_tick 0` were cleared here because
+    // stepping them at a demo's server tick of millions took 0.2-1 s per `step` on BlmapChill;
+    // the clear stays as a guard that costs nothing.)
     scratch.projectiles.clear();
     for tick_inputs in inputs {
         scratch.step(tick_inputs);

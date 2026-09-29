@@ -347,6 +347,9 @@ pub struct LiveWorldSnapshot {
     /// has been received yet this connection (see that method's own doc comment for the "carry
     /// forward the last known value" semantics a caller needs to replicate itself across calls).
     pub teams: Option<ddai_net::tuning::TeamsState>,
+    /// [`ddai_net::view::View::projectiles`]'s result — what `ddai-world`'s
+    /// `LiveWorld::set_projectiles` builds the predicted projectiles from (task 2.4b).
+    pub projectiles: Vec<(i32, ddai_net::view::ProjectileView)>,
 }
 
 /// Review round 1, finding F8: categorizes [`ClientEvent::GaveUp`] so a caller can pick a distinct
@@ -1007,6 +1010,7 @@ fn handle_session_event(
             tuning: session.tuning(),
             switch_states: view.switch_states(),
             teams: session.teams_state(),
+            projectiles: view.projectiles(),
         })));
     }
 

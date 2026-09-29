@@ -82,6 +82,7 @@ fn eval(
             s.teams.as_ref(),
             own_input_at_tick,
         );
+        lw.set_projectiles(&s.projectiles);
 
         if let Some(pending_here) = pending.remove(&s.tick)
             && let Some(actual) = s.characters.iter().find(|c| c.id == own_id)

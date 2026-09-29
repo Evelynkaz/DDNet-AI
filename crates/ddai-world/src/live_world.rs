@@ -10,12 +10,13 @@ use ddai_brain::{CharacterObservation, Observation};
 use ddai_net::generated::enums::playerflagflag;
 use ddai_net::generated::objects;
 use ddai_net::tuning::{TeamsState, TuneParams};
-use ddai_net::view::CharacterView;
+use ddai_net::view::{CharacterView, ProjectileView};
 use ddai_physics::core::{self, MAX_CLIENTS, NUM_WEAPONS, PlayerInput, WEAPON_HAMMER, WEAPON_NINJA};
 use ddai_physics::map::MapData;
 use ddai_physics::tuning::TuningParams;
 use ddai_physics::world::{self, Player, TickInput, World};
 
+use crate::projectiles::projectile_from_view;
 use crate::reckoning::{MAX_EVOLVE_AGE_TICKS, evolve_character_core, to_net_ddnet_character};
 
 /// `TILE_SWITCH{TIMEDOPEN,TIMEDCLOSE,OPEN,CLOSE}` (`ddai_physics::map`) re-exported here only so
@@ -215,6 +216,12 @@ impl LiveWorld {
         // cfg pass: this crate never has a scenario/`--cfg` file, only the live map and network
         // messages (`Sv_TuneParams`) to go on.
         let _ = world.init(std::iter::empty::<&str>());
+        // Task 2.4b: the map's own crazy-shotgun cannons (`World::from_map`, `start_tick == 0`) are
+        // not simulated here — the real client never spawns map entities for prediction, it takes
+        // every projectile from the snapshot (see [`LiveWorld::set_projectiles`]). Left in, they
+        // would be evaluated at `t = server_tick / 50 s` (millions of pixels away, and a line walk
+        // over that distance under non-DDRace shotgun curvature).
+        world.projectiles.clear();
         let scratch = world.clone();
         LiveWorld {
             own_id,
@@ -259,6 +266,11 @@ impl LiveWorld {
     /// `characters`: `ddai_net::view::View::characters()`'s result (or an equivalent slice built
     /// for a test — see `crate::reckoning`/this crate's tests for how little that takes).
     /// `switch_states`: `ddai_net::view::View::switch_states()`'s result.
+    ///
+    /// Projectiles are not part of this call: it leaves the world with none (map-native cannons
+    /// are never simulated here), and the snapshot's own projectile items go in through
+    /// [`LiveWorld::set_projectiles`] right after — see there (task 2.4b).
+    ///
     /// `teams`: `ddai_client::session::Session::teams_state()`'s result, if the caller has kept
     /// one — DDRace team assignment has "carry forward the last known value" semantics (see
     /// [`TeamsState`]'s own doc comment), so a caller that never received one at all may simply
@@ -285,6 +297,9 @@ impl LiveWorld {
         own_input_at_tick: Option<PlayerInput>,
     ) {
         self.world.tick = tick;
+        // Projectiles belong to one snapshot: cleared here so a caller that never calls
+        // [`LiveWorld::set_projectiles`] gets none (never a stale set from an older tick).
+        self.world.projectiles.clear();
 
         if let Some(teams) = teams {
             for (id, &team) in teams.teams[..teams.received].iter().enumerate() {
@@ -364,7 +379,55 @@ impl LiveWorld {
         } else {
             self.own_character().map(|c| c.tune_zone).unwrap_or(0)
         };
-        apply_tune_params(self.world.tuning.zone_mut(own_zone), &tuning);
+        // Task 2.4b: until the first `Sv_TuneParams` has actually been received (`received == 0`,
+        // which is what `DEFAULT_TUNE_PARAMS` and `Session::tuning()` before that message carry),
+        // the world keeps the DDRace tuning `World::init` loaded (`CGameContext::OnInit`'s
+        // `ResetTuning` values, `gamecontext.cpp:4166-4190`: `gun_curvature 0`, `gun_speed 1400`,
+        // `shotgun_curvature 0`, `shotgun_speed 500`, `shotgun_speeddiff 0`, the rest vanilla) —
+        // what every DDNet block server actually runs. Stamping the *vanilla* defaults over it
+        // (`shotgun_curvature 1.25`, `shotgun_speed 2750`) is not "no information", it is a wrong
+        // guess that changes where every projectile flies.
+        if tuning.received > 0 {
+            apply_tune_params(self.world.tuning.zone_mut(own_zone), &tuning);
+        }
+    }
+
+    /// Replaces the world's projectiles with those of the snapshot just given to
+    /// [`LiveWorld::on_snapshot`] (task 2.4b): `View::projectiles()`'s result, in the same call
+    /// sequence (`on_snapshot`, then this) — `on_snapshot` empties the projectile list, so a later
+    /// call to it discards what an earlier `set_projectiles` set.
+    ///
+    /// Built the way the DDNet client's predicted world does it (`CGameWorld::NetObjAdd`,
+    /// `gameworld.cpp:437-500`, see [`crate::projectiles`]): each item becomes a projectile whose
+    /// time origin is the item's own `m_StartTick` — for a map cannon the tick of its last bounce,
+    /// which the server resets on every one (`projectile.cpp:201-203`), so it is always recent.
+    /// Items are added in ascending snapshot id (`SnapCollectEntities` sorts by id,
+    /// `gameclient.cpp:4392-4396`), and projectiles of another DDRace team are skipped
+    /// (`IsLocalTeam`, `gameworld.cpp:395-398`; the server already filters by team mask, this only
+    /// matters for a team change not yet reflected in the snapshot).
+    ///
+    /// The client keeps a predicted projectile across snapshots when it still `Match`es
+    /// (`gameworld.cpp:450-456`); this rebuilds from the snapshot every time instead, which is the
+    /// same state (the item *is* the server's state at `tick`) minus the client's own between-
+    /// snapshot drift.
+    pub fn set_projectiles(&mut self, projectiles: &[(i32, ProjectileView)]) {
+        let own_id = self.own_id;
+        let world = &mut self.world;
+        world.projectiles.clear();
+        let mut order: Vec<usize> = (0..projectiles.len()).collect();
+        order.sort_by_key(|&i| projectiles[i].0);
+        for i in order {
+            let Some(p) = projectile_from_view(&projectiles[i].1, world.tick, &world.collision, &world.tuning) else {
+                continue;
+            };
+            if p.owner >= 0
+                && (0..MAX_CLIENTS as i32).contains(&own_id)
+                && !world.teams_core.can_collide(own_id, p.owner)
+            {
+                continue;
+            }
+            world.projectiles.push(p);
+        }
     }
 
     /// [`Self::own_id`]'s current [`world::Character`], bounds-checked — review round 1, finding

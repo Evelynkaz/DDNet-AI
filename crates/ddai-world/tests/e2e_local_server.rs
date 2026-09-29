@@ -357,6 +357,9 @@ fn liveworld_accuracy_against_local_server() {
             snap.teams.as_ref(),
             own_input_at_tick,
         );
+        // Task 2.4b: the server's own projectile items (cannons and shots), as the client's
+        // prediction uses them — no map-native ones.
+        live.set_projectiles(&snap.projectiles);
         tracker.record_actual(snap.tick, live.base_world());
 
         for &h in &horizons {
@@ -441,4 +444,142 @@ fn is_frozen(cv: &ddai_net::view::CharacterView) -> bool {
     cv.ddnet
         .map(|d| d.freeze_end != 0 || (d.flags & (1 << 21)) != 0)
         .unwrap_or(true)
+}
+
+/// Task 2.4b: projectile prediction against the real server. One client walks nowhere and fires
+/// its gun in a rotating direction (about four shots a second); the server puts each bullet into
+/// the snapshots as a `CNetObj_DDNetProjectile` with the shooter as owner. For every pair of
+/// snapshots 2 ticks apart, the bullets of the first are set into `LiveWorld` and predicted 2
+/// ticks ahead; each must be alive in the prediction exactly when the real server still reports
+/// it in the second snapshot (a bullet that hit a wall or expired in between must be gone, one
+/// still flying must still be there, unchanged).
+///
+/// Crazy-shotgun cannons cannot be checked this way locally: on every map the local server has,
+/// the cannons are thousands of pixels from any spawn and the server only snapshots projectiles
+/// within the client's view range. `tests/projectiles.rs` covers them against the physics `World`
+/// (bit-exact server port) with the same wire encoding instead.
+#[test]
+#[ignore]
+fn projectile_prediction_against_local_server() {
+    if !e2e_enabled() {
+        eprintln!("skipped: set DDAI_E2E=1 to run against the local ddnet-server (127.0.0.1:8303)");
+        return;
+    }
+    let addr: SocketAddr = "127.0.0.1:8303".parse().expect("valid loopback address");
+    let config = ClientConfig {
+        name: "ddai-world-e2e-shots".to_string(),
+        cache_dir: data_dir().join("maps").join("cache"),
+        ..ClientConfig::default()
+    };
+    let mut client = Client::connect(addr, config);
+
+    let mut data = LiveData::default();
+    let start = Instant::now();
+    let mut next_change = Instant::now();
+    let (mut fire, mut angle) = (0i32, 0f32);
+    let mut input = idle_input();
+    while start.elapsed() < Duration::from_secs(15) {
+        if let Some(ev) = client.recv_event(Duration::from_millis(5)) {
+            match ev {
+                ClientEvent::Session(s) => dispatch_session_event(*s, &mut data),
+                ClientEvent::LiveWorldSnapshot(snap) => data.snapshots.push(*snap),
+                _ => {}
+            }
+        }
+        if data.own_in_game {
+            if Instant::now() >= next_change {
+                // Press, release, press, ... every 120 ms (gun fire delay is 125 ms): a shot per
+                // 240 ms, aimed round the compass.
+                fire = fire.wrapping_add(1);
+                angle += 0.7;
+                input = NetPlayerInput {
+                    target_x: (angle.cos() * 400.0) as i32,
+                    target_y: (angle.sin() * 400.0) as i32,
+                    fire,
+                    wanted_weapon: 2, // 1 + WEAPON_GUN
+                    ..idle_input()
+                };
+                next_change = Instant::now() + Duration::from_millis(120);
+            }
+            client.set_input(input);
+        }
+    }
+    client.disconnect();
+    client.join();
+
+    assert!(
+        data.own_in_game,
+        "never reached InGame — is ddnet-local.service running?"
+    );
+    assert_eq!(data.map_changes, 1, "the map changed during the run");
+    let map_name = data.map_name.clone().expect("MapChanging event");
+    let map_path = data_dir()
+        .join("ddnet-server")
+        .join("maps")
+        .join(format!("{map_name}.map"));
+    let map_bytes = std::fs::read(&map_path).unwrap_or_else(|e| panic!("read {}: {e}", map_path.display()));
+    let map = Arc::new(ddai_map::load_map(&map_bytes).expect("map loads").data);
+    let own_id = data.snapshots.iter().find_map(|s| s.own_id).expect("own client id");
+
+    let by_tick: BTreeMap<i32, &LiveWorldSnapshot> = data.snapshots.iter().map(|s| (s.tick, s)).collect();
+    let mut live = LiveWorld::new(Arc::clone(&map), own_id, 1);
+    let (mut pairs, mut compared, mut agree, mut destroyed, mut shapes_other) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+    for s in &data.snapshots {
+        let Some(s2) = by_tick.get(&(s.tick + 2)) else { continue };
+        live.on_snapshot(
+            s.tick,
+            &s.characters,
+            s.tuning,
+            &s.switch_states,
+            s.teams.as_ref(),
+            None,
+        );
+        live.set_projectiles(&s.projectiles);
+        let base: Vec<_> = live.base_world().projectiles.clone();
+        if base.len() != s.projectiles.len() {
+            continue; // an item the world has no model for (or a foreign team's): no 1:1 mapping
+        }
+        shapes_other += s
+            .projectiles
+            .iter()
+            .filter(|(_, v)| !matches!(v, ddai_net::view::ProjectileView::DDNet(_)))
+            .count();
+        let predicted = live.predict(s2.tick, &[]).projectiles.clone();
+        // `set_projectiles` adds items in ascending snapshot id, so `base[i]` is the i-th smallest id.
+        let mut ids: Vec<i32> = s.projectiles.iter().map(|&(id, _)| id).collect();
+        ids.sort_unstable();
+        pairs += 1;
+        for (id, b) in ids.iter().zip(&base) {
+            compared += 1;
+            let alive_true = s2.projectiles.iter().any(|(i, _)| i == id);
+            let alive_pred = predicted.iter().any(|p| {
+                p.start_tick == b.start_tick
+                    && p.pos.x.to_bits() == b.pos.x.to_bits()
+                    && p.pos.y.to_bits() == b.pos.y.to_bits()
+            });
+            agree += usize::from(alive_true == alive_pred);
+            destroyed += usize::from(!alive_true);
+            if alive_true != alive_pred && std::env::var("MISS").is_ok() {
+                eprintln!(
+                    "MISS tick={} id={id} true_alive={alive_true} predicted_alive={alive_pred} bullet={b:?}",
+                    s.tick
+                );
+            }
+        }
+    }
+    eprintln!(
+        "map={map_name} pairs={pairs} bullets compared={compared} agree={agree} destroyed in between={destroyed} \
+         non-DDNet shapes={shapes_other}"
+    );
+    assert!(compared >= 50, "too few bullets compared ({compared})");
+    assert!(
+        destroyed >= 10,
+        "too few destroyed bullets ({destroyed}): the timing check needs some"
+    );
+    let fraction = agree as f64 / compared as f64;
+    assert!(
+        fraction >= 0.99,
+        "only {agree}/{compared} bullets predicted alive/destroyed correctly"
+    );
 }
