@@ -4,6 +4,7 @@
 //! real one — synthetic maps, scenario generation, and trace comparison for the DDNet physics
 //! parity work (see `docs/formats.md`).
 
+mod dataset_cmd;
 mod demo_cmd;
 mod fly_cmd;
 mod map_cmd;
@@ -34,6 +35,8 @@ enum Command {
     Map(map_cmd::MapArgs),
     /// Real DDNet `.demo` file inspection (task 8.4b, `ddai-demo`): info/dump/stats.
     Demo(demo_cmd::DemoArgs),
+    /// Human-play dataset (task 8.4c, `ddai-dataset`): `from-demos`, `info`, `show`, `locate`.
+    Dataset(dataset_cmd::DatasetArgs),
     /// Starts the bot's own web server (login + status page), listening on loopback only.
     Web(web_cmd::WebArgs),
     /// Generates (and stores the argon2id hash of) the web UI's owner password.
@@ -57,6 +60,7 @@ fn main() -> ExitCode {
         Some(Command::Fly(args)) => fly_cmd::run(args),
         Some(Command::Map(args)) => map_cmd::run(args),
         Some(Command::Demo(args)) => demo_cmd::run(args),
+        Some(Command::Dataset(args)) => dataset_cmd::run(args),
         Some(Command::Web(args)) => web_cmd::run_web(args),
         Some(Command::WebPasswd(args)) => web_cmd::run_web_passwd(args),
         Some(Command::Play(args)) => play_cmd::run(args),

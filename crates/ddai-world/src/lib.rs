@@ -24,5 +24,6 @@ pub mod live_world;
 pub mod reckoning;
 
 pub use live_world::{
-    LiveWorld, correct_late_inputs, player_input_from_net, player_input_to_net, retarget_late_inputs,
+    LiveWorld, character_observation, correct_late_inputs, player_input_from_net, player_input_to_net,
+    retarget_late_inputs,
 };

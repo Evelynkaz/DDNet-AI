@@ -941,7 +941,10 @@ fn rebuild_active_timed_switchers(world: &mut World<f32>) {
     }
 }
 
-fn character_observation(world: &World<f32>, id: i32) -> Option<CharacterObservation> {
+/// The [`CharacterObservation`] of client `id` in `world`, `None` when there is no such character.
+/// Public so offline consumers (the human-play dataset pipeline, task 8.4c) can read many
+/// characters out of one reconstructed world without building a `LiveWorld` per viewpoint.
+pub fn character_observation(world: &World<f32>, id: i32) -> Option<CharacterObservation> {
     if !(0..MAX_CLIENTS as i32).contains(&id) {
         return None;
     }

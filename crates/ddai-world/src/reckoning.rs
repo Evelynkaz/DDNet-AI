@@ -118,13 +118,19 @@ pub fn evolve_character_core(
         return me;
     }
 
-    // A single-slot isolated world: `WorldCore::from_characters` forces `core.id = id` (its own
-    // array key), unlike the real `Init()` (which leaves `m_Id == -1`) — restored right after
-    // construction, since `id` is otherwise dead weight in a world with no other slot for it to
-    // matter to (see the free functions' own hook-vs-siblings loops, all `for slot in
-    // 0..world.len`, trivially a single iteration here).
-    let mut temp: WorldCore<f32, 1> = WorldCore::from_characters(&[(0u8, me)]);
-    if let Some(c) = temp.get_mut(0) {
+    // A single-slot isolated world, like the client's `Evolve`, whose `TempWorld` is empty apart
+    // from the character itself. `WorldCore::from_characters` forces `core.id = key` (the slot's
+    // array key), unlike the real `Init()` (which leaves `m_Id == -1`), so `id` is reset to `-1`
+    // right after construction. The slot key must not be the character's own `hooked_player`:
+    // in DDNet `m_apCharacters[m_HookedPlayer]` is null in the empty temp world, so a grabbed
+    // player-hook is always released (`HOOK_RETRACTED`, `hooked_player = -1`, `hook_pos = pos`,
+    // `gamecore.cpp:416`). Keying the slot 0 made `slot_of(0)` resolve to the character itself
+    // for a hook on client 0, which panicked in `TeamsCore::can_keep_hook(0, -1)` (found on real
+    // demos, task 8.4c). A tee cannot hook itself, so any key different from `net.hooked_player`
+    // is alias-free.
+    let key: u8 = if net.hooked_player == 0 { 1 } else { 0 };
+    let mut temp: WorldCore<f32, 1> = WorldCore::from_characters(&[(key, me)]);
+    if let Some(c) = temp.get_mut(key) {
         c.id = -1;
     }
     let empty_teams = TeamsCore::new();
@@ -135,11 +141,11 @@ pub fn evolve_character_core(
         tick += 1;
         core::tick(&mut temp, 0, collision, &empty_teams, false, true);
         core::move_character(&mut temp, 0, collision, &empty_teams);
-        if let Some(c) = temp.get_mut(0) {
+        if let Some(c) = temp.get_mut(key) {
             core::quantize(c);
         }
     }
-    *temp.get(0).expect("single-slot world always keeps its one character")
+    *temp.get(key).expect("single-slot world always keeps its one character")
 }
 
 #[cfg(test)]
@@ -197,6 +203,31 @@ mod tests {
             weapon: 0,
             emote: 0,
             attack_tick: 0,
+        }
+    }
+
+    #[test]
+    fn a_player_hook_is_released_for_every_hooked_id_including_zero() {
+        // DDNet's `Evolve` runs in an empty temp world, so the hooked player is never found and
+        // the hook is released: HOOK_RETRACTED, hooked_player -1, hook_pos = pos. Client id 0 used
+        // to panic (task 8.4c regression) and then, in a first fix, kept the hook.
+        let map = flat_room();
+        let collision: Collision<f32> = Collision::new(&map);
+        let mut reference = None;
+        for hooked in [5, 0, 1, 63] {
+            let mut net = net_at(10, 100, 100);
+            net.hook_state = ddai_physics::core::HOOK_GRABBED;
+            net.hooked_player = hooked;
+            net.hook_x = 100;
+            net.hook_y = 125;
+            let core = evolve_character_core(&net, 20, &collision);
+            assert_eq!(core.hook_state, ddai_physics::core::HOOK_RETRACTED, "hooked {hooked}");
+            assert_eq!(core.hooked_player(), -1, "hooked {hooked}");
+            assert_ne!(core.hook_pos, Vec2::new(100.0, 125.0), "the old hook point is gone");
+            assert_eq!(core.id, -1, "the returned core keeps the Init() id");
+            // The outcome must not depend on which client id was hooked (no slot aliasing).
+            let key = (core.pos, core.vel, core.hook_pos, core.hook_state);
+            assert_eq!(*reference.get_or_insert(key), key, "hooked {hooked}");
         }
     }
 

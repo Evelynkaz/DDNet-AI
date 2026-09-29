@@ -996,6 +996,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-dataset"
+version = "0.1.0"
+dependencies = [
+ "ddai-brain",
+ "ddai-dataset",
+ "ddai-demo",
+ "ddai-map",
+ "ddai-net",
+ "ddai-physics",
+ "ddai-recorder",
+ "ddai-world",
+ "postcard",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "zstd",
+]
+
+[[package]]
 name = "ddai-demo"
 version = "0.1.0"
 dependencies = [
@@ -1176,6 +1197,7 @@ dependencies = [
  "core_affinity",
  "ctrlc",
  "ddai-client",
+ "ddai-dataset",
  "ddai-demo",
  "ddai-fly",
  "ddai-flyg",
