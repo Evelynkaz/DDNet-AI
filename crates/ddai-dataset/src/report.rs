@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{DemoEntry, MapEntry};
+use crate::dataset::{DemoEntry, MapEntry, SampleTotals};
 use crate::demo::DemoOutput;
 use crate::pipeline::BuildCounters;
 use crate::replay::{Channel, ReplayStats};
@@ -177,12 +177,14 @@ fn mix_examples<T: Clone>(ok: &[T], bad: &[T]) -> Vec<T> {
     ex
 }
 
-/// Builds the report. `outputs[i]` belongs to `demos[i]` (`None` for skipped demos); `ranking`
-/// carries the global buckets keyed by `(demo index, player label)`.
+/// Builds the report. `outputs[i]` and `totals[i]` belong to `demos[i]` (`None` for skipped
+/// demos); `totals` are the sample counters the dataset writer collected while writing the chunks;
+/// `ranking` carries the global buckets keyed by `(demo index, player label)`.
 pub fn build(
     demos: &[DemoEntry],
     maps: &[MapEntry],
     outputs: &[Option<DemoOutput>],
+    totals: &[Option<SampleTotals>],
     ranking: &[RankRow],
     counts: DemoCounts,
     top_players: usize,
@@ -237,47 +239,32 @@ pub fn build(
         rep.chars.conv_weapon_only += out.counters.conv_weapon_only;
         rep.chars.conv_neither += out.counters.conv_neither;
 
-        let demo_ticks = match (out.frames.first(), out.frames.last()) {
-            (Some(a), Some(b)) => i64::from(b.tick) - i64::from(a.tick) + 2,
-            _ => 0,
+        let demo_ticks = if out.frame_count == 0 {
+            0
+        } else {
+            i64::from(out.last_tick) - i64::from(out.first_tick) + 2
         };
         rep.time.recorded_hours += hours(demo_ticks);
         rep.time.character_hours += hours(out.counters.chars as i64 * 2);
-        let mut usable_frames = std::collections::BTreeSet::new();
-        for s in &out.samples {
-            let b = bucket_of
-                .get(&(di, out.frames[s.frame as usize].chars[s.slot as usize].player))
-                .copied()
-                .unwrap_or(SkillBucket::Unranked);
-            rep.samples.total += 1;
-            rep.samples.by_skill[b as usize] += 1;
-            if s.confident() {
-                rep.samples.confident += 1;
-                rep.samples.confident_by_skill[b as usize] += 1;
-                usable_frames.insert(s.frame);
+        if let Some(t) = totals.get(di as usize).and_then(Option::as_ref) {
+            rep.samples.total += t.total;
+            for b in 0..4 {
+                rep.samples.by_skill[b] += t.by_skill[b];
+                rep.samples.confident_by_skill[b] += t.confident_by_skill[b];
             }
-            if s.active() {
-                rep.samples.active += 1;
-                if s.confident() {
-                    rep.samples.active_confident += 1;
+            rep.samples.confident += t.confident;
+            rep.samples.active += t.active;
+            rep.samples.active_confident += t.active_confident;
+            rep.samples.next_fresh += t.next_fresh;
+            rep.samples.frozen_actor += t.frozen_actor;
+            rep.samples.tagged += t.tagged;
+            for (technique, n) in &t.by_technique {
+                if let Some(row) = tech.get_mut(technique) {
+                    row.samples += n;
                 }
             }
-            if s.next_fresh() {
-                rep.samples.next_fresh += 1;
-            }
-            if out.frames[s.frame as usize].chars[s.slot as usize].frozen() {
-                rep.samples.frozen_actor += 1;
-            }
-            if s.tags != 0 {
-                rep.samples.tagged += 1;
-            }
-            for t in crate::tags::techniques_in(s.tags) {
-                if let Some(row) = tech.get_mut(&t) {
-                    row.samples += 1;
-                }
-            }
+            rep.time.usable_hours += hours(t.usable_frames as i64 * 2);
         }
-        rep.time.usable_hours += hours(usable_frames.len() as i64 * 2);
 
         for (label, stats) in &out.replay {
             rep.replay_total.merge(stats);
@@ -579,7 +566,7 @@ mod tests {
 
     #[test]
     fn an_empty_build_renders_every_section_without_dividing_by_zero() {
-        let rep = build(&[], &[], &[], &[], DemoCounts::default(), 5);
+        let rep = build(&[], &[], &[], &[], &[], DemoCounts::default(), 5);
         assert_eq!(rep.techniques.len(), Technique::ALL.len());
         let text = render(&rep);
         assert!(text.contains("demos: 0 total"));

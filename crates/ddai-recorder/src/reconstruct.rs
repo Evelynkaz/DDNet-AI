@@ -323,23 +323,6 @@ pub(crate) fn stint_for(
 /// afterwards" design would have to re-derive exactly the same per-tick boundary anyway, with no
 /// benefit.
 pub fn reconstruct(frames: &[Frame]) -> Vec<PlayerReconstruction> {
-    // Per (client id, stint): the trajectory built so far, the last `character.tick` pushed (to
-    // dedup repeated identical dead-reckoning ticks across consecutive snapshots — §13.8's own
-    // rationale), the last `jumped` bit-0 value seen (for rising-edge jump detection), the last
-    // `attack_tick` value seen (for fire-event detection — review round 1, finding F11's baseline/
-    // monotonic-only tracking), and whether every sample so far had the DDNet extension.
-    struct Building {
-        trajectory: Vec<TrajectorySample>,
-        inputs: Vec<EstimatedInput>,
-        fire_ticks: Vec<i32>,
-        last_tick: Option<i32>,
-        last_jump_bit0: Option<bool>,
-        last_jump_bit1: Option<bool>,
-        last_attack_tick: Option<i32>,
-        all_had_ddnet_ext: bool,
-        saw_any_ddnet_ext: bool,
-    }
-
     let mut identities: HashMap<i32, Identity> = HashMap::new();
     let mut by_player: BTreeMap<(i32, u32), Building> = BTreeMap::new();
     let mut frame_index: usize = 0;
@@ -351,148 +334,321 @@ pub fn reconstruct(frames: &[Frame]) -> Vec<PlayerReconstruction> {
         else {
             continue;
         };
-
-        // Review round 1, finding F5: update identity/stint tracking from *every* id present in
-        // `players` this frame, before looking at `characters` at all — a player with no live
-        // `Character` (dead, or between rounds) still has a `PlayerInfo`/`ClientInfo` entry and
-        // must still be tracked, so a later stint boundary is computed against the right
-        // `last_seen_frame`.
-        for p in players {
-            let name = p.client_info.as_ref().map(|ci| ci.name.as_str());
-            stint_for(&mut identities, p.id, frame_index, name);
-        }
-
-        for c in characters {
-            // The stint for `c.id` as of *this* frame — `stint_for` was already called above for
-            // every id in `players` this frame (including `c.id`, on any well-formed server); if
-            // `c.id` was somehow missing from `players` this frame, this reuses whatever stint it
-            // was last assigned (or starts stint 0 if this id has genuinely never been seen in
-            // `players` at all) rather than inventing a spurious new one.
-            let stint = stint_for(&mut identities, c.id, frame_index, None);
-            let key = (c.id, stint);
-
-            let entry = by_player.entry(key).or_insert_with(|| Building {
-                trajectory: Vec::new(),
-                inputs: Vec::new(),
-                fire_ticks: Vec::new(),
-                last_tick: None,
-                last_jump_bit0: None,
-                last_jump_bit1: None,
-                last_attack_tick: None,
-                all_had_ddnet_ext: true,
-                saw_any_ddnet_ext: false,
-            });
-
-            if entry.last_tick == Some(c.character.tick) {
-                continue; // same dead-reckoning tick already recorded — a repeat, not new data.
-            }
-            entry.last_tick = Some(c.character.tick);
-
-            if c.ddnet.is_some() {
-                entry.saw_any_ddnet_ext = true;
-            } else {
-                entry.all_had_ddnet_ext = false;
-            }
-
-            let ((aim_x, aim_y), _aim_confidence_this_sample) = aim_from_ddnet_or_angle(c);
-
-            entry.trajectory.push(TrajectorySample {
-                tick: c.character.tick,
-                x: c.character.x,
-                y: c.character.y,
-                vel_x: c.character.vel_x,
-                vel_y: c.character.vel_y,
-                hook_state: c.character.hook_state,
-                hooked_player: c.character.hooked_player,
-                weapon: c.character.weapon,
-                direction: c.character.direction,
-                freeze: is_movement_frozen(c),
-                in_freeze_tile: is_in_freeze_tile(c),
-                aim_x,
-                aim_y,
-                jumped: c.character.jumped,
-            });
-
-            // Review round 3, finding F20 step (4): a rising edge of bit 0 ("jump button held")
-            // OR of bit 1 ("second/air jump already used", `gamecore.cpp:249-253` — set the same
-            // tick an air jump executes, exactly like bit 0 is for a ground jump) each count as a
-            // jump event on their own, independently — see `EstimatedInput::jump`'s own doc
-            // comment for why bit 1 catches genuine air jumps that bit 0's own rising edge can
-            // miss (a 1-tick-long ground jump with the double-jump tuning enabled is the one case
-            // neither bit can see — documented there too, not silently claimed fixed).
-            let jump_bit0_now = c.character.jumped & 1 != 0;
-            let jump_bit1_now = c.character.jumped & 2 != 0;
-            let bit0_rising = match entry.last_jump_bit0 {
-                Some(prev) => jump_bit0_now && !prev,
-                // First observed sample for this player: no prior context — see
-                // `EstimatedInput::jump`'s doc comment for why this still counts as an event.
-                None => jump_bit0_now,
-            };
-            let bit1_rising = match entry.last_jump_bit1 {
-                Some(prev) => jump_bit1_now && !prev,
-                None => jump_bit1_now,
-            };
-            let jump_event = bit0_rising || bit1_rising;
-            entry.last_jump_bit0 = Some(jump_bit0_now);
-            entry.last_jump_bit1 = Some(jump_bit1_now);
-
-            entry.inputs.push(EstimatedInput {
-                tick: c.character.tick,
-                direction: c.character.direction,
-                aim_x,
-                aim_y,
-                jump: jump_event,
-                hook: c.character.hook_state != HOOK_IDLE,
-            });
-
-            // Review round 1, finding F11: two fixes over round 1's "any change is a fire event".
-            // (1) The very *first* observed sample only establishes the baseline — the pre-
-            // existing value it reveals was not necessarily a fire that happened while this crate
-            // was watching (it could be the value the character already had). (2) Only a *strict
-            // increase* counts as a real fire: `attack_tick` is stamped from the server's own
-            // always-increasing tick counter (`character.cpp:649`, `m_AttackTick =
-            // Server()->Tick()`), so a genuine fire can never produce a value smaller than the
-            // last one seen — a decrease only happens on a reset (a respawn's fresh `CCharacter`,
-            // or simply the start of a new stint/segment), which round 1 miscounted as a fire.
-            // Residual, undetectable-from-sparse-sampling edge case, documented rather than
-            // silently claimed fixed: `CCharacter::TickPaused` (`character.cpp:975`) also
-            // increments `m_AttackTick` by exactly 1 for every tick the *whole game* is paused (an
-            // admin/vote pause, not a normal part of block play) to keep tick-relative timers in
-            // sync — indistinguishable, from sparse dead-reckoning samples alone, from a real
-            // fire's tick jump. This project never sends a pause request itself (D-007: no chat,
-            // no vote); a human player or admin pausing while being recorded remains a known,
-            // accepted gap in `fire_ticks`' precision, not a false "fixed".
-            match entry.last_attack_tick {
-                None => entry.last_attack_tick = Some(c.character.attack_tick),
-                Some(prev) if c.character.attack_tick > prev => {
-                    entry.last_attack_tick = Some(c.character.attack_tick);
-                    entry.fire_ticks.push(c.character.attack_tick);
-                }
-                Some(prev) if c.character.attack_tick < prev => {
-                    entry.last_attack_tick = Some(c.character.attack_tick);
-                }
-                Some(_) => {}
+        for (key, c) in attribute_characters(&mut identities, frame_index, characters, players) {
+            let entry = by_player.entry(key).or_insert_with(Building::new);
+            if let Some(o) = entry.observe(c, i32::MIN) {
+                entry.trajectory.push(o.trajectory);
+                entry.inputs.push(o.input);
             }
         }
-
         frame_index += 1;
     }
 
     by_player
         .into_iter()
-        .map(|((client_id, stint), b)| PlayerReconstruction {
-            client_id,
-            stint,
-            trajectory: b.trajectory,
-            inputs: b.inputs,
-            fire_ticks: b.fire_ticks,
-            confidence: FieldConfidence::with_aim(if b.saw_any_ddnet_ext && b.all_had_ddnet_ext {
-                Confidence::Exact
-            } else {
-                Confidence::Estimated
-            }),
+        .map(|((client_id, stint), b)| {
+            let confidence = b.confidence();
+            PlayerReconstruction {
+                client_id,
+                stint,
+                trajectory: b.trajectory,
+                inputs: b.inputs,
+                fire_ticks: b.fire_ticks,
+                confidence,
+            }
         })
         .collect()
+}
+
+/// Review round 1, finding F5: update identity/stint tracking from *every* id present in
+/// `players` this frame, before looking at `characters` at all — a player with no live
+/// `Character` (dead, or between rounds) still has a `PlayerInfo`/`ClientInfo` entry and must
+/// still be tracked, so a later stint boundary is computed against the right `last_seen_frame`.
+/// Then every character is attributed to its `(client_id, stint)` track, in the order of
+/// `characters`. The stint for `c.id` is as of *this* frame — `stint_for` was already called for
+/// every id in `players` this frame (including `c.id`, on any well-formed server); if `c.id` was
+/// somehow missing from `players` this frame, this reuses whatever stint it was last assigned (or
+/// starts stint 0 if this id has genuinely never been seen in `players` at all) rather than
+/// inventing a spurious new one. Shared by [`reconstruct`] and [`StreamReconstructor`] so the two
+/// can never attribute a character differently.
+fn attribute_characters<'a>(
+    identities: &mut HashMap<i32, Identity>,
+    frame_index: usize,
+    characters: &'a [CharacterRecord],
+    players: &[crate::format::PlayerRecord],
+) -> Vec<((i32, u32), &'a CharacterRecord)> {
+    for p in players {
+        let name = p.client_info.as_ref().map(|ci| ci.name.as_str());
+        stint_for(identities, p.id, frame_index, name);
+    }
+    characters
+        .iter()
+        .map(|c| {
+            let stint = stint_for(identities, c.id, frame_index, None);
+            ((c.id, stint), c)
+        })
+        .collect()
+}
+
+/// One `(client id, stint)` track under construction: the per-sample state machine of
+/// [`reconstruct`], separated from the storage of its output so [`StreamReconstructor`] can run
+/// the very same code without keeping the history.
+struct Building {
+    trajectory: Vec<TrajectorySample>,
+    inputs: Vec<EstimatedInput>,
+    fire_ticks: Vec<i32>,
+    /// The last `character.tick` pushed (to dedup repeated identical dead-reckoning ticks across
+    /// consecutive snapshots — §13.8's own rationale).
+    last_tick: Option<i32>,
+    /// The last `jumped` bit values seen (for rising-edge jump detection).
+    last_jump_bit0: Option<bool>,
+    last_jump_bit1: Option<bool>,
+    /// The last `attack_tick` value seen (for fire-event detection — review round 1, finding
+    /// F11's baseline/monotonic-only tracking).
+    last_attack_tick: Option<i32>,
+    /// Whether every sample so far had the DDNet extension.
+    all_had_ddnet_ext: bool,
+    saw_any_ddnet_ext: bool,
+}
+
+impl Building {
+    fn new() -> Self {
+        Building {
+            trajectory: Vec::new(),
+            inputs: Vec::new(),
+            fire_ticks: Vec::new(),
+            last_tick: None,
+            last_jump_bit0: None,
+            last_jump_bit1: None,
+            last_attack_tick: None,
+            all_had_ddnet_ext: true,
+            saw_any_ddnet_ext: false,
+        }
+    }
+
+    fn confidence(&self) -> FieldConfidence {
+        FieldConfidence::with_aim(if self.saw_any_ddnet_ext && self.all_had_ddnet_ext {
+            Confidence::Exact
+        } else {
+            Confidence::Estimated
+        })
+    }
+
+    /// Feeds one character sample. `None` when `c` repeats the previous dead-reckoning tick (a
+    /// repeat, not new data); otherwise the new trajectory sample and estimated input (the caller
+    /// decides whether to keep them). A fire event is appended to `fire_ticks` here, dropping
+    /// the ticks before `fire_horizon` first (`i32::MIN` keeps them all).
+    fn observe(&mut self, c: &CharacterRecord, fire_horizon: i32) -> Option<Observed> {
+        if self.last_tick == Some(c.character.tick) {
+            return None; // same dead-reckoning tick already recorded — a repeat, not new data.
+        }
+        self.last_tick = Some(c.character.tick);
+
+        if c.ddnet.is_some() {
+            self.saw_any_ddnet_ext = true;
+        } else {
+            self.all_had_ddnet_ext = false;
+        }
+
+        let ((aim_x, aim_y), _aim_confidence_this_sample) = aim_from_ddnet_or_angle(c);
+
+        let trajectory = TrajectorySample {
+            tick: c.character.tick,
+            x: c.character.x,
+            y: c.character.y,
+            vel_x: c.character.vel_x,
+            vel_y: c.character.vel_y,
+            hook_state: c.character.hook_state,
+            hooked_player: c.character.hooked_player,
+            weapon: c.character.weapon,
+            direction: c.character.direction,
+            freeze: is_movement_frozen(c),
+            in_freeze_tile: is_in_freeze_tile(c),
+            aim_x,
+            aim_y,
+            jumped: c.character.jumped,
+        };
+
+        // Review round 3, finding F20 step (4): a rising edge of bit 0 ("jump button held")
+        // OR of bit 1 ("second/air jump already used", `gamecore.cpp:249-253` — set the same
+        // tick an air jump executes, exactly like bit 0 is for a ground jump) each count as a
+        // jump event on their own, independently — see `EstimatedInput::jump`'s own doc
+        // comment for why bit 1 catches genuine air jumps that bit 0's own rising edge can
+        // miss (a 1-tick-long ground jump with the double-jump tuning enabled is the one case
+        // neither bit can see — documented there too, not silently claimed fixed).
+        let jump_bit0_now = c.character.jumped & 1 != 0;
+        let jump_bit1_now = c.character.jumped & 2 != 0;
+        let bit0_rising = match self.last_jump_bit0 {
+            Some(prev) => jump_bit0_now && !prev,
+            // First observed sample for this player: no prior context — see
+            // `EstimatedInput::jump`'s doc comment for why this still counts as an event.
+            None => jump_bit0_now,
+        };
+        let bit1_rising = match self.last_jump_bit1 {
+            Some(prev) => jump_bit1_now && !prev,
+            None => jump_bit1_now,
+        };
+        let jump_event = bit0_rising || bit1_rising;
+        self.last_jump_bit0 = Some(jump_bit0_now);
+        self.last_jump_bit1 = Some(jump_bit1_now);
+
+        let input = EstimatedInput {
+            tick: c.character.tick,
+            direction: c.character.direction,
+            aim_x,
+            aim_y,
+            jump: jump_event,
+            hook: c.character.hook_state != HOOK_IDLE,
+        };
+
+        // Review round 1, finding F11: two fixes over round 1's "any change is a fire event".
+        // (1) The very *first* observed sample only establishes the baseline — the pre-
+        // existing value it reveals was not necessarily a fire that happened while this crate
+        // was watching (it could be the value the character already had). (2) Only a *strict
+        // increase* counts as a real fire: `attack_tick` is stamped from the server's own
+        // always-increasing tick counter (`character.cpp:649`, `m_AttackTick =
+        // Server()->Tick()`), so a genuine fire can never produce a value smaller than the
+        // last one seen — a decrease only happens on a reset (a respawn's fresh `CCharacter`,
+        // or simply the start of a new stint/segment), which round 1 miscounted as a fire.
+        // Residual, undetectable-from-sparse-sampling edge case, documented rather than
+        // silently claimed fixed: `CCharacter::TickPaused` (`character.cpp:975`) also
+        // increments `m_AttackTick` by exactly 1 for every tick the *whole game* is paused (an
+        // admin/vote pause, not a normal part of block play) to keep tick-relative timers in
+        // sync — indistinguishable, from sparse dead-reckoning samples alone, from a real
+        // fire's tick jump. This project never sends a pause request itself (D-007: no chat,
+        // no vote); a human player or admin pausing while being recorded remains a known,
+        // accepted gap in `fire_ticks`' precision, not a false "fixed".
+        let mut fire = None;
+        match self.last_attack_tick {
+            None => self.last_attack_tick = Some(c.character.attack_tick),
+            Some(prev) if c.character.attack_tick > prev => {
+                self.last_attack_tick = Some(c.character.attack_tick);
+                self.fire_ticks.retain(|&t| t >= fire_horizon);
+                self.fire_ticks.push(c.character.attack_tick);
+                fire = Some(c.character.attack_tick);
+            }
+            Some(prev) if c.character.attack_tick < prev => {
+                self.last_attack_tick = Some(c.character.attack_tick);
+            }
+            Some(_) => {}
+        }
+        Some(Observed {
+            trajectory,
+            input,
+            fire,
+        })
+    }
+}
+
+/// What [`Building::observe`] learned from a sample that advanced the dead-reckoning tick.
+struct Observed {
+    trajectory: TrajectorySample,
+    input: EstimatedInput,
+    /// The `attack_tick` of a fire event this sample registered.
+    fire: Option<i32>,
+}
+
+/// What a [`StreamReconstructor`] knows about one character of a pushed frame: the track it was
+/// attributed to and the sample current for it - the new sample when the character's
+/// dead-reckoning tick advanced, the previous one (same `character.tick`) when the snapshot merely
+/// repeated it. This is exactly what [`reconstruct`]'s output holds under
+/// `(client_id, character.tick)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CharacterSample {
+    /// `(client id, stint)` - the key of [`PlayerReconstruction`].
+    pub key: (i32, u32),
+    pub trajectory: TrajectorySample,
+    pub input: EstimatedInput,
+    /// This frame registered the sample (the character's dead-reckoning tick advanced); `false`
+    /// when it repeats the previous one.
+    pub registered: bool,
+}
+
+/// [`reconstruct`], one frame at a time, in bounded memory: the same per-track state machine
+/// (the two share [`Building`] and [`attribute_characters`]) but no history - only the last
+/// sample of each track and its recent `fire_ticks` are kept.
+///
+/// What a streaming consumer must know: `reconstruct` returns a track's `fire_ticks` *as of the
+/// end of the recording*, this returns them as of the frames pushed so far. A fire is registered
+/// when a sample with a new `character.tick` shows a larger `attack_tick`, so it can be registered
+/// long after the tick `t` it names (a stale core: minutes). A consumer that needs the complete
+/// lists runs the recording through once to collect them ([`StreamReconstructor::into_fire_ticks`])
+/// and a second time for the samples; [`Pushed::fires`] and [`CharacterSample::registered`] report
+/// what each frame registered.
+#[derive(Default)]
+pub struct StreamReconstructor {
+    identities: HashMap<i32, Identity>,
+    tracks: HashMap<(i32, u32), Building>,
+    /// The last sample of each track (the one `character.tick` repeats refer to).
+    last: HashMap<(i32, u32), (TrajectorySample, EstimatedInput)>,
+    frame_index: usize,
+}
+
+/// The result of [`StreamReconstructor::push`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Pushed {
+    /// One entry per character of the frame, in the frame's order.
+    pub samples: Vec<CharacterSample>,
+    /// Fire events registered by this frame: `(track, attack_tick)`.
+    pub fires: Vec<((i32, u32), i32)>,
+}
+
+impl StreamReconstructor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds one frame (non-snapshot frames are ignored, like [`reconstruct`] does). Fire ticks
+    /// older than `fire_horizon` are dropped from the tracks that register a new fire (pass
+    /// `i32::MIN` to keep everything).
+    pub fn push(&mut self, frame: &Frame, fire_horizon: i32) -> Pushed {
+        let Frame::Snapshot {
+            characters, players, ..
+        } = frame
+        else {
+            return Pushed::default();
+        };
+        let mut pushed = Pushed {
+            samples: Vec::with_capacity(characters.len()),
+            fires: Vec::new(),
+        };
+        for (key, c) in attribute_characters(&mut self.identities, self.frame_index, characters, players) {
+            let track = self.tracks.entry(key).or_insert_with(Building::new);
+            let mut registered = false;
+            if let Some(o) = track.observe(c, fire_horizon) {
+                if let Some(t) = o.fire {
+                    pushed.fires.push((key, t));
+                }
+                self.last.insert(key, (o.trajectory, o.input));
+                registered = true;
+            }
+            if let Some(&(trajectory, input)) = self.last.get(&key) {
+                pushed.samples.push(CharacterSample {
+                    key,
+                    trajectory,
+                    input,
+                    registered,
+                });
+            }
+        }
+        self.frame_index += 1;
+        pushed
+    }
+
+    /// The fire ticks registered so far on `key` (minus those dropped by the `fire_horizon`).
+    pub fn fire_ticks(&self, key: (i32, u32)) -> &[i32] {
+        self.tracks.get(&key).map_or(&[], |b| b.fire_ticks.as_slice())
+    }
+
+    /// The fire ticks of every track that registered any (what [`reconstruct`] returns as
+    /// `fire_ticks` when fed the same frames with a `fire_horizon` of `i32::MIN`).
+    pub fn into_fire_ticks(self) -> HashMap<(i32, u32), Vec<i32>> {
+        self.tracks
+            .into_iter()
+            .filter(|(_, b)| !b.fire_ticks.is_empty())
+            .map(|(k, b)| (k, b.fire_ticks))
+            .collect()
+    }
 }
 
 /// One `(client_id, stint)` pair's last-known name and the (0-based, `Snapshot`-frame-only) index

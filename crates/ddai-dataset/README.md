@@ -21,8 +21,9 @@
 
 | Модуль | Что делает |
 |---|---|
-| `ingest` | демка → кадры `ddai_recorder::format::Frame` (только свежие снапшоты); `character.tick == 0` → тик снапшота; **сразу** через анонимайзер 8.4a (`player_N` по `(client id, stint)`, клан пуст) |
-| `pipeline` | по каждому кадру `LiveWorld` строит точное состояние всех персонажей; вывод фриза без `DDNetCharacter`; ввод за интервал `[t_k, t_{k+1})` (шаги `t_k → t_k+1`, `t_k+1 → t_k+2`) из `ddai_recorder::reconstruct`; реплей `World<f32>` на 2 тика и сравнение со следующим кадром; абляция каналов |
+| `ingest` | демка → кадры `ddai_recorder::format::Frame` по одному (`FrameSource`; только свежие снапшоты); `character.tick == 0` → тик снапшота; **сразу** через анонимайзер 8.4a (`player_N` по `(client id, stint)`, клан пуст) |
+| `store` | постраничное хранилище таймлайна демки во временном файле (страница 256 кадров, кэш 8 страниц): память не зависит от длины демки (8.4d) |
+| `pipeline` | потоково (`recon_table` + `build_stream`): по каждому кадру `LiveWorld` строит точное состояние всех персонажей; вывод фриза без `DDNetCharacter`; ввод за интервал `[t_k, t_{k+1})` (шаги `t_k → t_k+1`, `t_k+1 → t_k+2`) из `ddai_recorder::reconstruct`; реплей `World<f32>` на 2 тика и сравнение со следующим кадром; абляция каналов |
 | `replay` | классы `Exact/Within1px/Off`, статистика по каналам, гистограмма ошибки |
 | `analysis` | входы во фриз, эпизоды хука, удары молотом, атрибуция D-030 («последний коснувшийся за 50 тиков») |
 | `skill` | блоки, самофризы, время во фризе, выживание; рейтинг и корзины Top/Mid/Low/Unranked |
@@ -35,6 +36,14 @@
 
 Формат, правила и пороги — `docs/formats.md` §20. Итоги на архиве — `docs/EXPERIMENTS.md` E-004.
 
+## Память (8.4d)
+
+Память не растёт с длиной демки и числом игроков: кадры идут потоком в страницы временного файла (`store`), анализ читает их
+через маленький кэш, образцы пишутся без тегов, а теги и корзина навешиваются при записи чанков. Результат побайтно равен
+результату прежнего конвейера, который держал весь таймлайн в памяти (на демке в 295 тыс. снапшотов — 14,5 ГБ).
+Подробности, допущения и доказательство — `docs/formats.md` §20.10. Временные файлы: 77 байт на кадр на демке с немногими игроками и 758 на занятой (223 МБ на демке в 3,3 ч), живут до записи чанков, так что пик диска — сумма по всем демкам (≈272 МБ для v2); каталог —
+`--spill-dir` (по умолчанию временный каталог системы), файл удаляется сразу после создания.
+
 ## Использование
 
 ```bash
@@ -43,7 +52,7 @@ ddnet-ai dataset from-demos \
     --demos ~/aiddnet/data/demos/chillerdragon/block-06 \
     --maps ~/aiddnet/data/maps \
     --out ~/aiddnet/data/datasets/human/chillerdragon-block06-v1 \
-    --name chillerdragon-block06-v1 --source "TwDemosMain/block-06 @ac5e545" --threads 6
+    --name chillerdragon-block06-v1 --source "TwDemosMain/block-06 @ac5e545" --threads 6 [--spill-dir DIR]
 
 ddnet-ai dataset info <dir> --verify       # отчёт + проверка sha256 чанков
 ddnet-ai dataset show <dir> <sha-prefix> --tick T --window 30   # кадры вокруг попадания из отчёта
@@ -81,6 +90,7 @@ for sample in reader.samples(&filter) {
 
 ```bash
 cargo test -p ddai-dataset            # юнит-тесты и сквозные тесты на синтетических данных
+cargo test -p ddai-dataset --release --test e2e_synthetic -- --ignored --nocapture stress   # пик памяти от длины демки
 ```
 
 Реальные демки в тестах не используются.

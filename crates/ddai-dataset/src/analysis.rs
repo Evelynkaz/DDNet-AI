@@ -10,6 +10,7 @@ use ddai_physics::map::{MapData, TILE_DFREEZE, TILE_FREEZE, TILE_NOHOOK, TILE_SO
 
 use crate::config::Config;
 use crate::ingest::KillEvent;
+use crate::store::{FrameReader, FrameStore, Item};
 use crate::types::{CharRec, FrameRec, char_flags};
 
 pub const HOOK_GRABBED: i8 = 5;
@@ -229,34 +230,64 @@ pub struct Attributed {
     pub killed: bool,
 }
 
-/// The timeline all extraction runs over.
+/// The timeline all extraction runs over. The frames live in a [`FrameStore`] (spilled to a
+/// temporary file, task 8.4d) and are read through a small page cache: every method below touches
+/// a frame neighbourhood, never the whole timeline, so the resident size does not depend on the
+/// length of the demo.
 pub struct Timeline<'a> {
     pub cfg: &'a Config,
-    pub frames: &'a [FrameRec],
     pub kills: &'a [KillEvent],
     pub tiles: Tiles<'a>,
     map: &'a MapData,
     /// The map's collision, built on first use (only the ballistic counterfactuals need it).
     collision: std::sync::OnceLock<Collision<f32>>,
-    /// Per frame: label -> slot.
-    by_label: Vec<HashMap<u16, usize>>,
+    store: &'a FrameStore,
+    reader: FrameReader<'a>,
 }
 
 impl<'a> Timeline<'a> {
-    pub fn new(cfg: &'a Config, frames: &'a [FrameRec], kills: &'a [KillEvent], map: &'a MapData) -> Self {
-        let by_label = frames
-            .iter()
-            .map(|f| f.chars.iter().enumerate().map(|(i, c)| (c.player, i)).collect())
-            .collect();
+    pub fn new(cfg: &'a Config, store: &'a FrameStore, kills: &'a [KillEvent], map: &'a MapData) -> Self {
         Timeline {
             cfg,
-            frames,
             kills,
             tiles: Tiles::new(map),
             map,
             collision: std::sync::OnceLock::new(),
-            by_label,
+            store,
+            reader: store.reader(),
         }
+    }
+
+    /// Like [`Timeline::new`] with a custom page-cache size (tests).
+    pub fn with_cache(
+        cfg: &'a Config,
+        store: &'a FrameStore,
+        kills: &'a [KillEvent],
+        map: &'a MapData,
+        cache_pages: usize,
+    ) -> Self {
+        let mut tl = Self::new(cfg, store, kills, map);
+        tl.reader = store.reader_with_cache(cache_pages);
+        tl
+    }
+
+    /// Pages decoded from the spill file so far (cache misses).
+    pub fn page_loads(&self) -> u64 {
+        self.reader.page_loads()
+    }
+
+    /// Number of frames.
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.store.is_empty()
+    }
+
+    /// Frame `k` (keeps its page alive while held).
+    pub fn frame(&self, k: usize) -> Item<FrameRec> {
+        self.reader.get(k)
     }
 
     /// The map's collision (built once, on first use).
@@ -265,27 +296,35 @@ impl<'a> Timeline<'a> {
     }
 
     pub fn slot(&self, k: usize, label: u16) -> Option<usize> {
-        self.by_label.get(k)?.get(&label).copied()
+        if k >= self.len() {
+            return None;
+        }
+        self.frame(k).slot_of(label)
     }
 
-    pub fn ch(&self, k: usize, label: u16) -> Option<&CharRec> {
-        let s = self.slot(k, label)?;
-        self.frames.get(k)?.chars.get(s)
+    /// The character `label` in frame `k`, by value (`CharRec` is `Copy`).
+    pub fn ch(&self, k: usize, label: u16) -> Option<CharRec> {
+        if k >= self.len() {
+            return None;
+        }
+        self.frame(k).by_label(label).copied()
     }
 
     pub fn tick(&self, k: usize) -> i32 {
-        self.frames[k].tick
+        self.store.tick(k)
     }
 
     /// Frames `k` and `k + 1` are one decision step apart.
     pub fn contiguous(&self, k: usize) -> bool {
-        k + 1 < self.frames.len() && self.frames[k + 1].tick - self.frames[k].tick == self.cfg.decision_ticks
+        k + 1 < self.len() && self.tick(k + 1) - self.tick(k) == self.cfg.decision_ticks
     }
 
     /// Label of the character with client id `id` in frame `k`.
     pub fn label_of_id(&self, k: usize, id: i32) -> Option<u16> {
-        self.frames
-            .get(k)?
+        if k >= self.len() {
+            return None;
+        }
+        self.frame(k)
             .chars
             .iter()
             .find(|c| i32::from(c.id) == id)
@@ -294,7 +333,7 @@ impl<'a> Timeline<'a> {
 
     /// Frame index of the last frame with `tick <= t`.
     pub fn frame_at_or_before(&self, t: i32) -> Option<usize> {
-        let p = self.frames.partition_point(|f| f.tick <= t);
+        let p = self.store.ticks().partition_point(|&f| f <= t);
         p.checked_sub(1)
     }
 
@@ -315,8 +354,9 @@ impl<'a> Timeline<'a> {
     /// Whether `label` is frozen in any frame with `from_tick < tick <= from_tick + window`
     /// (binary search for the frame range: detectors call this once per event).
     pub fn frozen_within(&self, label: u16, from_tick: i32, window: i32) -> bool {
-        let lo = self.frames.partition_point(|f| f.tick <= from_tick);
-        let hi = self.frames.partition_point(|f| f.tick <= from_tick + window);
+        let ticks = self.store.ticks();
+        let lo = ticks.partition_point(|&f| f <= from_tick);
+        let hi = ticks.partition_point(|&f| f <= from_tick + window);
         (lo..hi).any(|k| self.ch(k, label).is_some_and(|c| c.frozen()))
     }
 }
@@ -324,15 +364,17 @@ impl<'a> Timeline<'a> {
 /// All freeze entries: frozen at `k`, present and not frozen at `k - 1` (consecutive frames).
 pub fn freeze_entries(tl: &Timeline<'_>) -> Vec<FreezeEntry> {
     let mut out = Vec::new();
-    for k in 1..tl.frames.len() {
+    for k in 1..tl.len() {
         if !tl.contiguous(k - 1) {
             continue;
         }
-        for c in &tl.frames[k].chars {
+        let fk = tl.frame(k);
+        let fprev = tl.frame(k - 1);
+        for c in &fk.chars {
             if !c.frozen() {
                 continue;
             }
-            match tl.ch(k - 1, c.player) {
+            match fprev.by_label(c.player) {
                 Some(p) if !p.frozen() => {}
                 _ => continue,
             }
@@ -340,7 +382,7 @@ pub fn freeze_entries(tl: &Timeline<'_>) -> Vec<FreezeEntry> {
             let mut exit_k = None;
             let mut vanished = false;
             let mut last_frozen_tick = tl.tick(k);
-            for j in (k + 1)..tl.frames.len() {
+            for j in (k + 1)..tl.len() {
                 if !tl.contiguous(j - 1) {
                     break;
                 }
@@ -376,13 +418,19 @@ pub fn hook_episodes(tl: &Timeline<'_>) -> Vec<HookEpisode> {
     let mut out = Vec::new();
     // open[(actor, victim)] = (start_k, last_k)
     let mut open: HashMap<(u16, u16), (usize, usize)> = HashMap::new();
-    for k in 0..tl.frames.len() {
+    for k in 0..tl.len() {
         let mut seen: Vec<(u16, u16)> = Vec::new();
-        for c in &tl.frames[k].chars {
+        let fk = tl.frame(k);
+        for c in &fk.chars {
             if c.hook_state != HOOK_GRABBED || c.hooked_player < 0 {
                 continue;
             }
-            let Some(v) = tl.label_of_id(k, i32::from(c.hooked_player)) else {
+            let Some(v) = fk
+                .chars
+                .iter()
+                .find(|o| i32::from(o.id) == i32::from(c.hooked_player))
+                .map(|o| o.player)
+            else {
                 continue;
             };
             if v == c.player {
@@ -443,26 +491,28 @@ fn unit(v: [i32; 2]) -> (f32, f32) {
 pub fn hammer_hits(tl: &Timeline<'_>) -> Vec<Hit> {
     let tc = &tl.cfg.technique;
     let mut out = Vec::new();
-    for k in 1..tl.frames.len() {
+    for k in 1..tl.len() {
         if !tl.contiguous(k - 1) {
             continue;
         }
-        for a in &tl.frames[k].chars {
+        let fk = tl.frame(k);
+        let fprev = tl.frame(k - 1);
+        for a in &fk.chars {
             if !a.has(char_flags::FIRED) || a.weapon != WEAPON_HAMMER || a.frozen() {
                 continue;
             }
-            let Some(a0) = tl.ch(k - 1, a.player) else { continue };
+            let Some(a0) = fprev.by_label(a.player) else { continue };
             if a0.frozen() {
                 continue;
             }
             let (ux, uy) = unit(a.aim);
             let (hx, hy) = (a0.pos[0] + 21.0 * ux, a0.pos[1] + 21.0 * uy);
             let mut best: Option<(f32, &CharRec, &CharRec)> = None;
-            for v in &tl.frames[k].chars {
+            for v in &fk.chars {
                 if v.player == a.player {
                     continue;
                 }
-                let Some(v0) = tl.ch(k - 1, v.player) else { continue };
+                let Some(v0) = fprev.by_label(v.player) else { continue };
                 let d = ((v0.pos[0] - hx).powi(2) + (v0.pos[1] - hy).powi(2)).sqrt();
                 if d > tc.hammer_reach_px || best.is_some_and(|(bd, _, _)| d >= bd) {
                     continue;
@@ -553,6 +603,19 @@ pub(crate) mod fixtures {
     //! Frame builders for synthetic trajectories.
     use super::*;
 
+    /// A store of `frames` that lives for the rest of the test process (a `Timeline` borrows its
+    /// store; leaking one small temporary store per test keeps the tests readable).
+    pub fn leak_store(frames: &[FrameRec]) -> &'static FrameStore {
+        Box::leak(Box::new(FrameStore::from_frames(frames).expect("spill file")))
+    }
+
+    /// Like [`leak_store`] with tiny pages, so that neighbouring frames are often on different pages.
+    pub fn leak_store_paged(frames: &[FrameRec], page_len: usize) -> &'static FrameStore {
+        Box::leak(Box::new(
+            FrameStore::from_frames_paged(frames, page_len).expect("spill file"),
+        ))
+    }
+
     pub fn ch(id: u8, player: u16, x: f32, y: f32) -> CharRec {
         CharRec {
             id,
@@ -606,8 +669,8 @@ mod tests {
     use super::*;
     use crate::testutil::arena_with_pit;
 
-    fn tl_of<'a>(cfg: &'a Config, frames: &'a [FrameRec], kills: &'a [KillEvent], map: &'a MapData) -> Timeline<'a> {
-        Timeline::new(cfg, frames, kills, map)
+    fn tl_of<'a>(cfg: &'a Config, frames: &[FrameRec], kills: &'a [KillEvent], map: &'a MapData) -> Timeline<'a> {
+        Timeline::new(cfg, leak_store(frames), kills, map)
     }
 
     #[test]
@@ -751,7 +814,7 @@ mod tests {
         let thrown = with_vel(ch(1, 2, 146.0, 92.0), 6.7, -8.4);
         let hits = |a1: CharRec, a0: CharRec, v1: CharRec| {
             let frames = vec![frame(10, vec![a0, v0]), frame(12, vec![a1, v1])];
-            hammer_hits(&Timeline::new(&cfg, &frames, &[], &map)).len()
+            hammer_hits(&tl_of(&cfg, &frames, &[], &map)).len()
         };
         assert_eq!(hits(swing, ch(0, 1, 100.0, 100.0), thrown), 1);
         // A frozen attacker cannot fire: at k or at k-1.

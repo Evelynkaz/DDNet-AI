@@ -58,8 +58,8 @@ pub const TICK_RATE: f32 = 50.0;
 pub fn compute(tl: &Timeline<'_>, attributed: &[Attributed]) -> BTreeMap<u16, PlayerSkill> {
     let cfg = tl.cfg;
     let mut out: BTreeMap<u16, PlayerSkill> = BTreeMap::new();
-    for f in tl.frames {
-        for c in &f.chars {
+    for k in 0..tl.len() {
+        for c in &tl.frame(k).chars {
             let p = out.entry(c.player).or_insert_with(|| PlayerSkill {
                 player: c.player,
                 ..Default::default()
@@ -214,7 +214,7 @@ mod tests {
             victim: 1,
             weapon: -1,
         }];
-        let tl = Timeline::new(&cfg, &frames, &kills, &map);
+        let tl = Timeline::new(&cfg, leak_store(&frames), &kills, &map);
         let at = attribute(&tl, &freeze_entries(&tl), &hook_episodes(&tl), &[]);
         let sk = compute(&tl, &at);
         let a = &sk[&1];

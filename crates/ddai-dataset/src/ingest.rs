@@ -135,54 +135,127 @@ pub fn snapshot_to_frame(tick: i32, snapshot: &Snapshot) -> Frame {
     }
 }
 
-/// Walks the demo. Never panics; a decode error stops the walk and is reported in the result.
-pub fn ingest(demo: &Demo<'_>) -> Ingested {
-    let mut out = Ingested::default();
-    let mut anon = Anonymizer::new();
-    let mut prev: Option<Arc<Snapshot>> = None;
-    let mut tune = DEFAULT_TUNE_PARAMS;
-    for tick in demo.ticks() {
-        let tick = match tick {
-            Ok(t) => t,
-            Err(e) => {
-                out.decode_error = Some(e.to_string());
-                break;
-            }
-        };
-        let mut kills_here = Vec::new();
-        for msg in &tick.messages {
-            match msg {
-                Msg::TuneParams(t) => tune = *t,
-                Msg::Game(ddai_net::generated::messages::GameMsg::SvKillMsg(k)) => {
-                    kills_here.push(KillEvent {
-                        tick: tick.tick,
-                        killer: k.killer,
-                        victim: k.victim,
-                        weapon: k.weapon,
-                    });
+/// One fresh snapshot of a demo, anonymised, with the tuning in force.
+pub type IngestedFrame = (Frame, TuneParams);
+
+/// Walks the demo one fresh snapshot at a time (constant memory: the demo's bytes aside, only the
+/// previous snapshot, the anonymiser state and the kill list are kept). Never panics; a decode
+/// error ends the stream and is reported in [`FrameSource::decode_error`]. The counters and
+/// `kills` are complete once the iterator is exhausted.
+pub struct FrameSource<'d> {
+    ticks: ddai_demo::TickIter<'d>,
+    anon: Anonymizer,
+    prev: Option<Arc<Snapshot>>,
+    tune: TuneParams,
+    done: bool,
+    /// Every kill message seen so far, in order.
+    pub kills: Vec<KillEvent>,
+    /// Snapshots that were replays of the previous one (skipped).
+    pub repeated_snapshots: usize,
+    /// A fatal decode error that ended the demo early (the frames before it are kept).
+    pub decode_error: Option<String>,
+    /// Frames yielded whose tuning differed from DDNet's defaults ([`tune_is_default`]).
+    pub tune_nondefault_frames: usize,
+    /// Frames yielded whose tuning differed in a movement-relevant field ([`tune_moves_differently`]).
+    pub tune_movement_frames: usize,
+}
+
+impl<'d> FrameSource<'d> {
+    pub fn new(demo: &Demo<'d>) -> Self {
+        FrameSource {
+            ticks: demo.ticks(),
+            anon: Anonymizer::new(),
+            prev: None,
+            tune: DEFAULT_TUNE_PARAMS,
+            done: false,
+            kills: Vec::new(),
+            repeated_snapshots: 0,
+            decode_error: None,
+            tune_nondefault_frames: 0,
+            tune_movement_frames: 0,
+        }
+    }
+}
+
+impl Iterator for FrameSource<'_> {
+    type Item = IngestedFrame;
+
+    fn next(&mut self) -> Option<IngestedFrame> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let tick = match self.ticks.next() {
+                None => {
+                    self.done = true;
+                    return None;
                 }
-                _ => {}
+                Some(Ok(t)) => t,
+                Some(Err(e)) => {
+                    self.decode_error = Some(e.to_string());
+                    self.done = true;
+                    return None;
+                }
+            };
+            for msg in &tick.messages {
+                match msg {
+                    Msg::TuneParams(t) => self.tune = *t,
+                    Msg::Game(ddai_net::generated::messages::GameMsg::SvKillMsg(k)) => {
+                        self.kills.push(KillEvent {
+                            tick: tick.tick,
+                            killer: k.killer,
+                            victim: k.victim,
+                            weapon: k.weapon,
+                        });
+                    }
+                    _ => {}
+                }
             }
+            let Some(snap) = &tick.snapshot else { continue };
+            let fresh = self.prev.as_ref().is_none_or(|p| !Arc::ptr_eq(p, snap));
+            self.prev = Some(Arc::clone(snap));
+            if !fresh {
+                self.repeated_snapshots += 1;
+                continue;
+            }
+            let mut frame = snapshot_to_frame(tick.tick, snap);
+            self.anon.anonymize_frame(&mut frame);
+            if !tune_is_default(&self.tune) {
+                self.tune_nondefault_frames += 1;
+            }
+            if tune_moves_differently(&self.tune) {
+                self.tune_movement_frames += 1;
+            }
+            return Some((frame, self.tune));
         }
-        out.kills.extend(kills_here);
-        let Some(snap) = &tick.snapshot else { continue };
-        let fresh = prev.as_ref().is_none_or(|p| !Arc::ptr_eq(p, snap));
-        prev = Some(Arc::clone(snap));
-        if !fresh {
-            out.repeated_snapshots += 1;
-            continue;
-        }
-        let mut frame = snapshot_to_frame(tick.tick, snap);
-        anon.anonymize_frame(&mut frame);
+    }
+}
+
+impl Ingested {
+    /// The frames with their tuning. `tunes` is aligned with `frames`; a missing entry means the
+    /// defaults (never a silent truncation of the frames).
+    pub fn frames_with_tunes(&self) -> impl Iterator<Item = IngestedFrame> + '_ {
+        self.frames
+            .iter()
+            .enumerate()
+            .map(|(k, f)| (f.clone(), self.tunes.get(k).copied().unwrap_or(DEFAULT_TUNE_PARAMS)))
+    }
+}
+
+/// Walks the whole demo into memory. Only for tests and small tools: the pipeline streams
+/// ([`FrameSource`]) so that memory does not grow with the length of the demo.
+pub fn ingest(demo: &Demo<'_>) -> Ingested {
+    let mut src = FrameSource::new(demo);
+    let mut out = Ingested::default();
+    for (frame, tune) in &mut src {
         out.frames.push(frame);
-        if !tune_is_default(&tune) {
-            out.tune_nondefault_frames += 1;
-        }
-        if tune_moves_differently(&tune) {
-            out.tune_movement_frames += 1;
-        }
         out.tunes.push(tune);
     }
+    out.kills = src.kills;
+    out.repeated_snapshots = src.repeated_snapshots;
+    out.decode_error = src.decode_error;
+    out.tune_nondefault_frames = src.tune_nondefault_frames;
+    out.tune_movement_frames = src.tune_movement_frames;
     out
 }
 
@@ -194,42 +267,58 @@ pub fn label_number(name: &str) -> Option<u16> {
         .and_then(|n| u16::try_from(n).ok())
 }
 
-/// Per-frame `(client id -> label number)` maps for an anonymised frame list. A character whose
+/// Carries the `(client id -> label number)` map from frame to frame: a character whose
 /// `ClientInfo` is missing in a frame keeps the label it had in the previous frame; one that never
 /// had any gets a label above `u16::MAX / 2` so it can never collide with an anonymiser label.
-pub fn labels(frames: &[Frame]) -> (Vec<Vec<(i32, u16)>>, usize) {
-    let mut carried: std::collections::HashMap<i32, u16> = std::collections::HashMap::new();
-    let mut missing = 0usize;
-    let mut out = Vec::with_capacity(frames.len());
-    for frame in frames {
+#[derive(Debug, Default)]
+pub struct LabelTracker {
+    carried: std::collections::HashMap<i32, u16>,
+    /// Characters that never had a label of their own.
+    pub missing: usize,
+}
+
+impl LabelTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `(client id, label number)` of every character of `frame`, in the frame's order (empty for
+    /// a frame that is not a snapshot).
+    pub fn push(&mut self, frame: &Frame) -> Vec<(i32, u16)> {
         let Frame::Snapshot {
             characters, players, ..
         } = frame
         else {
-            out.push(Vec::new());
-            continue;
+            return Vec::new();
         };
         for p in players {
             if let Some(n) = p.client_info.as_ref().and_then(|ci| label_number(&ci.name)) {
-                carried.insert(p.id, n);
+                self.carried.insert(p.id, n);
             }
         }
         let mut row = Vec::with_capacity(characters.len());
         for c in characters {
-            let n = match carried.get(&c.id) {
+            let n = match self.carried.get(&c.id) {
                 Some(&n) => n,
                 None => {
-                    missing += 1;
+                    self.missing += 1;
                     let n = 0x8000u16.saturating_add(u16::try_from(c.id.clamp(0, 0x7f00)).unwrap_or(0));
-                    carried.insert(c.id, n);
+                    self.carried.insert(c.id, n);
                     n
                 }
             };
             row.push((c.id, n));
         }
-        out.push(row);
+        row
     }
-    (out, missing)
+}
+
+/// Per-frame `(client id -> label number)` maps for an anonymised frame list (see
+/// [`LabelTracker`]), and the number of characters that never had a label.
+pub fn labels(frames: &[Frame]) -> (Vec<Vec<(i32, u16)>>, usize) {
+    let mut tracker = LabelTracker::new();
+    let out = frames.iter().map(|f| tracker.push(f)).collect();
+    (out, tracker.missing)
 }
 
 #[cfg(test)]

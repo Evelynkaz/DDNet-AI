@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{Config, hex};
+use crate::demo::DemoOutput;
 use crate::skill::RankRow;
 use crate::types::{Chunk, FORMAT_VERSION, FrameRec, ReplayClass, SampleRec, SkillBucket};
 
@@ -40,6 +41,15 @@ pub enum DatasetError {
     #[error("i/o error on {path}: {source}")]
     Io {
         path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// An i/o error on a demo file or a directory of the demo archive. File and directory names in
+    /// the archive carry nicknames, so the error names the demo by its position (`what`), never by
+    /// its path.
+    #[error("i/o error on {what}: {source}")]
+    Demo {
+        what: String,
         #[source]
         source: std::io::Error,
     },
@@ -143,6 +153,55 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+/// Counters over the samples of one demo, by skill bucket: what the report needs from the samples
+/// without holding them (they are final only once the global ranking has assigned the buckets).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SampleTotals {
+    pub total: u64,
+    pub confident: u64,
+    pub active: u64,
+    pub active_confident: u64,
+    pub next_fresh: u64,
+    pub frozen_actor: u64,
+    pub tagged: u64,
+    /// By skill bucket (indexed by [`SkillBucket`] as `u8`).
+    pub by_skill: [u64; 4],
+    pub confident_by_skill: [u64; 4],
+    /// Samples carrying each technique's tag.
+    pub by_technique: std::collections::BTreeMap<crate::tags::Technique, u64>,
+    /// Frames with at least one confident sample.
+    pub usable_frames: u64,
+}
+
+impl SampleTotals {
+    fn add(&mut self, s: &SampleRec, frozen_actor: bool, bucket: SkillBucket) {
+        self.total += 1;
+        self.by_skill[bucket as usize] += 1;
+        if s.confident() {
+            self.confident += 1;
+            self.confident_by_skill[bucket as usize] += 1;
+        }
+        if s.active() {
+            self.active += 1;
+            if s.confident() {
+                self.active_confident += 1;
+            }
+        }
+        if s.next_fresh() {
+            self.next_fresh += 1;
+        }
+        if frozen_actor {
+            self.frozen_actor += 1;
+        }
+        if s.tags != 0 {
+            self.tagged += 1;
+        }
+        for t in crate::tags::techniques_in(s.tags) {
+            *self.by_technique.entry(t).or_default() += 1;
+        }
+    }
+}
+
 /// Streams chunks into a dataset directory.
 pub struct DatasetWriter {
     dir: PathBuf,
@@ -188,6 +247,59 @@ impl DatasetWriter {
             sample_lo = sample_hi;
         }
         Ok(())
+    }
+
+    /// Writes one processed demo chunk by chunk, reading its frames and tag-less samples back from
+    /// the demo's spill pages (task 8.4d): at most `chunk_frames` frames are in memory at a time.
+    /// The tag bits (from the demo's tag windows) and the skill bucket (`bucket_of(player label)`)
+    /// are filled in here. Returns the sample counters of the demo for the report.
+    pub fn write_demo_output(
+        &mut self,
+        demo: u32,
+        out: &DemoOutput,
+        bucket_of: &dyn Fn(u16) -> SkillBucket,
+    ) -> Result<SampleTotals, DatasetError> {
+        let frames_r = out.frames.reader();
+        let samples_r = out.samples.reader();
+        let mut sweeper = out.tag_sweeper();
+        let mut totals = SampleTotals::default();
+        let n = out.frame_count;
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + self.chunk_frames).min(n);
+            let mut frames = Vec::with_capacity(end - start);
+            let mut samples = Vec::new();
+            for k in start..end {
+                let f = frames_r.get(k);
+                let bits = sweeper.bits(&f);
+                let mut usable = false;
+                for s in samples_r.get(k).iter() {
+                    let c = &f.chars[s.slot as usize];
+                    let bucket = bucket_of(c.player);
+                    let rec = SampleRec {
+                        frame: (k - start) as u32,
+                        tags: bits[s.slot as usize],
+                        skill: bucket as u8,
+                        ..*s
+                    };
+                    totals.add(&rec, c.frozen(), bucket);
+                    usable |= rec.confident();
+                    samples.push(rec);
+                }
+                if usable {
+                    totals.usable_frames += 1;
+                }
+                frames.push((*f).clone());
+            }
+            self.write_chunk(&Chunk {
+                format_version: FORMAT_VERSION,
+                demo,
+                frames,
+                samples,
+            })?;
+            start = end;
+        }
+        Ok(totals)
     }
 
     fn write_chunk(&mut self, chunk: &Chunk) -> Result<(), DatasetError> {

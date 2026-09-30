@@ -13,8 +13,18 @@
 //!
 //! The `Action` attached to the *observation at `k-1`* is the input of that interval, i.e. the
 //! decision taken at snapshot `k-1` and held until the next snapshot.
+//!
+//! **Streaming (task 8.4d).** [`build_stream`] takes the anonymised frames one at a time and hands
+//! every finished frame (with the steps of the interval that follows it) to a sink; memory is
+//! constant in the length of the demo. Everything above is causal except the input reconstruction:
+//! the recorder registers a fire event only when a character's dead-reckoning tick advances (a
+//! stale core can delay that by minutes: 1000 s seen), and its `(client id, tick)` lookup gives
+//! the *last* registration of a pair over the whole demo. So a first, cheap pass over the demo
+//! ([`recon_table`]: decode, anonymise, reconstruct - no physics) collects exactly those two
+//! whole-demo facts in a [`ReconTable`] (the fire ticks of every track, about 4 bytes per fire,
+//! and the few re-registered pairs), and the second pass ([`build_stream`]) is then causal.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use ddai_net::generated::enums::characterflagflag as cf;
@@ -24,11 +34,11 @@ use ddai_physics::core::{CharacterCore, PlayerInput};
 use ddai_physics::map::MapData;
 use ddai_physics::world::{TickInput, World};
 use ddai_recorder::format::Frame;
-use ddai_recorder::reconstruct::{PlayerReconstruction, reconstruct};
+use ddai_recorder::reconstruct::{CharacterSample, StreamReconstructor};
 use ddai_world::{LiveWorld, character_observation};
 
 use crate::config::Config;
-use crate::ingest::{self, Ingested};
+use crate::ingest::{Ingested, LabelTracker};
 use crate::replay::{Channel, Diff, ReplayStats, diff};
 use crate::types::{ActionRec, CharRec, FrameRec, ReplayClass, char_flags};
 
@@ -47,7 +57,8 @@ pub struct StepInfo {
     pub next_fresh: bool,
 }
 
-/// Output of [`build`].
+/// Output of [`build`]: the whole demo in memory (tests and small inputs; the pipeline streams
+/// through [`build_stream`]).
 #[derive(Debug, Clone, Default)]
 pub struct Built {
     pub frames: Vec<FrameRec>,
@@ -55,8 +66,29 @@ pub struct Built {
     /// snapshot for that character.
     pub steps: Vec<Vec<Option<StepInfo>>>,
     /// Replay statistics per anonymous player label.
-    pub replay: std::collections::BTreeMap<u16, ReplayStats>,
+    pub replay: BTreeMap<u16, ReplayStats>,
     pub counters: BuildCounters,
+    pub summary: BuildSummary,
+}
+
+/// One finished frame: the record and, for each of its characters, what is known about the
+/// interval that follows it (see [`StepInfo`]).
+#[derive(Debug, Clone)]
+pub struct FrameOut {
+    pub frame: FrameRec,
+    pub steps: Vec<Option<StepInfo>>,
+}
+
+/// What [`build_stream`] returns besides the frames.
+#[derive(Debug, Clone, Default)]
+pub struct BuildSummary {
+    /// Replay statistics per anonymous player label.
+    pub replay: BTreeMap<u16, ReplayStats>,
+    pub counters: BuildCounters,
+    /// Frames emitted.
+    pub frames: usize,
+    /// Facts from the reconstruction pass.
+    pub recon: ReconStats,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -141,9 +173,17 @@ struct Derived {
     fire_at: Vec<bool>,
 }
 
-fn derive(rec: Option<(&PlayerReconstruction, usize)>, prev_tick: i32, tick: i32) -> Derived {
+/// What the reconstructor knows about one character of a frame: its current sample and the fire
+/// events of its track.
+#[derive(Clone, Copy)]
+struct Recon<'a> {
+    sample: &'a CharacterSample,
+    fire_ticks: &'a [i32],
+}
+
+fn derive(rec: Option<Recon<'_>>, prev_tick: i32, tick: i32) -> Derived {
     let n = (tick - prev_tick).max(0) as usize;
-    let Some((r, si)) = rec else {
+    let Some(r) = rec else {
         let action = ActionRec {
             direction: 0,
             jump: false,
@@ -158,8 +198,8 @@ fn derive(rec: Option<(&PlayerReconstruction, usize)>, prev_tick: i32, tick: i32
             fire_at: vec![false; n],
         };
     };
-    let est = &r.inputs[si];
-    let traj = &r.trajectory[si];
+    let est = &r.sample.input;
+    let traj = &r.sample.trajectory;
     let fresh = est.tick > prev_tick;
     let jump = (traj.jumped & 1) != 0 || (fresh && est.jump);
     // `attack_tick` is the world tick *before* the step in which the press was applied
@@ -318,40 +358,241 @@ struct Replayed {
     neighbours: Vec<Vec<usize>>,
 }
 
-/// Builds states, inputs and replay for a whole demo.
-pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
-    let frames_in = &ing.frames;
-    let recs = reconstruct(frames_in);
-    let mut lookup: HashMap<(i32, i32), (usize, usize)> = HashMap::new();
-    for (ri, r) in recs.iter().enumerate() {
-        for (si, s) in r.trajectory.iter().enumerate() {
-            lookup.insert((r.client_id, s.tick), (ri, si));
-        }
+/// How long [`recon_table`] remembers a registered `(client id, character tick)` pair to notice a
+/// second registration of it (65 536 ticks, 22 min). Measured on the real archives: the longest gap
+/// between two registrations of a pair is 132 ticks, and a character's tick is at most ~150 ticks
+/// old when it is registered (the server refreshes a core at least every 3 s), so the window is
+/// more than 400x what is needed. The assumption is checked, not just made: a second registration
+/// of a pair happens at a snapshot no later than `registration tick - character tick` ticks after
+/// the first (a character's tick is never ahead of its snapshot), so if
+/// [`ReconStats::max_tick_age`] stays within the window no repetition can have been missed;
+/// [`ReconStats::beyond_window`] counts registrations that break that (0 on all real data).
+pub const PAIR_WINDOW_TICKS: i32 = 1 << 16;
+
+/// Facts about the input reconstruction of a demo.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReconStats {
+    /// Fire events registered.
+    pub fire_events: u64,
+    /// The longest time, in ticks, between a fire event and the snapshot that revealed it.
+    pub max_fire_delay_ticks: i32,
+    /// `(client id, character tick)` pairs registered more than once (a slot's stint changed while
+    /// its stale core kept the tick).
+    pub repeated_pairs: u64,
+    /// The largest age, in ticks, of a character's tick at the snapshot that registered it.
+    pub max_tick_age: i32,
+    /// Registrations older than [`PAIR_WINDOW_TICKS`]: each could hide an unmerged repetition.
+    pub beyond_window: u64,
+}
+
+/// What the whole-demo `reconstruct` knows that a causal pass cannot: the complete fire list of
+/// every track (`fire_ticks` is final only at the end of the demo) and, for each
+/// `(client id, character tick)` pair that was registered more than once, the last registration
+/// (the batch lookup overwrites, so every frame using the pair gets the last one).
+#[derive(Debug, Default)]
+pub struct ReconTable {
+    fires: HashMap<(i32, u32), Vec<i32>>,
+    last_registration: HashMap<(i32, i32), CharacterSample>,
+    pub stats: ReconStats,
+}
+
+impl ReconTable {
+    /// The sample the whole-demo reconstruction would hand each character of a frame: the one the
+    /// streaming reconstructor just produced, unless its `(client id, character tick)` pair was
+    /// registered again later.
+    fn resolve(
+        &self,
+        characters: &[ddai_recorder::format::CharacterRecord],
+        samples: Vec<CharacterSample>,
+    ) -> Vec<CharacterSample> {
+        characters
+            .iter()
+            .zip(samples)
+            .map(|(c, s)| {
+                self.last_registration
+                    .get(&(c.id, c.character.tick))
+                    .copied()
+                    .unwrap_or(s)
+            })
+            .collect()
     }
-    let (label_rows, missing) = ingest::labels(frames_in);
-    let mut out = Built::default();
-    out.counters.chars_without_info = missing as u64;
 
-    let mut live = LiveWorld::new(Arc::clone(map), -1, 0);
-    let mut scratch = live.base_world().clone();
+    fn fire_ticks(&self, key: (i32, u32)) -> &[i32] {
+        self.fires.get(&key).map_or(&[], Vec::as_slice)
+    }
+}
 
-    let mut last_weapon: HashMap<u16, i32> = HashMap::new();
-    let mut frozen_since: HashMap<u16, i32> = HashMap::new();
-    // Tick and index (into `out.frames`) of frame k-1.
-    let mut prev: Option<(i32, usize)> = None;
-
-    for (k, frame) in frames_in.iter().enumerate() {
-        let Frame::Snapshot { tick, characters, .. } = frame else {
+/// First pass: decode, anonymise and reconstruct the demo, keeping only the [`ReconTable`]. Memory:
+/// the table (fire ticks) plus a window of recently registered pairs.
+pub fn recon_table(frames: impl Iterator<Item = (Frame, ddai_net::tuning::TuneParams)>) -> ReconTable {
+    let mut recon = StreamReconstructor::new();
+    let mut table = ReconTable::default();
+    // Tick of the last registration of each pair within PAIR_WINDOW_TICKS, and the registrations
+    // in order of age.
+    let mut recent: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut queue: VecDeque<(i32, (i32, i32))> = VecDeque::new();
+    for (frame, _) in frames {
+        let Frame::Snapshot { tick, characters, .. } = &frame else {
             continue;
         };
         let tick = *tick;
-        let labels = &label_rows[k];
+        let pushed = recon.push(&frame, i32::MIN);
+        for &(_, t) in &pushed.fires {
+            table.stats.fire_events += 1;
+            table.stats.max_fire_delay_ticks = table.stats.max_fire_delay_ticks.max(tick - t);
+        }
+        for (c, sample) in characters.iter().zip(&pushed.samples) {
+            if !sample.registered {
+                continue;
+            }
+            let pair = (c.id, c.character.tick);
+            let age = tick - c.character.tick;
+            table.stats.max_tick_age = table.stats.max_tick_age.max(age);
+            if age > PAIR_WINDOW_TICKS {
+                table.stats.beyond_window += 1;
+            }
+            if recent.contains_key(&pair) && table.last_registration.insert(pair, *sample).is_none() {
+                table.stats.repeated_pairs += 1;
+            }
+            recent.insert(pair, tick);
+            queue.push_back((tick, pair));
+        }
+        while queue.front().is_some_and(|&(t, _)| t < tick - PAIR_WINDOW_TICKS) {
+            let (t, pair) = queue.pop_front().expect("front checked");
+            if recent.get(&pair) == Some(&t) {
+                recent.remove(&pair);
+            }
+        }
+    }
+    // The fire lists, complete.
+    table.fires = recon.into_fire_ticks();
+    table
+}
+
+/// Builds states, inputs and replay for a whole in-memory demo (tests and small inputs).
+pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
+    let mut out = Built::default();
+    let frames = || ing.frames_with_tunes();
+    let table = recon_table(frames());
+    let summary = build_stream::<std::convert::Infallible>(cfg, map, &table, frames(), |fo| {
+        out.frames.push(fo.frame);
+        out.steps.push(fo.steps);
+        Ok(())
+    })
+    .unwrap_or_else(|e| match e {});
+    out.replay = summary.replay.clone();
+    out.counters = summary.counters;
+    out.summary = summary;
+    out
+}
+
+/// Second pass: builds states, inputs and replay for a demo, one frame at a time. `frames` yields
+/// the anonymised snapshots (with the tuning in force), the same sequence [`recon_table`] saw;
+/// `sink` receives every finished frame in order. Memory does not depend on the number of frames.
+pub fn build_stream<E>(
+    cfg: &Config,
+    map: &Arc<MapData>,
+    table: &ReconTable,
+    frames: impl Iterator<Item = (Frame, ddai_net::tuning::TuneParams)>,
+    mut sink: impl FnMut(FrameOut) -> Result<(), E>,
+) -> Result<BuildSummary, E> {
+    let mut b = Builder::new(cfg, map);
+    // Nothing older than the current fire is needed from the reconstructor here: the fire lists
+    // come from the table.
+    let mut recon = StreamReconstructor::new();
+    let mut labels = LabelTracker::new();
+    for (frame, tune) in frames {
+        let Frame::Snapshot { characters, .. } = &frame else {
+            continue;
+        };
+        let row = labels.push(&frame);
+        let pushed = recon.push(&frame, i32::MAX);
+        let samples = table.resolve(characters, pushed.samples);
+        b.step(&frame, &row, tune, &samples, table, &mut sink)?;
+    }
+    b.finish(labels.missing as u64, &mut sink).map(|mut s| {
+        s.recon = table.stats;
+        s
+    })
+}
+
+/// The per-frame state of the pipeline.
+struct Builder<'a> {
+    cfg: &'a Config,
+    live: LiveWorld,
+    scratch: World<f32>,
+    last_weapon: HashMap<u16, i32>,
+    frozen_since: HashMap<u16, i32>,
+    /// Tick and record of frame k-1 (its steps are completed when frame k is processed).
+    prev: Option<(i32, FrameRec)>,
+    out: BuildSummary,
+}
+
+impl<'a> Builder<'a> {
+    fn new(cfg: &'a Config, map: &Arc<MapData>) -> Self {
+        let live = LiveWorld::new(Arc::clone(map), -1, 0);
+        let scratch = live.base_world().clone();
+        Builder {
+            cfg,
+            live,
+            scratch,
+            last_weapon: HashMap::new(),
+            frozen_since: HashMap::new(),
+            prev: None,
+            out: BuildSummary::default(),
+        }
+    }
+
+    /// Tick of the newest processed frame (`i32::MIN` before the first).
+    fn last_tick(&self) -> i32 {
+        self.prev.as_ref().map_or(i32::MIN, |(t, _)| *t)
+    }
+
+    /// Completes the last frame (no successor) and returns the totals.
+    fn finish<E>(
+        mut self,
+        chars_without_info: u64,
+        sink: &mut impl FnMut(FrameOut) -> Result<(), E>,
+    ) -> Result<BuildSummary, E> {
+        if let Some((_, rec)) = self.prev.take() {
+            let steps = vec![None; rec.chars.len()];
+            for pc in &rec.chars {
+                self.out.replay.entry(pc.player).or_default().no_next += 1;
+            }
+            sink(FrameOut { frame: rec, steps })?;
+            self.out.frames += 1;
+        }
+        self.out.counters.chars_without_info = chars_without_info;
+        Ok(self.out)
+    }
+
+    /// Processes one frame: `labels` and `samples` are aligned with its characters.
+    fn step<E>(
+        &mut self,
+        frame: &Frame,
+        labels: &[(i32, u16)],
+        tune: ddai_net::tuning::TuneParams,
+        samples: &[CharacterSample],
+        table: &ReconTable,
+        sink: &mut impl FnMut(FrameOut) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let cfg = self.cfg;
+        let Frame::Snapshot { tick, characters, .. } = frame else {
+            return Ok(());
+        };
+        let tick = *tick;
+        let recon_of = |ci: usize| -> Option<Recon<'_>> {
+            samples.get(ci).map(|sample| Recon {
+                sample,
+                fire_ticks: table.fire_ticks(sample.key),
+            })
+        };
 
         // --- replay of the interval [prev_tick, tick) from the state at k-1 (still in `live`) ---
         let mut replayed: Option<Replayed> = None;
-        if let Some((prev_tick, pk)) = prev {
+        if let Some((prev_tick, prev_frame)) = &self.prev {
+            let prev_tick = *prev_tick;
             if tick - prev_tick == cfg.decision_ticks {
-                let prev_frame: &FrameRec = &out.frames[pk];
                 let mut both: Vec<(u8, usize)> = Vec::new();
                 for (slot, pc) in prev_frame.chars.iter().enumerate() {
                     if characters.iter().any(|c| c.id == i32::from(pc.id)) {
@@ -368,18 +609,17 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
                     neighbours: Vec::new(),
                 };
                 for (id, slot) in both {
-                    let c = characters
+                    let ci = characters
                         .iter()
-                        .find(|c| c.id == i32::from(id))
+                        .position(|c| c.id == i32::from(id))
                         .expect("present in both frames");
-                    let rec = lookup.get(&(c.id, c.character.tick)).map(|&(ri, si)| (&recs[ri], si));
                     r.ids.push(id);
                     r.slots.push(slot);
-                    r.derived.push(derive(rec, prev_tick, tick));
+                    r.derived.push(derive(recon_of(ci), prev_tick, tick));
                 }
                 let ticks = cfg.decision_ticks.max(0) as usize;
                 let inputs = interval_inputs(&r.ids, &r.derived, ticks);
-                r.base = run(&mut scratch, live.base_world(), &inputs, &r.ids);
+                r.base = run(&mut self.scratch, self.live.base_world(), &inputs, &r.ids);
                 for ch in Channel::ALL {
                     if !r.derived.iter().any(|d| channel_active(&d.input, ch)) {
                         continue;
@@ -397,7 +637,7 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
                                 .collect()
                         })
                         .collect();
-                    r.ablated[ch as usize] = Some(run(&mut scratch, live.base_world(), &alt, &r.ids));
+                    r.ablated[ch as usize] = Some(run(&mut self.scratch, self.live.base_world(), &alt, &r.ids));
                 }
                 let starts: Vec<[f32; 2]> = r.slots.iter().map(|&s| prev_frame.chars[s].pos).collect();
                 r.neighbours = (0..starts.len())
@@ -411,7 +651,7 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
                     .collect();
                 replayed = Some(r);
             } else {
-                out.counters.gaps += 1;
+                self.out.counters.gaps += 1;
             }
         }
 
@@ -424,14 +664,14 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
                 Some(d) => Some(d),
                 None => {
                     let frozen = infer_freeze(character.weapon);
-                    let since = *frozen_since.entry(label).or_insert(tick);
+                    let since = *self.frozen_since.entry(label).or_insert(tick);
                     if !frozen {
-                        frozen_since.remove(&label);
+                        self.frozen_since.remove(&label);
                     }
                     let active = if frozen {
-                        *last_weapon.get(&label).unwrap_or(&WEAPON_HAMMER)
+                        *self.last_weapon.get(&label).unwrap_or(&WEAPON_HAMMER)
                     } else {
-                        last_weapon.insert(label, character.weapon);
+                        self.last_weapon.insert(label, character.weapon);
                         character.weapon
                     };
                     character.weapon = active;
@@ -453,38 +693,31 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
                 ddnet,
             });
         }
-        let tune = ing
-            .tunes
-            .get(k)
-            .copied()
-            .unwrap_or(ddai_net::tuning::DEFAULT_TUNE_PARAMS);
-        live.on_snapshot(tick, &views, tune, &[], None, None);
-        let world = live.base_world();
+        self.live.on_snapshot(tick, &views, tune, &[], None, None);
+        let world = self.live.base_world();
 
         // --- records for frame k ---
         let mut chars_out: Vec<CharRec> = Vec::with_capacity(characters.len());
-        let prev_tick_for_fire = prev.map_or(i32::MIN, |(t, _)| t);
+        let prev_tick_for_fire = self.last_tick();
+        let had_prev = self.prev.is_some();
         for (ci, c) in characters.iter().enumerate() {
             let Some(obs) = character_observation(world, c.id) else {
                 continue;
             };
             let core = world.cores.get(c.id as u8);
             let label = labels[ci].1;
-            let rec = lookup.get(&(c.id, c.character.tick)).map(|&(ri, si)| (&recs[ri], si));
+            let rec = recon_of(ci);
             let aim = match rec {
-                Some((r, si)) => {
-                    let e = &r.inputs[si];
-                    [e.aim_x, e.aim_y]
-                }
+                Some(r) => [r.sample.input.aim_x, r.sample.input.aim_y],
                 None => [0, -1],
             };
-            let fired = prev.is_some()
-                && rec.is_some_and(|(r, _)| r.fire_ticks.iter().any(|&t| t >= prev_tick_for_fire && t < tick));
+            let fired =
+                had_prev && rec.is_some_and(|r| r.fire_ticks.iter().any(|&t| t >= prev_tick_for_fire && t < tick));
             let fresh = tick - c.character.tick <= 1;
             let mut flags = 0u16;
             if obs.is_frozen {
                 flags |= char_flags::FROZEN;
-                out.counters.frozen_chars += 1;
+                self.out.counters.frozen_chars += 1;
             }
             if obs.is_deep_frozen {
                 flags |= char_flags::DEEP_FROZEN;
@@ -496,24 +729,24 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
                 flags |= char_flags::GROUNDED;
             }
             if let Some(d) = &c.ddnet {
-                out.counters.ext_chars += 1;
+                self.out.counters.ext_chars += 1;
                 let ext_frozen = d.freeze_end != 0 || d.flags & cf::MOVEMENTS_DISABLED != 0;
                 match (ext_frozen, infer_freeze(c.character.weapon)) {
-                    (true, true) => out.counters.conv_both += 1,
-                    (true, false) => out.counters.conv_ext_only += 1,
-                    (false, true) => out.counters.conv_weapon_only += 1,
-                    (false, false) => out.counters.conv_neither += 1,
+                    (true, true) => self.out.counters.conv_both += 1,
+                    (true, false) => self.out.counters.conv_ext_only += 1,
+                    (false, true) => self.out.counters.conv_weapon_only += 1,
+                    (false, false) => self.out.counters.conv_neither += 1,
                 }
             } else {
                 flags |= char_flags::FREEZE_INFERRED;
-                out.counters.inferred_chars += 1;
+                self.out.counters.inferred_chars += 1;
             }
             if fired {
                 flags |= char_flags::FIRED;
             }
             if fresh {
                 flags |= char_flags::FRESH;
-                out.counters.fresh_chars += 1;
+                self.out.counters.fresh_chars += 1;
             }
             if core.is_some_and(|c| c.jumped & 2 != 0) {
                 flags |= char_flags::AIR_JUMP_USED;
@@ -521,7 +754,7 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
             if core.is_some_and(|c| c.jumped & 1 != 0) {
                 flags |= char_flags::JUMP_HELD;
             }
-            out.counters.chars += 1;
+            self.out.counters.chars += 1;
             chars_out.push(CharRec {
                 id: c.id as u8,
                 player: label,
@@ -540,21 +773,20 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
                 aim,
             });
         }
-        out.frames.push(FrameRec { tick, chars: chars_out });
-        out.steps.push(Vec::new());
+        let rec_k = FrameRec { tick, chars: chars_out };
 
-        // --- compare the replay with the state at k, fill steps[k-1] ---
-        if let Some((prev_tick_for_stats, pk)) = prev {
-            let n_prev = out.frames[pk].chars.len();
+        // --- compare the replay with the state at k, complete frame k-1 ---
+        if let Some((prev_tick_for_stats, prev_rec)) = self.prev.take() {
+            let n_prev = prev_rec.chars.len();
             let mut steps: Vec<Option<StepInfo>> = vec![None; n_prev];
             if let Some(r) = replayed {
                 let base = diffs(&r.base, world, &r.ids, cfg.within_px);
                 let ablated: [Option<Vec<Option<Diff>>>; 5] =
                     std::array::from_fn(|i| r.ablated[i].as_ref().map(|c| diffs(c, world, &r.ids, cfg.within_px)));
                 for (i, &slot) in r.slots.iter().enumerate() {
-                    let pc = out.frames[pk].chars[slot];
+                    let pc = prev_rec.chars[slot];
                     let label = pc.player;
-                    let stats = out.replay.entry(label).or_default();
+                    let stats = self.out.replay.entry(label).or_default();
                     let Some(d) = base[i] else {
                         stats.no_next += 1;
                         continue;
@@ -619,28 +851,22 @@ pub fn build(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> Built {
                     });
                 }
                 // Characters of frame k-1 that are absent now.
-                for (slot, pc) in out.frames[pk].chars.iter().enumerate() {
+                for (slot, pc) in prev_rec.chars.iter().enumerate() {
                     if steps[slot].is_none() && !r.slots.contains(&slot) {
-                        out.replay.entry(pc.player).or_default().no_next += 1;
+                        self.out.replay.entry(pc.player).or_default().no_next += 1;
                     }
                 }
             } else {
-                for pc in &out.frames[pk].chars {
-                    out.replay.entry(pc.player).or_default().no_next += 1;
+                for pc in &prev_rec.chars {
+                    self.out.replay.entry(pc.player).or_default().no_next += 1;
                 }
             }
-            out.steps[pk] = steps;
+            sink(FrameOut { frame: prev_rec, steps })?;
+            self.out.frames += 1;
         }
-        prev = Some((tick, out.frames.len() - 1));
+        self.prev = Some((tick, rec_k));
+        Ok(())
     }
-    // The last frame has no successor.
-    if let Some((_, pk)) = prev {
-        out.steps[pk] = vec![None; out.frames[pk].chars.len()];
-        for pc in &out.frames[pk].chars {
-            out.replay.entry(pc.player).or_default().no_next += 1;
-        }
-    }
-    out
 }
 
 /// Direction of the wire angle (1/256 rad) as a nominal-magnitude integer vector.
@@ -1087,6 +1313,121 @@ mod tests {
         assert!(built.steps[0][0].is_none());
         assert!(built.frames[1].chars.is_empty());
         assert!(built.steps[2][0].is_none());
+    }
+
+    /// A pseudo-random recording full of the awkward cases: stale cores (the tick repeats) with an
+    /// `attack_tick` that moves meanwhile, a slot flickering out of `players` (new stint, same stale
+    /// tick: the same `(id, tick)` registered twice), slots reused, characters coming and going.
+    fn awkward_frames(seed: u64, n: usize) -> Vec<Frame> {
+        let mut x = seed;
+        let mut rnd = move |m: u64| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 33) % m
+        };
+        let mut core_tick = [0i32; 5];
+        let mut attack = [0i32; 5];
+        let mut frames = Vec::new();
+        for f in 0..n {
+            let tick = 1000 + 2 * f as i32;
+            let mut characters = Vec::new();
+            let mut players = Vec::new();
+            for id in 0..5usize {
+                if rnd(10) == 0 {
+                    continue; // out of view (and sometimes out of `players`: a new stint)
+                }
+                match rnd(4) {
+                    0 => core_tick[id] = tick,                        // a fresh core
+                    1 => core_tick[id] = core_tick[id].max(tick - 6), // a slightly old one
+                    _ => {}                                           // stale: same tick again
+                }
+                if rnd(5) == 0 {
+                    attack[id] = tick - rnd(4) as i32 - 1;
+                }
+                let mut c = wire_character(core_tick[id].max(1), 100 + 40 * id as i32 + rnd(3) as i32, 300);
+                c.attack_tick = attack[id];
+                c.jumped = rnd(4) as i32;
+                c.hook_state = if rnd(6) == 0 { 4 } else { 0 };
+                characters.push(CharacterRecord {
+                    id: id as i32,
+                    character: c,
+                    ddnet: (rnd(3) != 0).then(|| objects::DDNetCharacter {
+                        flags: cf::WEAPON_HAMMER | cf::WEAPON_GUN,
+                        freeze_end: 0,
+                        jumps: 2,
+                        tele_checkpoint: 0,
+                        strong_weak_id: id as i32,
+                        jumped_total: -1,
+                        ninja_activation_tick: -1,
+                        freeze_start: -1,
+                        target_x: rnd(200) as i32 - 100,
+                        target_y: rnd(200) as i32 - 100,
+                        tune_zone_override: -1,
+                    }),
+                });
+                if rnd(6) != 0 {
+                    players.push(PlayerRecord {
+                        id: id as i32,
+                        info: player_info(id as i32),
+                        client_info: Some(client_info(&format!("player_{}", id + 5 * (rnd(2) as usize)))),
+                        ddnet: None,
+                    });
+                }
+            }
+            frames.push(Frame::Snapshot {
+                tick,
+                characters,
+                players,
+            });
+        }
+        frames
+    }
+
+    /// The streamed reconstruction (table + causal pass) hands every character exactly what the
+    /// whole-demo `reconstruct` + `(client id, tick)` lookup of the original pipeline did.
+    #[test]
+    fn streamed_reconstruction_equals_the_whole_demo_lookup() {
+        let mut repeated = 0;
+        for seed in 1..=40u64 {
+            let frames = awkward_frames(seed, 400);
+            // Reference: the original pipeline's batch reconstruction and lookup.
+            let recs = ddai_recorder::reconstruct::reconstruct(&frames);
+            let mut lookup: HashMap<(i32, i32), (usize, usize)> = HashMap::new();
+            for (ri, r) in recs.iter().enumerate() {
+                for (si, s) in r.trajectory.iter().enumerate() {
+                    lookup.insert((r.client_id, s.tick), (ri, si));
+                }
+            }
+            // Streamed.
+            let table = recon_table(
+                frames
+                    .iter()
+                    .cloned()
+                    .map(|f| (f, ddai_net::tuning::DEFAULT_TUNE_PARAMS)),
+            );
+            repeated += table.stats.repeated_pairs;
+            let mut recon = StreamReconstructor::new();
+            for frame in &frames {
+                let Frame::Snapshot { characters, .. } = frame else {
+                    unreachable!()
+                };
+                let pushed = recon.push(frame, i32::MAX);
+                let samples = table.resolve(characters, pushed.samples);
+                for (c, s) in characters.iter().zip(&samples) {
+                    let &(ri, si) = lookup
+                        .get(&(c.id, c.character.tick))
+                        .expect("every character has a sample");
+                    let r = &recs[ri];
+                    assert_eq!((s.key.0, s.key.1), (r.client_id, r.stint), "seed {seed}");
+                    assert_eq!(s.input, r.inputs[si], "seed {seed}");
+                    assert_eq!(s.trajectory, r.trajectory[si], "seed {seed}");
+                    assert_eq!(table.fire_ticks(s.key), r.fire_ticks.as_slice(), "seed {seed}");
+                }
+            }
+        }
+        assert!(
+            repeated > 0,
+            "the generator must produce re-registered pairs, or this proves nothing"
+        );
     }
 
     #[test]

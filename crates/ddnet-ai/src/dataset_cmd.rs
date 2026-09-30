@@ -52,6 +52,11 @@ pub enum DatasetCommand {
         /// Process only the first N demos (sha256 order); smoke tests.
         #[arg(long)]
         limit: Option<usize>,
+        /// Directory of the temporary spill files: 77 to 760 bytes per frame (few to many players),
+        /// kept until the chunks are written, so the disk peak is the sum over all demos; the files
+        /// are unlinked on creation. Default: the system temporary directory.
+        #[arg(long)]
+        spill_dir: Option<PathBuf>,
     },
     /// Prints the report of a dataset; `--verify` also checks every chunk's sha256.
     Info {
@@ -73,7 +78,15 @@ pub enum DatasetCommand {
         #[arg(long = "player")]
         players: Vec<u16>,
     },
-    /// Finds the local demo file(s) whose sha256 starts with the prefix.
+    /// Audits a dataset for nicknames: searches every output file for every nickname, clan and file
+    /// name found in the demos it was built from. Prints counts only, never the names; exits with an
+    /// error if anything is found.
+    CheckPrivacy {
+        #[arg(long)]
+        demos: PathBuf,
+        dir: PathBuf,
+    },
+    /// Finds the local demo file(s) (prints their paths: file names carry nicknames, keep the output local) whose sha256 starts with the prefix.
     Locate {
         #[arg(long)]
         demos: PathBuf,
@@ -120,6 +133,7 @@ fn run_inner(cmd: DatasetCommand) -> Result<(), String> {
             name,
             source,
             limit,
+            spill_dir,
         } => {
             let opts = Options {
                 demos_dir: demos,
@@ -131,6 +145,7 @@ fn run_inner(cmd: DatasetCommand) -> Result<(), String> {
                 source,
                 limit,
                 top_players: 20,
+                spill_dir,
             };
             let rep = run::from_demos(&opts, &Config::default(), &|m| eprintln!("{m}")).map_err(|e| e.to_string())?;
             println!("{}", report::render(&rep));
@@ -154,6 +169,15 @@ fn run_inner(cmd: DatasetCommand) -> Result<(), String> {
             window,
             players,
         } => show(&dir, &demo, tick, window, &players),
+        DatasetCommand::CheckPrivacy { demos, dir } => {
+            let rep = ddai_dataset::privacy::check(&demos, &dir).map_err(|e| e.to_string())?;
+            print!("{}", ddai_dataset::privacy::render(&rep));
+            if rep.leaks() == 0 {
+                Ok(())
+            } else {
+                Err(format!("{} nickname leaks", rep.leaks()))
+            }
+        }
         DatasetCommand::Locate { demos, prefix } => {
             for f in run::discover(&demos, "demo").map_err(|e| e.to_string())? {
                 let bytes = std::fs::read(&f).map_err(|e| e.to_string())?;

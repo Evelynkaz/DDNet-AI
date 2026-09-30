@@ -16,10 +16,12 @@ pub mod dataset;
 pub mod demo;
 pub mod ingest;
 pub mod pipeline;
+pub mod privacy;
 pub mod replay;
 pub mod report;
 pub mod run;
 pub mod skill;
+pub mod store;
 #[cfg(feature = "test-util")]
 pub mod synth;
 pub mod tags;

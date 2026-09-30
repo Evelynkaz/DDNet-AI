@@ -16,7 +16,7 @@ use crate::dataset::{
     write_json,
 };
 use crate::demo::{self, DemoOutput};
-use crate::ingest;
+use crate::pipeline;
 use crate::report::{self, DemoCounts, Report};
 use crate::skill::RankRow;
 use crate::types::{FORMAT_VERSION, SkillBucket};
@@ -38,6 +38,9 @@ pub struct Options {
     /// Process only the first `n` demos (in sha256 order); for smoke tests.
     pub limit: Option<usize>,
     pub top_players: usize,
+    /// Directory of the temporary spill files (frames and samples of the demos being processed;
+    /// about 0.76 KB per frame on a busy demo, unlinked on creation). `None` = the system temporary directory.
+    pub spill_dir: Option<PathBuf>,
 }
 
 /// Recursively lists `*.demo` files, sorted by path (the order is only used to find files; the
@@ -46,15 +49,11 @@ pub fn discover(dir: &Path, ext: &str) -> Result<Vec<PathBuf>, DatasetError> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let rd = fs::read_dir(&d).map_err(|source| DatasetError::Io {
-            path: d.clone(),
-            source,
-        })?;
+        // Directory names of a demo archive can carry nicknames: errors do not name them.
+        let what = || "a directory below the input directory".to_string();
+        let rd = fs::read_dir(&d).map_err(|source| DatasetError::Demo { what: what(), source })?;
         for e in rd {
-            let e = e.map_err(|source| DatasetError::Io {
-                path: d.clone(),
-                source,
-            })?;
+            let e = e.map_err(|source| DatasetError::Demo { what: what(), source })?;
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
@@ -131,6 +130,43 @@ fn resolve_map(
     })
 }
 
+/// sha256 of a demo file, read in blocks (a demo can be hundreds of MB). `index` is the file's
+/// position in the sorted listing: it stands in for the name in errors (the names carry nicknames).
+fn sha256_file(path: &Path, index: usize) -> Result<String, DatasetError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let io = |source| DatasetError::Demo {
+        what: format!("demo file #{index} (in sorted order)"),
+        source,
+    };
+    let mut file = fs::File::open(path).map_err(io)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf).map_err(io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(crate::config::hex(&hasher.finalize()))
+}
+
+/// The error a panic in a worker becomes: a spill read failure keeps its i/o error, anything else
+/// is reported as an internal error (the panic message itself went to stderr).
+fn panic_error(payload: Box<dyn std::any::Any + Send>, sha_prefix: &str) -> DatasetError {
+    match crate::store::spill_error(payload) {
+        Ok(source) => DatasetError::Io {
+            path: std::env::temp_dir(),
+            source,
+        },
+        Err(_) => DatasetError::Demo {
+            what: format!("demo {sha_prefix}"),
+            source: std::io::Error::other("internal error while processing (see the panic message above)"),
+        },
+    }
+}
+
 struct Processed {
     entry: DemoEntry,
     out: Option<DemoOutput>,
@@ -164,7 +200,7 @@ pub fn from_demos(opts: &Options, cfg: &Config, log: &(dyn Fn(&str) + Sync)) -> 
     let mut items: Vec<(String, PathBuf, u64)> = Vec::new();
     let mut counts = DemoCounts::default();
     let mut seen = std::collections::BTreeSet::new();
-    for f in files {
+    for (index, f) in files.into_iter().enumerate() {
         let size = fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
         if size > MAX_DEMO_BYTES {
             counts.total += 1;
@@ -175,11 +211,7 @@ pub fn from_demos(opts: &Options, cfg: &Config, log: &(dyn Fn(&str) + Sync)) -> 
                 .or_default() += 1;
             continue;
         }
-        let bytes = fs::read(&f).map_err(|source| DatasetError::Io {
-            path: f.clone(),
-            source,
-        })?;
-        let sha = sha256_hex(&bytes);
+        let sha = sha256_file(&f, index)?;
         counts.total += 1;
         if !seen.insert(sha.clone()) {
             counts.duplicates += 1;
@@ -203,6 +235,7 @@ pub fn from_demos(opts: &Options, cfg: &Config, log: &(dyn Fn(&str) + Sync)) -> 
     let cache = load_map_cache(&opts.map_dirs);
     let maps_used: Mutex<BTreeMap<String, (String, Vec<u8>)>> = Mutex::new(BTreeMap::new());
     let results: Vec<Mutex<Option<Processed>>> = (0..items.len()).map(|_| Mutex::new(None)).collect();
+    let failure: Mutex<Option<DatasetError>> = Mutex::new(None);
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let threads = opts.threads.clamp(1, 6);
@@ -210,13 +243,31 @@ pub fn from_demos(opts: &Options, cfg: &Config, log: &(dyn Fn(&str) + Sync)) -> 
         for _ in 0..threads {
             scope.spawn(|| {
                 loop {
+                    if failure.lock().expect("no panics while holding the lock").is_some() {
+                        break;
+                    }
                     let i = next.fetch_add(1, Ordering::SeqCst);
                     if i >= items.len() {
                         break;
                     }
                     let (sha, path, size) = &items[i];
                     let started = std::time::Instant::now();
-                    let processed = process_one(cfg, sha, path, *size, &cache, &maps_used);
+                    // A panic (a spill file that cannot be read back, or a bug) must stop the other
+                    // workers too, not leave them draining the queue.
+                    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        process_one(opts, cfg, sha, path, *size, &cache, &maps_used)
+                    }))
+                    .unwrap_or_else(|payload| Err(panic_error(payload, &sha[..12])));
+                    let processed = match attempt {
+                        Ok(p) => p,
+                        Err(e) => {
+                            failure
+                                .lock()
+                                .expect("no panics while holding the lock")
+                                .get_or_insert(e);
+                            break;
+                        }
+                    };
                     if started.elapsed().as_secs() >= 20 {
                         log(&format!(
                             "slow demo {}: {} frames, {:.0} s",
@@ -234,6 +285,9 @@ pub fn from_demos(opts: &Options, cfg: &Config, log: &(dyn Fn(&str) + Sync)) -> 
             });
         }
     });
+    if let Some(e) = failure.into_inner().expect("no poisoned lock") {
+        return Err(e);
+    }
     let processed: Vec<Processed> = results
         .into_iter()
         .map(|m| {
@@ -242,6 +296,35 @@ pub fn from_demos(opts: &Options, cfg: &Config, log: &(dyn Fn(&str) + Sync)) -> 
                 .expect("every index was processed")
         })
         .collect();
+
+    // Input reconstruction facts (see `pipeline::ReconTable`).
+    let outs = || processed.iter().filter_map(|p| p.out.as_ref());
+    log(&format!(
+        "input reconstruction: {} fire events, longest registration delay {} ticks, {} re-registered (client, tick) pairs; oldest character tick at registration {} ticks, {} older than the {}-tick pair window",
+        outs().map(|o| o.recon.fire_events).sum::<u64>(),
+        outs().map(|o| o.recon.max_fire_delay_ticks).max().unwrap_or(0),
+        outs().map(|o| o.recon.repeated_pairs).sum::<u64>(),
+        outs().map(|o| o.recon.max_tick_age).max().unwrap_or(0),
+        outs().map(|o| o.recon.beyond_window).sum::<u64>(),
+        pipeline::PAIR_WINDOW_TICKS
+    ));
+    if processed
+        .iter()
+        .filter_map(|p| p.out.as_ref())
+        .any(|o| !o.ticks_ascending)
+    {
+        log("warning: a demo has frame ticks that do not ascend; tag windows assume they do");
+    }
+
+    {
+        let frames: u64 = outs().map(|o| o.frame_count as u64).sum();
+        let bytes: u64 = outs().map(|o| o.spill_bytes).sum();
+        log(&format!(
+            "spill pages: {:.1} MB for {frames} frames ({:.0} bytes per frame)",
+            bytes as f64 / 1e6,
+            bytes as f64 / frames.max(1) as f64
+        ));
+    }
 
     // Map table (sorted by sha256) and demo -> map index.
     let maps_used = maps_used.into_inner().expect("no poisoned lock");
@@ -285,23 +368,24 @@ pub fn from_demos(opts: &Options, cfg: &Config, log: &(dyn Fn(&str) + Sync)) -> 
 }
 
 fn process_one(
+    opts: &Options,
     cfg: &Config,
     sha: &str,
     path: &Path,
     size: u64,
     cache: &[CachedMap],
     maps_used: &Mutex<BTreeMap<String, (String, Vec<u8>)>>,
-) -> Processed {
+) -> Result<Processed, DatasetError> {
     let Ok(bytes) = fs::read(path) else {
-        return skipped(sha.to_string(), size, "file unreadable");
+        return Ok(skipped(sha.to_string(), size, "file unreadable"));
     };
     let demo = match Demo::parse(&bytes) {
         Ok(d) => d,
-        Err(_) => return skipped(sha.to_string(), size, "demo header unreadable"),
+        Err(_) => return Ok(skipped(sha.to_string(), size, "demo header unreadable")),
     };
     let (map_bytes, map, source) = match resolve_map(&demo, cache) {
         Ok(x) => x,
-        Err(reason) => return skipped(sha.to_string(), size, reason),
+        Err(reason) => return Ok(skipped(sha.to_string(), size, reason)),
     };
     let map_sha = sha256_hex(&map_bytes);
     maps_used
@@ -309,12 +393,16 @@ fn process_one(
         .expect("no panics while holding the lock")
         .entry(map_sha.clone())
         .or_insert_with(|| (demo.header.map_name.clone(), map_bytes));
-    let ing = ingest::ingest(&demo);
-    if ing.frames.is_empty() {
-        return skipped(sha.to_string(), size, "no snapshots");
+    let out = demo::process_source(cfg, &Arc::new(map), &demo, opts.spill_dir.as_deref()).map_err(|source| {
+        DatasetError::Io {
+            path: opts.spill_dir.clone().unwrap_or_else(std::env::temp_dir),
+            source,
+        }
+    })?;
+    if out.frame_count == 0 {
+        return Ok(skipped(sha.to_string(), size, "no snapshots"));
     }
-    let out = demo::process(cfg, &Arc::new(map), &ing);
-    Processed {
+    Ok(Processed {
         entry: DemoEntry {
             sha256: sha.to_string(),
             size,
@@ -323,13 +411,13 @@ fn process_one(
             map_name: Some(demo.header.map_name.clone()),
             map: None,
             map_source: source.to_string(),
-            frames: out.frames.len() as u64,
-            samples: out.samples.len() as u64,
-            decode_error: ing.decode_error.is_some(),
+            frames: out.frame_count as u64,
+            samples: out.sample_count as u64,
+            decode_error: out.decode_error,
         },
         out: Some(out),
         map_sha: Some(map_sha),
-    }
+    })
 }
 
 fn finish(
@@ -337,7 +425,7 @@ fn finish(
     cfg: &Config,
     counts: DemoCounts,
     demos: Vec<DemoEntry>,
-    mut outputs: Vec<Option<DemoOutput>>,
+    outputs: Vec<Option<DemoOutput>>,
     maps_used: BTreeMap<String, (String, Vec<u8>)>,
     log: &(dyn Fn(&str) + Sync),
 ) -> Result<Report, DatasetError> {
@@ -358,17 +446,6 @@ fn finish(
     let ranking = crate::skill::assign_buckets(rows, cfg);
     let bucket_of: HashMap<(u32, u16), SkillBucket> =
         ranking.iter().map(|r| ((r.demo, r.skill.player), r.bucket)).collect();
-    for (di, out) in outputs.iter_mut().enumerate() {
-        if let Some(out) = out {
-            for s in out.samples.iter_mut() {
-                let label = out.frames[s.frame as usize].chars[s.slot as usize].player;
-                s.skill = bucket_of
-                    .get(&(di as u32, label))
-                    .copied()
-                    .unwrap_or(SkillBucket::Unranked) as u8;
-            }
-        }
-    }
 
     // Write.
     fs::create_dir_all(&opts.out_dir).map_err(|source| DatasetError::Io {
@@ -396,13 +473,26 @@ fn finish(
         demos_skipped: counts.skipped,
         ..Counts::default()
     };
+    let mut sample_totals: Vec<Option<dataset::SampleTotals>> = Vec::with_capacity(outputs.len());
     for (di, out) in outputs.iter().enumerate() {
-        if let Some(out) = out {
-            writer.write_demo(di as u32, &out.frames, &out.samples)?;
-            totals.frames += out.frames.len() as u64;
-            totals.samples += out.samples.len() as u64;
-            totals.confident_samples += out.samples.iter().filter(|s| s.confident()).count() as u64;
-        }
+        let Some(out) = out else {
+            sample_totals.push(None);
+            continue;
+        };
+        let di = di as u32;
+        let t = crate::store::catch_spill(|| {
+            writer.write_demo_output(di, out, &|label| {
+                bucket_of.get(&(di, label)).copied().unwrap_or(SkillBucket::Unranked)
+            })
+        })
+        .map_err(|source| DatasetError::Io {
+            path: opts.spill_dir.clone().unwrap_or_else(std::env::temp_dir),
+            source,
+        })??;
+        totals.frames += out.frame_count as u64;
+        totals.samples += t.total;
+        totals.confident_samples += t.confident;
+        sample_totals.push(Some(t));
     }
     totals.players = ranking.len() as u64;
     totals.chunks = writer.chunks.len() as u64;
@@ -422,7 +512,15 @@ fn finish(
     write_json(&opts.out_dir.join(MANIFEST), &manifest)?;
     write_json(&opts.out_dir.join(PLAYERS), &ranking)?;
 
-    let mut rep = report::build(&demos, &map_entries, &outputs, &ranking, counts, opts.top_players);
+    let mut rep = report::build(
+        &demos,
+        &map_entries,
+        &outputs,
+        &sample_totals,
+        &ranking,
+        counts,
+        opts.top_players,
+    );
     rep.source = opts.source.clone();
     rep.code_commit = opts.code_commit.clone();
     rep.config_hash = cfg.hash_hex();
@@ -435,4 +533,20 @@ fn finish(
         opts.out_dir.display()
     ));
     Ok(rep)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::SpillError;
+
+    #[test]
+    fn a_worker_panic_becomes_an_error_that_stops_the_run() {
+        let spill: Box<dyn std::any::Any + Send> = Box::new(SpillError(std::io::Error::other("disk gone")));
+        assert!(matches!(panic_error(spill, "abcdef123456"), DatasetError::Io { .. }));
+        let bug: Box<dyn std::any::Any + Send> = Box::new("index out of bounds");
+        let e = panic_error(bug, "abcdef123456");
+        assert!(matches!(e, DatasetError::Demo { .. }));
+        assert!(e.to_string().contains("abcdef123456"));
+    }
 }

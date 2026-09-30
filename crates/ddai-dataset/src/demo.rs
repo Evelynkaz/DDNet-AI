@@ -1,27 +1,54 @@
 //! One demo end to end: anonymised frames + map -> frames, `(Observation, Action)` samples with
 //! tags and quality flags, skill signals and technique events.
+//!
+//! Memory is bounded (task 8.4d): the frames stream through [`pipeline::build_stream`] into two
+//! [`crate::store`] page stores (frames, and the samples of every frame without their tags), the
+//! analyses read the frames back through a small page cache, and the tag bits, which depend on the
+//! analyses' events, are applied when the dataset chunks are written ([`DemoOutput::tag_sweeper`]).
+//! What stays in memory is the events, the players and the counters: a few thousand small records.
 
 use std::collections::BTreeMap;
+use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
 use ddai_physics::map::MapData;
-use serde::{Deserialize, Serialize};
 
 use crate::analysis::{self, Timeline};
 use crate::config::Config;
-use crate::ingest::Ingested;
-use crate::pipeline::{self, BuildCounters};
+use crate::ingest::{FrameSource, Ingested, IngestedFrame, KillEvent};
+use crate::pipeline::{self, BuildCounters, FrameOut};
 use crate::replay::ReplayStats;
 use crate::skill::{self, PlayerSkill};
+use crate::store::{FrameStore, FrameStoreWriter, PagedStore, PagedWriter, Spill};
 use crate::tags::signal;
 use crate::technique::{self, Ctx, TechniqueEvent};
 use crate::types::{FrameRec, SampleRec, quality};
 
-/// Everything one demo contributes to the dataset.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// A range of ticks in which every frame's character `label` carries the tag bit `bit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TagWindow {
+    pub label: u16,
+    pub from: i32,
+    pub to: i32,
+    pub bit: u32,
+}
+
+/// Everything one demo contributes to the dataset. The frames and the tag-less samples live in
+/// the spill file of the demo's stores (see the module docs) and are read by the dataset writer.
+#[derive(Debug)]
 pub struct DemoOutput {
-    pub frames: Vec<FrameRec>,
-    pub samples: Vec<SampleRec>,
+    /// All frames, in order.
+    pub frames: FrameStore,
+    /// The samples of each frame (index = frame index), without tags and skill bucket.
+    pub samples: PagedStore<Vec<SampleRec>>,
+    pub frame_count: usize,
+    pub sample_count: usize,
+    /// Ticks of the first and last frame.
+    pub first_tick: i32,
+    pub last_tick: i32,
+    /// Tag windows, sorted by start tick.
+    pub tag_windows: Vec<TagWindow>,
     pub players: Vec<PlayerSkill>,
     pub replay: BTreeMap<u16, ReplayStats>,
     pub events: Vec<TechniqueEvent>,
@@ -35,6 +62,52 @@ pub struct DemoOutput {
     pub tune_nondefault_frames: u32,
     /// Frames with movement-relevant non-default tuning.
     pub tune_movement_frames: u32,
+    /// The demo ended early on a decode error.
+    pub decode_error: bool,
+    /// Facts about the input reconstruction pass (fire events, the longest registration delay,
+    /// re-registered `(client id, tick)` pairs).
+    pub recon: pipeline::ReconStats,
+    /// Frame ticks were not ascending somewhere (windows by tick assume they are).
+    pub ticks_ascending: bool,
+    /// Bytes the demo's pages take in the spill file.
+    pub spill_bytes: u64,
+}
+
+impl DemoOutput {
+    /// Applies the tag windows to frames visited in order.
+    pub fn tag_sweeper(&self) -> TagSweeper<'_> {
+        TagSweeper {
+            windows: &self.tag_windows,
+            next: 0,
+            active: Vec::new(),
+        }
+    }
+}
+
+/// Computes the tag bits of each character of the frames it is fed in order (tick ascending):
+/// the OR of the bits of every window `[from, to]` that contains the frame's tick and names a
+/// label present in the frame.
+pub struct TagSweeper<'w> {
+    windows: &'w [TagWindow],
+    next: usize,
+    active: Vec<TagWindow>,
+}
+
+impl TagSweeper<'_> {
+    pub fn bits(&mut self, frame: &FrameRec) -> Vec<u32> {
+        while self.next < self.windows.len() && self.windows[self.next].from <= frame.tick {
+            self.active.push(self.windows[self.next]);
+            self.next += 1;
+        }
+        self.active.retain(|w| w.to >= frame.tick);
+        let mut bits = vec![0u32; frame.chars.len()];
+        for w in &self.active {
+            if let Some(slot) = frame.slot_of(w.label) {
+                bits[slot] |= w.bit;
+            }
+        }
+        bits
+    }
 }
 
 /// The `target_id` rule (documented in `docs/formats.md` §20):
@@ -74,11 +147,87 @@ pub fn choose_target(frame: &FrameRec, slot: usize, target_range: f32) -> i16 {
         .unwrap_or(-1)
 }
 
-/// Runs the whole per-demo pipeline. The skill bucket of the samples is left at `Unranked`; it is
-/// assigned after the global ranking.
-pub fn process(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> DemoOutput {
-    let built = pipeline::build(cfg, map, ing);
-    let tl = Timeline::new(cfg, &built.frames, &ing.kills, map);
+/// Runs the whole per-demo pipeline on an in-memory demo (tests and small inputs); the skill
+/// bucket of the samples is left at `Unranked`, it is assigned after the global ranking.
+pub fn process(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> io::Result<DemoOutput> {
+    let frames = || ing.frames_with_tunes();
+    process_frames(cfg, map, frames, None, |_| Tail {
+        kills: ing.kills.clone(),
+        tune_nondefault_frames: ing.tune_nondefault_frames as u32,
+        tune_movement_frames: ing.tune_movement_frames as u32,
+        decode_error: ing.decode_error.is_some(),
+    })
+}
+
+/// Runs the whole per-demo pipeline on a demo in bounded memory: the frames are streamed out of
+/// the demo twice ([`FrameSource`]; see [`pipeline::recon_table`]) and spilled to a temporary file
+/// in `spill_dir` (the system temporary directory when `None`).
+pub fn process_source(
+    cfg: &Config,
+    map: &Arc<MapData>,
+    demo: &ddai_demo::Demo<'_>,
+    spill_dir: Option<&Path>,
+) -> io::Result<DemoOutput> {
+    process_frames(
+        cfg,
+        map,
+        || FrameSource::new(demo),
+        spill_dir,
+        |src| Tail {
+            kills: src.kills,
+            tune_nondefault_frames: src.tune_nondefault_frames as u32,
+            tune_movement_frames: src.tune_movement_frames as u32,
+            decode_error: src.decode_error.is_some(),
+        },
+    )
+}
+
+/// What is only known once the frames have all been read.
+pub struct Tail {
+    pub kills: Vec<KillEvent>,
+    pub tune_nondefault_frames: u32,
+    pub tune_movement_frames: u32,
+    pub decode_error: bool,
+}
+
+/// `frames` is called twice and must yield the same frames each time; `tail` gets the iterator of
+/// the second pass after it has been drained.
+fn process_frames<I: Iterator<Item = IngestedFrame>>(
+    cfg: &Config,
+    map: &Arc<MapData>,
+    mut frames: impl FnMut() -> I,
+    spill_dir: Option<&Path>,
+    tail: impl FnOnce(I) -> Tail,
+) -> io::Result<DemoOutput> {
+    // --- pass 0: the whole-demo facts of the input reconstruction ---
+    let table = pipeline::recon_table(frames());
+
+    // --- pass 1: stream the demo through the pipeline into the spilled stores ---
+    let spill = Spill::create(spill_dir)?;
+    let mut frame_w = FrameStoreWriter::new(Arc::clone(&spill));
+    let mut sample_w: PagedWriter<Vec<SampleRec>> = PagedWriter::new(Arc::clone(&spill));
+    let mut sample_count = 0usize;
+    let mut k = 0u32;
+    let mut frames = frames();
+    let summary = pipeline::build_stream(cfg, map, &table, frames.by_ref(), |out: FrameOut| -> io::Result<()> {
+        let samples = samples_of(cfg, k, &out);
+        sample_count += samples.len();
+        frame_w.push(out.frame)?;
+        sample_w.push(samples)?;
+        k += 1;
+        Ok(())
+    })?;
+    let tail = tail(frames);
+    let store = frame_w.finish()?;
+    let sample_store = sample_w.finish()?;
+    let (first_tick, last_tick) = match (store.ticks().first(), store.ticks().last()) {
+        (Some(&a), Some(&b)) => (a, b),
+        _ => (0, 0),
+    };
+    let ticks_ascending = store.ticks().windows(2).all(|w| w[0] <= w[1]);
+
+    // --- pass 2: analyses over the stored timeline ---
+    let tl = Timeline::new(cfg, &store, &tail.kills, map);
     let entries = analysis::freeze_entries(&tl);
     let hooks = analysis::hook_episodes(&tl);
     let hits = analysis::hammer_hits(&tl);
@@ -94,72 +243,91 @@ pub fn process(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> DemoOutput {
     };
     let events = technique::detect(&ctx);
 
-    // Tag bits per (frame, slot).
-    let mut tag_bits: Vec<Vec<u32>> = built.frames.iter().map(|f| vec![0u32; f.chars.len()]).collect();
-    let mut tag_window = |label: u16, from: i32, to: i32, bit: u32| {
-        let lo = built.frames.partition_point(|f| f.tick < from);
-        let hi = built.frames.partition_point(|f| f.tick <= to);
-        for (k, bits) in tag_bits.iter_mut().enumerate().take(hi).skip(lo) {
-            if let Some(s) = tl.slot(k, label) {
-                bits[s] |= bit;
-            }
-        }
-    };
+    // Tag windows; the bits are applied when the chunks are written.
+    let mut tag_windows: Vec<TagWindow> = Vec::new();
     for e in events.iter().filter(|e| e.active) {
-        tag_window(e.actor, e.start_tick, e.end_tick, e.technique.bit());
+        tag_windows.push(TagWindow {
+            label: e.actor,
+            from: e.start_tick,
+            to: e.end_tick,
+            bit: e.technique.bit(),
+        });
     }
     for a in &attr {
         let t = a.entry.tick;
         let lead = cfg.signal_lead_ticks;
+        let mut window = |label: u16, bit: u32| {
+            tag_windows.push(TagWindow {
+                label,
+                from: t - lead,
+                to: t,
+                bit,
+            });
+        };
         match a.toucher {
             Some((actor, _)) => {
                 if a.block {
-                    tag_window(actor, t - lead, t, signal::LEADS_TO_BLOCK);
+                    window(actor, signal::LEADS_TO_BLOCK);
                 }
-                tag_window(a.entry.player, t - lead, t, signal::LEADS_TO_BLOCKED);
+                window(a.entry.player, signal::LEADS_TO_BLOCKED);
             }
-            None => tag_window(a.entry.player, t - lead, t, signal::LEADS_TO_SELF_FREEZE),
+            None => window(a.entry.player, signal::LEADS_TO_SELF_FREEZE),
         }
     }
+    tag_windows.sort_by_key(|w| w.from);
 
-    let mut samples = Vec::new();
-    for (k, frame) in built.frames.iter().enumerate() {
-        for (slot, step) in built.steps[k].iter().enumerate() {
-            let Some(st) = step else { continue };
-            let mut q = st.replay as u8 & quality::REPLAY_MASK;
-            if st.next_fresh {
-                q |= quality::NEXT_FRESH;
-            }
-            if st.active {
-                q |= quality::ACTIVE;
-            }
-            samples.push(SampleRec {
-                frame: k as u32,
-                slot: slot as u8,
-                action: st.action,
-                target: choose_target(frame, slot, cfg.target_range),
-                tags: tag_bits[k][slot],
-                q,
-                skill: 0,
-            });
-        }
-    }
-
-    DemoOutput {
-        samples,
+    let spill_bytes = store.stored_bytes() + sample_store.stored_bytes();
+    let frame_count = store.len();
+    drop(tl);
+    Ok(DemoOutput {
+        frames: store,
+        samples: sample_store,
+        frame_count,
+        sample_count,
+        first_tick,
+        last_tick,
+        tag_windows,
         players: skills.into_values().collect(),
-        replay: built.replay,
+        replay: summary.replay,
         events,
-        counters: built.counters,
+        counters: summary.counters,
         freeze_entries: entries.len() as u32,
         credited_freezes: attr.iter().filter(|a| a.toucher.is_some()).count() as u32,
         blocks: attr.iter().filter(|a| a.block).count() as u32,
         hook_episodes: hooks.len() as u32,
         hammer_hits: hits.len() as u32,
-        tune_nondefault_frames: ing.tune_nondefault_frames as u32,
-        tune_movement_frames: ing.tune_movement_frames as u32,
-        frames: built.frames,
+        tune_nondefault_frames: tail.tune_nondefault_frames,
+        tune_movement_frames: tail.tune_movement_frames,
+        decode_error: tail.decode_error,
+        recon: summary.recon,
+        ticks_ascending,
+        spill_bytes,
+    })
+}
+
+/// The samples of one finished frame, without tags and skill bucket.
+fn samples_of(cfg: &Config, k: u32, out: &FrameOut) -> Vec<SampleRec> {
+    let mut samples = Vec::new();
+    for (slot, step) in out.steps.iter().enumerate() {
+        let Some(st) = step else { continue };
+        let mut q = st.replay as u8 & quality::REPLAY_MASK;
+        if st.next_fresh {
+            q |= quality::NEXT_FRESH;
+        }
+        if st.active {
+            q |= quality::ACTIVE;
+        }
+        samples.push(SampleRec {
+            frame: k,
+            slot: slot as u8,
+            action: st.action,
+            target: choose_target(&out.frame, slot, cfg.target_range),
+            tags: 0,
+            q,
+            skill: 0,
+        });
     }
+    samples
 }
 
 #[cfg(test)]

@@ -64,6 +64,7 @@ fn opts(demos: &Path, out: &Path, maps: Vec<PathBuf>, threads: usize) -> Options
         source: "synthetic demos".to_string(),
         limit: None,
         top_players: 5,
+        spill_dir: None,
     }
 }
 
@@ -323,6 +324,34 @@ fn no_nickname_and_no_file_name_reaches_any_output_file() {
     assert!(scanned >= 6, "manifest, players, report, map and chunks were scanned");
 }
 
+/// The audit the real archives are checked with (`ddnet-ai dataset check-privacy`) finds nothing
+/// in a synthetic dataset whose demo names and ClientInfo carry nicknames, finds them once they are
+/// planted, and never prints them.
+#[test]
+fn the_privacy_audit_finds_planted_names_and_stays_quiet_on_a_clean_dataset() {
+    let fx = fixture();
+    let out = fx.root.join("out");
+    from_demos(
+        &opts(&fx.demos, &out, vec![fx.maps.clone()], 2),
+        &Config::default(),
+        &|_| {},
+    )
+    .unwrap();
+    let rep = ddai_dataset::privacy::check(&fx.demos, &out).unwrap();
+    assert!(rep.names >= 6, "nicknames, clan and file names: {rep:?}");
+    assert!(rep.demos_read >= 2);
+    assert!(rep.files_checked > 3 && rep.bytes_checked > 1000);
+    assert_eq!(rep.leaks(), 0, "{}", ddai_dataset::privacy::render(&rep));
+    // Plant a nickname in the report: found, and the rendering does not contain it.
+    let path = out.join("report.json");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("\nZzSecretGamma\n");
+    fs::write(&path, text).unwrap();
+    let rep = ddai_dataset::privacy::check(&fx.demos, &out).unwrap();
+    assert_eq!(rep.leaks(), 1, "{rep:?}");
+    assert!(!ddai_dataset::privacy::render(&rep).contains("ZzSecret"));
+}
+
 #[test]
 fn two_runs_produce_identical_bytes_regardless_of_thread_count() {
     let fx = fixture();
@@ -432,13 +461,238 @@ fn ingest_replaces_names_with_per_demo_labels_and_splits_stints_of_a_reused_slot
     assert_eq!(labels[6], labels[11]);
     // The pipeline sees the same split: slot 0 has two labels in the frames.
     let cfg = Config::default();
-    let out = ddai_dataset::demo::process(&cfg, &std::sync::Arc::new(ddai_map::load_map(&map).unwrap().data), &ing);
-    let mut ids: Vec<u16> = out
-        .frames
-        .iter()
-        .flat_map(|f| f.chars.iter().filter(|c| c.id == 0).map(|c| c.player))
+    let out =
+        ddai_dataset::demo::process(&cfg, &std::sync::Arc::new(ddai_map::load_map(&map).unwrap().data), &ing).unwrap();
+    let frames = out.frames.reader();
+    let mut ids: Vec<u16> = (0..out.frame_count)
+        .flat_map(|k| {
+            frames
+                .get(k)
+                .chars
+                .iter()
+                .filter(|c| c.id == 0)
+                .map(|c| c.player)
+                .collect::<Vec<_>>()
+        })
         .collect();
     ids.sort_unstable();
     ids.dedup();
     assert_eq!(ids.len(), 2);
+}
+
+/// The dataset written chunk by chunk from the spilled stores (tags and skill bucket applied on
+/// the way) is byte-for-byte what the original in-memory path produces: tags computed by binary
+/// search over the frame ticks, buckets written into every sample, `write_demo` on the whole demo.
+#[test]
+fn chunks_written_from_the_spilled_stores_equal_the_in_memory_writer() {
+    use ddai_dataset::dataset::DatasetWriter;
+    use ddai_dataset::types::SampleRec;
+    let map = synth::map_bytes(30, 12, (10, 20));
+    let bytes = synth::demo_bytes(&map, true, &hook_and_block_snapshots());
+    let demo = ddai_demo::Demo::parse(&bytes).unwrap();
+    // Many chunks, the last one short.
+    let cfg = Config {
+        chunk_frames: 7,
+        ..Config::default()
+    };
+    let loaded = std::sync::Arc::new(ddai_map::load_map(&map).unwrap().data);
+    let out = ddai_dataset::demo::process_source(&cfg, &loaded, &demo, None).unwrap();
+    assert!(
+        out.tag_windows.len() > 1,
+        "the demo must carry tags, or this proves little"
+    );
+    let bucket = |label: u16| {
+        if label.is_multiple_of(2) {
+            SkillBucket::Top
+        } else {
+            SkillBucket::Mid
+        }
+    };
+
+    let fast = tempfile::tempdir().unwrap();
+    let mut w = DatasetWriter::create(fast.path(), &cfg).unwrap();
+    let totals = w.write_demo_output(0, &out, &bucket).unwrap();
+    assert_eq!(totals.total as usize, out.sample_count);
+
+    // Reference: everything in memory, tag bits by `partition_point` like the original.
+    let fr = out.frames.reader();
+    let sr = out.samples.reader();
+    let frames: Vec<_> = (0..out.frame_count).map(|k| (*fr.get(k)).clone()).collect();
+    let mut samples: Vec<SampleRec> = Vec::new();
+    let mut tag_bits: Vec<Vec<u32>> = frames.iter().map(|f| vec![0; f.chars.len()]).collect();
+    for wnd in &out.tag_windows {
+        let lo = frames.partition_point(|f| f.tick < wnd.from);
+        let hi = frames.partition_point(|f| f.tick <= wnd.to);
+        for k in lo..hi {
+            if let Some(slot) = frames[k].chars.iter().rposition(|c| c.player == wnd.label) {
+                tag_bits[k][slot] |= wnd.bit;
+            }
+        }
+    }
+    for k in 0..frames.len() {
+        for s in sr.get(k).iter() {
+            let mut s = *s;
+            s.tags = tag_bits[k][s.slot as usize];
+            s.skill = bucket(frames[k].chars[s.slot as usize].player) as u8;
+            samples.push(s);
+        }
+    }
+    assert!(samples.iter().any(|s| s.tags != 0), "some sample must be tagged");
+    let slow = tempfile::tempdir().unwrap();
+    let mut w = DatasetWriter::create(slow.path(), &cfg).unwrap();
+    w.write_demo(0, &frames, &samples).unwrap();
+
+    let names = |d: &Path| -> Vec<(String, Vec<u8>)> {
+        all_files(d)
+            .into_iter()
+            .map(|p| (p.strip_prefix(d).unwrap().display().to_string(), fs::read(p).unwrap()))
+            .collect()
+    };
+    let (a, b) = (names(fast.path()), names(slow.path()));
+    assert!(a.len() >= 3, "several chunks expected, got {}", a.len());
+    assert_eq!(a, b);
+}
+
+/// Peak memory against demo length (run by hand: `cargo test -p ddai-dataset --release --test
+/// e2e_synthetic -- --ignored --nocapture stress`). Synthetic demos of 4 000, 16 000 and 64 000
+/// snapshots (2.2 min, 8.9 min, 35.6 min of play; 12 players) are processed by a child process each,
+/// which reports its peak RSS; what the pipeline itself keeps must not grow with the length (the
+/// demo's own bytes, read whole, are subtracted: that is input, not pipeline state).
+#[test]
+#[ignore = "stress test, about a minute in release mode"]
+fn stress_peak_memory_is_flat_in_demo_length() {
+    if let Ok(path) = std::env::var("DDAI_STRESS_DEMO") {
+        // Child: process the demo, print the peak RSS.
+        let dir = PathBuf::from(path);
+        let out = dir.join("out");
+        let o = opts(&dir.join("demos"), &out, vec![], 1);
+        from_demos(&o, &Config::default(), &|_| {}).unwrap();
+        let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let hwm = status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.split_whitespace().next().map(str::to_string))
+            .unwrap_or_default();
+        println!("STRESS_PEAK_KB={hwm}");
+        return;
+    }
+    if !Path::new("/proc/self/status").exists() {
+        return;
+    }
+    let map = synth::map_bytes(60, 14, (20, 40));
+    let mut rows: Vec<(usize, u64, u64)> = Vec::new();
+    for n in [4_000usize, 16_000, 64_000] {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("demos")).unwrap();
+        let mut seed = 12345u64;
+        let mut rnd = move |m: i32| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) % m as u64) as i32
+        };
+        let snaps: Vec<(i32, Vec<SynthChar>)> = (0..n as i32)
+            .map(|i| {
+                let tick = 10_000 + 2 * i;
+                let chars = (0..12)
+                    .map(|id| {
+                        let x = 200 + 60 * id + (i / 7 + rnd(5)) % 40;
+                        let hook = (rnd(9) == 0).then_some((id + 1) % 12);
+                        let mut c = ch(id % 3, tick, x, 338, if rnd(11) == 0 { 5 } else { 0 }, hook);
+                        c.id = id;
+                        c.name = format!("Zz{id}");
+                        c.wire.attack_tick = tick - rnd(40);
+                        c
+                    })
+                    .collect();
+                (tick, chars)
+            })
+            .collect();
+        let bytes = synth::demo_bytes(&map, true, &snaps);
+        drop(snaps);
+        fs::write(tmp.path().join("demos").join("a.demo"), &bytes).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let child = std::process::Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "stress_peak_memory_is_flat_in_demo_length",
+            ])
+            .env("DDAI_STRESS_DEMO", tmp.path())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&child.stdout);
+        let kb: u64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("STRESS_PEAK_KB="))
+            .unwrap_or_else(|| panic!("child failed: {text} {}", String::from_utf8_lossy(&child.stderr)))
+            .trim()
+            .parse()
+            .unwrap();
+        rows.push((n, bytes.len() as u64 / 1024, kb));
+        println!(
+            "{n:6} snapshots, demo {:6} KB, peak RSS {kb:7} KB, without the demo bytes {:7} KB",
+            bytes.len() / 1024,
+            kb - bytes.len() as u64 / 1024
+        );
+    }
+    let net = |r: &(usize, u64, u64)| r.2 as i64 - r.1 as i64;
+    let growth = net(&rows[2]) - net(&rows[0]);
+    assert!(
+        growth < 48 * 1024,
+        "peak RSS without the demo bytes grew by {growth} KB from {} to {} snapshots",
+        rows[0].0,
+        rows[2].0
+    );
+}
+
+/// An unreadable demo must not get its file name - a nickname in the real archives - into any error
+/// message, from the build or from the privacy audit. (A dangling symlink is unreadable for root
+/// too.)
+#[cfg(unix)]
+#[test]
+fn errors_about_an_unreadable_demo_never_contain_its_file_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let demos = tmp.path().join("demos");
+    fs::create_dir_all(demos.join("ZzSecretDir")).unwrap();
+    std::os::unix::fs::symlink(
+        tmp.path().join("missing"),
+        demos.join("ZzSecretDir").join("ZzSecretNick raid.demo"),
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    let no_name = |text: String| {
+        assert!(!text.contains("ZzSecret"), "a nickname-like name leaked: {text}");
+        assert!(text.contains("demo file #0"), "the error must say which demo: {text}");
+    };
+    let e = from_demos(&opts(&demos, &out, vec![], 1), &Config::default(), &|_| {}).unwrap_err();
+    no_name(format!("{e} / {e:?}"));
+    let e = ddai_dataset::privacy::check(&demos, &out).unwrap_err();
+    no_name(format!("{e} / {e:?}"));
+    // The same for an unreadable directory of the archive.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let d = demos.join("ZzSecretDir");
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&d).is_ok(); // root ignores the mode
+        let e = from_demos(&opts(&demos, &out, vec![], 1), &Config::default(), &|_| {}).unwrap_err();
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            assert!(!format!("{e} / {e:?}").contains("ZzSecret"), "{e}");
+        }
+    }
+}
+
+/// `tunes` shorter than `frames` must not drop frames (the missing tuning is the default).
+#[test]
+fn a_short_tune_list_does_not_truncate_the_frames() {
+    let map = synth::map_bytes(30, 12, (10, 20));
+    let bytes = synth::demo_bytes(&map, true, &hook_and_block_snapshots());
+    let demo = ddai_demo::Demo::parse(&bytes).unwrap();
+    let mut ing = ddai_dataset::ingest::ingest(&demo);
+    let n = ing.frames.len();
+    ing.tunes.truncate(3);
+    let loaded = std::sync::Arc::new(ddai_map::load_map(&map).unwrap().data);
+    let out = ddai_dataset::demo::process(&Config::default(), &loaded, &ing).unwrap();
+    assert_eq!(out.frame_count, n);
 }

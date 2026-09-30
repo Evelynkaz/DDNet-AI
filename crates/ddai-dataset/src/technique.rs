@@ -134,7 +134,7 @@ fn t1_t4_hook_attacks(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
             .nearest_freeze(v0.pos[0], v0.pos[1], tc.freeze_near_px)
             .is_some();
         let v_end = tl.ch(ep.end_k, ep.victim).unwrap_or(v0);
-        let (ux, uy) = unit_towards(v0, a0);
+        let (ux, uy) = unit_towards(&v0, &a0);
         let pulled = (v_end.pos[0] - v0.pos[0]) * ux + (v_end.pos[1] - v0.pos[1]) * uy;
         if at_stake && pulled >= 16.0 {
             out.push(TechniqueEvent {
@@ -263,16 +263,18 @@ fn t3_swing_up(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
 fn t5_body_push(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
     let (tl, tc) = (ctx.tl, ctx.tc);
     let mut out: Vec<TechniqueEvent> = Vec::new();
-    for k in 1..tl.frames.len() {
+    for k in 1..tl.len() {
         if !tl.contiguous(k - 1) {
             continue;
         }
-        for a in &tl.frames[k].chars {
-            for v in &tl.frames[k].chars {
+        let fk = tl.frame(k);
+        let fprev = tl.frame(k - 1);
+        for a in &fk.chars {
+            for v in &fk.chars {
                 if a.player == v.player {
                     continue;
                 }
-                let (Some(a0), Some(v0)) = (tl.ch(k - 1, a.player), tl.ch(k - 1, v.player)) else {
+                let (Some(a0), Some(v0)) = (fprev.by_label(a.player), fprev.by_label(v.player)) else {
                     continue;
                 };
                 if a0.frozen() || v0.frozen() || !v0.grounded() {
@@ -396,7 +398,7 @@ fn t9_escape_hook(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
             }
             if k > ep.start_k
                 && let Some(xp) = tl.ch(k - 1, ep.victim)
-                && ((air_jump_used(x) && !air_jump_used(xp)) || x.vel[1] - xp.vel[1] <= -5.0)
+                && ((air_jump_used(&x) && !air_jump_used(&xp)) || x.vel[1] - xp.vel[1] <= -5.0)
             {
                 detail |= 4;
             }
@@ -441,7 +443,7 @@ fn t10_save_thrown_up(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
         }
         let mut detail = 0u8;
         let mut last_k = h.k;
-        for k in h.k..tl.frames.len() {
+        for k in h.k..tl.len() {
             if tl.tick(k) > h.tick + 25 {
                 break;
             }
@@ -460,8 +462,8 @@ fn t10_save_thrown_up(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
             }
             if k > h.k
                 && let Some(xp) = tl.ch(k - 1, h.victim)
-                && air_jump_used(x)
-                && !air_jump_used(xp)
+                && air_jump_used(&x)
+                && !air_jump_used(&xp)
             {
                 detail |= 4;
             }
@@ -522,10 +524,11 @@ fn t11_edge_stance(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
             detail: 0,
         });
     };
-    for k in 0..tl.frames.len() {
+    for k in 0..tl.len() {
         let mut continuing: Vec<u16> = Vec::new();
-        for c in &tl.frames[k].chars {
-            if on_edge(c, &tl.frames[k].chars) && (k == 0 || tl.contiguous(k - 1)) {
+        let fk = tl.frame(k);
+        for c in &fk.chars {
+            if on_edge(c, &fk.chars) && (k == 0 || tl.contiguous(k - 1)) {
                 continuing.push(c.player);
                 runs.entry(c.player).or_insert(k);
             }
@@ -538,7 +541,7 @@ fn t11_edge_stance(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
     }
     let rest: Vec<(u16, usize)> = runs.into_iter().collect();
     for (l, from) in rest {
-        finish(l, from, tl.frames.len() - 1, &mut out);
+        finish(l, from, tl.len() - 1, &mut out);
     }
     out
 }
@@ -549,12 +552,14 @@ fn t11_edge_stance(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
 fn t12_second_jump_save(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
     let (tl, tc) = (ctx.tl, ctx.tc);
     let mut out = Vec::new();
-    for k in 1..tl.frames.len() {
+    for k in 1..tl.len() {
         if !tl.contiguous(k - 1) {
             continue;
         }
-        for x1 in &tl.frames[k].chars {
-            let Some(x0) = tl.ch(k - 1, x1.player) else { continue };
+        let fk = tl.frame(k);
+        let fprev = tl.frame(k - 1);
+        for x1 in &fk.chars {
+            let Some(x0) = fprev.by_label(x1.player) else { continue };
             if x0.frozen() || x0.grounded() || air_jump_used(x0) || !air_jump_used(x1) || x1.frozen() {
                 continue;
             }
@@ -589,16 +594,18 @@ fn t12_second_jump_save(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
 fn t13_regain_jump(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
     let tl = ctx.tl;
     let mut out = Vec::new();
-    for k in 1..tl.frames.len() {
+    for k in 1..tl.len() {
         if !tl.contiguous(k - 1) {
             continue;
         }
-        for x1 in &tl.frames[k].chars {
-            let Some(x0) = tl.ch(k - 1, x1.player) else { continue };
+        let fk = tl.frame(k);
+        let fprev = tl.frame(k - 1);
+        for x1 in &fk.chars {
+            let Some(x0) = fprev.by_label(x1.player) else { continue };
             if !(air_jump_used(x0) && !air_jump_used(x1) && x1.grounded() && !x1.frozen()) {
                 continue;
             }
-            let enemy = tl.frames[k]
+            let enemy = fk
                 .chars
                 .iter()
                 .any(|o| o.player != x1.player && !o.frozen() && (300.0..=500.0).contains(&Ctx::dist(o, x1)));
@@ -627,12 +634,14 @@ fn t13_regain_jump(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
 fn t14_panic_hook(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
     let tl = ctx.tl;
     let mut out = Vec::new();
-    for k in 1..tl.frames.len() {
+    for k in 1..tl.len() {
         if !tl.contiguous(k - 1) {
             continue;
         }
-        for x1 in &tl.frames[k].chars {
-            let Some(x0) = tl.ch(k - 1, x1.player) else { continue };
+        let fk = tl.frame(k);
+        let fprev = tl.frame(k - 1);
+        for x1 in &fk.chars {
+            let Some(x0) = fprev.by_label(x1.player) else { continue };
             let started = x0.hook_state <= 0 && (x1.hook_state == HOOK_FLYING || x1.hook_state == HOOK_GRABBED);
             if !started || x1.hooked_player >= 0 || x0.frozen() || x0.grounded() || !air_jump_used(x0) {
                 continue;
@@ -640,7 +649,7 @@ fn t14_panic_hook(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
             if tl.tiles.freeze_below(x0.pos[0], x0.pos[1], 192.0).is_none() {
                 continue;
             }
-            let attached = (k..(k + 3).min(tl.frames.len())).any(|j| {
+            let attached = (k..(k + 3).min(tl.len())).any(|j| {
                 tl.ch(j, x1.player).is_some_and(|c| {
                     c.hook_state == HOOK_GRABBED
                         && c.hooked_player < 0
@@ -793,7 +802,7 @@ fn wall_hook(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
         let mut changed = false;
         for k in s..=e {
             let Some(c) = tl.ch(k, label) else { continue };
-            let b = ballistic(tl, seed, seed_tick, tl.tick(k));
+            let b = ballistic(tl, &seed, seed_tick, tl.tick(k));
             let dv = ((c.vel[0] - b.vel.x).powi(2) + (c.vel[1] - b.vel.y).powi(2)).sqrt();
             let dp = ((c.pos[0] - b.pos.x).powi(2) + (c.pos[1] - b.pos.y).powi(2)).sqrt();
             if dv >= tc.wall_hook_min_dv || dp >= tc.wall_hook_min_dpos {
@@ -808,13 +817,14 @@ fn wall_hook(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
         // Threats.
         let mut threat = 0u8;
         let my_id = i16::from(seed.id);
-        for o in tl.frames[s].chars.iter().filter(|o| o.player != label && !o.frozen()) {
+        let f_s = tl.frame(s);
+        for o in f_s.chars.iter().filter(|o| o.player != label && !o.frozen()) {
             // The enemy's own approach: how much *its* distance to where we were shrank, so our
             // own movement (the hook pulling us towards a still enemy) does not count.
-            if Ctx::dist(o, x0) <= tc.hook_range
+            if Ctx::dist(o, &x0) <= tc.hook_range
                 && let Some(o_prev) = tl.ch(s - 1, o.player)
             {
-                let (d_prev, d_now) = (Ctx::dist(o_prev, seed), Ctx::dist(o, seed));
+                let (d_prev, d_now) = (Ctx::dist(&o_prev, &seed), Ctx::dist(o, &seed));
                 if (d_prev - d_now) / ctx.dec() as f32 >= tc.threat_closing_speed {
                     threat |= 4;
                 }
@@ -835,7 +845,7 @@ fn wall_hook(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
         let horizon = tl.tick(e) - seed_tick + tc_horizon(tc);
         let mut t = 2;
         while t <= horizon {
-            let b = ballistic(tl, seed, seed_tick, seed_tick + t);
+            let b = ballistic(tl, &seed, seed_tick, seed_tick + t);
             let (cx, cy) = tl.tiles.cell(b.pos.x, b.pos.y);
             if tl.tiles.is_freeze(cx, cy) {
                 threat |= 8;
@@ -849,7 +859,7 @@ fn wall_hook(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
         let detail = (u8::from(ceiling))
             | (u8::from(!ceiling) << 1)
             | threat
-            | (u8::from(!x0.grounded() && air_jump_used(x0)) << 4);
+            | (u8::from(!x0.grounded() && air_jump_used(&x0)) << 4);
         let start = seed_tick;
         let end = tl.tick(e);
         out.push(TechniqueEvent {
@@ -863,10 +873,10 @@ fn wall_hook(ctx: &Ctx<'_, '_>) -> Vec<TechniqueEvent> {
             detail,
         });
     };
-    for k in 0..tl.frames.len() {
+    for k in 0..tl.len() {
         let mut here: Vec<u16> = Vec::new();
         if k == 0 || tl.contiguous(k - 1) {
-            for c in &tl.frames[k].chars {
+            for c in &tl.frame(k).chars {
                 if terrain(c) {
                     here.push(c.player);
                     open.entry(c.player).and_modify(|(_, e)| *e = k).or_insert((k, k));
@@ -911,14 +921,13 @@ mod tests {
         run_cfg(&Config::default(), map, frames, kills)
     }
 
-    fn run_cfg(cfg: &Config, map: &MapData, frames: &[FrameRec], kills: &[KillEvent]) -> Vec<TechniqueEvent> {
-        let tl = Timeline::new(cfg, frames, kills, map);
-        let entries = freeze_entries(&tl);
-        let hooks = hook_episodes(&tl);
-        let hits = hammer_hits(&tl);
-        let attr = attribute(&tl, &entries, &hooks, &hits);
+    fn run_on(tl: &Timeline<'_>, cfg: &Config) -> Vec<TechniqueEvent> {
+        let entries = freeze_entries(tl);
+        let hooks = hook_episodes(tl);
+        let hits = hammer_hits(tl);
+        let attr = attribute(tl, &entries, &hooks, &hits);
         let ctx = Ctx {
-            tl: &tl,
+            tl,
             entries: &entries,
             hooks: &hooks,
             hits: &hits,
@@ -926,6 +935,19 @@ mod tests {
             tc: &cfg.technique,
         };
         detect(&ctx)
+    }
+
+    /// Every technique test runs the detectors twice: on a store with the default page size, and on
+    /// one with three-frame pages read through a two-page cache (neighbouring frames constantly on
+    /// different pages, every page evicted and reloaded) - the results must be identical.
+    fn run_cfg(cfg: &Config, map: &MapData, frames: &[FrameRec], kills: &[KillEvent]) -> Vec<TechniqueEvent> {
+        let events = run_on(&Timeline::new(cfg, leak_store(frames), kills, map), cfg);
+        let paged = run_on(
+            &Timeline::with_cache(cfg, leak_store_paged(frames, 3), kills, map, 2),
+            cfg,
+        );
+        assert_eq!(events, paged, "paging must not change what the detectors see");
+        events
     }
 
     fn of(events: &[TechniqueEvent], t: Technique) -> Vec<TechniqueEvent> {
@@ -1454,7 +1476,12 @@ mod tests {
     /// No-hook ballistic state of a character at `(x, y)` with velocity `vel` at tick 10, at `tick`.
     fn ballistic_at(map: &MapData, pos: [f32; 2], vel: [f32; 2], tick: i32) -> ([f32; 2], [f32; 2]) {
         let seed = with_vel(ch(0, 1, pos[0], pos[1]), vel[0], vel[1]);
-        let c = ballistic(&Timeline::new(&Config::default(), &[], &[], map), &seed, 10, tick);
+        let c = ballistic(
+            &Timeline::new(&Config::default(), leak_store(&[]), &[], map),
+            &seed,
+            10,
+            tick,
+        );
         ([c.pos.x, c.pos.y], [c.vel.x, c.vel.y])
     }
 

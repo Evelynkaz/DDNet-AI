@@ -105,6 +105,18 @@ pub struct FrameRec {
     pub chars: Vec<CharRec>,
 }
 
+impl FrameRec {
+    /// Index of the character with player label `label` (the last one if a label were repeated).
+    pub fn slot_of(&self, label: u16) -> Option<usize> {
+        self.chars.iter().rposition(|c| c.player == label)
+    }
+
+    /// The character with player label `label`.
+    pub fn by_label(&self, label: u16) -> Option<&CharRec> {
+        self.slot_of(label).map(|i| &self.chars[i])
+    }
+}
+
 /// The reconstructed human input for one decision interval: the two steps `tick -> tick + 1 -> tick + 2`, i.e. `[tick, tick + 2)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionRec {
