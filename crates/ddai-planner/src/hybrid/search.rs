@@ -1,0 +1,1709 @@
+//! The hybrid decision (task 3.5, D-041/D-042/D-048): a pool of candidates from five sources is
+//! scored by exact rollouts on `World<f32>`; the best few are re-scored under every combination of
+//! the opponents' modelled responses; the plan with the best robust value wins; the planner's
+//! shield has the last word.
+//!
+//! ```text
+//! decide
+//!  |- setup      threats (1vN), danger flags, hazard fields, decision snapshot
+//!  |- pool       warm plan -> proposals -> book -> throws -> techniques (order depends on danger)
+//!  |- stage 1    every candidate under the cheap model (all opponents hold)   [budget * (1 - f)]
+//!  |- CEM        population samples refitted to the elites (planner's own)
+//!  |- stage 2    top-M re-scored under every hold/react combination            [budget * f]
+//!  |- extension  only if danger is flagged AND the choice still ends with us out (D-042)
+//!  |- shield     escapeExists / saferInput with all opponents' modelled inputs
+//! ```
+//!
+//! **Order of the pool.** Calm: warm, proposals, book, offensive techniques, throws, a few
+//! defensive techniques. When the danger flags fire (two or more opponents in the radius, freeze
+//! near us, or we are hooked) the defensive techniques come right after the warm plan; when the
+//! warm plan itself ends with us frozen under some modelled response (the probe) they come before
+//! anything else and get the whole first chunk.
+//!
+//! **Determinism.** In [`HybridMode::Fixed`] no clock is read, candidates are generated in a fixed
+//! order by one thread and scored by the [`Engine`] (a pure function per candidate), results are
+//! merged by candidate index: the decision does not depend on the thread count.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use ddai_brain::Observation;
+use ddai_jsmath::{self as js, Rng};
+use ddai_physics::map::MapData;
+
+use crate::clock::{Clock, WallClock};
+use crate::fields::{EDGE_GAP_PX, HazardField, freeze_gap_px, hazard_nearness, wrap_angle};
+use crate::hybrid::anchors::AnchorCache;
+use crate::hybrid::config::{HybridConfig, HybridMode, RobustMode};
+use crate::hybrid::engine::{Batch, Ctx, Engine, EvalOut, EvalResult};
+use crate::hybrid::proposer::{ProposeCtx, Proposer};
+use crate::hybrid::techniques::{Generated, Tech, TechCaps, TechCtx, generate};
+use crate::hybrid::threat::{Danger, MAX_THREATS, ReactBelief, ThreatSet, robust_value_weighted, threat_radius};
+use crate::hybrid::{ABS_AIM, is_abs_aim, resolve_aim};
+use crate::physics_adapter::{PhysicsSavedState, PhysicsWorld};
+use crate::plan_world::PlanWorld;
+use crate::planner::{PlanStep, Planner};
+use crate::scripted::scripted_action;
+use crate::throw_lines::{
+    ThrowSituation, frozen_throw_lines, frozen_throw_worth_trying, throw_lines, throw_worth_trying,
+};
+use crate::types::{HOOK_GRABBED, PlayerInput, TeeState};
+use crate::vmath::vdistance;
+
+/// Model combinations a plan is scored under, at most (every subset of one or two relevant
+/// opponents: 1, 2 or 4; more opponents skip the re-scoring by default).
+pub const MAX_COMBOS: usize = 4;
+
+/// Frozen non-victim tees closer than this are passed to the planner as frozen bystanders.
+const BYSTANDER_PX: f64 = crate::brains::BYSTANDER_PX;
+
+/// The search never gets less than this under the decision cap (ms).
+const MIN_SEARCH_MS: f64 = 1.0;
+
+/// The search budget while we are frozen (ms); no adaptive extension either.
+const FROZEN_SEARCH_MS: f64 = 1.0;
+
+/// Where a candidate came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Source {
+    Warm,
+    Proposal,
+    Book,
+    Throw,
+    Cem,
+    Tech(Tech),
+}
+
+/// Number of [`Source`] kinds (techniques count as one kind in the per-source tables).
+pub const SOURCE_KINDS: usize = 6;
+
+impl Source {
+    pub fn kind(self) -> usize {
+        match self {
+            Source::Warm => 0,
+            Source::Proposal => 1,
+            Source::Book => 2,
+            Source::Throw => 3,
+            Source::Cem => 4,
+            Source::Tech(_) => 5,
+        }
+    }
+
+    pub fn kind_name(kind: usize) -> &'static str {
+        ["warm", "proposal", "book", "throw", "cem", "technique"][kind]
+    }
+
+    /// The label telemetry shows for the chosen plan ("T14 panic hook", "book", ...).
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Tech(t) => t.name(),
+            other => Source::kind_name(other.kind()),
+        }
+    }
+}
+
+/// Physics ticks simulated per phase, summed over all workers (D-045: unlike a clock this does not
+/// count host stalls, so it is the measure the 5 ms goal is proven with).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WorkCounters {
+    /// Rolling the planning world forward by the input lag.
+    pub lag: u64,
+    /// The proposer's own simulation (the scripted proposer; a fly is measured in wall time).
+    pub proposal: u64,
+    pub stage1: u64,
+    pub stage2: u64,
+    /// The adaptive extension.
+    pub extension: u64,
+    /// The shield's `escapeExists`/`saferInput` rollouts.
+    pub shield: u64,
+    /// Hook-anchor ray casts.
+    pub rays: u64,
+    pub rollouts_stage1: u32,
+    pub rollouts_stage2: u32,
+    pub rollouts_extension: u32,
+}
+
+impl WorkCounters {
+    /// Physics ticks of the whole decision.
+    pub fn total_ticks(&self) -> u64 {
+        self.lag + self.proposal + self.stage1 + self.stage2 + self.extension + self.shield
+    }
+
+    pub fn add(&mut self, o: &WorkCounters) {
+        self.lag += o.lag;
+        self.proposal += o.proposal;
+        self.stage1 += o.stage1;
+        self.stage2 += o.stage2;
+        self.extension += o.extension;
+        self.shield += o.shield;
+        self.rays += o.rays;
+        self.rollouts_stage1 += o.rollouts_stage1;
+        self.rollouts_stage2 += o.rollouts_stage2;
+        self.rollouts_extension += o.rollouts_extension;
+    }
+}
+
+/// Everything worth showing about one decision (the web page, the clips, the arena summary).
+#[derive(Debug, Clone, Default)]
+pub struct DecisionTelemetry {
+    pub work: WorkCounters,
+    /// Candidates generated / scored (stage 1 or later) per [`Source::kind`].
+    pub generated: [u32; SOURCE_KINDS],
+    pub evaluated: [u32; SOURCE_KINDS],
+    /// The source of the chosen plan (its label), and the technique if it came from one.
+    pub chosen: Option<Source>,
+    pub chosen_plan: Vec<PlanStep>,
+    pub threat_ids: Vec<i32>,
+    pub victim_id: i32,
+    pub danger: Danger,
+    /// Model combinations the top candidates were scored under (1 = no robust stage).
+    pub combos: u32,
+    pub budget_ms: f64,
+    /// Wall time of the search (deadline mode only; 0 in fixed mode, which reads no clock).
+    pub search_ms: f64,
+    pub proposal_ms: f64,
+    /// Wall time spent inside candidate scoring (`Engine::evaluate`), deadline mode only; the rest
+    /// of `search_ms` is pool generation and bookkeeping.
+    pub rollout_ms: f64,
+    pub shield_ms: f64,
+    /// The extension ran (danger flagged and the choice still ended with us out).
+    pub extended: bool,
+    pub shielded: bool,
+    pub shield_incomplete: bool,
+    /// The search ran out of time before its pool was exhausted.
+    pub out_of_time: bool,
+    pub best_score: f64,
+    pub robust_value: f64,
+    /// Mean estimated probability that the modelled opponents react (see `ReactBelief`).
+    pub react_belief: f64,
+    /// The chosen plan ends with us out under some modelled response.
+    pub unsafe_choice: bool,
+    /// `HybridConfig::debug_dump`: the best candidates by cheap score: `(label, cheap score,
+    /// per-combination scores, first step)`.
+    pub dump: Vec<(String, f64, Vec<f64>, String)>,
+}
+
+impl DecisionTelemetry {
+    pub fn to_json(&self) -> String {
+        let src = |a: &[u32; SOURCE_KINDS]| {
+            (0..SOURCE_KINDS)
+                .map(|k| format!("\"{}\":{}", Source::kind_name(k), a[k]))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let ids = self
+            .threat_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let plan = self
+            .chosen_plan
+            .iter()
+            .map(|s| format!("[{},{},{},{}]", s.dir, s.jump, s.hook, s.fire))
+            .collect::<Vec<_>>()
+            .join(",");
+        let w = &self.work;
+        let dump = if self.dump.is_empty() {
+            String::new()
+        } else {
+            let items = self
+                .dump
+                .iter()
+                .map(|(l, s, all, first)| {
+                    format!(
+                        "{{\"src\":\"{l}\",\"score\":{:.3},\"combos\":[{}],\"step0\":\"{first}\"}}",
+                        finite(*s),
+                        all.iter()
+                            .map(|v| format!("{:.3}", finite(*v)))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(",\"dump\":[{items}]")
+        };
+        format!(
+            "{{\"chosen\":\"{}\",\"plan\":[{}],\"victim\":{},\"threats\":[{}],\"danger\":\"{}\",\"combos\":{},\
+\"generated\":{{{}}},\"evaluated\":{{{}}},\"budget_ms\":{},\"search_ms\":{:.3},\"proposal_ms\":{:.3},\"rollout_ms\":{:.3},\"shield_ms\":{:.3},\
+\"extended\":{},\"shielded\":{},\"shield_incomplete\":{},\"out_of_time\":{},\"unsafe\":{},\"best_score\":{:.4},\"robust\":{:.4},\"react_belief\":{:.3},\
+\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{}}}{}}}",
+            self.chosen.map_or("none", Source::label),
+            plan,
+            self.victim_id,
+            ids,
+            self.danger.reasons(),
+            self.combos,
+            src(&self.generated),
+            src(&self.evaluated),
+            self.budget_ms,
+            self.search_ms,
+            self.proposal_ms,
+            self.rollout_ms,
+            self.shield_ms,
+            self.extended,
+            self.shielded,
+            self.shield_incomplete,
+            self.out_of_time,
+            self.unsafe_choice,
+            finite(self.best_score),
+            finite(self.robust_value),
+            finite(self.react_belief),
+            w.total_ticks(),
+            w.lag,
+            w.proposal,
+            w.stage1,
+            w.stage2,
+            w.extension,
+            w.shield,
+            w.rays,
+            dump,
+        )
+    }
+}
+
+fn finite(v: f64) -> f64 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
+/// One candidate and its scores by model combination.
+#[derive(Clone)]
+struct Cand {
+    plan: Vec<PlanStep>,
+    src: Source,
+    res: [Option<EvalResult>; MAX_COMBOS],
+}
+
+impl Cand {
+    fn new(plan: Vec<PlanStep>, src: Source) -> Cand {
+        Cand {
+            plan,
+            src,
+            res: [None; MAX_COMBOS],
+        }
+    }
+
+    fn cheap(&self) -> Option<f64> {
+        self.res[0].map(|r| r.score)
+    }
+
+    fn complete(&self, combos: usize) -> bool {
+        self.res[..combos].iter().all(Option::is_some)
+    }
+
+    fn worst_self_out(&self, combos: usize) -> i32 {
+        self.res[..combos]
+            .iter()
+            .flatten()
+            .map(|r| r.self_out)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// A plan signature for de-duplication: the discrete moves and the aim rounded to 1/50 rad.
+fn signature(plan: &[PlanStep]) -> Vec<i32> {
+    plan.iter()
+        .flat_map(|s| [s.dir, s.jump, s.hook, s.fire, (s.aim * 50.0).round() as i32])
+        .collect()
+}
+
+/// What the brain hands the search for one decision.
+pub struct DecisionInput<'a> {
+    pub obs: &'a Observation,
+    pub self_id: i32,
+    pub victim_id: i32,
+    /// The input this client sent last (the plan's starting point).
+    pub prev: PlayerInput,
+    pub lag_ticks: u32,
+    /// Physics ticks the brain simulated to roll the planning world forward (work counter).
+    pub roll_ticks: u64,
+}
+
+/// The decision procedure and everything it keeps between decisions.
+pub struct HybridSearch {
+    cfg: HybridConfig,
+    // Boxed: the planner is ~300 KB and a world/snapshot ~100 KB; threads have small stacks.
+    planner: Box<Planner<PhysicsWorld>>,
+    /// The decision planning world: the brain syncs it, rolls it forward and hands it over.
+    world: Box<PhysicsWorld>,
+    saved: Box<PhysicsSavedState>,
+    engine: Engine,
+    proposer: Box<dyn Proposer>,
+    anchors: AnchorCache,
+    map: Arc<MapData>,
+    /// The work clock's counter, when the brain runs on one.
+    meter: Option<Arc<crate::hybrid::work::WorkMeter>>,
+    /// The decision's model combinations as reaction masks (see `decide`) and their probabilities.
+    masks: Vec<u32>,
+    mask_weights: Vec<f64>,
+    /// Online per-opponent estimate that it reacts rather than holds, and what was predicted for
+    /// each modelled opponent at the previous decision (hold input, scripted reply).
+    beliefs: HashMap<i32, ReactBelief>,
+    prev_predictions: Vec<(i32, PlayerInput, PlayerInput)>,
+    /// Whether the mode reads a clock (deadline) and the wall time spent scoring this decision.
+    timed: bool,
+    rollout_ms: f64,
+    /// The shield's two snapshot buffers, kept across decisions.
+    shield_bufs: Box<crate::shield::ShieldBuffers<PhysicsWorld>>,
+    batch: Batch,
+    outs: Vec<EvalOut>,
+    last_prop_ticks: u64,
+}
+
+impl HybridSearch {
+    pub fn new(
+        cfg: HybridConfig,
+        proposer: Box<dyn Proposer>,
+        world: PhysicsWorld,
+        clock: Arc<WallClock>,
+    ) -> HybridSearch {
+        cfg.validate().expect("valid hybrid config");
+        let planner = Box::new(Planner::new(cfg.planner));
+        let saved = Box::new(world.save_state());
+        let map = world.map().clone();
+        let ctx = Box::new(Ctx {
+            generation: 0,
+            saved: saved.clone(),
+            self_id: 0,
+            victim_id: 1,
+            prev: crate::types::empty_input(),
+            victim_input: crate::types::empty_input(),
+            opp_seed: 1,
+            field: Arc::new(HazardField {
+                width: 0,
+                height: 0,
+                dist: Vec::new(),
+            }),
+            unfreeze: Arc::new(HazardField {
+                width: 0,
+                height: 0,
+                dist: Vec::new(),
+            }),
+            frozen_bystanders: Vec::new(),
+            frozen_bystander_vels: Vec::new(),
+            threats: None,
+            self_freeze_bias: 1.0,
+        });
+        let engine = Engine::new(&cfg, &world, ctx, clock);
+        HybridSearch {
+            cfg,
+            planner,
+            world: Box::new(world),
+            saved,
+            engine,
+            proposer,
+            anchors: AnchorCache::new(),
+            map,
+            meter: None,
+            masks: Vec::new(),
+            mask_weights: Vec::new(),
+            beliefs: HashMap::new(),
+            prev_predictions: Vec::new(),
+            timed: false,
+            rollout_ms: 0.0,
+            shield_bufs: Box::default(),
+            batch: Batch::default(),
+            outs: Vec::new(),
+            last_prop_ticks: 0,
+        }
+    }
+
+    /// Lets the search report its work to a work clock.
+    pub fn set_meter(&mut self, meter: Option<Arc<crate::hybrid::work::WorkMeter>>) {
+        self.engine.set_meter(meter.clone());
+        self.meter = meter;
+    }
+
+    pub fn config(&self) -> &HybridConfig {
+        &self.cfg
+    }
+
+    pub fn world_mut(&mut self) -> &mut PhysicsWorld {
+        &mut self.world
+    }
+
+    /// Gives the proposer back (the brain rebuilds the search when the map changes).
+    pub fn into_proposer(mut self) -> Box<dyn Proposer> {
+        std::mem::replace(&mut self.proposer, Box::new(crate::hybrid::proposer::NoProposer))
+    }
+
+    pub fn proposer_name(&self) -> &str {
+        self.proposer.name()
+    }
+
+    pub fn workers(&self) -> usize {
+        self.engine.workers()
+    }
+
+    /// New episode: forgets the warm plan and hidden state, reseeds every random source.
+    pub fn reset(&mut self, ctx: &ddai_brain::ResetContext) {
+        self.planner.set_search_seed(ctx.seed as u32);
+        self.planner.warm = None;
+        self.beliefs.clear();
+        self.prev_predictions.clear();
+        self.proposer.reset(ctx);
+        self.last_prop_ticks = self.proposer.work_ticks();
+    }
+
+    /// Runs `jobs` (candidate index, combo) as one batch and files the results into `cands`.
+    /// Returns whether some rollout was cut by the deadline. Ticks are added to `ticks`.
+    fn run_jobs(
+        &mut self,
+        clock: &dyn Clock,
+        cands: &mut [Cand],
+        jobs: &[(usize, u32)],
+        deadline_ms: Option<f64>,
+        ticks: &mut u64,
+        rollouts: &mut u32,
+    ) -> bool {
+        if jobs.is_empty() {
+            return false;
+        }
+        let n = self.cfg.planner.steps as usize;
+        self.batch.clear(n);
+        let mut last: Option<(usize, usize)> = None;
+        for &(ci, combo) in jobs {
+            let pi = match last {
+                Some((lc, lp)) if lc == ci => lp,
+                _ => {
+                    let p = self.batch.push_plan(&cands[ci].plan);
+                    last = Some((ci, p));
+                    p
+                }
+            };
+            self.batch.push_job(pi, self.masks[combo as usize]);
+        }
+        let t0 = self.timed.then(|| clock.now_ms());
+        self.engine
+            .evaluate(&mut self.batch, clock, deadline_ms, &mut self.outs);
+        if let Some(t0) = t0 {
+            self.rollout_ms += clock.now_ms() - t0;
+        }
+        let mut cut = false;
+        for (k, &(ci, combo)) in jobs.iter().enumerate() {
+            let o = self.outs[k];
+            *ticks += u64::from(o.ticks);
+            match o.res {
+                Some(r) => {
+                    cands[ci].res[combo as usize] = Some(r);
+                    *rollouts += 1;
+                }
+                None => cut = true,
+            }
+        }
+        // The meter was advanced by the engine after each rollout.
+        cut
+    }
+
+    /// One decision. `clock` is only read in deadline mode.
+    #[allow(clippy::too_many_lines)]
+    pub fn decide(&mut self, clock: &dyn Clock, inp: &DecisionInput<'_>) -> (PlayerInput, DecisionTelemetry) {
+        let timed = matches!(self.cfg.mode, HybridMode::Deadline { .. });
+        self.timed = timed;
+        self.rollout_ms = 0.0;
+        let now = |c: &dyn Clock| if timed { c.now_ms() } else { 0.0 };
+        let mut tel = DecisionTelemetry {
+            victim_id: inp.victim_id,
+            combos: 1,
+            ..DecisionTelemetry::default()
+        };
+        tel.work.lag = inp.roll_ticks;
+        if let Some(m) = &self.meter {
+            m.set_scale(self.world.all_tees().len());
+            m.add(inp.roll_ticks);
+        }
+        tel.budget_ms = match self.cfg.mode {
+            HybridMode::Deadline { budget_ms } => budget_ms,
+            HybridMode::Fixed => 0.0,
+        };
+        let (self_id, victim_id, prev) = (inp.self_id, inp.victim_id, inp.prev);
+        let (Some(me), Some(victim)) = (self.world.get_tee(self_id), self.world.get_tee(victim_id)) else {
+            return (prev, tel);
+        };
+        if !me.alive || !victim.alive {
+            return (prev, tel);
+        }
+        self.planner.opp_seed = js::opp_seed_next(self.planner.opp_seed);
+        let cfg = self.cfg.clone();
+        let n = cfg.planner.steps as usize;
+        let track_aim = cfg.planner.track_aim;
+        let aim_at = js::atan2(victim.pos.y - me.pos.y, victim.pos.x - me.pos.x);
+        let aim_base = if track_aim { aim_at } else { 0.0 };
+        let (field, unfreeze) = self.planner.hazard_fields(self.world.collision());
+
+        // ---- who is around --------------------------------------------------------------------
+        let all = self.world.all_tees();
+        let radius = cfg
+            .threat_radius_px
+            .unwrap_or_else(|| threat_radius(cfg.decision_ticks, inp.lag_ticks));
+        let dist_me = |t: &TeeState| vdistance(t.pos, me.pos);
+        let mut threats: Vec<TeeState> = if cfg.threat_model {
+            all.iter()
+                .filter(|t| t.id != self_id && t.id != victim_id && t.alive && !t.frozen && dist_me(t) <= radius)
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        threats.sort_by(|a, b| dist_me(a).total_cmp(&dist_me(b)).then(a.id.cmp(&b.id)));
+        threats.truncate(MAX_THREATS);
+        let hooked_by = all
+            .iter()
+            .find(|t| {
+                t.id != self_id && t.alive && !t.frozen && t.hooked_player == self_id && t.hook_state == HOOK_GRABBED
+            })
+            .copied();
+        let frozen_by: Vec<&TeeState> = all
+            .iter()
+            .filter(|t| t.id != self_id && t.id != victim_id && t.alive && t.frozen && dist_me(t) <= BYSTANDER_PX)
+            .collect();
+        let victim_in_radius = !victim.frozen && dist_me(&victim) <= radius;
+        let mut danger = Danger {
+            opponents_in_radius: u32::from(victim_in_radius) + threats.len() as u32,
+            near_freeze: !me.frozen && freeze_gap_px(self.world.collision(), me.pos.x, me.pos.y) < EDGE_GAP_PX,
+            hooked_by: hooked_by.map(|t| t.id),
+            probe_self_out: false,
+        };
+        tel.threat_ids = threats.iter().map(|t| t.id).collect();
+        let victim_input = crate::brains::enemy_input_from_tee(&victim);
+        let threat_set = (!threats.is_empty()).then(|| ThreatSet {
+            ids: threats.iter().map(|t| t.id).collect(),
+            inputs: threats.iter().map(crate::brains::enemy_input_from_tee).collect(),
+            react_mask: 0,
+            weight: cfg.threat_weight,
+            hook_targets: cfg.hook_threats,
+        });
+        self.planner.threats.clone_from(&threat_set);
+        self.planner.set_frozen_bystanders(
+            frozen_by.iter().map(|t| t.pos).collect(),
+            frozen_by.iter().map(|t| t.vel).collect(),
+        );
+
+        // What each modelled opponent did since the last decision, against what "hold" and "react"
+        // predicted for it then (see `ReactBelief`).
+        for (id, hold, react) in std::mem::take(&mut self.prev_predictions) {
+            if let Some(t) = all.iter().find(|t| t.id == id && t.alive && !t.frozen) {
+                let observed = crate::brains::enemy_input_from_tee(t);
+                self.beliefs.entry(id).or_default().observe(&observed, &hold, &react);
+            }
+        }
+
+        // Model combinations. Bit 0 = the victim reacts, bit `i + 1` = threat `i` reacts; only the
+        // opponents that can act on us matter (a frozen or far victim's reaction changes nothing, so
+        // it would only double the stage-2 cost). `masks[0] = 0` is the cheap model (everybody
+        // holds), the last mask is "everybody reacts"; a job names its combination by index.
+        let mut relevant: Vec<u32> = Vec::with_capacity(1 + threats.len());
+        if victim_in_radius {
+            relevant.push(0);
+        }
+        relevant.extend((0..threats.len() as u32).map(|i| i + 1));
+        self.masks.clear();
+        // `max_combos = 1` means exactly one combination (the cheap model), whatever the opponents.
+        if cfg.robust.enabled && cfg.robust.max_combos >= 2 && relevant.len() <= cfg.robust.max_relevant {
+            let bit = |j: usize| 1u32 << relevant[j];
+            let all: u32 = (0..relevant.len()).map(bit).fold(0, |a, b| a | b);
+            if relevant.len() <= 2 && cfg.robust.max_combos >= (1 << relevant.len()) {
+                // Every subset: 1, 2 or 4 combinations.
+                for subset in 0u32..(1u32 << relevant.len()) {
+                    let mask = (0..relevant.len())
+                        .filter(|j| (subset >> j) & 1 == 1)
+                        .fold(0, |a, j| a | bit(j));
+                    self.masks.push(mask);
+                }
+            } else if cfg.robust.max_combos <= 2 || relevant.len() < 3 {
+                // The two extremes only: everybody holds / everybody reacts.
+                self.masks.extend([0, all]);
+            } else {
+                // Three or more relevant opponents would be 8+ combinations per plan, more than a
+                // 4 ms budget can pay for: the two extremes (everybody holds / everybody reacts)
+                // plus each of the two most important opponents reacting alone.
+                self.masks.extend([0, all, bit(0), bit(1)]);
+            }
+        } else {
+            self.masks.push(0);
+        }
+        let ncombos = self.masks.len();
+        tel.combos = ncombos as u32;
+        // Probability of each combination from the per-opponent beliefs, and how much the worst
+        // case counts: it fades when the opponents look like they hold (an idle victim must not
+        // make us play scared).
+        let belief_of = |bit: u32| -> f64 {
+            let id = if bit == 0 {
+                victim_id
+            } else {
+                threats[bit as usize - 1].id
+            };
+            self.beliefs.get(&id).copied().unwrap_or_default().p
+        };
+        self.mask_weights.clear();
+        for &mask in &self.masks {
+            let p = relevant.iter().fold(1.0, |acc, &bit| {
+                let w = belief_of(bit);
+                acc * if (mask >> bit) & 1 == 1 { w } else { 1.0 - w }
+            });
+            self.mask_weights.push(p);
+        }
+        let mean_belief = if relevant.is_empty() {
+            0.5
+        } else {
+            relevant.iter().map(|&b| belief_of(b)).sum::<f64>() / relevant.len() as f64
+        };
+        tel.react_belief = mean_belief;
+        let lambda_eff = if cfg.robust.belief_lambda {
+            cfg.robust.lambda * (2.0 * mean_belief).min(1.0)
+        } else {
+            cfg.robust.lambda
+        };
+
+        // ---- decision snapshot for the workers -----------------------------------------------
+        self.world.save_state_into(&mut self.saved);
+        let opp_seed = self.planner.opp_seed;
+        {
+            let (saved, ts) = (&*self.saved, threat_set.clone());
+            let (f, u) = (Arc::clone(&field), Arc::clone(&unfreeze));
+            let (bp, bv) = (
+                frozen_by.iter().map(|t| t.pos).collect::<Vec<_>>(),
+                frozen_by.iter().map(|t| t.vel).collect::<Vec<_>>(),
+            );
+            self.engine.with_ctx(|c| {
+                c.saved.assign_from(saved);
+                c.self_id = self_id;
+                c.victim_id = victim_id;
+                c.prev = prev;
+                c.victim_input = victim_input;
+                c.opp_seed = opp_seed;
+                c.field = f;
+                c.unfreeze = u;
+                c.frozen_bystanders = bp;
+                c.frozen_bystander_vels = bv;
+                c.threats = ts;
+                c.self_freeze_bias = 1.0;
+            });
+        }
+
+        // ---- candidate pool ------------------------------------------------------------------
+        let mut seen: HashSet<Vec<i32>> = HashSet::new();
+        let mut push = |cands: &mut Vec<Cand>, tel: &mut DecisionTelemetry, plan: Vec<PlanStep>, src: Source| {
+            if plan.len() == n && seen.insert(signature(&plan)) {
+                tel.generated[src.kind()] += 1;
+                cands.push(Cand::new(plan, src));
+            }
+        };
+        let mut warm_c: Vec<Cand> = Vec::new();
+        let have_warm = if let Some(warm) = self.planner.warm.clone()
+            && warm.len() == n
+        {
+            let shifted: Vec<PlanStep> = warm[1..]
+                .iter()
+                .copied()
+                .chain(std::iter::once(*warm.last().unwrap()))
+                .collect();
+            push(&mut warm_c, &mut tel, shifted, Source::Warm);
+            true
+        } else {
+            false
+        };
+
+        let t_prop = now(clock);
+        let mut props: Vec<Vec<PlanStep>> = Vec::new();
+        if cfg.proposals > 0 {
+            let pctx = ProposeCtx {
+                obs: inp.obs,
+                world: &self.world,
+                saved: &self.saved,
+                map: &self.map,
+                self_id,
+                victim_id,
+                steps: n,
+                step_ticks: &self.planner.step_ticks,
+                aim_at,
+                track_aim,
+                prev,
+                k: cfg.proposals,
+            };
+            self.proposer.propose(&pctx, &mut props);
+        }
+        tel.proposal_ms = now(clock) - t_prop;
+        let pt = self.proposer.work_ticks();
+        tel.work.proposal = pt - self.last_prop_ticks;
+        self.last_prop_ticks = pt;
+        if let Some(m) = &self.meter {
+            m.add(tel.work.proposal);
+        }
+        // The search budget (D-042: 4 ms) starts here: after the proposals (the fly's ~1 ms is
+        // accounted separately), but it covers the candidate generation below.
+        let t_search = now(clock);
+        let mut prop_c: Vec<Cand> = Vec::new();
+        for p in props.into_iter().take(cfg.proposals) {
+            push(&mut prop_c, &mut tel, sanitize(p, n), Source::Proposal);
+        }
+
+        let mut book_c: Vec<Cand> = Vec::new();
+        for p in self
+            .planner
+            .seed_plans(&*self.world, self_id, victim_id, &field, aim_at)
+        {
+            push(&mut book_c, &mut tel, p, Source::Book);
+        }
+
+        let mut throw_c: Vec<Cand> = Vec::new();
+        {
+            let at = if track_aim { 0.0 } else { aim_at };
+            let sit = ThrowSituation {
+                separation: vdistance(me.pos, victim.pos),
+                enemy_hazard_nearness: hazard_nearness(&field, victim.pos.x, victim.pos.y),
+                me_frozen: me.frozen,
+                enemy_frozen: victim.frozen,
+                enemy_alive: victim.alive,
+            };
+            let lines =
+                if cfg.planner.frozen_throw > 0 && frozen_throw_worth_trying(&sit) && victim.freeze_ticks_left >= 30 {
+                    frozen_throw_lines(cfg.planner.steps, at)
+                } else if cfg.planner.freeze_throw > 0 && throw_worth_trying(&sit) {
+                    throw_lines(cfg.planner.steps, at)
+                } else {
+                    Vec::new()
+                };
+            for p in lines.into_iter().take(cfg.throw_cap) {
+                push(&mut throw_c, &mut tel, p, Source::Throw);
+            }
+        }
+
+        let mut generated = Generated::default();
+        let rays_before = self.anchors.rays;
+        if cfg.techniques {
+            let anchors = self.anchors.select(self.world.collision(), me.pos, cfg.anchors);
+            let me_strong = strength(self.world.inner(), self_id, victim_id);
+            let tc = TechCtx {
+                col: self.world.collision(),
+                field: &field,
+                me: &me,
+                victim: &victim,
+                threats: &threats,
+                hooked_by: hooked_by.as_ref(),
+                steps: n,
+                aim_at,
+                me_strong,
+            };
+            generated = generate(
+                &tc,
+                &anchors,
+                &TechCaps {
+                    generic_escape: danger.flagged(),
+                    ..TechCaps::default()
+                },
+            );
+        }
+        tel.work.rays = self.anchors.rays - rays_before;
+        if let Some(m) = &self.meter {
+            m.add_units(2 * tel.work.rays);
+        }
+        let mut def_c: Vec<Cand> = Vec::new();
+        for tp in &generated.defence {
+            push(&mut def_c, &mut tel, tp.plan.clone(), Source::Tech(tp.tech));
+        }
+        let mut off_c: Vec<Cand> = Vec::new();
+        for tp in &generated.offence {
+            push(&mut off_c, &mut tel, tp.plan.clone(), Source::Tech(tp.tech));
+        }
+
+        // ---- the probe: does the warm plan (or standing still) end with us out? ---------------
+        let sim_tees = js::max(1.0, all.len() as f64);
+        let shield_reserve = cfg.shield_reserve_ms_per_tee * sim_tees;
+        let budget = match cfg.mode {
+            // The decision cap (search + shield) shortens the search when the shield's reserve
+            // would not fit under it (many tees); never below `MIN_SEARCH_MS`.
+            HybridMode::Deadline { budget_ms } => {
+                let budget_ms = match cfg.decision_cap_ms {
+                    Some(cap) => js::min(budget_ms, js::max(cap - shield_reserve, MIN_SEARCH_MS)),
+                    None => budget_ms,
+                };
+                // Frozen, the game ignores our movement inputs: only a cheap search keeps the warm
+                // plan alive for the moment we thaw (review round 1, F4).
+                if me.frozen {
+                    js::min(budget_ms, FROZEN_SEARCH_MS)
+                } else {
+                    budget_ms
+                }
+            }
+            HybridMode::Fixed => 0.0,
+        };
+        tel.budget_ms = budget;
+        let stage1_end = if ncombos > 1 {
+            t_search + budget * (1.0 - cfg.stage2_fraction)
+        } else {
+            t_search + budget
+        };
+        let search_end = t_search + budget;
+        let chunk = if !timed {
+            usize::MAX
+        } else if self.engine.workers() > 1 {
+            2 * self.engine.workers()
+        } else {
+            1
+        };
+        let mut cands: Vec<Cand> = Vec::new();
+        let mut have_any = false;
+        let mut out_of_time = false;
+        let mut ticks1 = 0u64;
+        let mut roll1 = 0u32;
+
+        let probe_plan = if have_warm {
+            None
+        } else {
+            Some(vec![
+                PlanStep {
+                    dir: 0,
+                    jump: 0,
+                    hook: 0,
+                    fire: 0,
+                    aim: 0.0,
+                };
+                n
+            ])
+        };
+        {
+            // The probe = stage-1 scoring of the warm plan under "all hold" plus the all-react
+            // combination; both are reused by the later stages.
+            let mut probe = std::mem::take(&mut warm_c);
+            if probe.is_empty()
+                && let Some(p) = probe_plan
+            {
+                probe.push(Cand::new(p, Source::Warm));
+                tel.generated[Source::Warm.kind()] += 1;
+            }
+            let base = cands.len();
+            cands.extend(probe);
+            if cands.len() > base {
+                let mut jobs: Vec<(usize, u32)> = vec![(base, 0)];
+                if ncombos > 1 {
+                    jobs.push((base, (ncombos - 1) as u32));
+                }
+                let cut = self.run_jobs(clock, &mut cands, &jobs, None, &mut ticks1, &mut roll1);
+                debug_assert!(!cut);
+                have_any = true;
+                if cands[base].res[..ncombos].iter().flatten().any(|r| r.self_out > 0) {
+                    danger.probe_self_out = true;
+                }
+            }
+        }
+        tel.danger = danger;
+
+        // ---- stage 1: order the pool by danger, score under the cheap model --------------------
+        // The situational defensive techniques (T9, T10, T12, T13, T14, T15, T17, ...) exist only
+        // when their geometric trigger fired, so there are few of them and they go first: a tee
+        // falling over freeze without a jump must try the wall hook before anything else, however
+        // small the budget. The generic wall/ceiling escape (danger without a cause) waits behind
+        // the book and the attack unless the probe says we are doomed or we are hooked; putting
+        // it ahead every time starved the attack (danger flags alone are true in most decisions
+        // of a fight).
+        let urgent = danger.escape_first() || danger.hooked_by.is_some();
+        let (def_first, def_rest): (Vec<Cand>, Vec<Cand>) = def_c
+            .into_iter()
+            .partition(|c| urgent || !matches!(c.src, Source::Tech(Tech::AnchorEscape)));
+        let mut order: Vec<Cand> = Vec::new();
+        order.extend(def_first);
+        order.extend(prop_c);
+        order.extend(book_c);
+        order.extend(off_c);
+        order.extend(throw_c);
+        order.extend(def_rest);
+        let first_pool = cands.len();
+        cands.extend(order);
+        let mut next = first_pool;
+        while next < cands.len() {
+            if timed && have_any && now(clock) >= stage1_end {
+                out_of_time = true;
+                break;
+            }
+            let end = next.saturating_add(chunk).min(cands.len());
+            let jobs: Vec<(usize, u32)> = (next..end).map(|i| (i, 0)).collect();
+            let dl = (timed && have_any).then_some(stage1_end);
+            let cut = self.run_jobs(clock, &mut cands, &jobs, dl, &mut ticks1, &mut roll1);
+            have_any |= cands[next..end].iter().any(|c| c.res[0].is_some());
+            next = end;
+            if cut {
+                out_of_time = true;
+                break;
+            }
+        }
+
+        // ---- CEM ------------------------------------------------------------------------------
+        let mut dist = self.planner.build_dist(aim_base);
+        let seed_scored = |cands: &[Cand]| -> Vec<(Vec<PlanStep>, f64)> {
+            cands
+                .iter()
+                .filter(|c| matches!(c.src, Source::Book | Source::Proposal | Source::Throw))
+                .filter_map(|c| c.cheap().map(|s| (c.plan.clone(), s)))
+                .collect()
+        };
+        let mut scored = seed_scored(&cands);
+        let cem_iteration = |this: &mut HybridSearch,
+                             it: i32,
+                             cands: &mut Vec<Cand>,
+                             scored: &mut Vec<(Vec<PlanStep>, f64)>,
+                             dist: &mut Vec<crate::planner::StepDist>,
+                             tel: &mut DecisionTelemetry,
+                             clock: &dyn Clock,
+                             dl: f64,
+                             ticks: &mut u64,
+                             rolls: &mut u32,
+                             seen: &mut HashSet<Vec<i32>>|
+         -> bool {
+            if it > 0 {
+                scored.clear();
+            }
+            let pop = cfg.planner.population.max(0) as usize;
+            let mut done = 0usize;
+            let mut cut_any = false;
+            while done < pop {
+                if timed && now(clock) >= dl {
+                    cut_any = true;
+                    break;
+                }
+                let k = chunk.min(pop - done);
+                let base = cands.len();
+                for _ in 0..k {
+                    let plan = this.planner.sample_plan(dist);
+                    tel.generated[Source::Cem.kind()] += 1;
+                    seen.insert(signature(&plan));
+                    cands.push(Cand::new(plan, Source::Cem));
+                }
+                let jobs: Vec<(usize, u32)> = (base..base + k).map(|i| (i, 0)).collect();
+                let dlo = timed.then_some(dl);
+                let cut = this.run_jobs(clock, cands, &jobs, dlo, ticks, rolls);
+                for c in &cands[base..] {
+                    if let Some(s) = c.cheap() {
+                        scored.push((c.plan.clone(), s));
+                    }
+                }
+                done += k;
+                if cut {
+                    cut_any = true;
+                    break;
+                }
+            }
+            scored.sort_by(|a, b| score_desc(a.1, b.1));
+            let elite_n = cfg.planner.elite.max(0) as usize;
+            let elites: Vec<Vec<PlanStep>> = scored.iter().take(elite_n).map(|(p, _)| p.clone()).collect();
+            this.planner.refit(dist, &elites);
+            cut_any
+        };
+        if !(timed && (out_of_time || now(clock) >= stage1_end)) {
+            for it in 0..cfg.planner.iterations {
+                if timed && now(clock) >= stage1_end {
+                    out_of_time = true;
+                    break;
+                }
+                let cut = cem_iteration(
+                    self,
+                    it,
+                    &mut cands,
+                    &mut scored,
+                    &mut dist,
+                    &mut tel,
+                    clock,
+                    stage1_end,
+                    &mut ticks1,
+                    &mut roll1,
+                    &mut seen,
+                );
+                if cut {
+                    out_of_time = true;
+                    break;
+                }
+            }
+        } else {
+            out_of_time = true;
+        }
+        tel.work.stage1 = ticks1;
+        tel.work.rollouts_stage1 = roll1;
+
+        // ---- stage 2: robust re-scoring of the best few ---------------------------------------
+        let mut ticks2 = 0u64;
+        let mut roll2 = 0u32;
+        let mut top = self.top_indices(&cands, cfg.robust.top_m, prev.direction);
+        if ncombos > 1 {
+            let mut jobs: Vec<(usize, u32)> = Vec::new();
+            for &ci in &top {
+                for combo in 1..ncombos as u32 {
+                    if cands[ci].res[combo as usize].is_none() {
+                        jobs.push((ci, combo));
+                    }
+                }
+            }
+            let dl = timed.then_some(search_end);
+            let cut = self.run_jobs(clock, &mut cands, &jobs, dl, &mut ticks2, &mut roll2);
+            out_of_time |= cut;
+        }
+        tel.work.stage2 = ticks2;
+        tel.work.rollouts_stage2 = roll2;
+
+        // ---- choose ---------------------------------------------------------------------------
+        let lambda = lambda_eff;
+        let mut pick = choose(
+            &cands,
+            &top,
+            ncombos,
+            &self.mask_weights,
+            lambda,
+            cfg.robust.mode,
+            prev.direction,
+            cfg.planner.flip_margin,
+        );
+
+        // ---- adaptive extension (D-042) -------------------------------------------------------
+        let unsafe_now =
+            |cands: &[Cand], pick: Option<usize>| pick.is_some_and(|i| cands[i].worst_self_out(ncombos.max(1)) > 0);
+        if timed && cfg.adaptive.enabled && !me.frozen && danger.flagged() && unsafe_now(&cands, pick) {
+            tel.extended = true;
+            let ext_end = t_search + cfg.adaptive.max_total_ms - shield_reserve;
+            let mut ticks_e = 0u64;
+            let mut roll_e = 0u32;
+            // First whatever the pool still holds unscored (defensive techniques come first in
+            // a dangerous pool), then more CEM.
+            let pending: Vec<usize> = (0..cands.len()).filter(|&i| cands[i].res[0].is_none()).collect();
+            for group in pending.chunks(chunk.max(1)) {
+                if now(clock) >= ext_end {
+                    break;
+                }
+                let jobs: Vec<(usize, u32)> = group.iter().map(|&i| (i, 0)).collect();
+                self.run_jobs(clock, &mut cands, &jobs, Some(ext_end), &mut ticks_e, &mut roll_e);
+            }
+            let mut rounds = 0;
+            loop {
+                top = self.top_indices(&cands, cfg.robust.top_m, prev.direction);
+                if ncombos > 1 {
+                    let mut jobs: Vec<(usize, u32)> = Vec::new();
+                    for &ci in &top {
+                        for combo in 1..ncombos as u32 {
+                            if cands[ci].res[combo as usize].is_none() {
+                                jobs.push((ci, combo));
+                            }
+                        }
+                    }
+                    self.run_jobs(clock, &mut cands, &jobs, Some(ext_end), &mut ticks_e, &mut roll_e);
+                }
+                pick = choose(
+                    &cands,
+                    &top,
+                    ncombos,
+                    &self.mask_weights,
+                    lambda,
+                    cfg.robust.mode,
+                    prev.direction,
+                    cfg.planner.flip_margin,
+                );
+                if !unsafe_now(&cands, pick) || now(clock) >= ext_end || rounds >= 3 {
+                    break;
+                }
+                rounds += 1;
+                let cut = cem_iteration(
+                    self,
+                    1,
+                    &mut cands,
+                    &mut scored,
+                    &mut dist,
+                    &mut tel,
+                    clock,
+                    ext_end,
+                    &mut ticks_e,
+                    &mut roll_e,
+                    &mut seen,
+                );
+                if cut {
+                    top = self.top_indices(&cands, cfg.robust.top_m, prev.direction);
+                    if ncombos > 1 {
+                        let mut jobs: Vec<(usize, u32)> = Vec::new();
+                        for &ci in &top {
+                            for combo in 1..ncombos as u32 {
+                                if cands[ci].res[combo as usize].is_none() {
+                                    jobs.push((ci, combo));
+                                }
+                            }
+                        }
+                        self.run_jobs(clock, &mut cands, &jobs, Some(ext_end), &mut ticks_e, &mut roll_e);
+                    }
+                    pick = choose(
+                        &cands,
+                        &top,
+                        ncombos,
+                        &self.mask_weights,
+                        lambda,
+                        cfg.robust.mode,
+                        prev.direction,
+                        cfg.planner.flip_margin,
+                    );
+                    break;
+                }
+            }
+            tel.work.extension = ticks_e;
+            tel.work.rollouts_extension = roll_e;
+        }
+        for c in &cands {
+            if c.res[0].is_some() {
+                tel.evaluated[c.src.kind()] += 1;
+            }
+        }
+        if cfg.debug_dump {
+            let mut idx: Vec<usize> = (0..cands.len()).filter(|&i| cands[i].cheap().is_some()).collect();
+            idx.sort_by(|&a, &b| score_desc(cands[a].cheap().unwrap(), cands[b].cheap().unwrap()).then(a.cmp(&b)));
+            for &i in idx.iter().take(14) {
+                let c = &cands[i];
+                let s0 = c.plan[0];
+                tel.dump.push((
+                    c.src.label().to_string(),
+                    c.cheap().unwrap_or(0.0),
+                    c.res[..ncombos].iter().flatten().map(|r| r.score).collect(),
+                    format!(
+                        "d{} j{} h{} f{} a{:.2}",
+                        s0.dir,
+                        s0.jump,
+                        s0.hook,
+                        s0.fire,
+                        if is_abs_aim(s0.aim) { s0.aim - ABS_AIM } else { s0.aim }
+                    ),
+                ));
+            }
+        }
+        tel.out_of_time = out_of_time;
+        tel.search_ms = now(clock) - t_search;
+        tel.rollout_ms = self.rollout_ms;
+
+        // ---- the chosen plan -> input ---------------------------------------------------------
+        let Some(pick) = pick else {
+            return (prev, tel);
+        };
+        let chosen_cand = cands[pick].clone();
+        let best = chosen_cand.plan.clone();
+        tel.chosen = Some(chosen_cand.src);
+        tel.chosen_plan.clone_from(&best);
+        tel.best_score = chosen_cand.cheap().unwrap_or(0.0);
+        tel.unsafe_choice = chosen_cand.worst_self_out(ncombos.max(1)) > 0;
+        tel.robust_value = if chosen_cand.complete(ncombos) {
+            robust_value_weighted(&scores_of(&chosen_cand, ncombos), &self.mask_weights[..ncombos], lambda)
+        } else {
+            tel.best_score
+        };
+
+        let rest = cfg.planner.rest_aim && best[0].hook == 0 && best[0].fire == 0;
+        let aim0 = if rest {
+            aim_at
+        } else {
+            resolve_aim(best[0].aim, aim_base)
+        };
+        let hook_ok = best[0].hook == 0
+            || self.planner.hook_already_out(&*self.world, self_id)
+            || self
+                .planner
+                .hook_allowed(&*self.world, self_id, victim_id, best[0], prev, aim0);
+        self.planner.swing_target_frozen = victim.frozen;
+        self.planner.swing_rope_on = me.hooked_player == victim_id;
+        self.planner.swing_target = Some(victim);
+        let mut chosen = self.planner.step_to_input(
+            &*self.world,
+            best[0],
+            prev,
+            vdistance(me.pos, victim.pos),
+            hook_ok,
+            Some(me.pos),
+            Some(victim.pos),
+            Some(victim.vel),
+            aim0,
+        );
+
+        // ---- shield ---------------------------------------------------------------------------
+        let t_shield = now(clock);
+        if cfg.planner.shield && !me.frozen {
+            let hold = self.planner.shield_hold(1);
+            let mut others: HashMap<i32, PlayerInput> = HashMap::new();
+            others.insert(victim_id, victim_input);
+            if let Some(ts) = &threat_set {
+                for (i, id) in ts.ids.iter().enumerate() {
+                    others.insert(*id, ts.inputs[i]);
+                }
+            }
+            // The worst modelled response to the chosen plan is what the shield must survive.
+            if ncombos > 1 && chosen_cand.complete(ncombos) {
+                let worst = (0..ncombos)
+                    .min_by(|&a, &b| {
+                        let (sa, sb) = (
+                            chosen_cand.res[a].map_or(f64::INFINITY, |r| r.score),
+                            chosen_cand.res[b].map_or(f64::INFINITY, |r| r.score),
+                        );
+                        sa.total_cmp(&sb)
+                    })
+                    .map_or(0, |w| self.masks[w]);
+                let mut rng = Rng::new(self.planner.opp_seed);
+                if worst & 1 == 1 {
+                    let inp = scripted_action(&*self.world, victim_id, self_id, &victim_input, &mut rng);
+                    others.insert(victim_id, inp);
+                }
+                if let Some(ts) = &threat_set {
+                    for (i, id) in ts.ids.iter().enumerate() {
+                        if (worst >> (i + 1)) & 1 == 1 {
+                            let inp = scripted_action(&*self.world, *id, self_id, &ts.inputs[i], &mut rng);
+                            others.insert(*id, inp);
+                        }
+                    }
+                }
+            }
+            let was_on = crate::prof::is_enabled();
+            crate::prof::enable();
+            let (s0, _) = crate::prof::counters();
+            if let Some(m) = &self.meter {
+                m.begin_shield();
+            }
+            if timed {
+                let call_start = t_search;
+                let reserve_deadline = now(clock) + shield_reserve;
+                let status = crate::shield::escape_exists_buffered(
+                    &mut *self.world,
+                    self_id,
+                    &chosen,
+                    hold,
+                    &others,
+                    Some((clock, reserve_deadline)),
+                    &mut self.shield_bufs,
+                );
+                if !matches!(status, crate::shield::Bounded::Done(true)) {
+                    // Not `Done(true)`: either no escape exists (`Done(false)`) or the check ran out of
+                    // time (`TimedOut`). An input with no escape is the slowest to disprove (every
+                    // escape has to be tried and fail), so a timeout is unconfirmed danger, not safety
+                    // (review round 1, F1): the search for a safer input gets the extension budget.
+                    // But the shield only knows stand/walk/jump escapes, not a hook: when the search
+                    // itself judged the plan safe (exact rollouts under every modelled response) and
+                    // the check merely timed out, a substitute found late would throw away plans the
+                    // shield cannot value (T14 panic hook: 88% -> 0% in the first F1 attempt), so then
+                    // it keeps the old single attempt inside the reserve.
+                    let danger = matches!(status, crate::shield::Bounded::Done(false)) || tel.unsafe_choice;
+                    let safer_deadline = if danger && cfg.adaptive.enabled {
+                        js::max(reserve_deadline, call_start + cfg.adaptive.max_total_ms)
+                    } else {
+                        reserve_deadline
+                    };
+                    match crate::shield::safer_input_buffered(
+                        &mut *self.world,
+                        self_id,
+                        &chosen,
+                        hold,
+                        &others,
+                        Some(&prev),
+                        Some((clock, safer_deadline)),
+                        &mut self.shield_bufs,
+                    ) {
+                        crate::shield::Bounded::Done(Some(safer)) => {
+                            chosen = safer;
+                            tel.shielded = true;
+                        }
+                        crate::shield::Bounded::Done(None) => {}
+                        crate::shield::Bounded::TimedOut => tel.shield_incomplete = true,
+                    }
+                }
+            } else {
+                // Fixed-work mode: no deadline, so the answers are complete (never `TimedOut`).
+                let has_escape = matches!(
+                    crate::shield::escape_exists_buffered(
+                        &mut *self.world,
+                        self_id,
+                        &chosen,
+                        hold,
+                        &others,
+                        None,
+                        &mut self.shield_bufs,
+                    ),
+                    crate::shield::Bounded::Done(true)
+                );
+                if !has_escape
+                    && let crate::shield::Bounded::Done(Some(safer)) = crate::shield::safer_input_buffered(
+                        &mut *self.world,
+                        self_id,
+                        &chosen,
+                        hold,
+                        &others,
+                        Some(&prev),
+                        None,
+                        &mut self.shield_bufs,
+                    )
+                {
+                    chosen = safer;
+                    tel.shielded = true;
+                }
+            }
+            let (s1, _) = crate::prof::counters();
+            tel.work.shield = s1 - s0;
+            if let Some(m) = &self.meter {
+                m.end_shield();
+            }
+            if !was_on {
+                crate::prof::disable();
+            }
+        }
+        tel.shield_ms = now(clock) - t_shield;
+
+        // Predictions for the next decision's belief update.
+        self.prev_predictions.clear();
+        let mut modelled_ids: Vec<i32> = Vec::with_capacity(1 + threats.len());
+        if victim_in_radius {
+            modelled_ids.push(victim_id);
+        }
+        modelled_ids.extend(threats.iter().map(|t| t.id));
+        for id in modelled_ids {
+            if let Some(t) = all.iter().find(|t| t.id == id) {
+                let hold = crate::brains::enemy_input_from_tee(t);
+                let react = scripted_action(&*self.world, id, self_id, &hold, &mut Rng::new(7));
+                self.prev_predictions.push((id, hold, react));
+            }
+        }
+
+        // ---- bookkeeping ----------------------------------------------------------------------
+        self.planner.warm = Some(normalize(&best, aim_base));
+        let chosen = self.planner.maybe_release(&*self.world, self_id, chosen);
+        self.planner.committed = Some(chosen);
+        (chosen, tel)
+    }
+
+    /// The `m` best candidates by cheap score (descending, ties by pool order), plus the best one
+    /// that keeps the current direction if it is not among them (for the flip hysteresis).
+    fn top_indices(&self, cands: &[Cand], m: usize, prev_dir: i32) -> Vec<usize> {
+        let mut idx: Vec<usize> = (0..cands.len()).filter(|&i| cands[i].cheap().is_some()).collect();
+        idx.sort_by(|&a, &b| score_desc(cands[a].cheap().unwrap(), cands[b].cheap().unwrap()).then(a.cmp(&b)));
+        let mut top: Vec<usize> = idx.iter().copied().take(m.max(1)).collect();
+        if let Some(&stay) = idx.iter().find(|&&i| cands[i].plan[0].dir == prev_dir)
+            && !top.contains(&stay)
+        {
+            top.push(stay);
+        }
+        top
+    }
+}
+
+fn scores_of(c: &Cand, combos: usize) -> Vec<f64> {
+    c.res[..combos].iter().flatten().map(|r| r.score).collect()
+}
+
+/// Picks the winner among `top`: the best robust value among candidates with all combinations
+/// scored; with the flip hysteresis of `decide_once` (keep the current direction unless a flip is
+/// clearly better). Falls back to the best cheap score if no candidate is complete.
+#[allow(clippy::too_many_arguments)]
+fn choose(
+    cands: &[Cand],
+    top: &[usize],
+    combos: usize,
+    weights: &[f64],
+    lambda: f64,
+    mode: RobustMode,
+    prev_dir: i32,
+    flip_margin: f64,
+) -> Option<usize> {
+    // (safe, value): with `SafeFirst` a plan no modelled reply freezes us in outranks every plan
+    // some reply does, and safe plans compete on the cheap score; the rest (and `Mix`) on the mix.
+    let value = |i: usize| -> Option<(bool, f64)> {
+        let c = &cands[i];
+        if !c.complete(combos) {
+            return None;
+        }
+        let mix = if combos > 1 {
+            robust_value_weighted(&scores_of(c, combos), &weights[..combos], lambda)
+        } else {
+            c.cheap()?
+        };
+        if mode == RobustMode::SafeFirst && combos > 1 {
+            let safe = c.worst_self_out(combos) == 0;
+            Some((safe, if safe { c.cheap()? } else { mix }))
+        } else {
+            Some((false, mix))
+        }
+    };
+    let better = |a: (bool, f64), b: (bool, f64)| a.0 && !b.0 || (a.0 == b.0 && a.1 > b.1);
+    let mut best: Option<(usize, (bool, f64))> = None;
+    let mut best_stay: Option<(usize, (bool, f64))> = None;
+    for &i in top {
+        let Some(v) = value(i) else { continue };
+        if best.is_none_or(|(_, bv)| better(v, bv)) {
+            best = Some((i, v));
+        }
+        if cands[i].plan[0].dir == prev_dir && best_stay.is_none_or(|(_, sv)| better(v, sv)) {
+            best_stay = Some((i, v));
+        }
+    }
+    let (mut bi, bv) = match best {
+        Some(b) => b,
+        None => {
+            // Nothing complete: the best cheap score anywhere.
+            let mut cheap: Option<(usize, f64)> = None;
+            for (i, c) in cands.iter().enumerate() {
+                if let Some(s) = c.cheap()
+                    && cheap.is_none_or(|(_, bs)| s > bs)
+                {
+                    cheap = Some((i, s));
+                }
+            }
+            return cheap.map(|(i, _)| i);
+        }
+    };
+    if flip_margin > 0.0
+        && let Some((si, sv)) = best_stay
+        && cands[bi].plan[0].dir != prev_dir
+        && bv.0 == sv.0
+        && bv.1 - sv.1 < flip_margin
+    {
+        bi = si;
+    }
+    Some(bi)
+}
+
+/// `b - a` with NaN as equal (the planner's descending sort).
+fn score_desc(a: f64, b: f64) -> std::cmp::Ordering {
+    let d = b - a;
+    if d < 0.0 {
+        std::cmp::Ordering::Less
+    } else if d > 0.0 {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    }
+}
+
+/// Pads/truncates a proposal to `n` steps and replaces non-finite aims (a proposal is untrusted).
+fn sanitize(mut plan: Vec<PlanStep>, n: usize) -> Vec<PlanStep> {
+    if plan.is_empty() {
+        return plan;
+    }
+    while plan.len() < n {
+        plan.push(*plan.last().unwrap());
+    }
+    plan.truncate(n);
+    for s in &mut plan {
+        s.dir = s.dir.clamp(-1, 1);
+        s.jump = i32::from(s.jump != 0);
+        s.hook = i32::from(s.hook != 0);
+        s.fire = i32::from(s.fire != 0);
+        if !s.aim.is_finite() {
+            s.aim = 0.0;
+        }
+    }
+    plan
+}
+
+/// A plan as the next decision's warm start: technique plans' absolute aims become aims relative to
+/// the victim direction (the encoding CEM samples around and `refit` averages).
+fn normalize(plan: &[PlanStep], aim_base: f64) -> Vec<PlanStep> {
+    plan.iter()
+        .map(|s| {
+            if is_abs_aim(s.aim) {
+                PlanStep {
+                    aim: wrap_angle(s.aim - ABS_AIM - aim_base),
+                    ..*s
+                }
+            } else {
+                *s
+            }
+        })
+        .collect()
+}
+
+/// `Some(true)` when `me` holds the strong side of a hook duel with `other` (the tee that is
+/// processed *later* in the tick, i.e. spawned earlier), `None` when either is not in the world.
+fn strength(world: &ddai_physics::world::World<f32>, me: i32, other: i32) -> Option<bool> {
+    let pos = |id: i32| world.entity_order.iter().position(|&x| i32::from(x) == id);
+    Some(pos(me)? > pos(other)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(dir: i32, scores: &[f64]) -> Cand {
+        let mut c = Cand::new(
+            vec![PlanStep {
+                dir,
+                jump: 0,
+                hook: 0,
+                fire: 0,
+                aim: 0.0,
+            }],
+            Source::Cem,
+        );
+        for (i, &s) in scores.iter().enumerate() {
+            c.res[i] = Some(EvalResult {
+                score: s,
+                self_out: 0,
+                enemy_out: 0,
+                enemy_sealed: false,
+            });
+        }
+        c
+    }
+
+    #[test]
+    fn choose_prefers_the_best_worst_case_not_the_best_cheap_score() {
+        // A wins the cheap model but is refuted by the reacting opponent; B is steady.
+        let cands = vec![cand(1, &[5.0, -6.0]), cand(1, &[3.0, 2.5])];
+        let pick = choose(&cands, &[0, 1], 2, &[1.0; 4], 0.5, RobustMode::Mix, 1, 0.0);
+        assert_eq!(pick, Some(1));
+        // Pure mean would still prefer B (2.75 vs -0.5); pure cheap prefers A.
+        let pick = choose(&cands, &[0, 1], 1, &[1.0; 4], 0.5, RobustMode::Mix, 1, 0.0);
+        assert_eq!(pick, Some(0));
+    }
+
+    #[test]
+    fn safe_first_keeps_the_best_cheap_plan_among_those_no_reply_freezes_us_in() {
+        // A has the best cheap score but one reply freezes us; B and C are safe, B is cheaper-better.
+        let mut a = cand(1, &[9.0, 8.0]);
+        a.res[1].as_mut().unwrap().self_out = 5;
+        let b = cand(1, &[4.0, -3.0]);
+        let c = cand(1, &[2.0, 1.9]);
+        let cands = vec![a, b, c];
+        assert_eq!(
+            choose(&cands, &[0, 1, 2], 2, &[1.0; 4], 0.5, RobustMode::SafeFirst, 1, 0.0),
+            Some(1)
+        );
+        // The mix would take C (mean 1.95, worst 1.9) over B (mean 0.5, worst -3.0).
+        assert_eq!(
+            choose(&cands, &[0, 1, 2], 2, &[1.0; 4], 0.5, RobustMode::Mix, 1, 0.0),
+            Some(0)
+        );
+        // Nobody safe: fall back to the mix.
+        let mut d = cand(1, &[9.0, 8.0]);
+        d.res[1].as_mut().unwrap().self_out = 5;
+        let mut e = cand(1, &[3.0, 2.0]);
+        e.res[0].as_mut().unwrap().self_out = 1;
+        let cands = vec![d, e];
+        assert_eq!(
+            choose(&cands, &[0, 1], 2, &[1.0; 4], 0.5, RobustMode::SafeFirst, 1, 0.0),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn incomplete_candidates_are_not_eligible_for_the_robust_choice() {
+        let cands = vec![cand(1, &[9.0]), cand(1, &[3.0, 2.0])];
+        assert_eq!(
+            choose(&cands, &[0, 1], 2, &[1.0; 4], 0.5, RobustMode::Mix, 1, 0.0),
+            Some(1)
+        );
+        // Nothing complete: fall back to the best cheap score.
+        let cands = vec![cand(1, &[9.0]), cand(1, &[3.0])];
+        assert_eq!(
+            choose(&cands, &[0, 1], 2, &[1.0; 4], 0.5, RobustMode::Mix, 1, 0.0),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn flip_hysteresis_keeps_the_direction_unless_the_flip_is_clearly_better() {
+        let cands = vec![cand(-1, &[2.0]), cand(1, &[1.7])];
+        // prev direction +1: the flip to -1 wins by 0.3 < 0.6, so the stay plan is kept.
+        assert_eq!(
+            choose(&cands, &[0, 1], 1, &[1.0; 4], 0.5, RobustMode::Mix, 1, 0.6),
+            Some(1)
+        );
+        let cands = vec![cand(-1, &[2.5]), cand(1, &[1.7])];
+        assert_eq!(
+            choose(&cands, &[0, 1], 1, &[1.0; 4], 0.5, RobustMode::Mix, 1, 0.6),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn ties_go_to_the_first_candidate() {
+        let cands = vec![cand(1, &[1.0]), cand(1, &[1.0]), cand(1, &[1.0])];
+        assert_eq!(
+            choose(&cands, &[0, 1, 2], 1, &[1.0; 4], 0.5, RobustMode::Mix, 1, 0.0),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn warm_plans_lose_their_absolute_aims() {
+        let plan = vec![
+            PlanStep {
+                dir: 1,
+                jump: 0,
+                hook: 1,
+                fire: 0,
+                aim: crate::hybrid::abs_aim(-1.0),
+            },
+            PlanStep {
+                dir: 1,
+                jump: 0,
+                hook: 0,
+                fire: 0,
+                aim: 0.3,
+            },
+        ];
+        let w = normalize(&plan, 0.25);
+        assert!((w[0].aim - -1.25).abs() < 1e-12);
+        assert_eq!(w[1].aim, 0.3);
+        assert!(w.iter().all(|s| !is_abs_aim(s.aim)));
+    }
+
+    #[test]
+    fn proposals_are_sanitized() {
+        let bad = vec![PlanStep {
+            dir: 5,
+            jump: 7,
+            hook: -1,
+            fire: 2,
+            aim: f64::NAN,
+        }];
+        let p = sanitize(bad, 3);
+        assert_eq!(p.len(), 3);
+        assert!(
+            p.iter()
+                .all(|s| s.dir == 1 && s.jump == 1 && s.hook == 1 && s.fire == 1 && s.aim == 0.0)
+        );
+    }
+
+    #[test]
+    fn signatures_ignore_sub_pixel_aim_noise_only() {
+        let a = [PlanStep {
+            dir: 1,
+            jump: 0,
+            hook: 0,
+            fire: 0,
+            aim: 0.5,
+        }];
+        let b = [PlanStep { aim: 0.5001, ..a[0] }];
+        let c = [PlanStep { aim: 0.6, ..a[0] }];
+        assert_eq!(signature(&a), signature(&b));
+        assert_ne!(signature(&a), signature(&c));
+    }
+
+    #[test]
+    fn source_labels_name_the_technique() {
+        assert_eq!(Source::Tech(Tech::T14).label(), "T14 panic hook");
+        assert_eq!(Source::Book.label(), "book");
+        assert_eq!(Source::Tech(Tech::T9).kind(), 5);
+    }
+
+    #[test]
+    fn telemetry_json_is_valid_json() {
+        let mut t = DecisionTelemetry {
+            chosen: Some(Source::Tech(Tech::T14)),
+            chosen_plan: vec![PlanStep {
+                dir: 1,
+                jump: 0,
+                hook: 1,
+                fire: 0,
+                aim: 0.0,
+            }],
+            threat_ids: vec![2, 3],
+            budget_ms: 4.0,
+            best_score: f64::NAN,
+            ..DecisionTelemetry::default()
+        };
+        t.generated[5] = 3;
+        let j = t.to_json();
+        assert!(j.contains("\"chosen\":\"T14 panic hook\""), "{j}");
+        assert!(j.contains("\"threats\":[2,3]"), "{j}");
+        assert!(
+            j.contains("\"best_score\":0.0000"),
+            "NaN must not leak into the JSON: {j}"
+        );
+        assert!(!j.contains("NaN") && !j.contains("inf"));
+    }
+}

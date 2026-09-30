@@ -29,6 +29,7 @@ mod kernel;
 pub mod model;
 pub mod optim;
 pub mod params;
+pub mod proposer;
 pub mod recorder;
 #[doc(hidden)] // test/bench support only (deterministic PRNG for reproducible synthetic input traffic).
 pub mod rng;

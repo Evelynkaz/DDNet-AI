@@ -30,7 +30,7 @@ use crate::vmath::{Vec2, vdistance, vec2};
 use ddai_jsmath::{self as js, Rng};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 const AIR_JUMP_MIN_GAP_TICKS: i64 = 11;
 const CADENCE_GAPS: usize = 4;
@@ -79,7 +79,7 @@ pub struct PlanStep {
 
 /// `StepDist` (`planner.ts:339`).
 #[derive(Debug, Clone, Copy)]
-struct StepDist {
+pub(crate) struct StepDist {
     p_left: f64,
     p_right: f64,
     p_jump: f64,
@@ -330,7 +330,7 @@ fn score_tick<W: PlanWorld>(
     s
 }
 
-const LAUNCH_REACH_PX: f64 = 96.0;
+pub(crate) const LAUNCH_REACH_PX: f64 = 96.0;
 
 /// `THAW_ESCAPES` (`planner.ts:723-754`): the 9 base 40-tick escape attempts `thawEscapable` tries
 /// (recomputed on demand -- these are plain data, cheap to rebuild; see `Planner::thaw_escapable`
@@ -368,6 +368,10 @@ fn thaw_escapes() -> Vec<Vec<PlayerInput>> {
     }
     out
 }
+
+/// [`thaw_escapes`] built once: it is constant data, and `thaw_escapable` used to rebuild it (nine
+/// vectors of 40 inputs) on every call.
+static THAW_ESCAPES: std::sync::LazyLock<Vec<Vec<PlayerInput>>> = std::sync::LazyLock::new(thaw_escapes);
 
 /// `ropeEscapes(dx, dy)` (`planner.ts:756-774`).
 fn rope_escapes(dx: f64, dy: f64) -> Vec<Vec<PlayerInput>> {
@@ -443,11 +447,11 @@ fn score_desc(a: f64, b: f64) -> Ordering {
 pub struct Planner<W: PlanWorld> {
     cfg: PlannerConfig,
     base_cfg: PlannerConfig,
-    rng: Rng,
-    saved: Option<W::SavedState>,
-    warm: Option<Vec<PlanStep>>,
-    committed: Option<PlayerInput>,
-    commit_left: i32,
+    pub(crate) rng: Rng,
+    pub(crate) saved: Option<W::SavedState>,
+    pub(crate) warm: Option<Vec<PlanStep>>,
+    pub(crate) committed: Option<PlayerInput>,
+    pub(crate) commit_left: i32,
 
     last_decide_tick: i64,
     decide_gaps: Vec<i64>,
@@ -466,39 +470,56 @@ pub struct Planner<W: PlanWorld> {
     thirds: Vec<Vec2>,
     band: Option<Band>,
 
-    opp_seed: u32,
+    pub(crate) opp_seed: u32,
     seed_offset: u32,
     predicted: Vec<PlayerInput>,
 
-    track_rollout: bool,
+    pub(crate) track_rollout: bool,
     track_gap: bool,
     rollout_min_gap: f64,
-    react_this_pass: bool,
+    pub(crate) react_this_pass: bool,
 
-    swing_target_frozen: bool,
-    swing_target: Option<TeeState>,
-    swing_rope_on: bool,
+    pub(crate) swing_target_frozen: bool,
+    pub(crate) swing_target: Option<TeeState>,
+    pub(crate) swing_rope_on: bool,
 
     thaw_scratch: Option<W>,
     thaw_scratch_identity: Option<u64>,
     thaw_memo: HashMap<String, bool>,
+    /// Task 3.5 (hybrid search only; `false` on every TS-parity path): make `thaw_escapable` a pure
+    /// function of its arguments, so a candidate's score does not depend on which other candidates
+    /// this planner instance happened to evaluate first (or on which worker thread it ran). The
+    /// coarse-keyed memo is cleared per evaluation and the scratch world is restored to its
+    /// pristine snapshot before each simulated escape.
+    pub(crate) deterministic_thaw: bool,
+    thaw_base: Option<W::SavedState>,
+    /// `thaw_memo` for `deterministic_thaw` mode: an integer key, no allocation, per evaluation.
+    thaw_fast: Vec<([i64; 9], bool)>,
+    /// Task 3.5 (hybrid 1vN search only; `None` on every TS-parity path): the other tees the
+    /// rollouts model individually and score defensively, next to the single `enemy_id` victim.
+    pub(crate) threats: Option<crate::hybrid::threat::ThreatSet>,
+    /// Physics ticks simulated by `evaluate_impl` over this planner's lifetime (a work counter,
+    /// D-045: unlike a clock it does not count host stalls).
+    pub(crate) eval_ticks: u64,
+    /// Reused event buffer of the rollout loop (`step_into`), so a rollout allocates nothing.
+    events_buf: Vec<crate::types::WorldEvent>,
 
-    rollout_enemy_out: i32,
-    rollout_enemy_sealed: bool,
-    rollout_self_out: i32,
+    pub(crate) rollout_enemy_out: i32,
+    pub(crate) rollout_enemy_sealed: bool,
+    pub(crate) rollout_self_out: i32,
 
     pub last_info: DecisionInfo,
 
     last_search_tick: i64,
-    warm_shift_steps: i32,
-    dir_since: i64,
-    dir_last: i32,
-    held_ticks: i64,
+    pub(crate) warm_shift_steps: i32,
+    pub(crate) dir_since: i64,
+    pub(crate) dir_last: i32,
+    pub(crate) held_ticks: i64,
 
-    step_ticks: Vec<i32>,
+    pub(crate) step_ticks: Vec<i32>,
 
     field_cache_identity: Option<u64>,
-    field_cache: Option<(Rc<HazardField>, Rc<HazardField>)>,
+    field_cache: Option<(Arc<HazardField>, Arc<HazardField>)>,
 
     /// Review round 1, F4: when `Some`, every `evaluate_impl` call (in call order -- book seeds,
     /// `landed_throws`, the CEM population loop, `notNow`, `polishRope`, `escapeBias`, `explain`,
@@ -550,6 +571,12 @@ impl<W: PlanWorld> Planner<W> {
             thaw_scratch: None,
             thaw_scratch_identity: None,
             thaw_memo: HashMap::new(),
+            deterministic_thaw: false,
+            thaw_base: None,
+            thaw_fast: Vec::new(),
+            threats: None,
+            eval_ticks: 0,
+            events_buf: Vec::new(),
             rollout_enemy_out: 0,
             rollout_enemy_sealed: false,
             rollout_self_out: 0,
@@ -625,6 +652,11 @@ impl<W: PlanWorld> Planner<W> {
         self.cfg
     }
 
+    /// Task 3.5: the hybrid search's worker planners tune their private copy per decision.
+    pub(crate) fn cfg_mut(&mut self) -> &mut PlannerConfig {
+        &mut self.cfg
+    }
+
     pub fn set_freeze_memory(&mut self, memory: Option<FreezeMemory>) {
         self.memory = memory;
     }
@@ -644,6 +676,12 @@ impl<W: PlanWorld> Planner<W> {
     pub fn set_frozen_bystanders(&mut self, tees: Vec<Vec2>, vels: Vec<Vec2>) {
         self.frozen_bystanders = tees;
         self.frozen_bystander_vels = vels;
+    }
+
+    /// Task 3.5: the hybrid workers copy the decision's frozen bystanders in place (no allocation
+    /// once the buffers have grown).
+    pub(crate) fn frozen_bystanders_mut(&mut self) -> (&mut Vec<Vec2>, &mut Vec<Vec2>) {
+        (&mut self.frozen_bystanders, &mut self.frozen_bystander_vels)
     }
 
     pub fn set_spare_bystanders(&mut self, tees: Vec<Vec2>, vels: Vec<Vec2>) {
@@ -702,14 +740,18 @@ impl<W: PlanWorld> Planner<W> {
         }
     }
 
-    /// Review round 1, F10: returns cheap `Rc` clones (a refcount bump), never a deep copy of the
+    /// Review round 1, F10: returns cheap `Arc` clones (a refcount bump), never a deep copy of the
     /// field's `dist: Vec<i32>` (one `i32` per map tile -- 0.8 MB on Copy Love Box, 6.6 MB on
     /// BlmapChill; a per-decision deep copy of that was the finding). Every caller already just
-    /// borrows `&field`/`&unfreeze`, which `Rc<HazardField>` derefs to for free.
-    fn hazard_fields(&mut self, col: &W::Collision) -> (Rc<HazardField>, Rc<HazardField>) {
+    /// borrows `&field`/`&unfreeze`, which `Arc<HazardField>` derefs to for free. (`Arc`, not `Rc`,
+    /// since task 3.5: the hybrid search hands the same two fields to its worker threads.)
+    pub(crate) fn hazard_fields(&mut self, col: &W::Collision) -> (Arc<HazardField>, Arc<HazardField>) {
         let id = col.identity();
         if self.field_cache_identity != Some(id) || self.field_cache.is_none() {
-            self.field_cache = Some((Rc::new(fields::hazard_field(col)), Rc::new(fields::unfreeze_field(col))));
+            self.field_cache = Some((
+                Arc::new(fields::hazard_field(col)),
+                Arc::new(fields::unfreeze_field(col)),
+            ));
             self.field_cache_identity = Some(id);
         }
         self.field_cache.clone().unwrap()
@@ -1502,7 +1544,8 @@ impl<W: PlanWorld> Planner<W> {
             // *not* count as "confirmed danger" on its own, so it doesn't earn the extension; it
             // still gets one attempt at `safer_input` within the plain reserve, since checking
             // "is there anything obviously safer" cheaply is worth it even when we couldn't
-            // confirm the chosen input is actually unsafe.
+            // confirm the chosen input is actually unsafe. (3.5 review round 1, F1, proposed
+            // extending on a timeout too: measured worse, see `docs/EXPERIMENTS.md` E-003.)
             let call_start_ms = deadline_ms - budget_ms;
             let sim_tees = js::max(1.0, world.all_tees().len() as f64);
             let reserve_ms = SHIELD_RESERVE_MS_PER_TEE * sim_tees;
@@ -1565,7 +1608,7 @@ impl<W: PlanWorld> Planner<W> {
     /// factor for no reason (e.g. the `low` preset's `commit_decisions: 4` made
     /// `decide_production`'s shield hold 4 ticks when only 1 was ever actually committed to) --
     /// its call site now passes `1` instead.
-    fn shield_hold(&self, commit: i32) -> i32 {
+    pub(crate) fn shield_hold(&self, commit: i32) -> i32 {
         let commit = commit.max(1);
         if !self.cfg.shield_cadence {
             return 2 * commit;
@@ -1582,7 +1625,7 @@ impl<W: PlanWorld> Planner<W> {
     }
 
     /// `maybeRelease(world, selfId, input)` (`planner.ts:1328-1331`).
-    fn maybe_release(&self, world: &W, self_id: i32, input: PlayerInput) -> PlayerInput {
+    pub(crate) fn maybe_release(&self, world: &W, self_id: i32, input: PlayerInput) -> PlayerInput {
         if !self.cfg.release_dead_hook || input.hook == 0 || !self.hook_is_dead(world, self_id) {
             input
         } else {
@@ -1590,14 +1633,14 @@ impl<W: PlanWorld> Planner<W> {
         }
     }
 
-    fn hook_is_dead(&self, world: &W, self_id: i32) -> bool {
+    pub(crate) fn hook_is_dead(&self, world: &W, self_id: i32) -> bool {
         match world.get_tee(self_id) {
             Some(me) => me.hook_state != HOOK_IDLE && me.hook_state != HOOK_FLYING && me.hook_state != HOOK_GRABBED,
             None => false,
         }
     }
 
-    fn hook_already_out(&self, world: &W, self_id: i32) -> bool {
+    pub(crate) fn hook_already_out(&self, world: &W, self_id: i32) -> bool {
         match world.get_tee(self_id) {
             Some(me) => me.hook_state == HOOK_FLYING || me.hook_state == HOOK_GRABBED,
             None => false,
@@ -1921,7 +1964,7 @@ impl<W: PlanWorld> Planner<W> {
     }
 
     /// `buildDist(aimAt)` (`planner.ts:1455-1475`).
-    fn build_dist(&self, aim_at: f64) -> Vec<StepDist> {
+    pub(crate) fn build_dist(&self, aim_at: f64) -> Vec<StepDist> {
         let mut out = Vec::with_capacity(self.cfg.steps as usize);
         for s in 0..self.cfg.steps as usize {
             let w = self
@@ -1954,7 +1997,7 @@ impl<W: PlanWorld> Planner<W> {
 
     /// `samplePlan(dist)` (`planner.ts:1477-1490`). RNG draw order per step: `dir`, `jump`,
     /// `hook`, `fire`, `aim` (gaussian) -- matters for parity, see the module doc comment.
-    fn sample_plan(&mut self, dist: &[StepDist]) -> Vec<PlanStep> {
+    pub(crate) fn sample_plan(&mut self, dist: &[StepDist]) -> Vec<PlanStep> {
         dist.iter()
             .map(|d| {
                 let r = self.rng.next_float();
@@ -1981,7 +2024,7 @@ impl<W: PlanWorld> Planner<W> {
     }
 
     /// `refit(dist, elites)` (`planner.ts:1492-1523`).
-    fn refit(&self, dist: &mut [StepDist], elites: &[Vec<PlanStep>]) {
+    pub(crate) fn refit(&self, dist: &mut [StepDist], elites: &[Vec<PlanStep>]) {
         if elites.is_empty() {
             return;
         }
@@ -2013,7 +2056,7 @@ impl<W: PlanWorld> Planner<W> {
     }
 
     /// `seedPlans` (`planner.ts:1525-1628`).
-    fn seed_plans(
+    pub(crate) fn seed_plans(
         &self,
         world: &W,
         self_id: i32,
@@ -2370,7 +2413,7 @@ impl<W: PlanWorld> Planner<W> {
     }
 
     /// `hookAllowed` (`planner.ts:1713-1718`).
-    fn hook_allowed(
+    pub(crate) fn hook_allowed(
         &self,
         world: &W,
         self_id: i32,
@@ -2383,7 +2426,12 @@ impl<W: PlanWorld> Planner<W> {
             return true;
         }
         let angle = self.executed_aim(step, prev, aim);
-        if self.cfg.gate_hook && !self.hook_would_reach(world, self_id, enemy_id, angle) {
+        if self.cfg.gate_hook
+            && !self.hook_would_reach(world, self_id, enemy_id, angle)
+            && !self.threats.as_ref().is_some_and(|t| {
+                t.hook_targets && t.ids.iter().any(|&id| self.hook_would_reach(world, self_id, id, angle))
+            })
+        {
             return false;
         }
         !self.rope_catches_spare(world, self_id, enemy_id, angle)
@@ -2502,21 +2550,44 @@ impl<W: PlanWorld> Planner<W> {
         // collide with here but doesn't in TS). `v == 0.0` is true for both `+0.0` and `-0.0` in
         // IEEE-754, so this catches every sign of zero.
         let clean = |v: f64| if v == 0.0 { 0.0 } else { v };
-        let key = format!(
-            "{}{},{},{},{},{},{},{},{}",
-            if strict { "s" } else { "" },
-            clean(js::round(en.pos.x / 4.0)),
-            clean(js::round(en.pos.y / 4.0)),
-            clean(js::round(en.vel.x)),
-            clean(js::round(en.vel.y)),
-            clean(js::round((en.pos.x - me_pos.x) / 8.0)),
-            clean(js::round((en.pos.y - me_pos.y) / 8.0)),
-            en.jumps_left,
-            i32::from(en.freeze_ticks_left > i64::from(THAW_ESCAPE_TICKS)),
-        );
-        if let Some(&known) = self.thaw_memo.get(&key) {
-            return known;
-        }
+        // Task 3.5: the hybrid search (`deterministic_thaw`) memoises per evaluation under an
+        // allocation-free integer key holding exactly the same rounded fields as the string key.
+        let int_key: Option<[i64; 9]> = self.deterministic_thaw.then(|| {
+            [
+                i64::from(strict),
+                clean(js::round(en.pos.x / 4.0)) as i64,
+                clean(js::round(en.pos.y / 4.0)) as i64,
+                clean(js::round(en.vel.x)) as i64,
+                clean(js::round(en.vel.y)) as i64,
+                clean(js::round((en.pos.x - me_pos.x) / 8.0)) as i64,
+                clean(js::round((en.pos.y - me_pos.y) / 8.0)) as i64,
+                i64::from(en.jumps_left),
+                i64::from(en.freeze_ticks_left > i64::from(THAW_ESCAPE_TICKS)),
+            ]
+        });
+        let key = if let Some(int_key) = int_key {
+            if let Some(&(_, known)) = self.thaw_fast.iter().find(|(k, _)| *k == int_key) {
+                return known;
+            }
+            String::new()
+        } else {
+            let key = format!(
+                "{}{},{},{},{},{},{},{},{}",
+                if strict { "s" } else { "" },
+                clean(js::round(en.pos.x / 4.0)),
+                clean(js::round(en.pos.y / 4.0)),
+                clean(js::round(en.vel.x)),
+                clean(js::round(en.vel.y)),
+                clean(js::round((en.pos.x - me_pos.x) / 8.0)),
+                clean(js::round((en.pos.y - me_pos.y) / 8.0)),
+                en.jumps_left,
+                i32::from(en.freeze_ticks_left > i64::from(THAW_ESCAPE_TICKS)),
+            );
+            if let Some(&known) = self.thaw_memo.get(&key) {
+                return known;
+            }
+            key
+        };
 
         let identity = world.collision().identity();
         if self.thaw_scratch.is_none() || self.thaw_scratch_identity != Some(identity) {
@@ -2524,8 +2595,15 @@ impl<W: PlanWorld> Planner<W> {
             scratch.add_tee(0, en.pos);
             self.thaw_scratch = Some(scratch);
             self.thaw_scratch_identity = Some(identity);
+            self.thaw_base = None;
         }
         let scratch = self.thaw_scratch.as_mut().unwrap();
+        if self.deterministic_thaw {
+            match &self.thaw_base {
+                Some(base) => scratch.restore_state(base),
+                None => self.thaw_base = Some(scratch.save_state()),
+            }
+        }
         if strict && scratch.get_tee(1).is_none() {
             scratch.add_tee(1, me_pos);
         }
@@ -2541,12 +2619,13 @@ impl<W: PlanWorld> Planner<W> {
         let k = *crate::tuning::HAMMER_STRENGTH;
         let push = vec2((k * 10.0 * hx) / bl, k * (-1.0 + (10.0 * (hy - 1.1)) / bl));
 
-        let mut escapes: Vec<Vec<PlayerInput>> = thaw_escapes();
-        if strict {
-            escapes.extend(rope_escapes(me_pos.x - en.pos.x, me_pos.y - en.pos.y));
-        }
+        let rope: Vec<Vec<PlayerInput>> = if strict {
+            rope_escapes(me_pos.x - en.pos.x, me_pos.y - en.pos.y)
+        } else {
+            Vec::new()
+        };
         let mut escapable = false;
-        for escape in &escapes {
+        for escape in THAW_ESCAPES.iter().chain(rope.iter()) {
             let mut applied = *en;
             applied.id = 0;
             applied.hook_state = 0;
@@ -2581,7 +2660,11 @@ impl<W: PlanWorld> Planner<W> {
                 break;
             }
         }
-        self.thaw_memo.insert(key, escapable);
+        if let Some(int_key) = int_key {
+            self.thaw_fast.push((int_key, escapable));
+        } else {
+            self.thaw_memo.insert(key, escapable);
+        }
         escapable
     }
 
@@ -2604,7 +2687,7 @@ impl<W: PlanWorld> Planner<W> {
 
     /// `stepToInput` (`planner.ts:1917-1974`).
     #[allow(clippy::too_many_arguments)]
-    fn step_to_input(
+    pub(crate) fn step_to_input(
         &mut self,
         world: &W,
         step: PlanStep,
@@ -2729,7 +2812,7 @@ impl<W: PlanWorld> Planner<W> {
     /// entirely and stops searching, keeping whatever `best` it already had. `deadline` is only
     /// ever `Some` from `decide_production`; every parity-path call site passes `None`.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    fn evaluate_impl(
+    pub(crate) fn evaluate_impl(
         &mut self,
         world: &mut W,
         self_id: i32,
@@ -2775,6 +2858,18 @@ impl<W: PlanWorld> Planner<W> {
 
         let mut opp_rng = Rng::new(self.opp_seed);
         let mut opp_input = enemy_input;
+        let mut events = std::mem::take(&mut self.events_buf);
+        if self.deterministic_thaw {
+            self.thaw_memo.clear();
+            self.thaw_fast.clear();
+        }
+        // Task 3.5: the hybrid 1vN search's extra tees (`None`, hence a no-op, everywhere else).
+        let mut thr_inputs = [empty_input(); crate::hybrid::threat::MAX_THREATS];
+        let thr_n = self.threats.as_ref().map_or(0, |t| {
+            let n = t.ids.len().min(crate::hybrid::threat::MAX_THREATS);
+            thr_inputs[..n].copy_from_slice(&t.inputs[..n]);
+            n
+        });
         if self.track_rollout {
             self.rollout_enemy_out = 0;
             self.rollout_self_out = 0;
@@ -2793,6 +2888,26 @@ impl<W: PlanWorld> Planner<W> {
             started_in_dead: me_at_start.is_some_and(|me| in_dead(self.dead.as_ref(), me.pos.x, me.pos.y)),
         };
 
+        // Task 3.5 (T14): jumpless, airborne, with a hazard below -- an anchor is the only control.
+        let anchor_bonus = if self.cfg.jumpless_anchor_bonus > 0.0
+            && let Some(m) = me_at_start
+            && m.jumps_left == 0
+            && !m.frozen
+        {
+            let col = world.collision();
+            let grounded = col.is_solid(m.pos.x - 13.0, m.pos.y + 16.0) || col.is_solid(m.pos.x + 13.0, m.pos.y + 16.0);
+            let hazard_below = (1..=12).any(|k| {
+                let y = m.pos.y + f64::from(k) * 32.0;
+                col.is_freeze(m.pos.x, y) || col.is_death(m.pos.x, y)
+            });
+            if !grounded && hazard_below {
+                self.cfg.jumpless_anchor_bonus
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
         let mut prev_jumps_left = me_at_start.map_or(0, |me| me.jumps_left);
         let mut ground_jump_at: i64 = -1;
         let mut rollout_tick: i64 = 0;
@@ -2805,7 +2920,10 @@ impl<W: PlanWorld> Planner<W> {
                 _ => 0.0,
             };
             let mut aim = plan_step.aim;
-            if self.cfg.track_aim
+            if crate::hybrid::is_abs_aim(aim) {
+                // Task 3.5: a technique plan's absolute aim (never produced on the parity path).
+                aim -= crate::hybrid::ABS_AIM;
+            } else if self.cfg.track_aim
                 && let (Some(m), Some(e)) = (me_now, en_now)
             {
                 aim += js::atan2(e.pos.y - m.pos.y, e.pos.x - m.pos.x);
@@ -2833,16 +2951,31 @@ impl<W: PlanWorld> Planner<W> {
             } else if !self.predicted.is_empty() {
                 opp_input = self.predicted[s.min(self.predicted.len() - 1)];
             }
+            if let Some(t) = &self.threats {
+                for (i, inp) in thr_inputs.iter_mut().enumerate().take(thr_n) {
+                    if (t.react_mask >> i) & 1 == 1 {
+                        *inp = scripted_action(world, t.ids[i], self_id, inp, &mut opp_rng);
+                    }
+                }
+            }
 
             for _ in 0..self.step_ticks[s] {
                 rollout_tick += 1;
+                self.eval_ticks += 1;
                 if self.cfg.release_dead_hook && input.hook != 0 && self.hook_is_dead(world, self_id) {
                     world.set_input(self_id, PlayerInput { hook: 0, ..input });
                 } else {
                     world.set_input(self_id, input);
                 }
                 world.set_input(enemy_id, opp_input);
-                let events = world.step();
+                if let Some(t) = &self.threats {
+                    for (i, inp) in thr_inputs.iter().enumerate().take(thr_n) {
+                        if (t.react_mask >> i) & 1 == 1 {
+                            world.set_input(t.ids[i], *inp);
+                        }
+                    }
+                }
+                world.step_into(&mut events);
                 let me_now = world.get_tee(self_id);
                 if let Some(me_now) = me_now {
                     if (me_now.jumped & 2) == 0 && me_now.jumps_left < prev_jumps_left {
@@ -2865,6 +2998,9 @@ impl<W: PlanWorld> Planner<W> {
                     }
                     if me_now.hook_state == HOOK_GRABBED {
                         hook_grabbed = true;
+                        if anchor_bonus > 0.0 && me_now.hooked_player < 0 && !me_now.frozen {
+                            score += anchor_bonus * (1.0 - (s as f64) / (plan.len() as f64 * 2.0));
+                        }
                     }
                     if self.cfg.hook_release_cost > 0.0 {
                         let holds = me_now.hooked_player == enemy_id;
@@ -2912,7 +3048,7 @@ impl<W: PlanWorld> Planner<W> {
                         self.rollout_min_gap = gap;
                     }
                 }
-                score += score_tick(
+                let mut tick_score = score_tick(
                     world,
                     self_id,
                     enemy_id,
@@ -2926,12 +3062,18 @@ impl<W: PlanWorld> Planner<W> {
                     self.memory.as_ref(),
                     &self.thirds,
                     self.band.as_ref(),
-                ) * (1.0 - (s as f64) / (plan.len() as f64 * 2.0));
+                );
+                if let Some(t) = &self.threats {
+                    tick_score +=
+                        t.weight * crate::hybrid::threat::threat_terms(world, self_id, &t.ids[..thr_n], &self.cfg);
+                }
+                score += tick_score * (1.0 - (s as f64) / (plan.len() as f64 * 2.0));
             }
             if let Some((clock, deadline_ms)) = deadline
                 && clock.now_ms() >= deadline_ms
             {
                 world.restore_state(self.saved.as_ref().unwrap());
+                self.events_buf = events;
                 return None;
             }
         }
@@ -2947,6 +3089,13 @@ impl<W: PlanWorld> Planner<W> {
             && !me_end.frozen
         {
             score -= self.cfg.landing_cost * flight_ends_in_hazard(world.collision(), me_end.pos, me_end.vel);
+        }
+        if self.cfg.enemy_landing_bonus > 0.0
+            && let Some(en_end) = world.get_tee(enemy_id)
+            && en_end.alive
+            && !en_end.frozen
+        {
+            score += self.cfg.enemy_landing_bonus * flight_ends_in_hazard(world.collision(), en_end.pos, en_end.vel);
         }
         if self.cfg.freeze_tail_weight > 0.0 {
             let tail = 1.0 - ((plan.len() as f64) - 1.0) / (plan.len() as f64 * 2.0);
@@ -2992,6 +3141,7 @@ impl<W: PlanWorld> Planner<W> {
                 en_end.is_some_and(|e| !e.alive || (e.frozen && rests_in_freeze(world.collision(), e.pos, e.vel) > 0));
         }
         world.restore_state(self.saved.as_ref().unwrap());
+        self.events_buf = events;
         if let Some(log) = self.candidate_log.as_mut() {
             log.push((plan.to_vec(), score));
         }

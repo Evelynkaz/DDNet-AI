@@ -37,3 +37,6 @@ serde_json = "1"
 # Only for `tests/parity_planner.rs`'s own sha256 check against the dump's recorded `mapSha256`
 # (guards against replaying against a map file that has since changed on disk).
 sha2 = "0.10"
+# Per-thread allocation counting for `tests/hybrid_alloc.rs` (the hybrid workers reuse their world
+# buffers; same crate and version as `ddai-physics`/`ddai-fly`/`ddai-world`).
+allocation-counter = "0.8.1"

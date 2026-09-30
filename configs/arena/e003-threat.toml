@@ -1,0 +1,76 @@
+# E-003, part 2: the 1vN threat model (task 3.5, D-043). The hybrid with the threat model against the
+# hybrid with the 1v1 model (only the chosen victim is modelled) and the plain planner, each alone against
+# N scripted attackers. Metrics of interest: self-freezes per minute, blocks per minute, survival. The
+# deadline is on the work clock (see e003-strength.toml); the planner has a wall-clock 4 ms deadline (its
+# only clock) and is therefore weakened by the VM load -- the E-002 planner numbers (1v3: 96.3%) are the
+# unloaded reference. Run:
+#   ddnet-ai arena run --config configs/arena/e003-threat.toml --out ~/aiddnet/data/runs/E-003/threat --threads 6
+name = "E-003 threat model"
+base_seed = 1
+games = 200
+
+# --- 1v2 on clb-left ---
+
+[[condition]]
+name = "1v2 hybrid threat model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 hybrid 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 hybrid threat model adaptive"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 planner fixed"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted", count = 2 }]
+
+# --- 1v3 on clb-left ---
+
+[[condition]]
+name = "1v3 hybrid threat model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 hybrid 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 hybrid threat model adaptive"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 planner fixed"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted", count = 3 }]
+
+# --- 1v5 on clb-left ---
+
+[[condition]]
+name = "1v5 hybrid threat model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 hybrid 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 hybrid threat model adaptive"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 planner fixed"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted", count = 5 }]

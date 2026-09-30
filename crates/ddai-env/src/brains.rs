@@ -91,11 +91,17 @@ impl Brain for TimelineBrain {
 /// A shared log of `(tick, action)` decisions.
 pub type ActionLog = Arc<Mutex<Vec<(i32, Action)>>>;
 
+/// A shared log of `(tick, telemetry JSON)` taken right after each decision.
+pub type TelemetryLog = Arc<Mutex<Vec<(i32, String)>>>;
+
 /// Wraps a brain and records every action it returns, with the tick it was decided on -- to turn a
-/// closed-loop solution (e.g. the planner's) into an open-loop `[[reference]]` timeline.
+/// closed-loop solution (e.g. the planner's) into an open-loop `[[reference]]` timeline. With
+/// [`RecordingBrain::with_telemetry`] it also keeps the inner brain's telemetry after each
+/// decision (which candidate source and technique the hybrid picked, and why).
 pub struct RecordingBrain {
     inner: Box<dyn Brain>,
     log: ActionLog,
+    telemetry: Option<TelemetryLog>,
 }
 
 impl RecordingBrain {
@@ -105,9 +111,24 @@ impl RecordingBrain {
             RecordingBrain {
                 inner,
                 log: log.clone(),
+                telemetry: None,
             },
             log,
         )
+    }
+
+    pub fn with_telemetry(inner: Box<dyn Brain>) -> (Self, ActionLog, TelemetryLog) {
+        let (mut b, log) = Self::new(inner);
+        let t: TelemetryLog = Arc::new(Mutex::new(Vec::new()));
+        b.telemetry = Some(t.clone());
+        (b, log, t)
+    }
+
+    fn record(&self, tick: i32, a: Action) {
+        self.log.lock().expect("log lock").push((tick, a));
+        if let (Some(t), Some(json)) = (&self.telemetry, self.inner.telemetry()) {
+            t.lock().expect("telemetry lock").push((tick, json));
+        }
     }
 }
 
@@ -118,13 +139,13 @@ impl Brain for RecordingBrain {
 
     fn decide(&mut self, obs: &Observation) -> Action {
         let a = self.inner.decide(obs);
-        self.log.lock().expect("log lock").push((obs.tick, a));
+        self.record(obs.tick, a);
         a
     }
 
     fn decide_in(&mut self, obs: &Observation, view: Option<&WorldView<'_>>) -> Action {
         let a = self.inner.decide_in(obs, view);
-        self.log.lock().expect("log lock").push((obs.tick, a));
+        self.record(obs.tick, a);
         a
     }
 

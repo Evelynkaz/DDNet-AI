@@ -97,6 +97,13 @@ pub trait PlanWorld {
     fn set_input(&mut self, id: i32, input: PlayerInput);
     fn set_held_input(&mut self, id: i32, input: PlayerInput);
     fn step(&mut self) -> Vec<WorldEvent>;
+    /// [`PlanWorld::step`] into a caller-owned buffer (cleared first), so a hot rollout loop can
+    /// reuse one allocation (task 3.5). The default forwards to `step`; the production backend
+    /// overrides it with an allocation-free version.
+    fn step_into(&mut self, events: &mut Vec<WorldEvent>) {
+        events.clear();
+        events.extend(self.step());
+    }
 
     fn save_state(&self) -> Self::SavedState;
     fn save_state_into(&self, into: &mut Self::SavedState);

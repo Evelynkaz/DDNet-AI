@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
+use ddai_env::EnvError;
 use ddai_env::arena::{Arena, load_arena_defs};
-use ddai_env::config::{RunConfig, builtin_brain};
+use ddai_env::config::{BrainFactory, HybridSpec, PlayerSpec, RunConfig, builtin_brain, hybrid_config};
 use ddai_env::output::{RunOptions, git_info, run_config};
 use ddai_env::report::measure_stall_baseline;
 use ddai_env::run::load_arenas;
@@ -74,7 +75,11 @@ pub enum ArenaCommand {
         /// Print the per-tick trace (exact start) of this scenario id with the given `--trace-brain`.
         #[arg(long)]
         trace: Option<String>,
-        /// `reference` (default), `idle`, `scripted` or `planner`.
+        /// With `--trace`: play trial N with its start-state jitter (default: the exact start).
+        #[arg(long)]
+        trace_trial: Option<u32>,
+        /// `reference` (default), `idle`, `scripted`, `planner` or `hybrid` (`-fixed` suffix: the
+        /// deterministic mode).
         #[arg(long, default_value = "reference")]
         trace_brain: String,
         #[arg(long)]
@@ -98,6 +103,42 @@ fn source_git_info() -> (String, bool) {
     let same = now == built;
     (built, dirty || !same)
 }
+
+/// The arena's brain factory: the built-in brains plus `hybrid` with the fly as proposer (which
+/// needs the model file, so it lives here and not in `ddai-env`).
+fn arena_brain(spec: &PlayerSpec) -> Result<Box<dyn ddai_brain::Brain>, EnvError> {
+    let fly = spec.hybrid.as_ref().is_some_and(|h| h.proposer_name() == "fly");
+    if spec.brain != "hybrid" || !fly {
+        return builtin_brain(spec);
+    }
+    let h: &HybridSpec = spec.hybrid.as_ref().expect("checked above");
+    let flyg = spec
+        .model
+        .as_deref()
+        .ok_or_else(|| EnvError::new("hybrid with proposer = \"fly\" needs model = <.flyg path>"))?;
+    let flyg = expand_home(flyg);
+    let cfg_path = h.fly_config.as_deref().map_or_else(
+        || {
+            let m = flyg.file_name().is_some_and(|n| n.to_string_lossy().contains("-M-"));
+            PathBuf::from(if m {
+                "configs/fly/M-brain.toml"
+            } else {
+                "configs/fly/S-brain.toml"
+            })
+        },
+        expand_home,
+    );
+    let (cfg, clock) = hybrid_config(spec)?;
+    let seed = 1;
+    let brain = ddai_fly::proposer::untrained_fly_brain(&flyg, &cfg_path, seed).map_err(EnvError::new)?;
+    let proposer = Box::new(ddai_fly::proposer::FlyProposer::new(brain, seed));
+    let hybrid = ddai_planner::hybrid::HybridBrain::new(cfg, clock, proposer).map_err(EnvError::new)?;
+    Ok(Box::new(hybrid))
+}
+
+const _: fn() = || {
+    let _: &BrainFactory = &arena_brain;
+};
 
 fn default_map_dir() -> PathBuf {
     match std::env::var_os("HOME") {
@@ -143,6 +184,7 @@ pub fn run(args: ArenaArgs) -> ExitCode {
             only,
             check_reference,
             trace,
+            trace_trial,
             trace_brain,
             map_dir,
         } => scenarios_cmd(
@@ -152,6 +194,7 @@ pub fn run(args: ArenaArgs) -> ExitCode {
             only.as_deref(),
             check_reference,
             trace.as_deref(),
+            trace_trial,
             &trace_brain,
             map_dir,
         ),
@@ -207,7 +250,7 @@ fn run_cmd(
         stall_baseline,
     };
     let summary =
-        run_config(&cfg, &arenas, &builtin_brain, &opts, &mut |line| eprintln!("{line}")).map_err(|e| e.to_string())?;
+        run_config(&cfg, &arenas, &arena_brain, &opts, &mut |line| eprintln!("{line}")).map_err(|e| e.to_string())?;
     println!("{}", ddai_env::report::markdown(&summary));
     eprintln!("wrote {}", out.display());
     Ok(())
@@ -242,6 +285,7 @@ fn scenarios_cmd(
     only: Option<&str>,
     check_reference: bool,
     trace: Option<&str>,
+    trace_trial: Option<u32>,
     trace_brain: &str,
     map_dir: Option<PathBuf>,
 ) -> Result<(), String> {
@@ -265,10 +309,41 @@ fn scenarios_cmd(
         let subject = if trace_brain == "reference" {
             reference_brain(def)
         } else {
-            builtin_brain(&PlayerSpec::simple(trace_brain)).map_err(|e| e.to_string())?
+            // `planner-fixed` / `hybrid-fixed`: the deterministic modes; a bare name is the default.
+            let (name, fixed) = trace_brain
+                .strip_suffix("-fixed")
+                .map_or((trace_brain, false), |n| (n, true));
+            // `hybrid-work`: the hybrid's 4 ms deadline on the work clock.
+            let (name, work) = name.strip_suffix("-work").map_or((name, false), |n| (n, true));
+            let mut spec = PlayerSpec::simple(name);
+            if fixed {
+                spec.mode = Some("fixed".to_string());
+            }
+            if work {
+                spec.mode = Some("deadline".to_string());
+                spec.clock = Some("work".to_string());
+                spec.budget_ms = Some(4.0);
+            }
+            if name == "hybrid" {
+                // The trace is a diagnostic: show the candidates and their scores.
+                spec.hybrid = Some(HybridSpec {
+                    debug_dump: Some(true),
+                    ..HybridSpec::default()
+                });
+            }
+            arena_brain(&spec).map_err(|e| e.to_string())?
         };
-        let (subject, log) = ddai_env::brains::RecordingBrain::new(subject);
-        let outcome = run_trial(def, &world, Box::new(subject), 0, 1, 0, false).map_err(|e| e.to_string())?;
+        let (subject, log, tlog) = ddai_env::brains::RecordingBrain::with_telemetry(subject);
+        let outcome = run_trial(
+            def,
+            &world,
+            Box::new(subject),
+            0,
+            1,
+            trace_trial.unwrap_or(0),
+            trace_trial.is_some(),
+        )
+        .map_err(|e| e.to_string())?;
         println!("{} {}: success = {}", def.id, def.name, outcome.success);
         for (t, snap) in outcome.trace.snaps.iter().enumerate() {
             let cells: Vec<String> = snap
@@ -285,6 +360,34 @@ fn scenarios_cmd(
                 })
                 .collect();
             println!("t={t:4} {}", cells.join("  |  "));
+        }
+        for (tick, json) in tlog.lock().map_err(|e| e.to_string())?.iter() {
+            // Only brains with structured telemetry (the hybrid) get a line per decision.
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json)
+                && let Some(last) = v.get("last").filter(|l| l.is_object())
+            {
+                if let Some(dump) = last.get("dump").and_then(|d| d.as_array()) {
+                    for d in dump.iter().take(6) {
+                        println!(
+                            "        {:<32} {:>8} {} {}",
+                            d["src"].as_str().unwrap_or("?"),
+                            d["score"],
+                            d["combos"],
+                            d["step0"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+                println!(
+                    "t={tick:4} chose {:<32} danger={:<22} best={} robust={} eval={} unsafe={} shielded={}",
+                    last["chosen"].as_str().unwrap_or("?"),
+                    last["danger"].as_str().unwrap_or(""),
+                    last["best_score"],
+                    last["robust"],
+                    last["evaluated"],
+                    last["unsafe"],
+                    last["shielded"],
+                );
+            }
         }
         println!(
             "\nsubject decisions as a reference timeline:\n{}",
@@ -321,7 +424,7 @@ fn scenarios_cmd(
     let text = std::fs::read_to_string(config).map_err(|e| format!("{}: {e}", config.display()))?;
     let cfg = ScenarioRunConfig::parse(&text).map_err(|e| e.to_string())?;
     let scores =
-        run_scenarios(&defs, &cfg, &builtin_brain, &map_dir, &mut |l| eprintln!("{l}")).map_err(|e| e.to_string())?;
+        run_scenarios(&defs, &cfg, &arena_brain, &map_dir, &mut |l| eprintln!("{l}")).map_err(|e| e.to_string())?;
     let md = markdown(&scores, &defs);
     println!("{md}");
     if let Some(out) = out {

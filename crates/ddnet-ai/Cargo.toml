@@ -16,6 +16,8 @@ workspace = true
 
 [dependencies]
 clap = { workspace = true }
+# Task 3.5: the arena brain factory names `Brain` and builds the hybrid brain with the fly proposer.
+ddai-brain = { path = "../ddai-brain" }
 ddai-client = { path = "../ddai-client" }
 ddai-dataset = { path = "../ddai-dataset" }
 ddai-demo = { path = "../ddai-demo" }
@@ -28,6 +30,8 @@ ddai-map = { path = "../ddai-map" }
 # need to be named directly in `record_cmd` (the type `ddai-client` re-exports,
 # `ddai_client::view::View`, borrows one) — same pattern as `ddai-physics` below.
 ddai-net = { path = "../ddai-net" }
+# Task 3.5: `HybridBrain` with `FlyProposer` (arena CLI).
+ddai-planner = { path = "../ddai-planner" }
 # Task 7.3's `fly brain-demo`: `ddai_physics::map::MapData` (`ddai-map::load_map`'s own return
 # type) needs to be named directly here (an `Arc<MapData>` is built for `ddai_fly::demo_brain`).
 ddai-physics = { path = "../ddai-physics" }

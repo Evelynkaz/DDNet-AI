@@ -103,6 +103,32 @@ fn deadline_hit(deadline: Option<(&dyn Clock, f64)>, tick: i32) -> bool {
     }
 }
 
+/// Reusable snapshot buffers of the shield (task 3.5): `escape_exists` saves the world twice per
+/// call, and a snapshot of the production world is ~105 kB, so the hybrid search keeps these two
+/// across calls and decisions and refills them in place (`save_state_into`) instead of allocating
+/// two fresh snapshots every time.
+pub struct ShieldBuffers<W: PlanWorld> {
+    start: Option<W::SavedState>,
+    after_hold: Option<W::SavedState>,
+}
+
+impl<W: PlanWorld> Default for ShieldBuffers<W> {
+    fn default() -> Self {
+        ShieldBuffers {
+            start: None,
+            after_hold: None,
+        }
+    }
+}
+
+/// Fills `slot` with the world's current state, reusing the buffer once it exists.
+fn save_into<W: PlanWorld>(world: &W, slot: &mut Option<W::SavedState>) {
+    match slot {
+        Some(s) => world.save_state_into(s),
+        None => *slot = Some(world.save_state()),
+    }
+}
+
 /// `escapeExists(world, selfId, input, holdTicks, others)` (`shield.ts:34-72`). Always restores
 /// `world` to its state on entry before returning (TS's `finally { world.restoreState(start) }`)
 /// — implemented as a plain call + restore around [`escape_exists_inner`] rather than a
@@ -135,9 +161,39 @@ pub fn escape_exists_bounded<W: PlanWorld>(
     others: &HashMap<i32, PlayerInput>,
     deadline: Option<(&dyn Clock, f64)>,
 ) -> Bounded<bool> {
-    let start = world.save_state();
-    let result = escape_exists_inner(world, self_id, input, hold_ticks, others, deadline);
-    world.restore_state(&start);
+    escape_exists_buffered(
+        world,
+        self_id,
+        input,
+        hold_ticks,
+        others,
+        deadline,
+        &mut ShieldBuffers::default(),
+    )
+}
+
+/// [`escape_exists_bounded`] with caller-owned snapshot buffers (see [`ShieldBuffers`]): the same
+/// algorithm and the same answers, without allocating a snapshot per call once the buffers exist.
+pub fn escape_exists_buffered<W: PlanWorld>(
+    world: &mut W,
+    self_id: i32,
+    input: &PlayerInput,
+    hold_ticks: i32,
+    others: &HashMap<i32, PlayerInput>,
+    deadline: Option<(&dyn Clock, f64)>,
+    bufs: &mut ShieldBuffers<W>,
+) -> Bounded<bool> {
+    save_into(world, &mut bufs.start);
+    let result = escape_exists_inner(
+        world,
+        self_id,
+        input,
+        hold_ticks,
+        others,
+        deadline,
+        &mut bufs.after_hold,
+    );
+    world.restore_state(bufs.start.as_ref().expect("just saved"));
     result
 }
 
@@ -148,6 +204,7 @@ fn escape_exists_inner<W: PlanWorld>(
     hold_ticks: i32,
     others: &HashMap<i32, PlayerInput>,
     deadline: Option<(&dyn Clock, f64)>,
+    after_hold_slot: &mut Option<W::SavedState>,
 ) -> Bounded<bool> {
     crate::prof::inc_escape();
     for t in 0..hold_ticks {
@@ -165,7 +222,7 @@ fn escape_exists_inner<W: PlanWorld>(
             return Bounded::Done(false);
         }
     }
-    let after_hold = world.save_state();
+    save_into(world, after_hold_slot);
     let Some(me) = world.get_tee(self_id) else {
         return Bounded::Done(false);
     };
@@ -198,7 +255,7 @@ fn escape_exists_inner<W: PlanWorld>(
         {
             return Bounded::TimedOut;
         }
-        world.restore_state(&after_hold);
+        world.restore_state(after_hold_slot.as_ref().expect("saved after the hold"));
         let mut ok = true;
         let mut aborted = false;
         for t in 0..ESCAPE_TICKS {
@@ -307,6 +364,30 @@ pub fn safer_input_bounded<W: PlanWorld>(
     sent_aim: Option<&PlayerInput>,
     deadline: Option<(&dyn Clock, f64)>,
 ) -> Bounded<Option<PlayerInput>> {
+    safer_input_buffered(
+        world,
+        self_id,
+        input,
+        hold_ticks,
+        others,
+        sent_aim,
+        deadline,
+        &mut ShieldBuffers::default(),
+    )
+}
+
+/// [`safer_input_bounded`] with caller-owned snapshot buffers (see [`ShieldBuffers`]).
+#[allow(clippy::too_many_arguments)]
+pub fn safer_input_buffered<W: PlanWorld>(
+    world: &mut W,
+    self_id: i32,
+    input: &PlayerInput,
+    hold_ticks: i32,
+    others: &HashMap<i32, PlayerInput>,
+    sent_aim: Option<&PlayerInput>,
+    deadline: Option<(&dyn Clock, f64)>,
+    bufs: &mut ShieldBuffers<W>,
+) -> Bounded<Option<PlayerInput>> {
     let Some(me) = world.get_tee(self_id) else {
         return Bounded::Done(None);
     };
@@ -337,7 +418,7 @@ pub fn safer_input_bounded<W: PlanWorld>(
             target_y: js::round(js::sin(a) * 300.0),
             ..*input
         };
-        match escape_exists_bounded(world, self_id, &cand, hold_ticks, others, deadline) {
+        match escape_exists_buffered(world, self_id, &cand, hold_ticks, others, deadline, bufs) {
             Bounded::Done(true) => return Bounded::Done(Some(cand)),
             Bounded::Done(false) => {}
             Bounded::TimedOut => return Bounded::TimedOut,

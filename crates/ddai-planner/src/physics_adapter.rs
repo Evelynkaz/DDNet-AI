@@ -239,6 +239,29 @@ pub struct PhysicsSavedState {
     last_known: Box<[Option<TeeState>; MAX_CLIENTS]>,
 }
 
+impl PhysicsSavedState {
+    /// Overwrites this snapshot with `other` reusing its buffers (`World::restore_from`); the
+    /// derived `clone_from` would build and drop a whole fresh world (~105 kB) instead. Task 3.5:
+    /// the hybrid search copies one decision snapshot per worker per decision.
+    pub fn assign_from(&mut self, other: &PhysicsSavedState) {
+        self.world.restore_from(&other.world);
+        self.pending_input.clone_from(&other.pending_input);
+        self.present.clone_from(&other.present);
+        self.last_known.clone_from(&other.last_known);
+    }
+}
+
+/// Reused per-tick scratch of [`PhysicsWorld::step`] (never part of a saved state).
+#[derive(Default)]
+struct StepScratch {
+    ids: Vec<i32>,
+    alive_before: Vec<bool>,
+    fire_before: Vec<i32>,
+    pos_before: Vec<Option<PVec2<f32>>>,
+    inputs: Vec<TickInput>,
+    victims: Vec<i32>,
+}
+
 /// [`PlanWorld`] over `ddai_physics::world::World<f32>`. Owns the map handle (`Arc<MapData>`) so
 /// [`PlanWorld::new_scratch`] can build an independent fresh world sharing the same map without
 /// this crate needing to reconstruct one from just a `Collision` (see the module doc comment).
@@ -257,6 +280,7 @@ pub struct PhysicsWorld {
     /// returned (with `alive` forced `false`) once the core disappears -- see `get_tee`'s doc
     /// comment on this field for the exact contract.
     last_known: Box<[Option<TeeState>; MAX_CLIENTS]>,
+    step_scratch: StepScratch,
 }
 
 fn neutral_input_array() -> Box<[PlayerInput; MAX_CLIENTS]> {
@@ -280,6 +304,7 @@ impl PhysicsWorld {
             pending_input: neutral_input_array(),
             present: Box::new([false; MAX_CLIENTS]),
             last_known: no_last_known(),
+            step_scratch: StepScratch::default(),
         }
     }
 
@@ -295,6 +320,7 @@ impl PhysicsWorld {
             pending_input: neutral_input_array(),
             present: Box::new([false; MAX_CLIENTS]),
             last_known: no_last_known(),
+            step_scratch: StepScratch::default(),
         }
     }
 
@@ -320,6 +346,11 @@ impl PhysicsWorld {
                 self.last_known[id] = None;
             }
         }
+    }
+
+    /// The map this world was built on.
+    pub fn map(&self) -> &Arc<MapData> {
+        &self.map
     }
 
     /// Read-only access to the underlying `World<f32>` -- for callers that need DDNet-specific
@@ -471,41 +502,51 @@ impl PlanWorld for PhysicsWorld {
     /// and reports every victim, not only the nearest. A proposal for a real event hook in
     /// `World::step` (which would make this derivation unnecessary) is in the task-8.1 report.
     fn step(&mut self) -> Vec<WorldEvent> {
-        let ids: Vec<i32> = (0..MAX_CLIENTS as i32)
-            .filter(|&id| self.present[id as usize])
-            .collect();
-        let alive_before: Vec<bool> = ids
-            .iter()
-            .map(|&id| self.world.characters[id as usize].as_ref().is_some_and(|c| c.alive))
-            .collect();
-        let fire_before: Vec<i32> = ids
-            .iter()
-            .map(|&id| self.world.characters[id as usize].map_or(-1, |c| c.attack_tick))
-            .collect();
-        // Task 8.1: positions *before* the step. A hammer swing is resolved in the direct-input
-        // phase, ahead of the character ticks, so the swinger's origin and every candidate
-        // victim's position are exactly these -- a hit victim has already been thrown away from
-        // where the swing found it by the time `step` returns.
-        let pos_before: Vec<Option<PVec2<f32>>> = ids
-            .iter()
-            .map(|&id| {
+        let mut events = Vec::new();
+        self.step_into(&mut events);
+        events
+    }
+
+    fn step_into(&mut self, events: &mut Vec<WorldEvent>) {
+        events.clear();
+        // Task 3.5: the per-tick scratch lives in the world and is reused (five fresh `Vec`s per
+        // tick before) -- a rollout is dozens of ticks and the hybrid search runs dozens of
+        // rollouts per decision, so the allocations were a measurable share of the cost and made
+        // the worker rollouts impossible to keep allocation-free.
+        let mut sc = std::mem::take(&mut self.step_scratch);
+        sc.ids.clear();
+        sc.alive_before.clear();
+        sc.fire_before.clear();
+        sc.pos_before.clear();
+        sc.inputs.clear();
+        for id in 0..MAX_CLIENTS {
+            if self.present[id] {
+                sc.ids.push(id as i32);
+            }
+        }
+        for &id in &sc.ids {
+            sc.alive_before
+                .push(self.world.characters[id as usize].as_ref().is_some_and(|c| c.alive));
+            sc.fire_before
+                .push(self.world.characters[id as usize].map_or(-1, |c| c.attack_tick));
+            // Task 8.1: positions *before* the step. A hammer swing is resolved in the
+            // direct-input phase, ahead of the character ticks, so the swinger's origin and every
+            // candidate victim's position are exactly these -- a hit victim has already been
+            // thrown away from where the swing found it by the time `step` returns.
+            sc.pos_before.push(
                 self.world
                     .cores
                     .slot_of(id as u8)
-                    .map(|slot| self.world.cores.core_at(slot).pos)
-            })
-            .collect();
-
-        let mut inputs: Vec<TickInput> = Vec::with_capacity(ids.len());
-        for &id in &ids {
-            inputs.push(TickInput {
+                    .map(|slot| self.world.cores.core_at(slot).pos),
+            );
+            sc.inputs.push(TickInput {
                 id: id as u8,
                 input: to_ddnet_input(&self.pending_input[id as usize]),
                 kill: false,
             });
         }
-        self.world.step(&inputs);
-        let mut events = Vec::new();
+        self.world.step(&sc.inputs);
+        let (ids, alive_before, fire_before, pos_before) = (&sc.ids, &sc.alive_before, &sc.fire_before, &sc.pos_before);
         for (i, &id) in ids.iter().enumerate() {
             let now_alive = self.world.characters[id as usize].as_ref().is_some_and(|c| c.alive);
             if alive_before[i] && !now_alive {
@@ -533,7 +574,8 @@ impl PlanWorld for PhysicsWorld {
             let character = self.world.characters[id as usize].as_ref();
             let reload = character.map_or(0, |c| c.reload_timer);
             let hit = reload as f32 > (miss_ticks + hit_ticks) / 2.0;
-            let mut victims: Vec<i32> = Vec::new();
+            let mut victims = std::mem::take(&mut sc.victims);
+            victims.clear();
             if hit && let (Some(origin), Some(character)) = (pos_before[i], character) {
                 // `fire_hammer`'s own search: everybody within `proximity/2 + proximity` (14 + 28)
                 // of the swing's start point, `proximity * 0.75` in front of the swinger along the
@@ -579,14 +621,15 @@ impl PlanWorld for PhysicsWorld {
                 from: id,
                 hits: victims.len().max(usize::from(hit)) as i32,
             });
-            for to in victims {
+            for &to in &victims {
                 events.push(WorldEvent::HammerHit { from: id, to });
             }
+            sc.victims = victims;
         }
-        for &id in &ids {
+        for &id in ids {
             self.refresh_cache(id);
         }
-        events
+        self.step_scratch = sc;
     }
 
     fn save_state(&self) -> Self::SavedState {
@@ -598,13 +641,16 @@ impl PlanWorld for PhysicsWorld {
         }
     }
     fn save_state_into(&self, into: &mut Self::SavedState) {
-        into.world.clone_from(&self.world);
+        // `World::restore_from` (not the derived `clone_from`, which builds a fresh clone and drops
+        // the old one): field-wise copy into the existing buffers, no allocation once warm.
+        into.world.restore_from(&self.world);
         into.pending_input.clone_from(&self.pending_input);
         into.present.clone_from(&self.present);
         into.last_known.clone_from(&self.last_known);
     }
     fn restore_state(&mut self, state: &Self::SavedState) {
-        self.world.clone_from(&state.world);
+        // See `save_state_into`: `restore_from` reuses the world's buffers.
+        self.world.restore_from(&state.world);
         self.pending_input.clone_from(&state.pending_input);
         self.present.clone_from(&state.present);
         self.last_known.clone_from(&state.last_known);

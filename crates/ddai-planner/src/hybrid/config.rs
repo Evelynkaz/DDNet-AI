@@ -1,0 +1,274 @@
+//! [`HybridConfig`]: every production-only knob of the hybrid brain. The TS-parity path
+//! (`Planner::decide`/`decide_once`) never sees any of it; everything here is a flag of the
+//! hybrid decision, documented at its field.
+
+use crate::config::{PlannerConfig, preset_normal};
+
+/// The planner preset the hybrid search scores with: `preset_normal` (the live TS configuration)
+/// plus the hybrid-only scoring terms (`0` everywhere else):
+/// * `enemy_landing_bonus`: the victim's ballistic landing in a hazard is worth something even
+///   when it happens after the rollout horizon (throws and drags);
+/// * `landing_cost`: the same forecast for ourselves (`landingCost`, an existing TS term);
+/// * `jumpless_anchor_bonus`: hanging on a wall hook while jumpless over a hazard (T14).
+pub fn hybrid_planner_preset() -> PlannerConfig {
+    hybrid_terms(preset_normal())
+}
+
+/// `base` with the hybrid-only scoring terms of [`hybrid_planner_preset`] switched on.
+pub fn hybrid_terms(base: PlannerConfig) -> PlannerConfig {
+    PlannerConfig {
+        enemy_landing_bonus: 3.0,
+        landing_cost: 2.0,
+        jumpless_anchor_bonus: 0.1,
+        ..base
+    }
+}
+
+/// How a decision spends effort.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HybridMode {
+    /// A fixed amount of work per decision: the candidate pool is complete (warm plan, proposals,
+    /// book, throws, techniques) and CEM runs its configured iterations. No clock is read, the
+    /// decision is a pure function of the state and the seed, and it is identical for any number
+    /// of worker threads. The arena's reproducible mode.
+    Fixed,
+    /// Iterative deepening against a wall-clock (or injected) deadline: `budget_ms` of search
+    /// (D-042: 4 ms), plus the adaptive extension when [`AdaptiveConfig`] allows it.
+    Deadline { budget_ms: f64 },
+}
+
+/// How the re-scored candidates are ranked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RobustMode {
+    /// `lambda * worst + (1 - lambda) * mean` over the model combinations.
+    #[default]
+    Mix,
+    /// A plan that no modelled reply leaves us out in beats every plan some reply does; safe
+    /// plans compete on the cheap-model score (they keep the attack), the others on the mix.
+    SafeFirst,
+}
+
+/// The two-stage robust choice (`orig-plan`'s single hold/react opponent model generalised to
+/// every combination of the modelled opponents' responses).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RobustConfig {
+    /// `false`: choose by the stage-1 (all opponents hold) score alone.
+    pub enabled: bool,
+    /// How many of the best stage-1 candidates are re-scored under every response combination.
+    pub top_m: usize,
+    /// Weight of the worst case in the choice: `lambda * worst + (1 - lambda) * mean`. `1` is pure
+    /// max-min. The default 0.5 keeps the bot attacking (pure max-min plays too safe against a
+    /// bot that always attacks) while still refusing plans one plausible reply refutes.
+    pub lambda: f64,
+    pub mode: RobustMode,
+    /// How many model combinations a plan is re-scored under at most (1-4; each one is one more
+    /// rollout per re-scored plan, so with several opponents this is the main cost of stage 2).
+    /// With two, the combinations are "everybody holds" and "everybody reacts".
+    pub max_combos: usize,
+    /// The re-scoring stage runs only when at most this many opponents can act on us (victim and
+    /// threats). Beyond that a 4 ms budget affords 6-9 candidates in a 1v3/1v5 fight and the
+    /// re-scoring would take a third of them (measured: more losses in 1v5, E-003), so the search
+    /// decides by the cheap model and the threat terms alone.
+    pub max_relevant: usize,
+    /// Scale the worst-case weight by the belief that the opponents react (an opponent that looks
+    /// idle counts less as a threat; measured: T5 36% -> 72%, T10 94% -> 100%, arena strength vs the
+    /// planner unchanged, E-003). Without it only the expectation is weighted by the beliefs.
+    pub belief_lambda: bool,
+}
+
+impl Default for RobustConfig {
+    fn default() -> Self {
+        RobustConfig {
+            enabled: true,
+            top_m: 3,
+            lambda: 0.5,
+            mode: RobustMode::Mix,
+            max_combos: 4,
+            max_relevant: 2,
+            belief_lambda: true,
+        }
+    }
+}
+
+/// D-042's adaptive budget.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdaptiveConfig {
+    /// Allow the extension. The search always stops at the base budget when nothing is wrong.
+    pub enabled: bool,
+    /// Total wall time (from the start of the search) the extension may use, shield included.
+    pub max_total_ms: f64,
+}
+
+impl Default for AdaptiveConfig {
+    fn default() -> Self {
+        AdaptiveConfig {
+            enabled: true,
+            max_total_ms: 15.0,
+        }
+    }
+}
+
+/// The hybrid brain's settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HybridConfig {
+    /// The planner preset the search scores with (`preset_normal` by default).
+    pub planner: PlannerConfig,
+    pub mode: HybridMode,
+    /// Threads that score candidates, the deciding thread included. `1` = no pool, no thread is
+    /// spawned. More threads make a decision faster, never different in [`HybridMode::Fixed`].
+    pub workers: usize,
+    /// `K`: proposals the search asks its [`crate::hybrid::Proposer`] for.
+    pub proposals: usize,
+    /// Run the technique library (D-048). `false` = book/CEM/proposals only.
+    pub techniques: bool,
+    /// Hook anchors kept per decision (angle-diverse, cached per tile).
+    pub anchors: usize,
+    /// At most this many throw lines (`throwLines`/`frozenThrowLines`, 12 / 28 of them) enter the
+    /// pool: they are cheap to generate but each costs a rollout.
+    pub throw_cap: usize,
+    /// The 1vN threat model: every free opponent within the threat radius is modelled in the
+    /// rollouts, scored defensively, part of the danger flags and of the shield. `false` is the
+    /// "1v1 model": only the chosen victim is modelled, the others just hold their inputs.
+    pub threat_model: bool,
+    /// Threat radius in px; `None` derives it (`hook length + two decisions of travel`).
+    pub threat_radius_px: Option<f64>,
+    /// Weight of the defensive terms of the extra threats relative to the victim's (`1` = equal).
+    pub threat_weight: f64,
+    /// A hook at an extra threat (not the victim) passes the hook gate (T10 hooks the tee below).
+    pub hook_threats: bool,
+    /// Ticks between decisions (the live cadence), for the derived radius.
+    pub decision_ticks: i32,
+    pub robust: RobustConfig,
+    pub adaptive: AdaptiveConfig,
+    /// Share of the deadline budget reserved for the robust re-scoring (stage 2).
+    pub stage2_fraction: f64,
+    /// Cap of a decision that is not extended (search + shield, ms): the search budget is
+    /// `min(budget_ms, cap - shield reserve)`. `None` = the budget alone (the extension of D-042
+    /// may still go up to `adaptive.max_total_ms` when danger is confirmed).
+    pub decision_cap_ms: Option<f64>,
+    /// Time the shield may use after the search, per tee in the world (ms); the search itself
+    /// keeps its own budget. The shield gives up (`shield_incomplete`) when it is spent, except
+    /// that a confirmed danger lets it run on up to the adaptive cap (D-042).
+    pub shield_reserve_ms_per_tee: f64,
+    /// Deadline mode on the **work clock**: microseconds charged per tee-tick (one physics tick of
+    /// one tee; an anchor ray counts as two), instead of wall time. `None` = the wall clock (or the step clock a test
+    /// injects). Reproducible and load-independent; needs `workers = 1`. See [`crate::hybrid::work`].
+    pub work_clock_us_per_tick: Option<f64>,
+    /// Keep a count of the physics ticks each phase simulates (D-045). Cheap; on by default.
+    pub count_work: bool,
+    /// Diagnostics: put the best candidates of every decision, with their scores, into the
+    /// telemetry (`dump`). Off by default (it allocates and bloats the JSON).
+    pub debug_dump: bool,
+}
+
+/// A finite number above zero (a NaN or an infinity from a config file is refused).
+fn positive(x: f64) -> bool {
+    x.is_finite() && x > 0.0
+}
+
+impl Default for HybridConfig {
+    fn default() -> Self {
+        HybridConfig {
+            planner: hybrid_planner_preset(),
+            mode: HybridMode::Deadline { budget_ms: 4.0 },
+            workers: 1,
+            proposals: 3,
+            techniques: true,
+            anchors: 8,
+            throw_cap: 10,
+            threat_model: true,
+            threat_radius_px: None,
+            threat_weight: 0.25,
+            hook_threats: true,
+            decision_ticks: 2,
+            robust: RobustConfig::default(),
+            adaptive: AdaptiveConfig::default(),
+            stage2_fraction: 0.35,
+            decision_cap_ms: Some(5.0),
+            shield_reserve_ms_per_tee: 0.25,
+            work_clock_us_per_tick: None,
+            count_work: true,
+            debug_dump: false,
+        }
+    }
+}
+
+impl HybridConfig {
+    /// A fixed-work (deterministic) configuration.
+    pub fn fixed() -> HybridConfig {
+        HybridConfig {
+            mode: HybridMode::Fixed,
+            adaptive: AdaptiveConfig {
+                enabled: false,
+                ..AdaptiveConfig::default()
+            },
+            ..HybridConfig::default()
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.workers == 0 {
+            return Err("hybrid: workers must be at least 1".into());
+        }
+        if let HybridMode::Deadline { budget_ms } = self.mode
+            && !positive(budget_ms)
+        {
+            return Err("hybrid: budget_ms must be positive".into());
+        }
+        if !(0.0..=1.0).contains(&self.robust.lambda) || !(0.0..1.0).contains(&self.stage2_fraction) {
+            return Err("hybrid: robust.lambda in [0,1], stage2_fraction in [0,1)".into());
+        }
+        if self.work_clock_us_per_tick.is_some_and(|u| !positive(u))
+            || (self.work_clock_us_per_tick.is_some() && self.workers > 1)
+        {
+            return Err("hybrid: the work clock needs us_per_tee_tick > 0 and workers = 1".into());
+        }
+        if self.robust.max_relevant > crate::hybrid::threat::MAX_THREATS + 1 {
+            return Err("hybrid: robust.max_relevant above the number of modelled opponents".into());
+        }
+        if !(1..=4).contains(&self.robust.max_combos)
+            || !(self.threat_weight.is_finite() && self.threat_weight >= 0.0)
+            || !positive(self.shield_reserve_ms_per_tee)
+            || self.decision_cap_ms.is_some_and(|c| !positive(c))
+        {
+            return Err("hybrid: robust.max_combos in 1..=4, threat_weight >= 0, shield_reserve_ms_per_tee > 0, decision_cap_ms > 0".into());
+        }
+        if !positive(self.adaptive.max_total_ms) || self.threat_radius_px.is_some_and(|r| !positive(r)) {
+            return Err("hybrid: adaptive.max_total_ms and threat_radius_px must be finite and positive".into());
+        }
+        if self.anchors > 36 {
+            return Err("hybrid: anchors above the ray count".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_the_d042_shape() {
+        let c = HybridConfig::default();
+        assert_eq!(c.mode, HybridMode::Deadline { budget_ms: 4.0 });
+        assert_eq!(c.adaptive.max_total_ms, 15.0);
+        assert!(c.validate().is_ok());
+        assert_eq!(HybridConfig::fixed().mode, HybridMode::Fixed);
+        assert!(!HybridConfig::fixed().adaptive.enabled);
+    }
+
+    #[test]
+    fn validation_rejects_nonsense() {
+        let bad = |f: &dyn Fn(&mut HybridConfig)| {
+            let mut c = HybridConfig::default();
+            f(&mut c);
+            assert!(c.validate().is_err());
+        };
+        bad(&|c| c.workers = 0);
+        bad(&|c| c.mode = HybridMode::Deadline { budget_ms: 0.0 });
+        bad(&|c| c.robust.lambda = 1.5);
+        bad(&|c| c.stage2_fraction = 1.0);
+        bad(&|c| c.robust.max_relevant = 20);
+        bad(&|c| c.anchors = 100);
+    }
+}

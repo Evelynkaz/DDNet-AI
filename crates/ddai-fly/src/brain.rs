@@ -212,6 +212,12 @@ impl FlyBrain {
         &self.ray_features
     }
 
+    /// The action distribution of the most recent `decide()` (`None` before the first decision or
+    /// after a `reset`): the head probabilities a hybrid proposer turns into plans (task 3.5).
+    pub fn last_decoded(&self) -> Option<&DecodedAction> {
+        self.last_decoded.as_ref()
+    }
+
     pub fn last_latency(&self) -> Duration {
         self.last_latency
     }

@@ -32,7 +32,7 @@ use crate::vmath::Vec2;
 
 /// `BYSTANDER_PX` (`bot.ts:339`): frozen non-target tees closer than this are passed to the
 /// planner as frozen bystanders (`bot.ts:4767-4775`).
-const BYSTANDER_PX: f64 = 160.0;
+pub(crate) const BYSTANDER_PX: f64 = 160.0;
 
 /// `wireAngleRad` (`core/types.ts:83`): the wire aim angle (1/256 rad, `0..2*PI*256`) as radians
 /// in `(-PI, PI]`.
@@ -140,19 +140,19 @@ fn tee_from_observation(c: &CharacterObservation) -> TeeState {
 }
 
 /// A private planning world, rebuilt lazily for the map of the current episode.
-struct Scratch {
-    map: Arc<MapData>,
+pub(crate) struct Scratch {
+    pub(crate) map: Arc<MapData>,
     world: Option<PhysicsWorld>,
 }
 
 impl Scratch {
-    fn new(map: Arc<MapData>) -> Self {
+    pub(crate) fn new(map: Arc<MapData>) -> Self {
         Scratch { map, world: None }
     }
 
     /// Copies the exact world in. The first call clones it (sharing the `Arc`'d collision); later
     /// ones `restore_from` into the same allocation.
-    fn sync_exact(&mut self, src: &ddai_physics::world::World<f32>) -> &mut PhysicsWorld {
+    pub(crate) fn sync_exact(&mut self, src: &ddai_physics::world::World<f32>) -> &mut PhysicsWorld {
         match &mut self.world {
             Some(w) => w.sync_from(src),
             None => {
@@ -165,20 +165,26 @@ impl Scratch {
     }
 
     /// Rebuilds a planning world holding exactly the tees of `obs` (no exact world available).
-    fn rebuild_from_observation(&mut self, obs: &Observation) -> &mut PhysicsWorld {
-        let mut w = PhysicsWorld::new(self.map.clone(), 1);
-        for c in std::iter::once(&obs.self_state).chain(obs.others.iter()) {
-            let st = tee_from_observation(c);
-            w.add_tee(c.id, st.pos);
-            w.apply_tee_state(c.id, &st);
-        }
-        self.world = Some(w);
+    pub(crate) fn rebuild_from_observation(&mut self, obs: &Observation) -> &mut PhysicsWorld {
+        self.world = Some(planning_world_from_observation(&self.map, obs));
         self.world.as_mut().expect("just set")
     }
 }
 
+/// A planning world holding exactly the tees of `obs`, built the way `syncPlanningWorld` builds
+/// one from a snapshot (no exact world available).
+pub(crate) fn planning_world_from_observation(map: &Arc<MapData>, obs: &Observation) -> PhysicsWorld {
+    let mut w = PhysicsWorld::new(map.clone(), 1);
+    for c in std::iter::once(&obs.self_state).chain(obs.others.iter()) {
+        let st = tee_from_observation(c);
+        w.add_tee(c.id, st.pos);
+        w.apply_tee_state(c.id, &st);
+    }
+    w
+}
+
 /// Which of the target-finding fields the brain resolves the opponent from.
-fn target_of(obs: &Observation) -> Option<&CharacterObservation> {
+pub(crate) fn target_of(obs: &Observation) -> Option<&CharacterObservation> {
     obs.target_or_nearest()
 }
 
@@ -363,7 +369,8 @@ impl PlannerStats {
 /// thread that plays the game.
 pub struct PlannerBrain {
     cfg: PlannerBrainConfig,
-    planner: Planner<PhysicsWorld>,
+    // Boxed: a planner is hundreds of kB, and test threads have 2 MB stacks.
+    planner: Box<Planner<PhysicsWorld>>,
     clock: BrainClock,
     prev: PlayerInput,
     scratch: Option<Scratch>,
@@ -382,7 +389,7 @@ impl PlannerBrain {
             ClockKind::Step { step_ms } => BrainClock::Step(StepClock::new(step_ms)),
         };
         PlannerBrain {
-            planner: Planner::new(cfg.preset.config()),
+            planner: Box::new(Planner::new(cfg.preset.config())),
             cfg,
             clock,
             prev: empty_input(),

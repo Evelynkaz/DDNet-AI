@@ -23,6 +23,9 @@ ddai-flyg = { path = "../ddai-flyg" }
 # directly, so both are listed explicitly rather than relying on `ddai-brain` to re-export them).
 ddai-brain = { path = "../ddai-brain" }
 ddai-physics = { path = "../ddai-physics" }
+# Task 3.5: `FlyProposer` implements the hybrid brain's `Proposer` trait (the fly proposes plans,
+# the exact search decides, D-041). The planner does not depend on the fly, so there is no cycle.
+ddai-planner = { path = "../ddai-planner" }
 serde = { version = "1.0.229", features = ["derive"] }
 # Same feature choice as ddai-flyg/ddai-connectome (see their Cargo.toml comments): default-features
 # = false drops the no_std `heapless-cas` feature (and its unmaintained transitive dependency,

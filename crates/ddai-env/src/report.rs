@@ -38,6 +38,32 @@ pub struct PlayerSummary {
     pub telemetry_sum: BTreeMap<String, f64>,
 }
 
+/// Adds every numeric leaf of a telemetry object into `sums` under its dotted path
+/// (`totals.extended`). Nested objects are followed (the hybrid brain reports `totals.*`); arrays
+/// and the `last` snapshot (a single decision, meaningless summed) are skipped.
+fn sum_numeric_leaves(prefix: &str, v: &serde_json::Value, sums: &mut BTreeMap<String, f64>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, child) in m {
+                if prefix.is_empty() && k == "last" {
+                    continue;
+                }
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                sum_numeric_leaves(&path, child, sums);
+            }
+        }
+        other => {
+            if let Some(x) = other.as_f64() {
+                *sums.entry(prefix.to_string()).or_insert(0.0) += x;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Distribution {
     pub n: u32,
@@ -180,12 +206,8 @@ pub fn summarize(run: &ConditionRun, arena_tag: &str, map_sha256: Option<String>
         pooled.sort_unstable();
         let mut sums: BTreeMap<String, f64> = BTreeMap::new();
         for g in games {
-            if let Some(serde_json::Value::Object(m)) = &g.players[slot].telemetry {
-                for (k, v) in m {
-                    if let Some(x) = v.as_f64() {
-                        *sums.entry(k.clone()).or_insert(0.0) += x;
-                    }
-                }
+            if let Some(t @ serde_json::Value::Object(_)) = &g.players[slot].telemetry {
+                sum_numeric_leaves("", t, &mut sums);
             }
         }
         let first = games.first().map(|g| &g.players[slot]);

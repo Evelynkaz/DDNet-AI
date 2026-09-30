@@ -1055,6 +1055,7 @@ dependencies = [
  "ddai-flyg",
  "ddai-map",
  "ddai-physics",
+ "ddai-planner",
  "postcard",
  "rayon",
  "serde",
@@ -1116,6 +1117,7 @@ dependencies = [
 name = "ddai-planner"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "ddai-brain",
  "ddai-jsmath",
  "ddai-map",
@@ -1214,6 +1216,7 @@ dependencies = [
  "clap",
  "core_affinity",
  "ctrlc",
+ "ddai-brain",
  "ddai-client",
  "ddai-dataset",
  "ddai-demo",
@@ -1223,6 +1226,7 @@ dependencies = [
  "ddai-map",
  "ddai-net",
  "ddai-physics",
+ "ddai-planner",
  "ddai-recorder",
  "ddai-trace",
  "ddai-web",

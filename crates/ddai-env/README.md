@@ -102,8 +102,13 @@ players = [{ brain = "planner", mode = "deadline", budget_ms = 4.0, lag = 0 },
 ```
 
 `brain` = `idle` / `scripted` / `planner` (`preset` normal|low|strong, `mode` fixed|deadline, `budget_ms`,
-`clock` wall|step). Слот 0 — фокусный игрок A. Любой другой `Brain` подключается через `BrainFactory` (библиотека);
-загрузчика мухи в CLI пока нет — у `FlyBrain` ещё нет формата чекпоинта (обучение — следующая задача).
+`clock` wall|step) / `hybrid` (гибридный мозг D-041, задача 3.5; те же `preset`/`mode`/`budget_ms`/`clock` плюс таблица
+`hybrid = { … }`: `proposer` none|scripted|fly, `proposals`, `workers`, `techniques`, `threat_model`, `robust`, `lambda`,
+`top_m`, `adaptive`, `max_total_ms`, `stage2_fraction`, `anchors`, `throw_cap`, `threat_radius_px`, `enemy_landing_bonus`,
+`landing_cost`, `debug_dump`; `fly_config` и `model = <.flyg>` для `proposer = "fly"`, фабрика — в CLI `ddnet-ai`, муха
+пока необученная: только проводка и цена). Слот 0 — фокусный игрок A. Любой другой `Brain` подключается через
+`BrainFactory` (библиотека). Телеметрия гибрида (`players[].telemetry`) — счётчики за партию (`totals`: решения, доля
+расширения D-042, кандидаты по источникам, выбранные техники, тики физики по фазам) и последнее решение (`last`).
 
 ## Выход
 

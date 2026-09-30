@@ -1,0 +1,66 @@
+# E-003, part 2b: what makes the 1vN threat model passive? Ablations of the hybrid's threat model on the
+# work clock (deterministic), 1v2 / 1v3 / 1v5 on clb-left, 200 games each. Run:
+#   ddnet-ai arena run --config configs/arena/e003-threat-ablation.toml --out ~/aiddnet/data/runs/E-003/ablation --threads 6
+name = "E-003 threat ablation"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "1v2 weight 0.5"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.5 } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 weight 0"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.0 } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 weight 0.25"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.25 } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v3 weight 0.5"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.5 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 weight 0"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.0 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 weight 0.25"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.25 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v5 weight 0.5"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.5 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 weight 0"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.0 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 weight 0.25"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_weight = 0.25 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 5 }]

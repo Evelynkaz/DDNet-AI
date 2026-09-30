@@ -1,0 +1,16 @@
+# E-003, part 3: the untrained fly as proposer (plumbing and cost only, no strength claim before phase-8
+# training). Needs the compiled S graph. Run:
+#   ddnet-ai arena run --config configs/arena/e003-fly.toml --out ~/aiddnet/data/runs/E-003/fly --threads 2
+name = "E-003 fly proposer"
+base_seed = 1
+games = 12
+
+[[condition]]
+name = "clb-left hybrid fly proposer vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", budget_ms = 4.0, model = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg", hybrid = { proposer = "fly", proposals = 3, adaptive = false } }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left hybrid no proposer vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted" }]

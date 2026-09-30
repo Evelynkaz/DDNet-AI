@@ -88,6 +88,12 @@ pub fn inc_escape() {
     ESCAPES.with(|e| e.set(e.get() + 1));
 }
 
+/// The shield's physics-step and `escape_exists` counters so far on this thread (task 3.5: the
+/// hybrid search reads the difference around its shield to report the shield's work, D-045).
+pub fn counters() -> (u64, u64) {
+    (STEPS.with(Cell::get), ESCAPES.with(Cell::get))
+}
+
 /// Records `(Instant::now(), 0, steps_so_far, escapes_so_far)` into the fixed slot `slot` (must be
 /// `0..4`; out-of-range silently does nothing rather than panicking, since this is diagnostic
 /// instrumentation, never load-bearing for correctness). Overwrites whatever was in that slot from

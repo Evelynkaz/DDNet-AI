@@ -213,6 +213,21 @@ pub struct PlannerConfig {
     pub hook_seeds: bool,
 
     pub hook_polish: bool,
+
+    /// **Task 3.5, hybrid search only (`0` in every TS preset, so parity is untouched).** Bonus, at
+    /// the end of a rollout, for a victim that is alive, not frozen and whose ballistic flight
+    /// (`flightEndsInHazard`, the same forecast `landing_cost` uses for us) ends in freeze or death.
+    /// A hammer throw or a drag launches the victim on an arc that lands after the 27-tick horizon
+    /// (the 3.5 scenario T18: the hammer works, the freeze floor is 30+ ticks away); without this
+    /// term the search cannot see the payoff and the throw scores the same as standing still.
+    pub enemy_landing_bonus: f64,
+
+    /// **Task 3.5, hybrid search only (`0` in every TS preset).** Per-tick bonus for hanging on a
+    /// wall or ceiling hook while we have no jump left, are in the air and freeze or death lies
+    /// below us (`docs/research/block-knowledge.md` T14, "panic hook"): the only control left over
+    /// a pit is an anchor, but a 27-tick rollout sees only its ballistic end, so without a bonus
+    /// an approach plan that merely survives scores as well as the safe hang.
+    pub jumpless_anchor_bonus: f64,
 }
 
 impl Default for PlannerConfig {
@@ -303,6 +318,8 @@ impl Default for PlannerConfig {
             value_weight: 0.0,
             hook_seeds: true,
             hook_polish: true,
+            enemy_landing_bonus: 0.0,
+            jumpless_anchor_bonus: 0.0,
         }
     }
 }

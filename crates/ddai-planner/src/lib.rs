@@ -11,6 +11,7 @@ pub mod brains;
 pub mod clock;
 pub mod config;
 pub mod fields;
+pub mod hybrid;
 pub mod memory;
 pub mod opponent_profile;
 pub mod physics_adapter;
