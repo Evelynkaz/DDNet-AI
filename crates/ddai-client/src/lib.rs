@@ -44,6 +44,6 @@ pub mod timing;
 pub use ddai_net::generated::enums;
 pub use ddai_net::generated::objects::PlayerInput;
 pub use ddai_net::view;
-pub use driver::{Client, ClientEvent, GaveUpCategory, LiveWorldSnapshot};
+pub use driver::{Client, ClientEvent, GaveUpCategory, InputTag, LiveWorldSnapshot};
 pub use session::{ClientConfig, MapLoadedEvent, MapSource, ServerCapabilities, Session, SessionEvent};
 pub use timing::{MarginStats, MarginSummary};

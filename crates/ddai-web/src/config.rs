@@ -45,6 +45,9 @@ pub struct WebConfig {
     /// to loop through, or a single such file. `None` means the live map view has no active
     /// source — the WS still works, it just never sends `map`/`live` messages.
     pub replay_source: Option<PathBuf>,
+    /// Task 4.1: the live bot's Unix socket (`ddai_bot::bridge`, `docs/formats.md` §21) as the live
+    /// view's data source instead of a replay. Mutually exclusive with `replay_source`.
+    pub bot_socket: Option<PathBuf>,
     /// Task 5.2a: directories `crate::live::map_resolve` may read a real `.map` file's bytes
     /// from, by filename, when resolving a real-map replay trace's map (never any path taken
     /// from request or trace content directly — see that module's doc comment). Typically
@@ -77,6 +80,7 @@ impl WebConfig {
             request_timeout: Duration::from_secs(10),
             trusted_device_ttl: Duration::from_secs(90 * 24 * 3600),
             replay_source: None,
+            bot_socket: None,
             map_search_dirs: Vec::new(),
             max_live_hz: 50.0,
         }

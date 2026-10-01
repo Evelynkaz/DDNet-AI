@@ -5,6 +5,7 @@
 //! parity work (see `docs/formats.md`).
 
 mod arena_cmd;
+mod bot_cmd;
 mod dataset_cmd;
 mod demo_cmd;
 mod fly_cmd;
@@ -673,8 +674,56 @@ mod tests {
 
     #[test]
     fn play_rejects_invalid_brain() {
-        let result = Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303", "--brain", "planner"]);
+        let result = Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303", "--brain", "nonsense"]);
         assert!(result.is_err());
+    }
+
+    /// Task 4.1: the bot brains and the bot flags.
+    #[test]
+    fn play_parses_the_bot_brains_and_options() {
+        for name in ["planner", "scripted", "hybrid", "fly"] {
+            let cli = Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303", "--brain", name])
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            match cli.command {
+                Some(super::Command::Play(args)) => assert!(args.brain.is_bot_brain(), "{name}"),
+                other => panic!("expected Play, got {other:?}"),
+            }
+        }
+        let cli = Cli::try_parse_from([
+            "ddnet-ai",
+            "play",
+            "--server",
+            "127.0.0.1:8303",
+            "--brain",
+            "idle",
+            "--bot",
+            "--mode",
+            "passive",
+            "--target",
+            "someone",
+            "--show-distance",
+            "4000,3000",
+            "--no-bridge",
+            "--report",
+            "/tmp/r.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(super::Command::Play(args)) => {
+                assert!(
+                    args.bot && !args.brain.is_bot_brain(),
+                    "idle only goes through the bot with --bot"
+                );
+                assert_eq!(args.bot_opts.mode, "passive");
+                assert_eq!(args.bot_opts.target.as_deref(), Some("someone"));
+                assert_eq!(args.bot_opts.show_distance, Some((4000, 3000)));
+                assert!(args.bot_opts.no_bridge);
+            }
+            other => panic!("expected Play, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303", "--show-distance", "x"]).is_err()
+        );
     }
 
     /// Task 8.4a: `--brain random-scripted`, `--seed`, `--input-log`.

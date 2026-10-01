@@ -63,7 +63,7 @@ use ddai_net::generated::enums::playerflagflag;
 use ddai_net::generated::objects::PlayerInput as NetPlayerInput;
 use ddai_physics::core::PlayerInput;
 use ddai_world::accuracy::AccuracyTracker;
-use ddai_world::{LiveWorld, player_input_from_net, retarget_late_inputs};
+use ddai_world::{LiveWorld, SnapshotInput, player_input_from_net, retarget_late_inputs};
 
 fn e2e_enabled() -> bool {
     std::env::var("DDAI_E2E").as_deref() == Ok("1")
@@ -349,17 +349,17 @@ fn liveworld_accuracy_against_local_server() {
         // dropped under F12's droppability, simply falls back to `on_snapshot`'s own documented
         // neutral guess for that one snapshot, same as `None` always meant).
         let own_input_at_tick = retargeted.get(&snap.tick).copied();
-        live.on_snapshot(
-            snap.tick,
-            &snap.characters,
-            snap.tuning,
-            &snap.switch_states,
-            snap.teams.as_ref(),
-            own_input_at_tick,
-        );
         // Task 2.4b: the server's own projectile items (cannons and shots), as the client's
         // prediction uses them — no map-native ones.
-        live.set_projectiles(&snap.projectiles);
+        live.on_snapshot(SnapshotInput {
+            tick: snap.tick,
+            characters: &snap.characters,
+            tuning: snap.tuning,
+            switch_states: &snap.switch_states,
+            teams: snap.teams.as_ref(),
+            own_input_at_tick,
+            projectiles: &snap.projectiles,
+        });
         tracker.record_actual(snap.tick, live.base_world());
 
         for &h in &horizons {
@@ -527,15 +527,15 @@ fn projectile_prediction_against_local_server() {
         (0usize, 0usize, 0usize, 0usize, 0usize);
     for s in &data.snapshots {
         let Some(s2) = by_tick.get(&(s.tick + 2)) else { continue };
-        live.on_snapshot(
-            s.tick,
-            &s.characters,
-            s.tuning,
-            &s.switch_states,
-            s.teams.as_ref(),
-            None,
-        );
-        live.set_projectiles(&s.projectiles);
+        live.on_snapshot(SnapshotInput {
+            tick: s.tick,
+            characters: &s.characters,
+            tuning: s.tuning,
+            switch_states: &s.switch_states,
+            teams: s.teams.as_ref(),
+            own_input_at_tick: None,
+            projectiles: &s.projectiles,
+        });
         let base: Vec<_> = live.base_world().projectiles.clone();
         if base.len() != s.projectiles.len() {
             continue; // an item the world has no model for (or a foreign team's): no 1:1 mapping

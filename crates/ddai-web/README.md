@@ -66,3 +66,13 @@ cargo test -p ddai-web --test replay_real_corpus -- --ignored   # сверка �
 ```
 
 `tools/e2e/live-map.spec.ts` (Playwright, реальный браузер) — см. `tools/e2e/README.md`.
+
+## Живой бот как источник кадров (задача 4.1)
+
+`ddnet-ai web --bot-socket <путь>` (по умолчанию бот слушает `~/aiddnet/data/bot/live.sock`) подключает
+`live::bot_source::BotSource`: `FrameSource`, который **только читает** Unix-сокет бота (`docs/formats.md` §21.2) и отдаёт
+хабу карту (резолв только из `--maps-dir`/`<data-dir>/maps/cache` по `<имя>_<sha256>.map` с проверкой sha256), игроков
+(метки `c<id>-<hash>`, не ники), кадры `DWLF` v1, события (заморозка/разморозка/смерть/возрождение/хват хука выводятся из
+соседних кадров) и статус бота (WS-сообщение `{"type":"bot","status":{…}}`, строка «бот …» в HUD вкладки «Игра»).
+Конфликтует с `--replay`. Потерянный сокет — повтор раз в секунду. Тесты: `live::bot_source::tests` (скриптовый «бот» на
+настоящем сокете, враждебная длина сообщения, вывод событий) и e2e `ddai-bot/tests/e2e_local_server.rs` (настоящий бот).

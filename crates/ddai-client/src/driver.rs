@@ -80,8 +80,11 @@ const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// How long `recv` blocks before the driver loop re-checks its channels/timers — this is the
 /// effective granularity of [`crate::timing::InputTiming::advance`]'s cadence (see that module's
 /// docs: a faster poll only lets the predicted tick advance *sooner* within its 20ms window, it
-/// cannot advance further than the wall clock allows either way).
-const POLL_TIMEOUT: Duration = Duration::from_millis(10);
+/// cannot advance further than the wall clock allows either way). Task 4.1: 2 ms instead of 10 ms —
+/// a decision the live bot hands over with `Client::set_input` is only picked up when this loop
+/// comes round, so the old value added up to 10 ms between "decided" and "sent" (measured: wire
+/// latency p50 24 ms -> see `docs/formats.md` §21.6) and let `advance()` fire up to 10 ms late.
+const POLL_TIMEOUT: Duration = Duration::from_millis(2);
 /// Receive buffer size — comfortably above `ddai_net::packet::MAX_PACKET_SIZE` (1400).
 const RECV_BUF_SIZE: usize = 2048;
 
@@ -327,6 +330,17 @@ pub enum ClientEvent {
     /// the same reason as [`ClientEvent::Session`] (this is the largest variant by far: a
     /// `Vec<CharacterView>` plus a handful of `Copy` structs).
     LiveWorldSnapshot(Box<LiveWorldSnapshot>),
+    /// Task 4.1 (D-042): the first `NETMSG_INPUT` carrying a decision made with
+    /// [`Client::set_input_for_snapshot`] just went out for `tick`; `since_snapshot` is the time
+    /// from that decision's snapshot arriving at the driver ([`LiveWorldSnapshot::arrived`]) to
+    /// now (the datagram handed to the socket). Includes the wait for the session's own input
+    /// cadence (one input per predicted tick, 20 ms apart), which is not the bot's to shrink.
+    InputLatency {
+        tick: i32,
+        since_snapshot: Duration,
+        /// The caller's [`InputTag`] of that decision, if it gave one.
+        tag: Option<InputTag>,
+    },
 }
 
 /// Payload of [`ClientEvent::LiveWorldSnapshot`] — see that variant's docs.
@@ -350,6 +364,22 @@ pub struct LiveWorldSnapshot {
     /// [`ddai_net::view::View::projectiles`]'s result — what `ddai-world`'s
     /// `LiveWorld::set_projectiles` builds the predicted projectiles from (task 2.4b).
     pub projectiles: Vec<(i32, ddai_net::view::ProjectileView)>,
+    /// Task 4.1: every player slot of the snapshot ([`ddai_net::view::View::players`]) — name,
+    /// clan, team, latency and the DDNet AFK/paused/spectator flags, which the live bot's target
+    /// selection needs and [`LiveWorldSnapshot::characters`] does not carry.
+    pub players: Vec<ddai_net::view::PlayerView>,
+    /// Task 4.1: the predicted tick of the last `NETMSG_INPUT` this session sent
+    /// ([`Session::pred_tick`]; `0` before the two-snapshot bootstrap). The next input goes out for
+    /// `pred_tick + 1`, which is the tick a decision made from this snapshot lands on — what
+    /// the bot's prediction has to reach (`docs/formats.md` §14.4's timing model).
+    pub pred_tick: i32,
+    /// Task 4.1: how long after this snapshot's arrival the driver sends its next `NETMSG_INPUT`
+    /// (for `pred_tick + 1`); `None` before the timing bootstrap. A decision ready later than this
+    /// goes out one tick later — the bot predicts one tick further ahead then.
+    pub next_input_in: Option<Duration>,
+    /// Task 4.1: when the driver thread assembled this snapshot — the zero point of the bot's
+    /// "snapshot arrival -> input sent" latency measurement (D-042).
+    pub arrived: std::time::Instant,
 }
 
 /// Review round 1, finding F8: categorizes [`ClientEvent::GaveUp`] so a caller can pick a distinct
@@ -446,7 +476,10 @@ impl ClientEvent {
     fn is_droppable(&self) -> bool {
         matches!(
             self,
-            ClientEvent::OwnPosition { .. } | ClientEvent::OwnTeam { .. } | ClientEvent::LiveWorldSnapshot(_)
+            ClientEvent::OwnPosition { .. }
+                | ClientEvent::OwnTeam { .. }
+                | ClientEvent::LiveWorldSnapshot(_)
+                | ClientEvent::InputLatency { .. }
         ) || matches!(
             self,
             ClientEvent::Session(ev)
@@ -819,12 +852,44 @@ enum Control {
     /// the same shape as [`Client::set_input`]'s `input_tx` but routed through the control channel
     /// since a team change is a one-off request, not a per-tick value to keep resending.
     SetTeam(i32),
+    /// Task 4.1: requests `Cl_Kill` ([`crate::session::Session::request_kill`]) — the protocol
+    /// message, never a chat `/kill` (D-007). The bot's unstick path is its only caller.
+    Kill,
+    /// Task 4.1: requests `Cl_ShowDistance(x, y)` on the current connection
+    /// ([`crate::session::Session::request_show_distance`]).
+    ShowDistance(i32, i32),
+}
+
+/// Task 4.1: what the caller expected of a decision, echoed back in [`ClientEvent::InputLatency`] so
+/// it can count how often a decision misses the input slot it was aimed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputTag {
+    /// The tick of the first `NETMSG_INPUT` due after the snapshot arrived (`pred_tick + 1`).
+    pub first_slot: i32,
+    /// The tick the caller predicted this decision would go out for.
+    pub expected_tick: i32,
+}
+
+/// What [`Client::set_input`] hands the driver thread: the input and, when the caller says so, the
+/// arrival time of the snapshot that decision was made from (task 4.1's latency measurement).
+#[derive(Debug, Clone, Copy)]
+struct InputUpdate {
+    input: PlayerInput,
+    decided_from: Option<(Instant, Option<InputTag>)>,
+}
+
+/// Task 4.1: the driver-side input state — the input every `NETMSG_INPUT` embeds and, until the
+/// next send, the arrival time of the snapshot it was decided from.
+#[derive(Debug, Clone, Copy)]
+struct InputState {
+    input: PlayerInput,
+    decided_from: Option<(Instant, Option<InputTag>)>,
 }
 
 /// The real-time client — task acceptance criterion 1's public entry point.
 pub struct Client {
     events_rx: event_channel::Receiver,
-    input_tx: Sender<PlayerInput>,
+    input_tx: Sender<InputUpdate>,
     control_tx: Sender<Control>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -852,7 +917,33 @@ impl Client {
     /// 1's `set_input(PlayerInput)`. Best-effort: a driver that has already stopped simply drops
     /// this silently (nothing left to send it to).
     pub fn set_input(&self, input: PlayerInput) {
-        let _ = self.input_tx.send(input);
+        let _ = self.input_tx.send(InputUpdate {
+            input,
+            decided_from: None,
+        });
+    }
+
+    /// Like [`Client::set_input`], and additionally tells the driver which snapshot (by its
+    /// [`LiveWorldSnapshot::arrived`] time) this decision was made from: the driver then reports
+    /// one [`ClientEvent::InputLatency`] when it sends the first `NETMSG_INPUT` carrying it
+    /// (task 4.1, D-042: snapshot arrival -> input on the wire).
+    pub fn set_input_for_snapshot(&self, input: PlayerInput, snapshot_arrived: Instant, tag: Option<InputTag>) {
+        let _ = self.input_tx.send(InputUpdate {
+            input,
+            decided_from: Some((snapshot_arrived, tag)),
+        });
+    }
+
+    /// Requests `Cl_Kill` (task 4.1) — the protocol message, the only way this crate ever lets a
+    /// caller kill the tee (chat `/kill` does not exist here, D-007). Best-effort like
+    /// [`Client::set_team`]; the caller owns the cooldown policy.
+    pub fn kill(&self) {
+        let _ = self.control_tx.send(Control::Kill);
+    }
+
+    /// Requests `Cl_ShowDistance(x, y)` (task 4.1; D-007's replacement for `/showall`).
+    pub fn show_distance(&self, x: i32, y: i32) {
+        let _ = self.control_tx.send(Control::ShowDistance(x, y));
     }
 
     /// Requests `Cl_SetTeam(team)` on the current connection (task 8.4a acceptance criterion 1:
@@ -959,6 +1050,9 @@ fn handle_session_event(
     // triggering event itself is forwarded below — so a listener always sees e.g. `MapChanging`
     // before the `MapLoaded` it caused, not the other way around.
     let mut synthesized: Vec<ClientEvent> = Vec::new();
+    // Task 4.1: the moment this driver thread got hold of the snapshot — zero point of the bot's
+    // "snapshot arrival -> input sent" measurement ([`LiveWorldSnapshot::arrived`]).
+    let snapshot_arrived = Instant::now();
 
     if let SessionEvent::MapChanging {
         name,
@@ -1011,6 +1105,10 @@ fn handle_session_event(
             switch_states: view.switch_states(),
             teams: session.teams_state(),
             projectiles: view.projectiles(),
+            players: view.players(),
+            pred_tick: session.pred_tick(),
+            next_input_in: session.next_input_in(now),
+            arrived: snapshot_arrived,
         })));
     }
 
@@ -1056,9 +1154,9 @@ fn run_one_connection(
     config: &ClientConfig,
     start: Instant,
     events_tx: &event_channel::Sender,
-    input_rx: &Receiver<PlayerInput>,
+    input_rx: &Receiver<InputUpdate>,
     control_rx: &Receiver<Control>,
-    latest_input: &mut PlayerInput,
+    latest_input: &mut InputState,
     // Review finding F7: set to `true` the moment this connection attempt ever reaches
     // [`SessionEvent::InGame`] — `run`'s caller uses this to decide whether a later
     // `LostConnection` should reset the backoff/attempt-count state.
@@ -1140,13 +1238,25 @@ fn run_one_connection(
                 session.request_team(team, now);
                 send_all(socket, session.flush(now));
             }
+            Ok(Control::Kill) => {
+                let now = Instant::now().duration_since(start);
+                session.request_kill(now);
+                send_all(socket, session.flush(now));
+            }
+            Ok(Control::ShowDistance(x, y)) => {
+                let now = Instant::now().duration_since(start);
+                session.request_show_distance(x, y, now);
+                send_all(socket, session.flush(now));
+            }
             Err(mpsc::TryRecvError::Empty) => {}
         }
 
-        while let Ok(input) = input_rx.try_recv() {
-            *latest_input = input;
+        while let Ok(update) = input_rx.try_recv() {
+            latest_input.input = update.input;
+            // The newest decision wins; its snapshot's arrival time is what the next send reports.
+            latest_input.decided_from = update.decided_from.or(latest_input.decided_from);
         }
-        session.set_input(*latest_input);
+        session.set_input(latest_input.input);
 
         match socket.recv(&mut buf) {
             Ok(n) => {
@@ -1203,6 +1313,16 @@ fn run_one_connection(
         let now = Instant::now().duration_since(start);
         send_all(socket, session.flush(now));
         for ev in session.take_events() {
+            // Task 4.1: the first send after a decision reports its snapshot-to-wire latency.
+            if let SessionEvent::InputSent { tick, .. } = &ev
+                && let Some((arrived, tag)) = latest_input.decided_from.take()
+            {
+                events_tx.send(ClientEvent::InputLatency {
+                    tick: *tick,
+                    since_snapshot: arrived.elapsed(),
+                    tag,
+                });
+            }
             // Belt-and-suspenders, same as the identical check above: `Connection::take_events`'s
             // own docs say it never actually produces a `Connected`-mapped event, but this is
             // cheap enough to check unconditionally rather than trust that documentation forever.
@@ -1322,7 +1442,7 @@ fn run(
     initial_addr: SocketAddr,
     config: ClientConfig,
     events_tx: event_channel::Sender,
-    input_rx: Receiver<PlayerInput>,
+    input_rx: Receiver<InputUpdate>,
     control_rx: Receiver<Control>,
 ) {
     let mut target = initial_addr;
@@ -1362,7 +1482,10 @@ fn run(
     // `MAX_SERVER_RECONNECTS_BEFORE_IN_GAME`.
     let mut server_reconnects_pending: u32 = 0;
     let mut backoff = MIN_BACKOFF;
-    let mut latest_input = default_player_input();
+    let mut latest_input = InputState {
+        input: default_player_input(),
+        decided_from: None,
+    };
     let mut reconnect_attempt: u32 = 0;
     // Task 2.3b acceptance criterion 4: "a per-session counter of connection attempts ... logged"
     // — every time this loop is about to start a new connection, for *any* reason (the very first
@@ -1657,7 +1780,8 @@ fn run(
                             events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
                             return;
                         }
-                        Ok(Control::SetTeam(_)) => continue,
+                        // Between connections there is nothing to send them on: dropped.
+                        Ok(Control::SetTeam(_) | Control::Kill | Control::ShowDistance(..)) => continue,
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     }
                 }

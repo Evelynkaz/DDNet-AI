@@ -59,6 +59,12 @@ pub struct WebArgs {
     /// never used directly — see `ddai_web::live::map_resolve`'s doc comment.
     #[arg(long = "maps-dir")]
     pub(crate) maps_dir: Vec<PathBuf>,
+    /// Task 4.1: show the real game instead of replays — the live bot's Unix socket
+    /// (`ddnet-ai play --brain ...` serves `<data-dir>/bot/live.sock`; `docs/formats.md` §21).
+    /// Read-only. Conflicts with `--replay`. With no `--maps-dir` the bot's own map cache
+    /// (`<data-dir>/maps/cache`) is searched.
+    #[arg(long = "bot-socket", conflicts_with = "replay")]
+    pub(crate) bot_socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -135,6 +141,12 @@ pub fn run_web(args: WebArgs) -> ExitCode {
     config.cookie_secure = args.cookie_secure;
     config.replay_source = args.replay;
     config.map_search_dirs = args.maps_dir;
+    if let Some(socket) = args.bot_socket {
+        if config.map_search_dirs.is_empty() {
+            config.map_search_dirs.push(config.data_dir.join("maps").join("cache"));
+        }
+        config.bot_socket = Some(socket);
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,

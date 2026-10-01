@@ -35,7 +35,7 @@ use ddai_physics::map::MapData;
 use ddai_physics::world::{TickInput, World};
 use ddai_recorder::format::Frame;
 use ddai_recorder::reconstruct::{CharacterSample, StreamReconstructor};
-use ddai_world::{LiveWorld, character_observation};
+use ddai_world::{LiveWorld, SnapshotInput, character_observation};
 
 use crate::config::Config;
 use crate::ingest::{Ingested, LabelTracker};
@@ -310,7 +310,7 @@ fn interval_inputs(ids: &[u8], derived: &[Derived], ticks: usize) -> Vec<Vec<Tic
 fn run(scratch: &mut World<f32>, start: &World<f32>, inputs: &[Vec<TickInput>], ids: &[u8]) -> Vec<Option<Outcome>> {
     scratch.restore_from(start);
     // The replay world starts without projectiles. Since task 2.4b `LiveWorld` itself holds none
-    // unless its caller passes the snapshot's projectile items (`LiveWorld::set_projectiles`); this
+    // unless its caller passes the snapshot's projectile items (`SnapshotInput::projectiles`); this
     // pipeline does not, on purpose: the recording client strips the DDNet extra info from legacy
     // projectile items (`gameclient.cpp:1409-1413`), leaving plain owner-less items with no
     // bounce/freeze/explosive flags (most of the archive's projectile items are of that
@@ -693,7 +693,8 @@ impl<'a> Builder<'a> {
                 ddnet,
             });
         }
-        self.live.on_snapshot(tick, &views, tune, &[], None, None);
+        // No projectiles: the replay deliberately does not simulate them (see `docs/formats.md` §20.2).
+        self.live.on_snapshot(SnapshotInput::new(tick, &views, tune));
         let world = self.live.base_world();
 
         // --- records for frame k ---

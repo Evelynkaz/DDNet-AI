@@ -164,6 +164,9 @@
         case "replay_status":
           GameView.onReplayStatus(msg);
           break;
+        case "bot":
+          GameView.onBotStatus(msg.status);
+          break;
         case "live_error":
           GameView.onLiveError(msg.message);
           break;
@@ -1135,6 +1138,24 @@
       }
     }
 
+    // Task 4.1: the live bot's status line in the HUD (target, mode, brain, p99 of the decision).
+    // Every value is written through `textContent` — the status comes from the bot process, but it
+    // is still only ever displayed as text.
+    function onBotStatus(st) {
+      var box = document.getElementById("hud-bot");
+      var text = document.getElementById("hud-bot-text");
+      if (!box || !text || !st || typeof st !== "object") {
+        return;
+      }
+      box.hidden = false;
+      var target = st.target >= 0 ? "цель " + st.target : "без цели";
+      var state = !st.alive ? "мёртв" : st.frozen ? "во фризе" : "жив";
+      text.textContent =
+        st.mode + " · " + st.brain + " · " + target + " · " + state +
+        " · блоки " + st.blocks + "/" + st.blocked_by +
+        " · p99 " + (st.decide_p99_us / 1000).toFixed(1) + " мс";
+    }
+
     function onReplayStatus(msg) {
       replayBar.hidden = false;
       if (!replaySeekDragging) {
@@ -1226,6 +1247,7 @@
       onPlayers: onPlayers,
       onEvents: onEvents,
       onReplayStatus: onReplayStatus,
+      onBotStatus: onBotStatus,
       onLiveError: onLiveError,
       onLiveFrame: onLiveFrame,
       onConnectionChanged: onConnectionChanged,

@@ -4,6 +4,7 @@
 //! 1.5). See `docs/formats.md`'s new section for the wire formats and `crates/ddai-web/README.md`
 //! for the architecture.
 
+pub mod bot_source;
 pub mod frame;
 pub mod hub;
 pub mod map_resolve;

@@ -38,7 +38,7 @@ use ddai_client::{Client, ClientConfig, ClientEvent, LiveWorldSnapshot, SessionE
 use ddai_net::generated::enums::playerflagflag;
 use ddai_net::generated::objects::PlayerInput as NetInput;
 use ddai_physics::core::PlayerInput;
-use ddai_world::{LiveWorld, correct_late_inputs, player_input_from_net, retarget_late_inputs};
+use ddai_world::{LiveWorld, SnapshotInput, correct_late_inputs, player_input_from_net, retarget_late_inputs};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -74,15 +74,15 @@ fn eval(
 
     for s in snaps {
         let own_input_at_tick = sent.get(&s.tick).copied();
-        lw.on_snapshot(
-            s.tick,
-            &s.characters,
-            s.tuning,
-            &s.switch_states,
-            s.teams.as_ref(),
+        lw.on_snapshot(SnapshotInput {
+            tick: s.tick,
+            characters: &s.characters,
+            tuning: s.tuning,
+            switch_states: &s.switch_states,
+            teams: s.teams.as_ref(),
             own_input_at_tick,
-        );
-        lw.set_projectiles(&s.projectiles);
+            projectiles: &s.projectiles,
+        });
 
         if let Some(pending_here) = pending.remove(&s.tick)
             && let Some(actual) = s.characters.iter().find(|c| c.id == own_id)

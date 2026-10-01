@@ -34,8 +34,8 @@ use ddai_net::view::CharacterView;
 use ddai_physics::core::{self, CharacterCore, NetCharacterCore, PlayerInput, TeamsCore, WorldCore};
 use ddai_physics::vmath::Vec2;
 use ddai_physics::world::{self, Player, TickInput, World};
-use ddai_world::LiveWorld;
 use ddai_world::accuracy::AccuracyTracker;
+use ddai_world::{LiveWorld, SnapshotInput};
 
 /// How stale `m_ReckoningTick` may get before the server force-resyncs anyway
 /// (`character.cpp:964`: `Server()->TickSpeed() * 3`, i.e. 3 seconds at the standard 50-tick
@@ -292,7 +292,7 @@ fn own_tee_prediction_is_bit_exact_without_interactions() {
             let character = world.characters[OWN as usize].unwrap();
             let true_core = world.cores.get(OWN as u8).unwrap();
             let cv = to_character_view(OWN, net_core, tick_field, true_core, &character, tick);
-            live.on_snapshot(tick, std::slice::from_ref(&cv), DEFAULT_TUNE_PARAMS, &[], None, None);
+            live.on_snapshot(SnapshotInput::new(tick, std::slice::from_ref(&cv), DEFAULT_TUNE_PARAMS));
 
             for &h in &horizons {
                 let in_flight: Vec<(i32, PlayerInput)> = future_inputs
@@ -405,7 +405,7 @@ fn others_prediction_error_distribution_at_1_5_10_ticks() {
                     to_character_view(id, net_core, tick_field, true_core, &character, tick)
                 })
                 .collect();
-            live.on_snapshot(tick, &views, DEFAULT_TUNE_PARAMS, &[], None, None);
+            live.on_snapshot(SnapshotInput::new(tick, &views, DEFAULT_TUNE_PARAMS));
 
             for &h in &horizons {
                 let predicted = live.predict(tick + h, &[]);
@@ -513,8 +513,8 @@ fn prediction_is_deterministic_across_two_independent_runs() {
                     to_character_view(id, net_core, tick_field, true_core, &character, tick)
                 })
                 .collect();
-            live_a.on_snapshot(tick, &views, DEFAULT_TUNE_PARAMS, &[], None, None);
-            live_b.on_snapshot(tick, &views, DEFAULT_TUNE_PARAMS, &[], None, None);
+            live_a.on_snapshot(SnapshotInput::new(tick, &views, DEFAULT_TUNE_PARAMS));
+            live_b.on_snapshot(SnapshotInput::new(tick, &views, DEFAULT_TUNE_PARAMS));
 
             for h in [1, 3, 7] {
                 let pa = live_a.predict(tick + h, &[]);

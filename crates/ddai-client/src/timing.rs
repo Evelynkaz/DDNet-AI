@@ -221,6 +221,18 @@ impl InputTiming {
         self.margin_stats.summary()
     }
 
+    /// Task 4.1: how long until [`InputTiming::advance`] next fires (the next `NETMSG_INPUT` goes
+    /// out), at `now_ns`; `None` before the two-snapshot bootstrap. `advance` fires once the
+    /// predicted clock reaches tick `pred_tick` (`floor(pred_now) + 1 > pred_tick`), so the wait is
+    /// `(pred_tick - pred_now_in_ticks) * 20 ms`, never negative. The live bot uses it to know whether
+    /// its decision will still make the next input or the one after.
+    pub fn next_input_in_ns(&self, now_ns: i64) -> Option<i64> {
+        let pred_now = self.predicted_time.as_ref()?.get(now_ns);
+        let tick_ns = crate::smooth_time::TIME_FREQ / i64::from(GAME_TICK_SPEED);
+        let reaches = i64::from(self.pred_tick) * tick_ns;
+        Some((reaches - pred_now).max(0))
+    }
+
     /// Call once for every [`ddai_net::assembly::Event::Snapshot`] the session accepts (in
     /// order) — `client.cpp:2304-2320`'s `m_aReceivedSnapshots[Conn]++` plus the two-snapshot
     /// bootstrap.
@@ -379,6 +391,28 @@ mod tests {
             last > first,
             "wall-clock time passing must eventually advance pred_tick"
         );
+    }
+
+    /// Task 4.1: `next_input_in_ns` says exactly when `advance` fires next.
+    #[test]
+    fn next_input_in_matches_when_advance_actually_fires() {
+        let mut timing = InputTiming::new(DEFAULT_PREDICTION_MARGIN_MS);
+        assert_eq!(timing.next_input_in_ns(0), None, "before the bootstrap");
+        timing.on_snapshot(100, 0);
+        timing.on_snapshot(101, 0);
+        timing.advance(0).expect("the bootstrap tick");
+        let wait = timing.next_input_in_ns(0).expect("bootstrapped");
+        let tick_ns = TIME_FREQ / i64::from(GAME_TICK_SPEED);
+        assert!((0..=tick_ns * 3).contains(&wait), "{wait}");
+        // Just before the predicted time: nothing is sent; at it: the next tick is sent.
+        if wait > 1_000_000 {
+            assert_eq!(timing.advance(wait - 1_000_000), None);
+        }
+        assert!(timing.advance(wait + 1_000_000).is_some());
+        // Right after a send the next one is up to a tick away.
+        let now = wait + 1_000_000;
+        let again = timing.next_input_in_ns(now).unwrap();
+        assert!(again <= tick_ns, "{again}");
     }
 
     #[test]

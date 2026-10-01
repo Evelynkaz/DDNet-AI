@@ -62,8 +62,13 @@ const STATUS_THROTTLE: Duration = Duration::from_millis(400);
 pub enum HubEvent {
     Map(MapMeta),
     Players(Vec<PlayerMeta>),
-    Events { tick: u32, events: Vec<GameEvent> },
+    Events {
+        tick: u32,
+        events: Vec<GameEvent>,
+    },
     ReplayStatus(ReplayStatus),
+    /// Task 4.1: the live bot's status JSON (see [`SourceEvent::BotStatus`]).
+    BotStatus(String),
     Error(String),
 }
 
@@ -150,6 +155,9 @@ impl LiveHub {
                         last_status_sent = now;
                         let _ = event_tx.send(Arc::new(HubEvent::ReplayStatus(status)));
                     }
+                }
+                SourceEvent::BotStatus(json) => {
+                    let _ = event_tx.send(Arc::new(HubEvent::BotStatus(json)));
                 }
                 SourceEvent::Error(message) => {
                     let _ = event_tx.send(Arc::new(HubEvent::Error(message)));

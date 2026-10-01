@@ -54,3 +54,16 @@
 - `systemctl restart` шлёт клиентам настоящий `NETMSG_CLOSE("Server shutdown")` до выхода процесса
   — с точки зрения провода не отличить от кика; для проверки именно пути «таймаут → реконнект»
   нужен `kill -9` по основному процессу юнита, не `restart`.
+
+## Дополнения задачи 4.1 (живой бот `ddai-bot`)
+
+- `Client::kill()` / `Session::request_kill` — сообщение протокола `Cl_Kill` (в белом списке с 2.3); `Client::show_distance(x, y)`
+  / `Session::request_show_distance` — `Cl_ShowDistance` на лету. Чата по-прежнему нет ни в одном пути.
+- `ClientConfig::emit_outgoing_audit` -> `SessionEvent::OutgoingGame { label, accepted }` на каждое исходящее игровое
+  сообщение (выключено по умолчанию): аудит «нет чата» в e2e.
+- `LiveWorldSnapshot` получил `players`, `pred_tick` (тик последнего отправленного `NETMSG_INPUT`, `Session::pred_tick()`)
+  и `arrived` (момент сборки снапшота).
+- `Client::set_input_for_snapshot(input, arrived)` + `ClientEvent::InputLatency { tick, since_snapshot }`: драйвер сообщает
+  задержку «снапшот пришёл -> ввод ушёл в сокет» для первого ввода с этим решением.
+- `POLL_TIMEOUT` драйвера 10 мс -> 2 мс: решение бота подхватывалось не чаще раза за `recv`, и `advance()` срабатывал
+  до 10 мс позже. Замер — `docs/formats.md` §21.6.

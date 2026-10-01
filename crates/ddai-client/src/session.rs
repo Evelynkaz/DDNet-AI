@@ -203,6 +203,11 @@ pub struct ClientConfig {
     /// would otherwise hide every other player from exactly the session this bot exists to
     /// observe.
     pub show_others: i32,
+    /// Task 4.1: when `true`, every outgoing game message also queues a
+    /// [`SessionEvent::OutgoingGame`] (a handful per join plus the bot's `Cl_Kill`/`Cl_SetTeam`;
+    /// never per tick). `false` by default. The live bot's e2e test turns it on to audit that no
+    /// chat message is ever sent (D-007).
+    pub emit_outgoing_audit: bool,
     /// Review round 1, finding F1: the D-027/D-038 safety switch, checked by
     /// [`crate::driver::Client`] before **every** socket connect it ever makes for this
     /// `ClientConfig` — the very first one, every reconnect, and every redirect (a server that
@@ -249,6 +254,7 @@ impl Default for ClientConfig {
             emit_snapshot_data: false,
             emit_input_sent: false,
             show_others: 0,
+            emit_outgoing_audit: false,
             live_servers: default_live_servers(),
         }
     }
@@ -439,6 +445,11 @@ pub enum SessionEvent {
     /// 2.4's own addition — task 8.4a does not currently read this event, but it costs nothing
     /// extra beyond what `emit_input_sent` already pays for.
     InputTiming { tick: i32, time_left: i32 },
+    /// Task 4.1 (D-007 audit): one outgoing *game* message went through
+    /// [`Session::send_game_chunk`] — `label` is the builder's own name (`"Cl_Kill"`,
+    /// `"Cl_SetTeam"`, ...), `accepted` whether [`crate::allowlist`] let it reach the wire. Gated by
+    /// [`ClientConfig::emit_outgoing_audit`]; the e2e test asserts no chat label ever shows up.
+    OutgoingGame { label: &'static str, accepted: bool },
 }
 
 /// Why [`Session::supply_cached_map`] refused.
@@ -701,6 +712,41 @@ impl Session {
             msgs::encode_cl_set_team(&msgs::ClSetTeam { team }, p);
         });
         self.send_game_chunk(payload, true, now, "Cl_SetTeam");
+    }
+
+    /// Sends `Cl_Kill` (task 4.1) — the protocol message behind the bot's unstick; chat `/kill`
+    /// has no builder anywhere in this crate (D-007). `NETMSGTYPE_CL_KILL` has been on
+    /// [`crate::allowlist`]'s allow-list since task 2.3. The caller owns the cooldown
+    /// (`ddai-bot`'s unstick: 500 ticks, `bot.ts` `KILL_COOLDOWN_TICKS`); the server applies its
+    /// own `sv_kill_delay`/kill-protection either way (`gamecontext.cpp` `OnKillNetMessage`).
+    pub fn request_kill(&mut self, now: Duration) {
+        let payload = build_numbered_game_payload(msgs::id::NETMSGTYPE_CL_KILL, |p| {
+            msgs::encode_cl_kill(&msgs::ClKill {}, p);
+        });
+        self.send_game_chunk(payload, true, now, "Cl_Kill");
+    }
+
+    /// Sends `Cl_ShowDistance(x, y)` (task 4.1) — the same message [`Session::send_post_enter_extras`]
+    /// sends once after entering, exposed so the bot can change its view range at runtime (D-007's
+    /// replacement for the old bot's `/showall` chat command).
+    pub fn request_show_distance(&mut self, x: i32, y: i32, now: Duration) {
+        let payload = build_ex_game_payload("show-distance@netmsg.ddnet.tw", |p| {
+            msgs::encode_cl_show_distance(&msgs::ClShowDistance { x, y }, p);
+        });
+        self.send_game_chunk(payload, true, now, "Cl_ShowDistance");
+    }
+
+    /// The predicted tick of the last `NETMSG_INPUT` sent (`0` before the two-snapshot bootstrap)
+    /// — [`crate::timing::InputTiming::pred_tick`]. Task 4.1: the bot's prediction target.
+    pub fn pred_tick(&self) -> i32 {
+        self.timing.pred_tick()
+    }
+
+    /// Task 4.1: time until the next `NETMSG_INPUT` is due ([`crate::timing::InputTiming::next_input_in_ns`]).
+    pub fn next_input_in(&self, now: Duration) -> Option<Duration> {
+        self.timing
+            .next_input_in_ns(to_ns(now))
+            .map(|ns| Duration::from_nanos(u64::try_from(ns).unwrap_or(0)))
     }
 
     pub fn is_in_game(&self) -> bool {
@@ -1552,6 +1598,10 @@ impl Session {
             self.outgoing_log.pop_front();
         }
         self.outgoing_log.push_back(OutgoingLogEntry { label, accepted });
+        if self.config.emit_outgoing_audit {
+            self.pending_events
+                .push_back(SessionEvent::OutgoingGame { label, accepted });
+        }
     }
 
     /// Test-only hook: attempts to send a *hand-built* `Cl_Say` payload through the exact same

@@ -19,7 +19,7 @@ use ddai_net::generated::objects;
 use ddai_net::tuning::DEFAULT_TUNE_PARAMS;
 use ddai_net::view::CharacterView;
 use ddai_physics::core::PlayerInput;
-use ddai_world::LiveWorld;
+use ddai_world::{LiveWorld, SnapshotInput};
 
 /// Serializes the tests in this file against each other so the wall-clock test's timing isn't
 /// distorted by another test running concurrently on the same cores. (Allocation counting no
@@ -81,7 +81,7 @@ fn build_live_world() -> LiveWorld {
     for i in 1..=NUM_OPPONENTS {
         characters.push(neutral_character(i, 300 + i * 40, 300));
     }
-    live.on_snapshot(100, &characters, DEFAULT_TUNE_PARAMS, &[], None, None);
+    live.on_snapshot(SnapshotInput::new(100, &characters, DEFAULT_TUNE_PARAMS));
     live
 }
 

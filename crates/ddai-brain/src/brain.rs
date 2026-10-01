@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use ddai_physics::core::PlayerInput;
 use ddai_physics::map::MapData;
+use ddai_physics::vmath::Vec2;
 use ddai_physics::world::World;
 
 /// What a [`Brain`] is told at the start of an episode/map (`Brain::reset`) — everything it needs
@@ -51,6 +52,22 @@ pub struct WorldView<'a> {
     pub in_flight: &'a [PlayerInput],
 }
 
+/// What the live bot knows that no world can tell a brain (task 4.1): who it must not hook and
+/// where it should head. Handed over with [`Brain::set_live_context`] right before each
+/// [`Brain::decide_in`]; the arena never calls it (everyone there is fair game and the target is
+/// always close), so every implementer that ignores it — the default — behaves exactly as before.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LiveContext<'a> {
+    /// Tees that must not be caught by a hook (friends, ignored, out of the game, AFK — `spared`,
+    /// `bot.ts:3009-3018`): `(position, velocity)` in pixels and pixels per tick. The planner
+    /// vetoes candidate plans whose rope would catch one (`setSpareBystanders`).
+    pub spares: &'a [(Vec2<f32>, Vec2<f32>)],
+    /// An intermediate point to head for when the target is far or behind a wall (`pathGoal` /
+    /// `trekGoal`, `setTravelGoal`); `None` (always, until task 4.2's navigation) means head for the
+    /// target itself.
+    pub travel_goal: Option<Vec2<f32>>,
+}
+
 /// The shared decision-maker interface (task 7.3, acceptance criterion 1). Every implementer is
 /// `&mut self` in [`Brain::decide`]: a brain is allowed to carry internal dynamical state across
 /// decisions (the fly's membrane potentials; a planner's warm-started search tree) — nothing here
@@ -80,6 +97,12 @@ pub trait Brain {
     ) -> crate::action::Action {
         let _ = world;
         self.decide(obs)
+    }
+
+    /// Task 4.1: the live bot's extra knowledge for the next [`Brain::decide_in`] (see
+    /// [`LiveContext`]). The default ignores it.
+    fn set_live_context(&mut self, ctx: &LiveContext<'_>) {
+        let _ = ctx;
     }
 
     /// A short, human-readable name for logs/telemetry (e.g. `"fly-S"`, `"planner"`,

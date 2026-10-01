@@ -14,6 +14,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::config::{ConfigError, WebConfig};
+use crate::live::bot_source::BotSource;
 use crate::live::hub::LiveHub;
 use crate::live::map_resolve::MapCache;
 use crate::live::replay::ReplaySource;
@@ -119,7 +120,15 @@ pub async fn bind(config: WebConfig) -> Result<Bound, BindError> {
                 .map_err(BindError::Replay)?;
             Some(Arc::new(LiveHub::start(Box::new(source), map_cache)))
         }
-        None => None,
+        None => match &config.bot_socket {
+            // Task 4.1: the live bot. The socket need not exist yet: the source retries.
+            Some(socket) => {
+                let map_cache = Arc::new(MapCache::new());
+                let source = BotSource::new(socket.clone(), config.map_search_dirs.clone(), map_cache.clone());
+                Some(Arc::new(LiveHub::start(Box::new(source), map_cache)))
+            }
+            None => None,
+        },
     };
 
     let state: SharedState = Arc::new(AppState::new_with_live_hub(config, session_key, live_hub));

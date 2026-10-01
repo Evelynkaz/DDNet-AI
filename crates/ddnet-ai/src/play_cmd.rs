@@ -41,6 +41,21 @@ pub enum Brain {
     /// `ddnet-ai rec reconstruct`'s offline input estimation against known ground truth
     /// (`--input-log`), not to play well.
     RandomScripted,
+    /// Task 4.1: the live bot (`ddai-bot`) with the planner brain (debug mode, the arena baseline).
+    Planner,
+    /// Task 4.1: the live bot with the scripted bot of the phase-0 harness as its brain.
+    Scripted,
+    /// Task 4.1: the live bot with the hybrid brain (D-041/D-055: exact search with the threat model, 5 ms cap).
+    Hybrid,
+    /// Task 4.1: the live bot with the fly (untrained until phase 8 delivers a checkpoint).
+    Fly,
+}
+
+impl Brain {
+    /// Whether this brain runs through the full bot pipeline (`ddai-bot`).
+    pub fn is_bot_brain(self) -> bool {
+        matches!(self, Brain::Planner | Brain::Scripted | Brain::Hybrid | Brain::Fly)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -79,6 +94,13 @@ pub struct PlayArgs {
     /// Works with any brain, not just `random-scripted`.
     #[arg(long)]
     pub input_log: Option<PathBuf>,
+    /// Task 4.1: run through the full bot pipeline (`ddai-bot`: target selection, unstick, filters,
+    /// latency measurement, the web bridge) even with `--brain idle`. Implied by `planner`,
+    /// `scripted`, `hybrid` and `fly`.
+    #[arg(long)]
+    pub bot: bool,
+    #[command(flatten)]
+    pub bot_opts: crate::bot_cmd::BotOpts,
 }
 
 const WINDOW_MS: u128 = 240;
@@ -304,6 +326,10 @@ pub fn run(args: PlayArgs) -> ExitCode {
         }
     };
 
+    if args.brain.is_bot_brain() || args.bot {
+        return crate::bot_cmd::run(&args, &data_dir);
+    }
+
     let config = ClientConfig {
         name: args.name.clone(),
         cache_dir: data_dir.join("maps").join("cache"),
@@ -373,6 +399,10 @@ pub fn run(args: PlayArgs) -> ExitCode {
                 Brain::Idle => idle_input(),
                 Brain::Circle => circle_input(start.elapsed()),
                 Brain::RandomScripted => random_scripted_input(start.elapsed(), args.seed),
+                // Routed to `bot_cmd::run` before this loop is ever entered.
+                Brain::Planner | Brain::Scripted | Brain::Hybrid | Brain::Fly => {
+                    unreachable!("bot brains return early")
+                }
             };
             client.set_input(input);
         }
@@ -510,6 +540,7 @@ fn log_event(
             }
         }
         ClientEvent::OwnTeam { tick, team } => tracing::debug!(tick, team, "own team"),
+        ClientEvent::InputLatency { .. } => {}
         ClientEvent::LiveWorldSnapshot(snap) => {
             // Task 2.4's `LiveWorld` is this event's real consumer; this demo/test tool has none
             // (see this file's module doc comment) — logged at DEBUG only, same reasoning as

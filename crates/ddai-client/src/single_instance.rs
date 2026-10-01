@@ -1,10 +1,18 @@
-//! Per-(server, identity) single-instance guard (review round 1, finding F8; `CLAUDE.md`/D-016:
+//! Single-instance guard (per server address; per (loopback address, identity) on this machine) (review round 1, finding F8; `CLAUDE.md`/D-016:
 //! "не больше одного бота на сервере") — shared by `ddnet-ai play` and `ddnet-ai record`, guarding
 //! against the accidental-duplicate-launch scenario the finding actually names ("record+play could
 //! run against same server simultaneously", i.e. the same command started twice, or a systemd
 //! auto-restart racing a still-shutting-down previous instance).
 //!
-//! **Keyed by `(address, name)`, not address alone.** An earlier version of this fix locked on the
+//! **Task 4.1 (review round 1, residual): one bot per real server, whatever its name.** For every
+//! non-loopback address the key is the **address only**: two bots with different names must not both
+//! join the same live server (`CLAUDE.md`: "не больше одного бота на сервере"; a second, differently
+//! named client is exactly the thing that looks like spam to its admin). Loopback addresses keep the
+//! `(address, name)` key described next, which is what lets this project's own local e2e tests run
+//! several bots against `127.0.0.1:8303`. `ddnet-ai play` (which the live bot runs through) and
+//! `ddnet-ai record` both call [`acquire`].
+//!
+//! **Keyed by `(address, name)` on loopback, not address alone.** An earlier version of this fix locked on the
 //! address only — which passed every unit test but broke this project's own established local e2e
 //! pattern the very first time it ran live: `tools/e2e/session.sh`/`record.sh` (task 2.3/8.4a, both
 //! predating this fix) deliberately run *several* distinctly-named bots against the same
@@ -34,6 +42,16 @@ pub fn default_run_dir() -> PathBuf {
     match std::env::var_os("HOME") {
         Some(home) if !home.is_empty() => PathBuf::from(home).join("aiddnet").join("data").join("run"),
         _ => PathBuf::from("data").join("run"),
+    }
+}
+
+/// The lock file name for `(addr, name)`: the address alone for a real (non-loopback) server, the
+/// address and the name on loopback (see the module docs).
+fn lock_file_name(addr: SocketAddr, name: &str) -> String {
+    if addr.ip().is_loopback() {
+        format!("{}-{}.lock", sanitize(&addr.to_string()), sanitize(name))
+    } else {
+        format!("{}.lock", sanitize(&addr.to_string()))
     }
 }
 
@@ -101,7 +119,7 @@ pub fn acquire(addr: SocketAddr, name: &str) -> Result<ServerLock, LockError> {
         path: dir.clone(),
         source,
     })?;
-    let path = dir.join(format!("{}-{}.lock", sanitize(&addr.to_string()), sanitize(name)));
+    let path = dir.join(lock_file_name(addr, name));
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -136,7 +154,7 @@ mod tests {
     /// `~/aiddnet/data/run` lock file from an actual live process, or with other tests running in
     /// parallel.
     fn acquire_in(dir: &std::path::Path, addr: SocketAddr, name: &str) -> Result<ServerLock, LockError> {
-        let path = dir.join(format!("{}-{}.lock", sanitize(&addr.to_string()), sanitize(name)));
+        let path = dir.join(lock_file_name(addr, name));
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -180,6 +198,30 @@ mod tests {
         let _guard_c = acquire_in(dir.path(), addr, "RecE2E").expect("and a third");
     }
 
+    /// Task 4.1 residual: on a real (non-loopback) server a second bot is refused whatever its name.
+    #[test]
+    fn a_second_bot_with_a_different_name_is_refused_on_a_real_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr: SocketAddr = "203.0.113.7:8308".parse().unwrap();
+        let _first = acquire_in(dir.path(), addr, "BotA").expect("first");
+        assert!(
+            acquire_in(dir.path(), addr, "BotB").is_err(),
+            "one bot per server, not per name"
+        );
+        let other: SocketAddr = "203.0.113.7:8309".parse().unwrap();
+        assert!(
+            acquire_in(dir.path(), other, "BotB").is_ok(),
+            "another server is another lock"
+        );
+        assert_eq!(lock_file_name(addr, "x"), lock_file_name(addr, "y"));
+        let lo: SocketAddr = "127.0.0.1:8303".parse().unwrap();
+        assert_ne!(
+            lock_file_name(lo, "x"),
+            lock_file_name(lo, "y"),
+            "loopback keeps the name"
+        );
+    }
+
     #[test]
     fn acquire_succeeds_and_releases_on_drop_allowing_a_later_acquire() {
         let dir = tempfile::tempdir().unwrap();
@@ -203,11 +245,7 @@ mod tests {
     fn dropping_the_lock_cleanly_removes_the_file_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         let addr: SocketAddr = "127.0.0.1:18887".parse().unwrap();
-        let path = dir.path().join(format!(
-            "{}-{}.lock",
-            sanitize(&addr.to_string()),
-            sanitize("CleanExit")
-        ));
+        let path = dir.path().join(lock_file_name(addr, "CleanExit"));
 
         {
             let _guard = acquire_in(dir.path(), addr, "CleanExit").expect("first acquire must succeed");

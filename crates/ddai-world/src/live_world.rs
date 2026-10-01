@@ -171,6 +171,49 @@ pub fn retarget_late_inputs(
     correct_late_inputs(&flattened, &std::collections::BTreeSet::new())
 }
 
+/// Everything [`LiveWorld::on_snapshot`] needs to ingest one snapshot — one borrowed struct, so
+/// the projectile pass that used to be a separate, order-sensitive `set_projectiles` call (2.4b
+/// review round 1, F3: calling it before `on_snapshot` silently lost the projectiles, and it reads
+/// state `on_snapshot` sets) is part of the same call and cannot be forgotten or misordered.
+/// A caller with no projectile information (the dataset's replay, which deliberately disables
+/// them) passes `projectiles: &[]` explicitly.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotInput<'a> {
+    /// The snapshot's own game tick (see [`LiveWorld::on_snapshot`]).
+    pub tick: i32,
+    /// `ddai_net::view::View::characters()`'s result.
+    pub characters: &'a [CharacterView],
+    /// `Session::tuning()`'s current value (`received == 0` until the first `Sv_TuneParams`).
+    pub tuning: TuneParams,
+    /// `ddai_net::view::View::switch_states()`'s result.
+    pub switch_states: &'a [(i32, objects::SwitchState)],
+    /// `Session::teams_state()`'s result, if any (see [`LiveWorld::on_snapshot`]).
+    pub teams: Option<&'a TeamsState>,
+    /// The input the server applied to our own tee at this tick, if known (see
+    /// [`LiveWorld::on_snapshot`]).
+    pub own_input_at_tick: Option<PlayerInput>,
+    /// `ddai_net::view::View::projectiles()`'s result — the snapshot's projectile items, from which
+    /// the predicted projectiles are built (see [`projectiles`](crate::projectiles)).
+    pub projectiles: &'a [(i32, ProjectileView)],
+}
+
+impl<'a> SnapshotInput<'a> {
+    /// A snapshot input with only the mandatory parts: no switch states, no team state, no known
+    /// own input, **no projectiles** (write `projectiles: ..` through struct update syntax when
+    /// there are any). Convenience for callers and tests that have nothing else to report.
+    pub fn new(tick: i32, characters: &'a [CharacterView], tuning: TuneParams) -> Self {
+        SnapshotInput {
+            tick,
+            characters,
+            tuning,
+            switch_states: &[],
+            teams: None,
+            own_input_at_tick: None,
+            projectiles: &[],
+        }
+    }
+}
+
 /// The client-side reconstruction of the server's `World<f32>`, kept up to date from the
 /// snapshot stream ([`LiveWorld::on_snapshot`]) and steppable a few ticks into the future
 /// ([`LiveWorld::predict`]) to cover network + processing latency.
@@ -196,6 +239,11 @@ pub struct LiveWorld {
     /// input, as the client does") — see [`derive_held_input`] for exactly what this
     /// approximates and why. Indexed by client id; `None` for an id with no character right now.
     held_input: [Option<PlayerInput>; MAX_CLIENTS],
+    /// Reused by `set_projectiles` (2.4b review, F4) — the snapshot-id order of the
+    /// projectile items — so the per-snapshot projectile pass allocates nothing once warm.
+    projectile_order: Vec<usize>,
+    /// Reused by [`LiveWorld::rebuild_entity_order`]: `(StrongWeakId, id)` of every present character.
+    entity_order_scratch: Vec<(i32, u8)>,
     seed: u64,
 }
 
@@ -218,10 +266,14 @@ impl LiveWorld {
         let _ = world.init(std::iter::empty::<&str>());
         // Task 2.4b: the map's own crazy-shotgun cannons (`World::from_map`, `start_tick == 0`) are
         // not simulated here — the real client never spawns map entities for prediction, it takes
-        // every projectile from the snapshot (see [`LiveWorld::set_projectiles`]). Left in, they
+        // every projectile from the snapshot (see `set_projectiles`). Left in, they
         // would be evaluated at `t = server_tick / 50 s` (millions of pixels away, and a line walk
         // over that distance under non-DDRace shotgun curvature).
         world.projectiles.clear();
+        // 2.4b review round 1, F1 / 4.1 review round 1, F5: the base world keeps the server's own
+        // `sv_destroy_bullets_on_death = true` (the `ddai-dataset` replay clones it and models the
+        // server); the "grenades keep flying" relaxation lives on the prediction scratch only
+        // (`LiveWorld::predict_impl`).
         let scratch = world.clone();
         LiveWorld {
             own_id,
@@ -230,6 +282,8 @@ impl LiveWorld {
             scratch,
             tick_inputs_scratch: Vec::with_capacity(8),
             held_input: [None; MAX_CLIENTS],
+            projectile_order: Vec::with_capacity(64),
+            entity_order_scratch: Vec::with_capacity(MAX_CLIENTS),
             seed,
         }
     }
@@ -255,28 +309,27 @@ impl LiveWorld {
     /// Builds/updates the reconstructed world from one snapshot (task spec, acceptance criterion
     /// 1): reckoning-core extrapolation per character (see [`crate::reckoning`]), `DDNetCharacter`
     /// merge (flags/freeze/jumps/telegun/weapons), `StrongWeakId` tick order (D-022), switch
-    /// states, and tuning (map zones, already loaded at [`LiveWorld::new`] time, plus the live
+    /// states, tuning (map zones, already loaded at [`LiveWorld::new`] time, plus the live
     /// `Sv_TuneParams` message layered on top of zone 0 — see [`apply_tune_params`]'s doc comment
-    /// for that layering's one known limitation).
+    /// for that layering's one known limitation) and, last, the snapshot's projectiles (task 4.1,
+    /// 2.4b review F3: they used to be a separate `set_projectiles` call that had to follow this
+    /// one; now they are part of [`SnapshotInput`] and are built after teams and tuning are
+    /// applied, in the one order that is correct).
     ///
-    /// `tick`: the snapshot's own game tick (`SessionEvent::Snapshot { tick }` /
+    /// `input.tick`: the snapshot's own game tick (`SessionEvent::Snapshot { tick }` /
     /// `ddai_net::view::View::game_info()`'s tick — whichever the caller already has to hand;
     /// this fn never reads it from `characters` itself, since a snapshot with *no* characters at
     /// all, e.g. before anyone has spawned, must still advance the base tick).
-    /// `characters`: `ddai_net::view::View::characters()`'s result (or an equivalent slice built
-    /// for a test — see `crate::reckoning`/this crate's tests for how little that takes).
-    /// `switch_states`: `ddai_net::view::View::switch_states()`'s result.
+    /// `input.characters`: `ddai_net::view::View::characters()`'s result (or an equivalent slice
+    /// built for a test — see `crate::reckoning`/this crate's tests for how little that takes).
+    /// `input.switch_states`: `ddai_net::view::View::switch_states()`'s result.
     ///
-    /// Projectiles are not part of this call: it leaves the world with none (map-native cannons
-    /// are never simulated here), and the snapshot's own projectile items go in through
-    /// [`LiveWorld::set_projectiles`] right after — see there (task 2.4b).
-    ///
-    /// `teams`: `ddai_client::session::Session::teams_state()`'s result, if the caller has kept
-    /// one — DDRace team assignment has "carry forward the last known value" semantics (see
+    /// `input.teams`: `ddai_client::session::Session::teams_state()`'s result, if the caller has
+    /// kept one — DDRace team assignment has "carry forward the last known value" semantics (see
     /// [`TeamsState`]'s own doc comment), so a caller that never received one at all may simply
     /// pass `None` every time (every character then stays on the default team, `0`).
-    /// `own_input_at_tick`: review round 3, finding F10 — the input the server actually applied to
-    /// *our own* tee at this exact snapshot's tick (i.e. this connection's own logged
+    /// `input.own_input_at_tick`: review round 3, finding F10 — the input the server actually
+    /// applied to *our own* tee at this exact snapshot's tick (i.e. this connection's own logged
     /// `SessionEvent::InputSent`/`InputTiming` history for `tick`, corrected for late delivery —
     /// see [`retarget_late_inputs`]/[`correct_late_inputs`] — and converted via
     /// [`player_input_from_net`]), if known. `None` when it isn't (a dropped `InputSent` — F12's
@@ -287,18 +340,20 @@ impl LiveWorld {
     /// character's very first-ever sighting (no previous seed to reuse either) falls all the way
     /// back to that guess — see this method's own doc comment on [`upsert_character`]'s seeding
     /// for why any of this matters only for our own tee, never for anyone else's.
-    pub fn on_snapshot(
-        &mut self,
-        tick: i32,
-        characters: &[CharacterView],
-        tuning: TuneParams,
-        switch_states: &[(i32, objects::SwitchState)],
-        teams: Option<&TeamsState>,
-        own_input_at_tick: Option<PlayerInput>,
-    ) {
+    /// `input.projectiles`: `ddai_net::view::View::projectiles()`'s result — see
+    /// `set_projectiles`.
+    pub fn on_snapshot(&mut self, input: SnapshotInput<'_>) {
+        let SnapshotInput {
+            tick,
+            characters,
+            tuning,
+            switch_states,
+            teams,
+            own_input_at_tick,
+            projectiles,
+        } = input;
         self.world.tick = tick;
-        // Projectiles belong to one snapshot: cleared here so a caller that never calls
-        // [`LiveWorld::set_projectiles`] gets none (never a stale set from an older tick).
+        // Projectiles belong to one snapshot: rebuilt from `projectiles` at the end of this call.
         self.world.projectiles.clear();
 
         if let Some(teams) = teams {
@@ -390,12 +445,15 @@ impl LiveWorld {
         if tuning.received > 0 {
             apply_tune_params(self.world.tuning.zone_mut(own_zone), &tuning);
         }
+
+        // Last, because it reads `world.tick`, `teams_core` and the tuning set above.
+        self.set_projectiles(projectiles);
     }
 
-    /// Replaces the world's projectiles with those of the snapshot just given to
-    /// [`LiveWorld::on_snapshot`] (task 2.4b): `View::projectiles()`'s result, in the same call
-    /// sequence (`on_snapshot`, then this) — `on_snapshot` empties the projectile list, so a later
-    /// call to it discards what an earlier `set_projectiles` set.
+    /// Rebuilds the world's projectiles from the snapshot's items — the tail of
+    /// [`LiveWorld::on_snapshot`], private since task 4.1 (2.4b review F3: a public method that had
+    /// to be called after `on_snapshot` and before anything else is an ordering contract that fails
+    /// silently).
     ///
     /// Built the way the DDNet client's predicted world does it (`CGameWorld::NetObjAdd`,
     /// `gameworld.cpp:437-500`, see [`crate::projectiles`]): each item becomes a projectile whose
@@ -410,13 +468,16 @@ impl LiveWorld {
     /// (`gameworld.cpp:450-456`); this rebuilds from the snapshot every time instead, which is the
     /// same state (the item *is* the server's state at `tick`) minus the client's own between-
     /// snapshot drift.
-    pub fn set_projectiles(&mut self, projectiles: &[(i32, ProjectileView)]) {
+    fn set_projectiles(&mut self, projectiles: &[(i32, ProjectileView)]) {
         let own_id = self.own_id;
         let world = &mut self.world;
         world.projectiles.clear();
-        let mut order: Vec<usize> = (0..projectiles.len()).collect();
+        // F4: the id order lives in a buffer kept on `self`, not a fresh `Vec` per snapshot.
+        let order = &mut self.projectile_order;
+        order.clear();
+        order.extend(0..projectiles.len());
         order.sort_by_key(|&i| projectiles[i].0);
-        for i in order {
+        for &i in order.iter() {
             let Some(p) = projectile_from_view(&projectiles[i].1, world.tick, &world.collision, &world.tuning) else {
                 continue;
             };
@@ -617,16 +678,22 @@ impl LiveWorld {
     /// [`LiveWorld::predict`]'s stepping, so getting the order wrong silently flips every such
     /// contest's outcome.
     fn rebuild_entity_order(&mut self) {
-        let mut ids: Vec<(i32, u8)> = self
-            .world
-            .characters
-            .iter()
-            .enumerate()
-            .filter_map(|(id, c)| c.as_ref().map(|c| (c.strong_weak_id, id as u8)))
-            .collect();
-        ids.sort_by_key(|&(strong_weak_id, _)| strong_weak_id);
+        // Task 4.1: through a buffer kept on `self`, so a snapshot allocates nothing once warm (the
+        // live bot's steady-state allocation test measures this).
+        let ids = &mut self.entity_order_scratch;
+        ids.clear();
+        ids.extend(
+            self.world
+                .characters
+                .iter()
+                .enumerate()
+                .filter_map(|(id, c)| c.as_ref().map(|c| (c.strong_weak_id, id as u8))),
+        );
+        // Unstable sort keyed on the pair: no temporary buffer (a stable sort allocates past 20
+        // elements) and still deterministic, ids being unique.
+        ids.sort_unstable();
         self.world.entity_order.clear();
-        self.world.entity_order.extend(ids.into_iter().map(|(_, id)| id));
+        self.world.entity_order.extend(ids.iter().map(|&(_, id)| id));
     }
 
     /// Steps a scratch copy of the reconstructed base world ([`LiveWorld::base_tick`]) forward to
@@ -654,7 +721,57 @@ impl LiveWorld {
     /// `to_tick < base_tick()` is a no-op (returns the base world unchanged, `to_tick > base_tick`
     /// is the only case this function ever actually steps).
     pub fn predict(&mut self, to_tick: i32, own_inputs_in_flight: &[(i32, PlayerInput)]) -> &World<f32> {
+        self.predict_impl(to_tick, own_inputs_in_flight, None)
+    }
+
+    /// [`LiveWorld::predict`] over only the characters `keep` marks (plus our own): every other
+    /// character is removed from the scratch copy before stepping (task 4.1 — "pass the brain only
+    /// the tees that matter": a search over a crowd of 8+ tees collapses, 3.5's review F2, and a tee
+    /// farther than hook reach plus the horizon's travel cannot touch us inside the horizon anyway).
+    /// The base world ([`LiveWorld::base_world`]) is untouched, so the next snapshot's prediction
+    /// starts from the full state again. Same cost profile as `predict` (zero allocation once warm).
+    pub fn predict_local(
+        &mut self,
+        to_tick: i32,
+        own_inputs_in_flight: &[(i32, PlayerInput)],
+        keep: &[bool; MAX_CLIENTS],
+    ) -> &World<f32> {
+        self.predict_impl(to_tick, own_inputs_in_flight, Some(keep))
+    }
+
+    fn predict_impl(
+        &mut self,
+        to_tick: i32,
+        own_inputs_in_flight: &[(i32, PlayerInput)],
+        keep: Option<&[bool; MAX_CLIENTS]>,
+    ) -> &World<f32> {
         self.scratch.restore_from(&self.world);
+        // 2.4b review round 1, F1: the server destroys a projectile whose owner is dead
+        // (`server/entities/projectile.cpp:125-129`, `marked_for_destroy` in the physics port), but
+        // the client's predicted `CProjectile::Tick` has no such rule, and "owner not in the world"
+        // here also means an owner who is alive on the server and merely network-clipped out of the
+        // snapshot (a shooter far beyond the `show_distance` radius). A grenade that vanished on the
+        // first predicted tick for that reason would hide a real explosion, so grenades keep flying
+        // in the prediction; the price is a grenade whose owner really dies inside the (<= 10 tick)
+        // horizon, which the server would destroy — the rarer case. Gun/shotgun/laser shots keep
+        // the server rule (they are harmless in block). Set here, after every `restore_from` (which
+        // copies the config), and on the scratch only (4.1 review round 1, F5): the base world — and
+        // so the dataset's replay — keeps the server's value.
+        self.scratch.config.sv_destroy_bullets_on_death = false;
+        if let Some(keep) = keep {
+            let own = self.own_id;
+            for (id, &kept) in keep.iter().enumerate() {
+                if kept || id as i32 == own || self.scratch.characters[id].is_none() {
+                    continue;
+                }
+                self.scratch.cores.remove(id as u8);
+                self.scratch.characters[id] = None;
+                self.scratch.players[id] = None;
+            }
+            self.scratch
+                .entity_order
+                .retain(|&id| keep[id as usize] || i32::from(id) == own);
+        }
         let to_tick = to_tick.min(self.scratch.tick.saturating_add(MAX_EVOLVE_AGE_TICKS));
         if to_tick <= self.scratch.tick {
             return &self.scratch;
@@ -701,34 +818,39 @@ impl LiveWorld {
     /// hooks" — target selection itself is outside this crate's scope, per `ddai-brain`'s own
     /// doc comment on that field).
     pub fn build_observation(&self, world: &World<f32>, target_id: Option<i32>) -> Observation {
-        let self_state =
-            character_observation(world, self.own_id).unwrap_or_else(|| CharacterObservation::at_rest(self.own_id));
-        let mut others = Vec::new();
-        for id in 0..MAX_CLIENTS as i32 {
-            if id == self.own_id {
-                continue;
-            }
-            if let Some(obs) = character_observation(world, id) {
-                others.push(obs);
-            }
-        }
-        // Review round 1, finding N3: bounds-checked, not a direct `world.characters[self.own_id
-        // as usize]` index — `self.own_id` is caller-supplied and never itself validated (see
-        // `Self::own_character`'s doc comment), so an out-of-range value (e.g. `-1`, "no local
-        // player yet") must fall back to zone `0`, not panic.
-        let tune_zone = if (0..MAX_CLIENTS as i32).contains(&self.own_id) {
-            world.characters[self.own_id as usize].map(|c| c.tune_zone).unwrap_or(0)
-        } else {
-            0
-        };
-        Observation {
+        let mut obs = Observation {
             map: Arc::clone(&self.map),
             tick: world.tick,
-            self_state,
-            others,
+            self_state: CharacterObservation::at_rest(self.own_id),
+            others: Vec::new(),
             target_id,
-            tuning: *world.tuning.zone(tune_zone),
-        }
+            tuning: TuningParams::default(),
+        };
+        self.fill_observation(world, target_id, &mut obs);
+        obs
+    }
+
+    /// [`LiveWorld::build_observation`] into a caller-owned `obs` (task 4.1): its `others` vector
+    /// keeps its capacity across snapshots, so the live bot's per-snapshot path allocates nothing
+    /// once warm. Every field of `obs` is overwritten.
+    pub fn fill_observation(&self, world: &World<f32>, target_id: Option<i32>, obs: &mut Observation) {
+        fill_observation_from(&self.map, self.own_id, world, target_id, obs);
+    }
+
+    /// [`LiveWorld::predict_local`] and [`LiveWorld::fill_observation`] in one call (task 4.1): the
+    /// returned world borrows `self` mutably, so the observation of that very world cannot be built
+    /// with a second `&self` call afterwards — this does both while the borrow is still split.
+    pub fn predict_local_observation(
+        &mut self,
+        to_tick: i32,
+        own_inputs_in_flight: &[(i32, PlayerInput)],
+        keep: &[bool; MAX_CLIENTS],
+        target_id: Option<i32>,
+        obs: &mut Observation,
+    ) -> &World<f32> {
+        self.predict_impl(to_tick, own_inputs_in_flight, Some(keep));
+        fill_observation_from(&self.map, self.own_id, &self.scratch, target_id, obs);
+        &self.scratch
     }
 
     /// The map this `LiveWorld` was built from ([`ddai_brain::Observation::map`] shares this same
@@ -1002,6 +1124,47 @@ fn rebuild_active_timed_switchers(world: &mut World<f32>) {
             world.active_timed_switchers.push(number as u8);
         }
     }
+}
+
+/// The body of [`LiveWorld::fill_observation`], free so a method holding `&mut self` can call it
+/// with field borrows (see [`LiveWorld::predict_local_observation`]).
+fn fill_observation_from(
+    map: &Arc<MapData>,
+    own_id: i32,
+    world: &World<f32>,
+    target_id: Option<i32>,
+    obs: &mut Observation,
+) {
+    obs.self_state = character_observation(world, own_id).unwrap_or_else(|| CharacterObservation::at_rest(own_id));
+    obs.others.clear();
+    for id in 0..MAX_CLIENTS as i32 {
+        if id == own_id {
+            continue;
+        }
+        if let Some(other) = character_observation(world, id) {
+            obs.others.push(other);
+        }
+    }
+    // Review round 1, finding N3: bounds-checked, not a direct `world.characters[own_id as usize]`
+    // index — `own_id` is caller-supplied and never itself validated (see `LiveWorld::own_character`'s
+    // doc comment), so an out-of-range value (e.g. `-1`, "no local player yet") must fall back to
+    // zone `0`, not panic.
+    //
+    // 2.4b review F5: this reads the character's own `tune_zone`, while `on_snapshot` stamps the
+    // `Sv_TuneParams` message onto `tune_zone_override` when the server set one. The two only differ
+    // on a server that sends an override; DDNet 20.1 always sends `OVERRIDE_NONE`
+    // (`server/entities/character.cpp:1376`), so this is exact there.
+    let tune_zone = if (0..MAX_CLIENTS as i32).contains(&own_id) {
+        world.characters[own_id as usize].map(|c| c.tune_zone).unwrap_or(0)
+    } else {
+        0
+    };
+    if !Arc::ptr_eq(&obs.map, map) {
+        obs.map = Arc::clone(map);
+    }
+    obs.tick = world.tick;
+    obs.target_id = target_id;
+    obs.tuning = *world.tuning.zone(tune_zone);
 }
 
 /// The [`CharacterObservation`] of client `id` in `world`, `None` when there is no such character.
@@ -1648,14 +1811,10 @@ mod tests {
 
         let view = character_view_from_core(0, truth.cores.get(0).unwrap());
         let mut lw = LiveWorld::new(Arc::clone(&map), 0, 5);
-        lw.on_snapshot(
-            base,
-            &[view],
-            ddai_net::tuning::DEFAULT_TUNE_PARAMS,
-            &[],
-            None,
-            Some(held_hammer_input(2)),
-        );
+        lw.on_snapshot(SnapshotInput {
+            own_input_at_tick: Some(held_hammer_input(2)),
+            ..SnapshotInput::new(base, &[view], ddai_net::tuning::DEFAULT_TUNE_PARAMS)
+        });
 
         // k=1,2: still holding `fire == 2` — no new press, must not phantom-fire.
         // k=3..5: a genuine new press (`fire`: 2 -> 3 at k=3), held afterward — must still fire.
@@ -1704,7 +1863,7 @@ mod tests {
         let base = truth.tick;
         let view = character_view_from_core(0, truth.cores.get(0).unwrap());
         let mut lw = LiveWorld::new(Arc::clone(&map), 0, 5);
-        lw.on_snapshot(base, &[view], ddai_net::tuning::DEFAULT_TUNE_PARAMS, &[], None, None);
+        lw.on_snapshot(SnapshotInput::new(base, &[view], ddai_net::tuning::DEFAULT_TUNE_PARAMS));
         let own_in: Vec<(i32, PlayerInput)> = (1..=5).map(|k| (base + k, held_hammer_input(2))).collect();
         let _ = lw.predict(base + 5, &own_in);
     }
@@ -1742,14 +1901,10 @@ mod tests {
         // First snapshot: a real seed *is* known (a successfully delivered `InputSent`).
         let tick_a = truth.tick;
         let view_a = character_view_from_core(0, truth.cores.get(0).unwrap());
-        lw.on_snapshot(
-            tick_a,
-            &[view_a],
-            ddai_net::tuning::DEFAULT_TUNE_PARAMS,
-            &[],
-            None,
-            Some(held_hammer_input(2)),
-        );
+        lw.on_snapshot(SnapshotInput {
+            own_input_at_tick: Some(held_hammer_input(2)),
+            ..SnapshotInput::new(tick_a, &[view_a], ddai_net::tuning::DEFAULT_TUNE_PARAMS)
+        });
 
         // Advance a few more ticks, still just holding `fire == 2` (no new press) — matches a
         // real connection's next snapshot.
@@ -1763,14 +1918,11 @@ mod tests {
         let tick_b = truth.tick;
         let view_b = character_view_from_core(0, truth.cores.get(0).unwrap());
         // Second snapshot: `own_input_at_tick` is `None` — simulates a dropped `InputSent`.
-        lw.on_snapshot(
+        lw.on_snapshot(SnapshotInput::new(
             tick_b,
             &[view_b],
             ddai_net::tuning::DEFAULT_TUNE_PARAMS,
-            &[],
-            None,
-            None,
-        );
+        ));
 
         // The reused seed must be the previous known value (`fire == 2`), not a fresh `fire: 0`
         // guess — pin the seeding itself directly, not just its downstream effect.

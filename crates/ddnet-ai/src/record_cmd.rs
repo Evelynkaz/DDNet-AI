@@ -528,7 +528,7 @@ pub fn run(args: RecordArgs) -> ExitCode {
             // Task 2.4's `LiveWorld` is this event's real consumer; the observer recorder has none
             // (it records raw snapshots into rec v1 via `SessionEvent::SnapshotData` instead, see
             // above) — ignored here, exactly like `ddnet-ai play`'s own handling of this event.
-            ClientEvent::LiveWorldSnapshot(_) => {}
+            ClientEvent::LiveWorldSnapshot(_) | ClientEvent::InputLatency { .. } => {}
             ClientEvent::MarginSummary(s) => {
                 tracing::info!(
                     count = s.count,

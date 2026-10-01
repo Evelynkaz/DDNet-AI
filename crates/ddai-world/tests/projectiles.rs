@@ -24,7 +24,7 @@ use ddai_physics::map::{
 };
 use ddai_physics::vmath::Vec2;
 use ddai_physics::world::{self, Player, Projectile, TickInput, World};
-use ddai_world::LiveWorld;
+use ddai_world::{LiveWorld, SnapshotInput};
 
 /// The server tick the budget tests pretend the server has been up for (~2.3 days at 50 Tps, the
 /// value the 8.4c review measured at).
@@ -261,8 +261,10 @@ fn cannons_at_big_tick(map: &Arc<MapData>) -> (Vec<(i32, ProjectileView)>, usize
 fn budget_check(map: Arc<MapData>, label: &str, tuning: TuneParams) {
     let (items, n) = cannons_at_big_tick(&map);
     let mut live = LiveWorld::new(map, 0, 1);
-    live.on_snapshot(BIG_TICK, &[], tuning, &[], None, None);
-    live.set_projectiles(&items);
+    live.on_snapshot(SnapshotInput {
+        projectiles: &items,
+        ..SnapshotInput::new(BIG_TICK, &[], tuning)
+    });
     assert_eq!(
         live.base_world().projectiles.len(),
         n,
@@ -317,7 +319,7 @@ fn budget_on_snapshot_alone_at_a_huge_server_tick_does_not_simulate_map_cannons_
     let map = twelve_cannon_map();
     let mut live = LiveWorld::new(map, 0, 1);
     for k in 0..3 {
-        live.on_snapshot(BIG_TICK + 2 * k, &[], DEFAULT_TUNE_PARAMS, &[], None, None);
+        live.on_snapshot(SnapshotInput::new(BIG_TICK + 2 * k, &[], DEFAULT_TUNE_PARAMS));
     }
     // Few iterations: the pre-2.4b code needs seconds per call here. Timing is asserted first so
     // that is what a regression reports.
@@ -363,8 +365,10 @@ fn budget_real_maps_at_a_huge_server_tick() {
         let items = wire_projectiles(&native, BIG_TICK - 7);
         for tuning in [DEFAULT_TUNE_PARAMS, received(DEFAULT_TUNE_PARAMS)] {
             let mut live = LiveWorld::new(Arc::clone(&map), 0, 1);
-            live.on_snapshot(BIG_TICK, &[], tuning, &[], None, None);
-            live.set_projectiles(&items);
+            live.on_snapshot(SnapshotInput {
+                projectiles: &items,
+                ..SnapshotInput::new(BIG_TICK, &[], tuning)
+            });
             let p50 = predict_p50_ns(&mut live, 10, 200);
             eprintln!(
                 "{label}: predict(+2) at tick {BIG_TICK} (tuning received={}): p50 = {:.1} us",
@@ -387,15 +391,14 @@ fn predict_with_projectiles_is_zero_allocation_once_warmed_up() {
     let map = twelve_cannon_map();
     let (items, n) = cannons_at_big_tick(&map);
     let mut live = LiveWorld::new(map, 0, 1);
-    live.on_snapshot(
-        BIG_TICK,
-        &[resting_tee(0, Vec2::new(200.0, 300.0))],
-        DEFAULT_TUNE_PARAMS,
-        &[],
-        None,
-        None,
-    );
-    live.set_projectiles(&items);
+    live.on_snapshot(SnapshotInput {
+        projectiles: &items,
+        ..SnapshotInput::new(
+            BIG_TICK,
+            &[resting_tee(0, Vec2::new(200.0, 300.0))],
+            DEFAULT_TUNE_PARAMS,
+        )
+    });
     assert_eq!(live.base_world().projectiles.len(), n);
     for _ in 0..20 {
         let _ = live.predict(BIG_TICK + 40, &[]);
@@ -466,8 +469,10 @@ fn assert_prediction_matches_truth(map: &Arc<MapData>, start: &World<f32>, what:
     let tick = start.tick;
     let mut live = LiveWorld::new(Arc::clone(map), 0, 1);
     let tee = start.cores.get(0).expect("tee").pos;
-    live.on_snapshot(tick, &[resting_tee(0, tee)], DEFAULT_TUNE_PARAMS, &[], None, None);
-    live.set_projectiles(&wire_projectiles(start, 0));
+    live.on_snapshot(SnapshotInput {
+        projectiles: &wire_projectiles(start, 0),
+        ..SnapshotInput::new(tick, &[resting_tee(0, tee)], DEFAULT_TUNE_PARAMS)
+    });
     assert_eq!(live.base_world().projectiles.len(), start.projectiles.len(), "{what}");
 
     let mut truth = start.clone();
@@ -584,8 +589,10 @@ fn prediction_evaluates_a_bullet_from_its_snapshot_start_tick_at_a_huge_server_t
     truth.cores.get_mut(0).unwrap().pos = rest;
     truth.characters[0].as_mut().unwrap().prev_pos = rest;
     let mut live = LiveWorld::new(Arc::clone(&map), 0, 1);
-    live.on_snapshot(BIG_TICK, &[resting_tee(0, rest)], DEFAULT_TUNE_PARAMS, &[], None, None);
-    live.set_projectiles(&[(7, wire_ownerless(&bullet))]);
+    live.on_snapshot(SnapshotInput {
+        projectiles: &[(7, wire_ownerless(&bullet))],
+        ..SnapshotInput::new(BIG_TICK, &[resting_tee(0, rest)], DEFAULT_TUNE_PARAMS)
+    });
 
     let mut frozen_at = None;
     for k in 1..=8 {
@@ -611,13 +618,15 @@ fn prediction_evaluates_a_bullet_from_its_snapshot_start_tick_at_a_huge_server_t
 }
 
 #[test]
-fn a_new_snapshot_replaces_projectiles_and_on_snapshot_alone_leaves_none() {
+fn a_new_snapshot_replaces_projectiles_and_an_empty_list_leaves_none() {
     let map = twelve_cannon_map();
     let mut truth: World<f32> = World::from_map(&map, 1);
     truth.init(std::iter::empty::<&str>()).unwrap();
     let mut live = LiveWorld::new(map, 0, 1);
-    live.on_snapshot(1000, &[], DEFAULT_TUNE_PARAMS, &[], None, None);
-    live.set_projectiles(&wire_projectiles(&truth, 1000));
+    live.on_snapshot(SnapshotInput {
+        projectiles: &wire_projectiles(&truth, 1000),
+        ..SnapshotInput::new(1000, &[], DEFAULT_TUNE_PARAMS)
+    });
     assert_eq!(live.base_world().projectiles.len(), 12);
     // A snapshot listing 3 of them (the rest network-clipped) leaves exactly those 3, added in
     // ascending snapshot id like the client's `SnapCollectEntities` sorts them.
@@ -629,12 +638,14 @@ fn a_new_snapshot_replaces_projectiles_and_on_snapshot_alone_leaves_none() {
         p.x = x * 100;
         (id, ProjectileView::DDNet(p))
     };
-    live.on_snapshot(1002, &[], DEFAULT_TUNE_PARAMS, &[], None, None);
-    live.set_projectiles(&[at(300, 30), at(100, 10), at(200, 20)]);
+    live.on_snapshot(SnapshotInput {
+        projectiles: &[at(300, 30), at(100, 10), at(200, 20)],
+        ..SnapshotInput::new(1002, &[], DEFAULT_TUNE_PARAMS)
+    });
     let xs: Vec<i32> = live.base_world().projectiles.iter().map(|p| p.pos.x as i32).collect();
     assert_eq!(xs, vec![100, 200, 300]);
-    // A snapshot for which the caller supplies none: nothing is carried over.
-    live.on_snapshot(1004, &[], DEFAULT_TUNE_PARAMS, &[], None, None);
+    // A snapshot for which the caller supplies none (`projectiles: &[]`): nothing is carried over.
+    live.on_snapshot(SnapshotInput::new(1004, &[], DEFAULT_TUNE_PARAMS));
     assert!(live.base_world().projectiles.is_empty());
     assert!(live.predict(1006, &[]).projectiles.is_empty());
 }
@@ -648,7 +659,6 @@ fn projectiles_of_another_ddrace_team_are_not_predicted() {
         received: 2,
     };
     teams.teams[1] = 5;
-    live.on_snapshot(500, &[], DEFAULT_TUNE_PARAMS, &[], Some(&teams), None);
     let shot = |owner| {
         ProjectileView::DDNet(objects::DDNetProjectile {
             x: 5_000,
@@ -663,9 +673,79 @@ fn projectiles_of_another_ddrace_team_are_not_predicted() {
             flags: projectileflagflag::NORMALIZE_VEL | projectileflagflag::EXPLOSIVE,
         })
     };
-    live.set_projectiles(&[(1, shot(0)), (2, shot(1)), (3, shot(-1))]);
+    live.on_snapshot(SnapshotInput {
+        teams: Some(&teams),
+        projectiles: &[(1, shot(0)), (2, shot(1)), (3, shot(-1))],
+        ..SnapshotInput::new(500, &[], DEFAULT_TUNE_PARAMS)
+    });
     let owners: Vec<i32> = live.base_world().projectiles.iter().map(|p| p.owner).collect();
     assert_eq!(owners, vec![0, -1], "own and ownerless shots stay, team 5's is dropped");
+}
+
+/// 2.4b review round 1, F1: a shot whose owner is not in the snapshot (network-clipped, alive on the
+/// server) must not vanish on the first predicted tick. A grenade now keeps flying
+/// (`sv_destroy_bullets_on_death = false` in `LiveWorld`); a gun bullet keeps the server's
+/// "owner gone -> destroy" rule, which is documented on `LiveWorld::new` (harmless in block).
+#[test]
+fn a_grenade_whose_owner_is_clipped_out_of_the_snapshot_keeps_flying() {
+    let shot = |ty: i32, owner: i32| {
+        ProjectileView::DDNet(objects::DDNetProjectile {
+            x: 30 * 32 * 100,
+            y: 10 * 32 * 100,
+            vel_x: 1,
+            vel_y: 0,
+            type_: ty,
+            start_tick: 999,
+            owner,
+            switch_number: 0,
+            tune_zone: 0,
+            flags: projectileflagflag::NORMALIZE_VEL
+                | if ty == ddai_physics::core::WEAPON_GRENADE {
+                    projectileflagflag::EXPLOSIVE
+                } else {
+                    0
+                },
+        })
+    };
+    let tee = Vec2::new(5.0 * 32.0, 28.0 * 32.0 - 14.0);
+    let predicted_after = |ty: i32, owner_present: bool| {
+        let mut live = LiveWorld::new(Room::new(60, 30).build(), 0, 1);
+        let mut chars = vec![resting_tee(0, tee)];
+        if owner_present {
+            chars.push(resting_tee(7, Vec2::new(50.0 * 32.0, 28.0 * 32.0 - 14.0)));
+        }
+        live.on_snapshot(SnapshotInput {
+            projectiles: &[(1, shot(ty, 7))],
+            ..SnapshotInput::new(1000, &chars, DEFAULT_TUNE_PARAMS)
+        });
+        assert_eq!(live.base_world().projectiles.len(), 1, "type {ty}: in the base world");
+        // F5 (4.1 review round 1): the relaxation is on the prediction only.
+        assert!(
+            live.base_world().config.sv_destroy_bullets_on_death,
+            "the base world (the dataset replay clones it) keeps the server's rule"
+        );
+        live.predict(1003, &[]).projectiles.len()
+    };
+    assert_eq!(
+        predicted_after(ddai_physics::core::WEAPON_GRENADE, false),
+        1,
+        "grenade, owner absent"
+    );
+    assert_eq!(
+        predicted_after(ddai_physics::core::WEAPON_GRENADE, true),
+        1,
+        "grenade, owner present"
+    );
+    assert_eq!(
+        predicted_after(ddai_physics::core::WEAPON_GUN, true),
+        1,
+        "gun, owner present"
+    );
+    assert_eq!(
+        predicted_after(ddai_physics::core::WEAPON_GUN, false),
+        0,
+        "a gun bullet still follows the server's owner-gone rule"
+    );
 }
 
 // --- tuning --------------------------------------------------------------------------------------
@@ -676,7 +756,7 @@ fn tuning_defaults_to_ddrace_reset_values_until_the_first_sv_tune_params() {
     let mut live = LiveWorld::new(map, 0, 1);
     // `Session::tuning()` before the first `Sv_TuneParams` is `DEFAULT_TUNE_PARAMS` (`received == 0`).
     assert_eq!(DEFAULT_TUNE_PARAMS.received, 0);
-    live.on_snapshot(100, &[], DEFAULT_TUNE_PARAMS, &[], None, None);
+    live.on_snapshot(SnapshotInput::new(100, &[], DEFAULT_TUNE_PARAMS));
     let z = *live.base_world().tuning.zone(0);
     // `CGameContext::OnInit`/`ResetTuning` (`gamecontext.cpp:4166-4190`).
     assert_eq!(z.shotgun_curvature::<f32>(), 0.0);
@@ -687,7 +767,7 @@ fn tuning_defaults_to_ddrace_reset_values_until_the_first_sv_tune_params() {
     assert_eq!(z.gravity::<f32>(), 0.5, "everything else is the vanilla default");
 
     // Once a message has arrived its values win, even if they equal the vanilla ones.
-    live.on_snapshot(102, &[], received(DEFAULT_TUNE_PARAMS), &[], None, None);
+    live.on_snapshot(SnapshotInput::new(102, &[], received(DEFAULT_TUNE_PARAMS)));
     let z = *live.base_world().tuning.zone(0);
     assert_eq!(z.shotgun_curvature::<f32>(), 1.25);
     assert_eq!(z.shotgun_speed::<f32>(), 2750.0);
@@ -710,7 +790,7 @@ fn observation_tuning_is_the_tuning_applied_at_the_own_tees_zone() {
     let mut live = LiveWorld::new(map, 0, 1);
     let mut msg = received(DEFAULT_TUNE_PARAMS);
     msg.gravity = 60; // 0.60, what a server would report for the tee's current zone
-    live.on_snapshot(300, &[resting_tee(0, tee)], msg, &[], None, None);
+    live.on_snapshot(SnapshotInput::new(300, &[resting_tee(0, tee)], msg));
     let predicted = live.predict(302, &[]).clone();
     let obs = live.build_observation(&predicted, None);
     // The tee is in zone 3 (map-position derived): the live message was applied to *that* zone.
@@ -732,7 +812,7 @@ fn observation_tuning_is_the_tuning_applied_at_the_own_tees_zone() {
 fn observation_tuning_before_any_message_is_the_zones_own_map_tuning() {
     let (map, tee) = tuned_room();
     let mut live = LiveWorld::new(map, 0, 1);
-    live.on_snapshot(300, &[resting_tee(0, tee)], DEFAULT_TUNE_PARAMS, &[], None, None);
+    live.on_snapshot(SnapshotInput::new(300, &[resting_tee(0, tee)], DEFAULT_TUNE_PARAMS));
     let predicted = live.predict(302, &[]).clone();
     let obs = live.build_observation(&predicted, None);
     assert_eq!(

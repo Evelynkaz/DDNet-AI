@@ -16,7 +16,7 @@ pub use ddai_brain::IdleBrain;
 
 use std::sync::Arc;
 
-use ddai_brain::{Action, Brain, CharacterObservation, IVec2, Observation, ResetContext, WorldView};
+use ddai_brain::{Action, Brain, CharacterObservation, IVec2, LiveContext, Observation, ResetContext, WorldView};
 use ddai_jsmath as js;
 use ddai_jsmath::Rng;
 use ddai_physics::map::MapData;
@@ -504,6 +504,33 @@ impl Brain for PlannerBrain {
         let action = self.plan(world, view.self_id, target, view.in_flight);
         self.scratch = Some(scratch);
         action
+    }
+
+    fn set_live_context(&mut self, ctx: &LiveContext<'_>) {
+        // `setSpareBystanders` (`bot.ts:4777-4783`): the tees the rope must not catch. The planner
+        // rejects candidate hooks whose line would catch one. (`setThirdTees` is not passed: the live
+        // configuration runs `thirdTeeExposure = 0`, `bot.ts:590`, so it would be ignored anyway.)
+        let pos: Vec<Vec2> = ctx
+            .spares
+            .iter()
+            .map(|(p, _)| Vec2 {
+                x: f64::from(p.x),
+                y: f64::from(p.y),
+            })
+            .collect();
+        let vel: Vec<Vec2> = ctx
+            .spares
+            .iter()
+            .map(|(_, v)| Vec2 {
+                x: f64::from(v.x),
+                y: f64::from(v.y),
+            })
+            .collect();
+        self.planner.set_spare_bystanders(pos, vel);
+        self.planner.set_travel_goal(ctx.travel_goal.map(|g| Vec2 {
+            x: f64::from(g.x),
+            y: f64::from(g.y),
+        }));
     }
 
     fn name(&self) -> &str {

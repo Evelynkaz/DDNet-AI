@@ -1,0 +1,40 @@
+[package]
+name = "ddai-bot"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Task 4.1: the live DDNet block bot around the brain — snapshot collapsing, LiveWorld prediction with in-flight inputs, pickTarget port, modes, unstick via Cl_Kill, post-filters, input encoding, latency measurement, and a read-only live-state bridge for the web unit."
+
+[lib]
+name = "ddai_bot"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-brain = { path = "../ddai-brain" }
+ddai-client = { path = "../ddai-client" }
+ddai-fly = { path = "../ddai-fly" }
+ddai-flyg = { path = "../ddai-flyg" }
+ddai-map = { path = "../ddai-map" }
+ddai-net = { path = "../ddai-net" }
+ddai-physics = { path = "../ddai-physics" }
+ddai-planner = { path = "../ddai-planner" }
+ddai-world = { path = "../ddai-world" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+allocation-counter = "0.8.1"
+tempfile = "3.14"
+# The gated e2e test runs the real web-side reader (`ddai_web::live::bot_source::BotSource`) against the
+# real bot's socket — the end-to-end proof of the live bridge.
+ddai-web = { path = "../ddai-web" }
+tokio = { version = "1.53", features = ["rt", "time", "sync"] }

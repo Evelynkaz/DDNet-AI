@@ -819,3 +819,9 @@ budget_ms, search_ms, proposal_ms, shield_ms, extended, shielded, shield_incompl
 
 GPL-3.0-only (весь воркспейс) — см. корневой `NOTICE`, раздел «crates/ddai-planner». Портированная
 логика планировщика/скрипта — из `Wranked1/DDNet-AI` (GPL-3.0).
+
+## `Brain::set_live_context` (задача 4.1)
+
+`PlannerBrain` реализует необязательный хук `ddai_brain::Brain::set_live_context(&LiveContext)`: живой бот передаёт
+«пощажённых» (друзья, игнор, вне игры, AFK — `setSpareBystanders`) и путевую точку (`setTravelGoal`) перед каждым
+`decide_in`. Арена этот метод не вызывает. `setThirdTees` не передаётся: живая конфигурация держит `thirdTeeExposure = 0`.

@@ -147,6 +147,10 @@ enum ServerMessage {
         events: Vec<EventMsg>,
     },
     ReplayStatus(ReplayStatusMsg),
+    /// Task 4.1: the live bot's status (`docs/formats.md` §21): target, mode, counters, latency.
+    Bot {
+        status: serde_json::Value,
+    },
     /// A live-source problem (acceptance criterion 2: "a malformed trace gives an error event,
     /// not a panic") — reported to the client, distinct from any HTTP-level error.
     LiveError {
@@ -165,6 +169,9 @@ fn hub_event_to_server_message(event: &HubEvent) -> ServerMessage {
             events: events.iter().copied().map(EventMsg::from).collect(),
         },
         HubEvent::ReplayStatus(status) => ServerMessage::ReplayStatus(status.clone().into()),
+        HubEvent::BotStatus(json) => ServerMessage::Bot {
+            status: serde_json::from_str(json).unwrap_or(serde_json::Value::Null),
+        },
         HubEvent::Error(message) => ServerMessage::LiveError {
             message: message.clone(),
         },

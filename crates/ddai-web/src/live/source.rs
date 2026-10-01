@@ -104,6 +104,10 @@ pub enum SourceEvent {
     /// A source-specific status update the hub exposes to the client verbatim (e.g. the replay
     /// source's play/pause/speed/current-file state — acceptance criterion 2).
     ReplayStatus(ReplayStatus),
+    /// Task 4.1: the live bot's own status (target, mode, brain telemetry, latency) as one JSON
+    /// object — only the bot-socket source produces it (`docs/formats.md` §21, `STATUS`). Opaque to
+    /// the hub: forwarded to browsers as the `bot` WS message.
+    BotStatus(String),
     /// Something went wrong that the source can recover from (acceptance criterion 2: "parsing
     /// is bounded, and a malformed trace gives an error event, not a panic") — reported to the
     /// client, never a panic or a silently-dropped frame stream.

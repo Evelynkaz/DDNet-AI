@@ -954,6 +954,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
+name = "ddai-bot"
+version = "0.1.0"
+dependencies = [
+ "allocation-counter",
+ "ddai-brain",
+ "ddai-client",
+ "ddai-fly",
+ "ddai-flyg",
+ "ddai-map",
+ "ddai-net",
+ "ddai-physics",
+ "ddai-planner",
+ "ddai-web",
+ "ddai-world",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ddai-brain"
 version = "0.1.0"
 dependencies = [
@@ -1216,6 +1240,7 @@ dependencies = [
  "clap",
  "core_affinity",
  "ctrlc",
+ "ddai-bot",
  "ddai-brain",
  "ddai-client",
  "ddai-dataset",
