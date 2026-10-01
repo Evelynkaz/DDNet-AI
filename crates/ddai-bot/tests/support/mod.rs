@@ -238,8 +238,12 @@ pub struct Seen {
     pub others: Vec<i32>,
     pub world_ids: Vec<i32>,
     pub spares: Vec<(f32, f32)>,
+    /// `LiveContext::spare_ids` of that decision.
+    pub spare_ids: Vec<i32>,
     /// Our own predicted position in the observation.
     pub self_x: f32,
+    /// Whether that predicted tee is frozen.
+    pub self_frozen: bool,
 }
 
 /// A brain that records what it is given and returns a fixed action.
@@ -248,6 +252,7 @@ pub struct Probe {
     pub resets: Rc<RefCell<Vec<ResetContext>>>,
     pub action: Rc<RefCell<Action>>,
     spares: Vec<(f32, f32)>,
+    spare_ids: Vec<i32>,
 }
 
 impl Probe {
@@ -269,6 +274,7 @@ impl Probe {
                 resets: Rc::clone(&resets),
                 action: Rc::clone(&action),
                 spares: Vec::new(),
+                spare_ids: Vec::new(),
             },
             log,
             resets,
@@ -301,13 +307,16 @@ impl Brain for Probe {
             others: obs.others.iter().map(|o| o.id).collect(),
             world_ids,
             spares: self.spares.clone(),
+            spare_ids: self.spare_ids.clone(),
             self_x: obs.self_state.pos.x,
+            self_frozen: obs.self_state.is_frozen,
         });
         *self.action.borrow()
     }
 
     fn set_live_context(&mut self, ctx: &LiveContext<'_>) {
         self.spares = ctx.spares.iter().map(|(p, _)| (p.x, p.y)).collect();
+        self.spare_ids = ctx.spare_ids.to_vec();
     }
 
     fn name(&self) -> &str {

@@ -460,6 +460,16 @@ fn log_event(e: &BotEvent) {
         BotEvent::Joining { tick } => tracing::info!(tick, "in the spectators: asking to join"),
         BotEvent::JoinGaveUp { tick } => tracing::warn!(tick, "still a spectator after all tries: not asking again"),
         BotEvent::MovedToSpectators { tick } => tracing::error!(tick, "moved to the spectators after having played"),
+        BotEvent::PredictionClamped {
+            tick,
+            wanted_ahead,
+            cap,
+        } => tracing::warn!(
+            tick,
+            wanted_ahead,
+            cap,
+            "the prediction horizon hit its cap (a very long RTT): decisions are made on a world that stops short of their tick"
+        ),
         BotEvent::TickReset { from, to } => tracing::info!(from, to, "game tick went backwards"),
         BotEvent::RosterChanged { players } => tracing::debug!(players, "roster changed"),
     }

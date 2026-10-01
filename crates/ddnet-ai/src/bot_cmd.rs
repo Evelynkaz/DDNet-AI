@@ -54,10 +54,16 @@ pub struct BotOpts {
     /// `--brain fly`: the brain config (`configs/fly/S-brain.toml`).
     #[arg(long)]
     pub fly_config: Option<PathBuf>,
-    /// `cl_prediction_margin` in ms (default 10): how early before a tick starts its input is due at
-    /// the server. A smaller margin moves the input slot later after each snapshot, giving a slow
-    /// brain time to make the slot (`docs/formats.md` §21.6); too small and inputs arrive late
-    /// (`INPUTTIMING` shows it in the report's `input_margin`).
+    /// A **fixed** `cl_prediction_margin` in ms. Without it the margin is adaptive (task 4.1b, D-063):
+    /// it starts at 10 and follows the `INPUTTIMING` feedback between 3 and 20 ms (rolling p1 of
+    /// `time_left` kept at about 2 ms: lowered by 1 ms at a time, only when p1 is at least 4 ms and no
+    /// input was late for 10 s; raised by 2 ms when two late inputs fall in the 5 s window, or when p1
+    /// is below 2 ms over at least 100 samples — one late input never raises it; late inputs sent more
+    /// than 18 ms too late are stalls no margin absorbs and are ignored).
+    /// The margin is how early before a tick starts its input is due at the server; a smaller one
+    /// moves the input slot later after each snapshot, giving a slow brain time to make it
+    /// (`docs/formats.md` §21.6); too small and inputs arrive late (`INPUTTIMING` shows it in the
+    /// report's `input_margin`).
     #[arg(long)]
     pub prediction_margin_ms: Option<i32>,
     /// `Cl_ShowDistance` half-extents `X,Y` (default 3000,2000 — D-007's replacement for /showall).
@@ -112,8 +118,9 @@ pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
             .unwrap_or(ClientConfig::default().timeout),
         ..ClientConfig::default()
     };
-    if let Some(m) = o.prediction_margin_ms {
-        client.prediction_margin_ms = m;
+    match o.prediction_margin_ms {
+        Some(m) => client.prediction_margin_ms = m,
+        None => client.adaptive_margin = true,
     }
     if let Some(sd) = o.show_distance {
         client.show_distance = sd;
@@ -262,6 +269,8 @@ pub fn report_json(r: &RunReport) -> serde_json::Value {
             "hammer_fires": r.stats.hammer_fires,
             "self_kills": r.stats.self_kills,
             "vetoed_hooks": r.stats.vetoed_hooks,
+            "vetoed_fires": r.stats.vetoed_fires,
+            "predict_clamped": r.stats.predict_clamped,
             "guarded_inputs": r.stats.guarded_inputs,
             "deaths": r.stats.deaths,
         },
@@ -277,8 +286,9 @@ pub fn report_json(r: &RunReport) -> serde_json::Value {
             "wire": sum_json(r.latency.wire.summary()),
             "slots": {"decisions": r.latency.slots.decisions, "first_slot": r.latency.slots.in_first_slot, "missed_first_slot": r.latency.slots.missed_first_slot, "as_predicted": r.latency.slots.as_predicted, "later_than_predicted": r.latency.slots.later_than_predicted, "earlier_than_predicted": r.latency.slots.earlier_than_predicted},
         },
-        "input_margin": r.margin.map(|m| serde_json::json!({
+        "input_margin": r.margin.as_ref().map(|m| serde_json::json!({
             "count": m.count, "late": m.late_count, "late_fraction": m.late_fraction, "p50_ms": m.p50_ms, "p99_ms": m.p99_ms, "min_ms": m.min_ms,
+            "margin_ms": m.margin_ms, "margin_changes": m.margin_changes, "adaptive": m.adaptive, "margin_stable_ms": m.margin_stable_ms, "margin_changes_last_30s": m.margin_changes_last_30s, "superseded_decisions": m.superseded_decisions, "time_at_cap_ms": m.time_at_margin_ms.last().copied().unwrap_or(0),
         })),
         "events": r.events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
     })

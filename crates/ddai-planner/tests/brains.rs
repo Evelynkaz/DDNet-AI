@@ -181,6 +181,49 @@ fn planner_brain_fixed_mode_is_deterministic() {
     assert_eq!(fixed_planner().name(), "planner-normal-fixed");
 }
 
+/// Task 4.1b (review F8): a spared tee handed over through `LiveContext::spare_ids` is never planned
+/// against as the target, whatever the caller's observation says; the same brain still plans normally
+/// against a real target with that tee standing in its world as a body.
+#[test]
+fn planner_brain_never_targets_a_spare_id_and_still_plans_with_it_in_the_world() {
+    let map = room();
+    let world = world_with(&map, &[(0, 10.5, 9.5), (1, 16.5, 9.5), (2, 12.5, 9.5)]);
+    let spare_pos = [(world.cores.get(2).unwrap().pos, world.cores.get(2).unwrap().vel)];
+    let ctx = |ids: &'static [i32]| ddai_brain::LiveContext {
+        spares: &spare_pos,
+        spare_ids: ids,
+        ..Default::default()
+    };
+    // The "target" is the spared tee: no plan, the previous (empty) input is repeated.
+    let mut b = fixed_planner();
+    reset(&mut b, &map, 0, 3);
+    b.set_live_context(&ctx(&[2]));
+    let against_spare = b.decide_in(&observation(&world, &map, 0, 2), Some(&view(&world, 0)));
+    assert_eq!(
+        against_spare,
+        action_from_input(&empty_input()),
+        "no plan against a spared tee"
+    );
+    // A real target with the spared body in the world: planned (the search ran).
+    let mut b = fixed_planner();
+    reset(&mut b, &map, 0, 3);
+    b.set_live_context(&ctx(&[2]));
+    let _ = b.decide_in(&observation(&world, &map, 0, 1), Some(&view(&world, 0)));
+    assert_eq!(
+        b.stats().searched,
+        1,
+        "the search ran with the spared body in the world"
+    );
+    // The ids are replaced on every call, not accumulated.
+    b.set_live_context(&ctx(&[]));
+    let _ = b.decide_in(&observation(&world, &map, 0, 2), Some(&view(&world, 0)));
+    assert_eq!(
+        b.stats().decisions,
+        2,
+        "with no spare ids tee 2 is an ordinary target again"
+    );
+}
+
 #[test]
 fn planner_brain_works_without_a_view_and_reports_telemetry() {
     let map = room();

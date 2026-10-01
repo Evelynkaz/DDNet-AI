@@ -24,6 +24,54 @@
 
 use std::time::Duration;
 
+/// Decisions the [`DecisionEstimator`] looks back over (about 2.5 s at 25 snapshots/s).
+pub const ESTIMATE_WINDOW: usize = 64;
+
+/// A conservative estimate of how long the next decision takes (task 4.1b): a **rolling quantile**
+/// of the last [`ESTIMATE_WINDOW`] decision times, not a mean. Decision time is skewed and bimodal
+/// (the hybrid brain usually needs ~6 ms but extends to 15 ms in danger), and the estimate only
+/// picks the input slot a decision is aimed at: a mean sits between the modes and is wrong for both,
+/// where a high quantile errs towards one more tick of latency that the driver's hold (the
+/// decision goes out for exactly the tick it was predicted for) makes harmless. Allocation-free.
+#[derive(Debug, Clone)]
+pub struct DecisionEstimator {
+    ring: [u32; ESTIMATE_WINDOW],
+    len: usize,
+    next: usize,
+    quantile: f64,
+    initial: Duration,
+}
+
+impl DecisionEstimator {
+    pub fn new(quantile: f64, initial: Duration) -> Self {
+        DecisionEstimator {
+            ring: [0; ESTIMATE_WINDOW],
+            len: 0,
+            next: 0,
+            quantile: quantile.clamp(0.0, 1.0),
+            initial,
+        }
+    }
+
+    pub fn push(&mut self, d: Duration) {
+        self.ring[self.next] = u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
+        self.next = (self.next + 1) % ESTIMATE_WINDOW;
+        self.len = (self.len + 1).min(ESTIMATE_WINDOW);
+    }
+
+    /// The estimate: `initial` before the first decision, the quantile after.
+    pub fn estimate(&self) -> Duration {
+        if self.len == 0 {
+            return self.initial;
+        }
+        let mut v = [0u32; ESTIMATE_WINDOW];
+        v[..self.len].copy_from_slice(&self.ring[..self.len]);
+        let v = &mut v[..self.len];
+        v.sort_unstable();
+        Duration::from_micros(u64::from(v[((self.len - 1) as f64 * self.quantile).ceil() as usize]))
+    }
+}
+
 /// Samples kept per series.
 pub const RING: usize = 1 << 15;
 

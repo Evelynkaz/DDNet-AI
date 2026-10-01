@@ -878,12 +878,174 @@ struct InputUpdate {
     decided_from: Option<(Instant, Option<InputTag>)>,
 }
 
+/// Task 4.1b: a tagged decision waiting for its intended tick.
+#[derive(Debug, Clone, Copy)]
+struct PendingInput {
+    input: PlayerInput,
+    arrived: Instant,
+    tag: InputTag,
+}
+
+/// A decision is never held more than this many ticks past the next send (a tag from a stale or
+/// confused caller must not freeze the input for long). **A tag farther ahead than this is adopted
+/// at once, i.e. early**, so a caller must keep its tags within it: the live bot clamps its decision
+/// estimate below one snapshot period (`ddai-bot`'s `prediction_target`), which bounds the tag
+/// distance at 2-3 ticks, and a test pins that bound to this constant.
+pub const MAX_HOLD_TICKS: i32 = 6;
+
+/// The fire counter after a decision whose level is `action_fire` (`true` = a fresh press), given the
+/// counter last on the wire: released before, a press adds 1; held, it adds 2 (release then press);
+/// `false` while held adds 1 (release); `false` while released changes nothing. The counter stays
+/// constant in every repeated `NETMSG_INPUT` until the next decision, so a press is counted once.
+pub fn next_fire_counter(prev: i32, action_fire: bool) -> i32 {
+    let held = prev & 1 != 0;
+    match (action_fire, held) {
+        (true, true) => prev + 2,
+        (true, false) | (false, true) => prev + 1,
+        (false, false) => prev,
+    }
+}
+
 /// Task 4.1: the driver-side input state — the input every `NETMSG_INPUT` embeds and, until the
 /// next send, the arrival time of the snapshot it was decided from.
+///
+/// Task 4.1b (hold until the intended tick): a decision that carries an [`InputTag`] waits in
+/// `pending` until the next `NETMSG_INPUT` is for `tag.expected_tick` or later, then becomes
+/// `input`. Until then the previous input goes out again — exactly what the caller's in-flight
+/// model assumed when it predicted the world to the intended tick. A decision that is already late
+/// (its tick has passed) is adopted at once, and a decision without a tag always is.
+///
+/// **A press adopted more than [`MAX_LATE_PRESS_TICKS`] after its tick is dropped** (review round 2,
+/// F6): the bot's hammer veto checked the swing for the tick the decision was aimed at (plus 2), so a
+/// decision that becomes ready later than that goes out **without** its press (even parity, no new
+/// fire), and is counted. A swing can therefore never leave at a tick the veto did not look at.
+///
+/// Public so the bot's scenario tests can run its decisions through the real adoption rules.
 #[derive(Debug, Clone, Copy)]
-struct InputState {
+pub struct InputState {
     input: PlayerInput,
     decided_from: Option<(Instant, Option<InputTag>)>,
+    pending: Option<PendingInput>,
+    /// Tagged decisions replaced by a newer one before their tick came: they never went out.
+    superseded: u64,
+    /// Decisions adopted more than [`MAX_LATE_PRESS_TICKS`] late whose fire press was dropped.
+    late_presses_dropped: u64,
+}
+
+/// A decision adopted more than this many ticks after its `expected_tick` loses its fire press: the
+/// hammer veto covers the intended tick and 2 ticks on (`ddai-bot`'s `hammer_veto`).
+pub const MAX_LATE_PRESS_TICKS: i32 = 2;
+
+impl Default for InputState {
+    fn default() -> Self {
+        InputState::new()
+    }
+}
+
+impl InputState {
+    /// The neutral starting state.
+    pub fn new() -> Self {
+        InputState {
+            input: default_player_input(),
+            decided_from: None,
+            pending: None,
+            superseded: 0,
+            late_presses_dropped: 0,
+        }
+    }
+
+    /// The input every `NETMSG_INPUT` embeds right now.
+    pub fn current(&self) -> PlayerInput {
+        self.input
+    }
+
+    /// Tagged decisions replaced before their tick came.
+    pub fn superseded(&self) -> u64 {
+        self.superseded
+    }
+
+    /// Decisions adopted too late whose press was dropped.
+    pub fn late_presses_dropped(&self) -> u64 {
+        self.late_presses_dropped
+    }
+
+    /// Hands over a decision of the live bot (`Client::set_input_for_snapshot`).
+    pub fn decide(&mut self, input: PlayerInput, arrived: Instant, tag: Option<InputTag>) {
+        self.receive(InputUpdate {
+            input,
+            decided_from: Some((arrived, tag)),
+        });
+    }
+
+    /// Makes `input` the one every `NETMSG_INPUT` embeds from now on. For a decision of the live bot
+    /// (`from_bot`) the **fire counter is re-based on the counter last on the wire** (review F2c): the
+    /// bot's counter assumes every earlier decision was sent, but a decision replaced while it waited
+    /// never was, and its press would otherwise sneak out folded into the next counter value
+    /// (`CountInput` counts every odd value between two inputs). The decision's level is the parity of
+    /// its counter (odd = a fresh press), exactly what `ddai-bot`'s encoder produces. Only a decision
+    /// that is adopted can press, and every decision has passed the bot's hammer veto at its own tick.
+    fn set_current(&mut self, input: PlayerInput, from_bot: bool, press_allowed: bool) {
+        let prev_fire = self.input.fire;
+        self.input = input;
+        if from_bot {
+            self.input.fire = next_fire_counter(prev_fire, press_allowed && input.fire & 1 != 0);
+        }
+    }
+
+    /// Takes in what the caller handed over since the last look.
+    fn receive(&mut self, update: InputUpdate) {
+        match update.decided_from {
+            Some((arrived, Some(tag))) => {
+                // The newest decision wins, also over one that is still waiting.
+                if self.pending.is_some() {
+                    self.superseded += 1;
+                }
+                self.pending = Some(PendingInput {
+                    input: update.input,
+                    arrived,
+                    tag,
+                });
+            }
+            Some((arrived, None)) => {
+                if self.pending.take().is_some() {
+                    self.superseded += 1;
+                }
+                self.set_current(update.input, true, true);
+                self.decided_from = Some((arrived, None));
+            }
+            None => {
+                self.pending = None;
+                self.input = update.input;
+            }
+        }
+    }
+
+    /// Adopts the pending decision if the next `NETMSG_INPUT` (for tick `next_send_tick`, `None`
+    /// before the timing bootstrap) is at or past its intended tick.
+    pub fn adopt_if_due(&mut self, next_send_tick: Option<i32>) {
+        let Some(p) = self.pending else { return };
+        let due = match next_send_tick {
+            None => true,
+            Some(next) => p.tag.expected_tick <= next || p.tag.expected_tick > next + MAX_HOLD_TICKS,
+        };
+        if due {
+            let late = next_send_tick.is_some_and(|next| next - p.tag.expected_tick > MAX_LATE_PRESS_TICKS);
+            if late && p.input.fire & 1 != 0 {
+                self.late_presses_dropped += 1;
+            }
+            self.set_current(p.input, true, !late);
+            self.decided_from = Some((p.arrived, Some(p.tag)));
+            self.pending = None;
+        }
+    }
+}
+
+/// The session's margin summary plus the driver's own input statistics.
+fn margin_summary_of(session: &Session, input: &InputState) -> crate::timing::MarginSummary {
+    let mut s = session.margin_summary();
+    s.superseded_decisions = input.superseded;
+    s.late_presses_dropped = input.late_presses_dropped;
+    s
 }
 
 /// The real-time client — task acceptance criterion 1's public entry point.
@@ -1252,10 +1414,11 @@ fn run_one_connection(
         }
 
         while let Ok(update) = input_rx.try_recv() {
-            latest_input.input = update.input;
-            // The newest decision wins; its snapshot's arrival time is what the next send reports.
-            latest_input.decided_from = update.decided_from.or(latest_input.decided_from);
+            latest_input.receive(update);
         }
+        // Hold a tagged decision until the `NETMSG_INPUT` it was predicted for (see `InputState`).
+        let next_send_tick = (session.pred_tick() > 0).then_some(session.pred_tick() + 1);
+        latest_input.adopt_if_due(next_send_tick);
         session.set_input(latest_input.input);
 
         match socket.recv(&mut buf) {
@@ -1485,6 +1648,9 @@ fn run(
     let mut latest_input = InputState {
         input: default_player_input(),
         decided_from: None,
+        pending: None,
+        superseded: 0,
+        late_presses_dropped: 0,
     };
     let mut reconnect_attempt: u32 = 0;
     // Task 2.3b acceptance criterion 4: "a per-session counter of connection attempts ... logged"
@@ -1614,14 +1780,14 @@ fn run(
 
         match outcome {
             ConnectionOutcome::Stop => {
-                events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                 return;
             }
             ConnectionOutcome::KickedOrBanned => {
                 // CLAUDE.md/live-play policy: never auto-reconnect after a kick/ban (or any other
                 // peer-close reason `should_reconnect_after_peer_close` didn't recognise as
                 // transient — review finding F2).
-                events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                 events_tx.send(ClientEvent::GaveUp {
                     reason: "disconnected by the server (kick/ban) — not reconnecting".to_string(),
                     category: GaveUpCategory::KickedOrBanned,
@@ -1630,7 +1796,7 @@ fn run(
             }
             ConnectionOutcome::ProtocolViolation => {
                 // Review finding F4: final, same shape as `KickedOrBanned` above — never retried.
-                events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                 events_tx.send(ClientEvent::GaveUp {
                     reason: "local protocol violation — not reconnecting".to_string(),
                     category: GaveUpCategory::ProtocolViolation,
@@ -1641,7 +1807,7 @@ fn run(
                 // Task 2.3b: the watchdog fired *inside* this connection attempt (still mid
                 // handshake, or online but never in-game) rather than between attempts — same
                 // final shape as `KickedOrBanned`/`ProtocolViolation` above.
-                events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                 give_up_on_watchdog(
                     &events_tx,
                     target,
@@ -1675,7 +1841,7 @@ fn run(
                         requests = server_reconnects_pending,
                         "server requested reconnect again before we were ever in game: reconnect loop, giving up (no further retries)"
                     );
-                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     events_tx.send(ClientEvent::GaveUp {
                         reason: format!(
                             "reconnect loop: the server sent reconnect@ddnet.org {} times without the session ever reaching in game ({} connection attempt(s))",
@@ -1688,7 +1854,7 @@ fn run(
                 if attempt_cap_reached(ever_in_game, connection_attempt) {
                     session.disconnect(Some("driver: attempt budget exhausted"));
                     send_all(&socket, session.flush(Instant::now().duration_since(start)));
-                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     give_up_on_attempt_cap(&events_tx, target, connection_attempt);
                     return;
                 }
@@ -1710,7 +1876,7 @@ fn run(
                 if redirects_followed >= 1 {
                     session.disconnect(Some("driver: refusing a second redirect"));
                     send_all(&socket, session.flush(Instant::now().duration_since(start)));
-                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     events_tx.send(ClientEvent::RedirectRefused {
                         reason: "refusing a second redirect in the same session (loop protection)".to_string(),
                     });
@@ -1723,7 +1889,7 @@ fn run(
                 if attempt_cap_reached(ever_in_game, connection_attempt) {
                     session.disconnect(Some("driver: attempt budget exhausted"));
                     send_all(&socket, session.flush(Instant::now().duration_since(start)));
-                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     give_up_on_attempt_cap(&events_tx, target, connection_attempt);
                     return;
                 }
@@ -1743,7 +1909,7 @@ fn run(
                 if attempt_cap_reached(ever_in_game, connection_attempt) {
                     session.disconnect(Some("driver: attempt budget exhausted"));
                     send_all(&socket, session.flush(Instant::now().duration_since(start)));
-                    events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                    events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     give_up_on_attempt_cap(&events_tx, target, connection_attempt);
                     return;
                 }
@@ -1777,7 +1943,7 @@ fn run(
                     }
                     match control_rx.recv_timeout(remaining.min(WATCHDOG_POLL_INTERVAL)) {
                         Ok(Control::Disconnect) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            events_tx.send(ClientEvent::MarginSummary(session.margin_summary()));
+                            events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                             return;
                         }
                         // Between connections there is nothing to send them on: dropped.
@@ -1876,5 +2042,187 @@ mod give_up_message_tests {
         assert!(!attempt_cap_reached(false, 1));
         assert!(attempt_cap_reached(false, 2));
         assert!(!attempt_cap_reached(true, 50));
+    }
+
+    fn fire_input(fire: i32) -> PlayerInput {
+        PlayerInput {
+            fire,
+            ..default_player_input()
+        }
+    }
+
+    fn fresh_state() -> InputState {
+        InputState::new()
+    }
+
+    fn tag(expected: i32) -> InputTag {
+        InputTag {
+            first_slot: 101,
+            expected_tick: expected,
+        }
+    }
+
+    fn tagged(fire: i32, expected: i32) -> InputUpdate {
+        InputUpdate {
+            input: fire_input(fire),
+            decided_from: Some((Instant::now(), Some(tag(expected)))),
+        }
+    }
+
+    /// Task 4.1b: a tagged decision waits for the `NETMSG_INPUT` of its intended tick.
+    #[test]
+    fn a_tagged_decision_is_held_until_its_intended_tick() {
+        let mut st = fresh_state();
+        st.receive(tagged(1, 103));
+        // The next sends are for 101 and 102: the old input keeps going out.
+        for next in [101, 102] {
+            st.adopt_if_due(Some(next));
+            assert_eq!(st.input.fire, 0, "held at {next}");
+            assert!(st.decided_from.is_none(), "no latency report yet");
+        }
+        st.adopt_if_due(Some(103));
+        assert_eq!(st.input.fire, 1, "adopted for its own tick");
+        assert_eq!(st.decided_from.map(|d| d.1.map(|t| t.expected_tick)), Some(Some(103)));
+        assert!(st.pending.is_none());
+        assert_eq!(st.superseded, 0);
+    }
+
+    #[test]
+    fn a_late_untagged_or_unbootstrapped_decision_is_adopted_at_once() {
+        // Late: its tick has passed.
+        let mut st = fresh_state();
+        st.receive(tagged(1, 102));
+        st.adopt_if_due(Some(104));
+        assert_eq!(st.input.fire, 1);
+        // Before the two-snapshot bootstrap there is no tick to wait for.
+        let mut st = fresh_state();
+        st.receive(tagged(1, 150));
+        st.adopt_if_due(None);
+        assert_eq!(st.input.fire, 1);
+        // No tag: immediate, as before 4.1b.
+        let mut st = fresh_state();
+        st.receive(InputUpdate {
+            input: fire_input(1),
+            decided_from: Some((Instant::now(), None)),
+        });
+        assert_eq!(st.input.fire, 1);
+        // Plain `set_input` (recorders, demos): the counter is theirs and goes out untouched.
+        let mut st = fresh_state();
+        st.receive(InputUpdate {
+            input: fire_input(3),
+            decided_from: None,
+        });
+        assert_eq!(st.input.fire, 3);
+    }
+
+    /// Review F2a: a tag farther ahead than `MAX_HOLD_TICKS` is the one way to go out early; the bot
+    /// never produces one (its own test pins its tag distance to this constant).
+    #[test]
+    fn a_tag_within_max_hold_ticks_is_never_adopted_early_and_a_farther_one_is_the_documented_exception() {
+        let mut st = fresh_state();
+        st.receive(tagged(1, 101 + MAX_HOLD_TICKS));
+        st.adopt_if_due(Some(101));
+        assert_eq!(st.input.fire, 0, "exactly MAX_HOLD_TICKS ahead is still held");
+        let mut st = fresh_state();
+        st.receive(tagged(1, 101 + MAX_HOLD_TICKS + 1));
+        st.adopt_if_due(Some(101));
+        assert_eq!(st.input.fire, 1, "beyond it: adopted at once (documented)");
+    }
+
+    /// Review F2b: a decision replaced before its tick is counted, and only that.
+    #[test]
+    fn the_newest_decision_replaces_one_still_waiting_and_it_is_counted() {
+        let mut st = fresh_state();
+        st.receive(tagged(1, 104));
+        st.receive(tagged(1, 105));
+        assert_eq!(st.superseded, 1);
+        st.adopt_if_due(Some(104));
+        assert_eq!(st.input.fire, 0, "the older one is gone, the newer waits for 105");
+        st.adopt_if_due(Some(105));
+        assert_eq!(st.input.fire, 1);
+        // A decision adopted in time and then followed by the next one is not superseded.
+        st.receive(tagged(0, 107));
+        st.adopt_if_due(Some(107));
+        assert_eq!(st.superseded, 1);
+        // An untagged decision that overtakes a waiting one counts too.
+        st.receive(tagged(1, 110));
+        st.receive(InputUpdate {
+            input: fire_input(1),
+            decided_from: Some((Instant::now(), None)),
+        });
+        assert_eq!(st.superseded, 2);
+    }
+
+    /// Review F2c: a press that was decided but never sent cannot sneak out folded into the next
+    /// counter value; the counter is re-based on the one last on the wire.
+    #[test]
+    fn a_replaced_decisions_press_never_goes_out() {
+        // A: a press (counter 1 in the bot's chain), replaced by B: released (counter 2 in its chain).
+        // Without the re-basing the wire would jump 0 -> 2 and CountInput would count one press.
+        let mut st = fresh_state();
+        st.receive(tagged(1, 104));
+        st.receive(tagged(2, 106));
+        st.adopt_if_due(Some(104));
+        st.adopt_if_due(Some(106));
+        assert_eq!(st.input.fire, 0, "no press reaches the wire: 0 -> 0");
+        // The same when B presses again: exactly one press (0 -> 1), not two.
+        let mut st = fresh_state();
+        st.receive(tagged(1, 104));
+        st.receive(tagged(3, 106));
+        st.adopt_if_due(Some(106));
+        assert_eq!(st.input.fire, 1);
+        // Held on the wire and the next decision presses again: release + press (+2), as the encoder does.
+        st.receive(tagged(3, 108));
+        st.adopt_if_due(Some(108));
+        assert_eq!(st.input.fire, 3);
+        // ... and releases (+1).
+        st.receive(tagged(4, 110));
+        st.adopt_if_due(Some(110));
+        assert_eq!(st.input.fire, 4);
+        // Without any replacement the wire follows the bot's own chain exactly.
+        let mut st = fresh_state();
+        let mut bot_chain = 0;
+        for (i, press) in [true, true, false, false, true, false].into_iter().enumerate() {
+            bot_chain = next_fire_counter(bot_chain, press);
+            st.receive(tagged(bot_chain, 101 + i as i32));
+            st.adopt_if_due(Some(101 + i as i32));
+            assert_eq!(st.input.fire, bot_chain, "decision {i}");
+        }
+    }
+
+    /// Review round 2, F6: a decision adopted more than 2 ticks after its tick goes out without its press.
+    #[test]
+    fn a_decision_adopted_more_than_two_ticks_late_loses_its_press_and_is_counted() {
+        // On time and up to 2 ticks late: the press goes.
+        for late in 0..=MAX_LATE_PRESS_TICKS {
+            let mut st = fresh_state();
+            st.receive(tagged(1, 104));
+            st.adopt_if_due(Some(104 + late));
+            assert_eq!(st.input.fire, 1, "{late} ticks late");
+            assert_eq!(st.late_presses_dropped, 0);
+        }
+        // 3 ticks late: no press, even parity, nothing new fired; counted.
+        let mut st = fresh_state();
+        st.receive(tagged(1, 104));
+        st.adopt_if_due(Some(107));
+        assert_eq!(st.input.fire, 0, "no press");
+        assert_eq!(st.late_presses_dropped, 1);
+        // Held on the wire: the late press-less decision releases (+1), it never presses again.
+        let mut st = fresh_state();
+        st.receive(tagged(1, 104));
+        st.adopt_if_due(Some(104));
+        assert_eq!(st.input.fire, 1);
+        st.receive(tagged(3, 106));
+        st.adopt_if_due(Some(110));
+        assert_eq!(st.input.fire, 2, "released, no new press");
+        // A late decision that wanted no press is not a dropped press.
+        let mut st = fresh_state();
+        st.receive(tagged(0, 104));
+        st.adopt_if_due(Some(110));
+        assert_eq!((st.input.fire, st.late_presses_dropped), (0, 0));
+        // The next on-time decision presses normally again.
+        st.receive(tagged(1, 112));
+        st.adopt_if_due(Some(112));
+        assert_eq!(st.input.fire, 1);
     }
 }

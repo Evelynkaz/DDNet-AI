@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use ddai_brain::{Action, Brain, IVec2, LiveContext, Observation, ResetContext, WorldView};
 use ddai_client::LiveWorldSnapshot;
 use ddai_net::generated::objects::PlayerInput as NetInput;
-use ddai_physics::core::{MAX_CLIENTS, PlayerInput as PhysInput};
+use ddai_physics::core::{MAX_CLIENTS, PlayerInput as PhysInput, WEAPON_HAMMER};
 use ddai_physics::map::MapData;
 use ddai_physics::vmath::Vec2;
 use ddai_planner::physics_adapter::from_ddnet_input;
@@ -62,7 +62,7 @@ use crate::brains::BrainKind;
 use crate::consts::*;
 use crate::hooks::{HookContext, Hooks, NavStep};
 use crate::input::InputEncoder;
-use crate::latency::LatencyStats;
+use crate::latency::{DecisionEstimator, LatencyStats};
 use crate::mapgrid::MapGrid;
 use crate::planning::PlanScratch;
 use crate::players::{PlayerTable, Salt, Tag};
@@ -125,6 +125,9 @@ pub struct BotConfig {
     /// Run the seal searches on a worker thread (the live runner does; the sans-IO scenario tests
     /// keep the deterministic synchronous search). See `seal_worker`.
     pub async_seal: bool,
+    /// The quantile of recent decision times used as the estimate that picks the input slot
+    /// (task 4.1b; 0.9 = p90).
+    pub estimate_quantile: f64,
 }
 
 impl Default for BotConfig {
@@ -140,6 +143,7 @@ impl Default for BotConfig {
             max_predict_ticks: MAX_PREDICT_TICKS,
             max_join_attempts: 10,
             async_seal: false,
+            estimate_quantile: DEFAULT_ESTIMATE_QUANTILE,
         }
     }
 }
@@ -186,6 +190,13 @@ pub enum BotEvent {
     JoinGaveUp {
         tick: i32,
     },
+    /// The prediction horizon the decision wanted exceeded the cap (reported at most once per 10 s):
+    /// the bot decides on a world that stops short of the tick its input takes effect on.
+    PredictionClamped {
+        tick: i32,
+        wanted_ahead: i32,
+        cap: i32,
+    },
     TickReset {
         from: i32,
         to: i32,
@@ -218,6 +229,8 @@ pub struct BotStats {
     pub guarded_inputs: u64,
     pub deaths: u64,
     pub ticks_resets: u64,
+    /// Decisions whose prediction horizon was cut by the cap (a very long RTT; `PredictionClamped`).
+    pub predict_clamped: u64,
 }
 
 /// The state of the bot for telemetry / the web bridge.
@@ -290,17 +303,21 @@ pub struct Bot {
     played_on_map: bool,
     stop: Option<StopReason>,
     last_aim: (i32, i32),
+    /// The tick of the last `PredictionClamped` event (rate limit).
+    last_clamp_event: i32,
     last_sent: PhysInput,
     /// Snapshot arrival -> this decision started (the channel hop), set by `on_snapshot`.
     queue_delay: Duration,
-    /// Smoothed duration of a decision (bot thread, brain included): decides whether this snapshot's
-    /// decision makes the driver's next input or the one after (see `prediction_target`).
+    /// Conservative (rolling-quantile) duration of a decision, bot thread and brain included: decides
+    /// which input slot this snapshot's decision is aimed at (see `prediction_target`).
     est_decision: Duration,
+    estimator: DecisionEstimator,
 
     // scratch (capacities fixed up front)
     in_flight: Vec<(i32, PhysInput)>,
     keep: Box<[bool; MAX_CLIENTS]>,
     spares: Vec<(Vec2<f32>, Vec2<f32>)>,
+    spare_ids: Vec<i32>,
     spare_tees: Vec<Tee>,
 
     stats: BotStats,
@@ -335,13 +352,16 @@ impl Bot {
             join: JoinState::default(),
             played_on_map: false,
             stop: None,
+            last_clamp_event: i32::MIN / 2,
             last_aim: (0, -1),
             last_sent: PhysInput::default(),
             queue_delay: Duration::ZERO,
             est_decision: Duration::from_millis(1),
+            estimator: DecisionEstimator::new(cfg.estimate_quantile, Duration::from_millis(1)),
             in_flight: Vec::with_capacity(64),
             keep: Box::new([false; MAX_CLIENTS]),
             spares: Vec::with_capacity(MAX_CLIENTS),
+            spare_ids: Vec::with_capacity(MAX_CLIENTS),
             spare_tees: Vec::with_capacity(MAX_CLIENTS),
             stats: BotStats::default(),
             latency: LatencyStats::default(),
@@ -566,8 +586,10 @@ impl Bot {
             self.stats.decisions += 1;
             let total = started.elapsed();
             self.latency.record(total, brain_time);
-            // Exponential smoothing (0.2): slow brains shift the estimate within a second.
-            self.est_decision = self.est_decision.mul_f32(0.8) + total.mul_f32(0.2);
+            // A rolling high quantile, not a mean (task 4.1b): the driver holds the decision until
+            // the tick it was aimed at, so a conservative estimate only costs latency.
+            self.estimator.push(total);
+            self.est_decision = self.estimator.estimate();
         }
         out
     }
@@ -613,12 +635,14 @@ impl Bot {
             played_on_map,
             stop,
             last_aim,
+            last_clamp_event,
             last_sent,
             queue_delay,
             est_decision,
             in_flight,
             keep,
             spares,
+            spare_ids,
             spare_tees,
             stats,
             events,
@@ -846,11 +870,29 @@ impl Bot {
         } else {
             let target_tee = tees.get(target).copied();
             compute_keep(&own, target, tees, cfg, &|t| is_spared(t, tick, players, clock), keep);
-            let to_tick = prediction_target(
+            let prediction = prediction_target(
                 snap,
                 cfg.max_predict_ticks,
                 *queue_delay + *est_decision + DRIVER_PICKUP,
             );
+            let to_tick = prediction.to_tick;
+            if prediction.clamped() {
+                // The horizon wanted is beyond the cap: the decision is made on a world that stops short
+                // of the tick it will take effect on (a very long RTT). Counted always, said at most
+                // once per 10 s.
+                stats.predict_clamped += 1;
+                if tick - *last_clamp_event >= PREDICT_CLAMP_EVENT_EVERY_TICKS || tick < *last_clamp_event {
+                    *last_clamp_event = tick;
+                    push_event(
+                        events,
+                        BotEvent::PredictionClamped {
+                            tick,
+                            wanted_ahead: prediction.wanted_ahead,
+                            cap: prediction.cap,
+                        },
+                    );
+                }
+            }
             expected_tick = Some(to_tick + 1);
             sent.in_flight(tick, to_tick, in_flight);
             // The observation's target is a tee that is still in the world (it may have just died).
@@ -858,6 +900,7 @@ impl Bot {
             let predicted = live.predict_local_observation(to_tick, in_flight, keep, target_id, obs);
 
             spares.clear();
+            spare_ids.clear();
             spare_tees.clear();
             for t in tees.iter() {
                 if t.id != own.id
@@ -866,6 +909,7 @@ impl Bot {
                     && is_spared(t, tick, players, clock)
                 {
                     spares.push((t.pos, t.vel));
+                    spare_ids.push(t.id);
                     spare_tees.push(*t);
                 }
             }
@@ -884,6 +928,7 @@ impl Bot {
             };
             brain.set_live_context(&LiveContext {
                 spares: spares.as_slice(),
+                spare_ids: spare_ids.as_slice(),
                 travel_goal,
             });
             let view = WorldView {
@@ -1021,8 +1066,34 @@ fn join_request(
 /// What the driver adds between `Client::set_input` and the socket when the input is otherwise ready
 /// (one poll round, `POLL_TIMEOUT`).
 const DRIVER_PICKUP: Duration = Duration::from_millis(2);
+/// `PredictionClamped` is reported at most this often (10 s of game ticks).
+const PREDICT_CLAMP_EVENT_EVERY_TICKS: i32 = 500;
 /// One server tick.
 const TICK: Duration = Duration::from_millis(20);
+
+/// One snapshot period (25 Hz).
+const SNAPSHOT_PERIOD: Duration = Duration::from_millis(40);
+
+/// Never predict farther than this many ticks past the snapshot, whatever the RTT (a 1.5 s horizon;
+/// `LiveWorld` itself stops at 3 s).
+pub const MAX_PREDICT_TICKS_ABSOLUTE: i32 = 75;
+
+/// What [`prediction_target`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Prediction {
+    /// The tick the world is predicted to.
+    to_tick: i32,
+    /// The horizon the decision wanted (`to_tick` before the cap) minus the snapshot tick.
+    wanted_ahead: i32,
+    /// The cap on the horizon in force, in ticks.
+    cap: i32,
+}
+
+impl Prediction {
+    fn clamped(&self) -> bool {
+        self.wanted_ahead > self.cap
+    }
+}
 
 /// The tick the prediction must reach (see the module docs): the predicted tick of the last input the
 /// driver sent — plus one more for every input that will go out *before* this decision is ready. The
@@ -1030,7 +1101,18 @@ const TICK: Duration = Duration::from_millis(20);
 /// be ready (`ready_in` after arrival: channel hop + estimated decision time + driver pickup) only
 /// after that goes out with the tick after, so the world must be predicted one tick further, and so on.
 /// Before the driver's two-snapshot bootstrap (`pred_tick == 0`) a 2-tick guess.
-fn prediction_target(snap: &LiveWorldSnapshot, max_ahead: i32, ready_in: Duration) -> i32 {
+///
+/// **`ready_in` is clamped below one snapshot period** (review F2a): a decision slower than that is
+/// replaced by the next snapshot's before its tick comes anyway, and an estimate inflated by a stall
+/// must not aim a tag farther ahead than the driver's `MAX_HOLD_TICKS` (the one way a decision could go
+/// out early). With it the tag is at most two ticks past the next input.
+///
+/// **The horizon cap is RTT-aware** (review residual): `max_ahead` (12 ticks) is the floor, but when
+/// the driver's `pred_tick` is already farther ahead of the snapshot (a long RTT: `pred_tick - tick`
+/// is about the RTT in ticks plus the margin) the cap follows it plus the decision's own slots, up to
+/// [`MAX_PREDICT_TICKS_ABSOLUTE`], so a 200+ ms RTT no longer under-predicts.
+fn prediction_target(snap: &LiveWorldSnapshot, max_ahead: i32, ready_in: Duration) -> Prediction {
+    let ready_in = ready_in.min(SNAPSHOT_PERIOD - Duration::from_millis(1));
     let want = if snap.pred_tick > 0 {
         let first = snap.next_input_in.unwrap_or(Duration::ZERO);
         let missed = if ready_in <= first {
@@ -1043,15 +1125,33 @@ fn prediction_target(snap: &LiveWorldSnapshot, max_ahead: i32, ready_in: Duratio
     } else {
         snap.tick + 2
     };
-    want.clamp(snap.tick, snap.tick + max_ahead)
+    let pred_ahead = if snap.pred_tick > 0 {
+        snap.pred_tick - snap.tick
+    } else {
+        0
+    };
+    // The floor, or the driver's own lead plus the most a decision can miss (2 inputs) and one tick.
+    let cap = max_ahead
+        .max(pred_ahead + 3)
+        .min(MAX_PREDICT_TICKS_ABSOLUTE.max(max_ahead));
+    Prediction {
+        to_tick: want.clamp(snap.tick, snap.tick + cap),
+        wanted_ahead: want - snap.tick,
+        cap,
+    }
 }
 
 /// Fills `keep` with the tees the brain gets: the target, everyone roped to us, and the nearest
-/// others within the threat radius up to `max_local_others`. **Spared tees** (friends, ignored,
-/// out of game, AFK) are not given to the brain unless roped to us (review round 1, F1): a brain
-/// that models every tee in its world as an opponent — the hybrid's threat model — would plan
-/// against, and swing at, someone it must leave alone. They reach the brain as
-/// `LiveContext::spares` instead.
+/// others within the threat radius up to `max_local_others`.
+///
+/// **Spared tees** (friends, ignored, out of game, AFK) are counted **separately** (task 4.1b, review
+/// F8; round 1's F1 had left them out entirely): the nearest [`MAX_SPARE_BODIES`] of them within
+/// [`SPARE_BODY_RANGE_PX`] are kept in the world as *physical bodies*, so the prediction simulates
+/// bumping into them, pushing them and being pulled by a rope that lands on them (collision and
+/// hooking other players are on by default). They do not use up `max_local_others` slots, so a crowd
+/// of friends cannot push opponents out (and the 8+-tee search collapse cannot come back: at most
+/// `1 + 5 + 3` other tees); a spared tee roped to us is always kept and counts as roped. The brain
+/// is told who they are through `LiveContext::spare_ids` and must not treat them as opponents.
 fn compute_keep(
     own: &Tee,
     target: i32,
@@ -1103,6 +1203,62 @@ fn compute_keep(
     for &(_, id) in picked[..filled.min(room)].iter() {
         keep[id as usize] = true;
     }
+
+    // The spared bodies: the nearest few within contact range, by (distance, id) — for brains that
+    // honour `spare_ids` only (`BrainKind::honours_spare_ids`).
+    if !cfg.brain.honours_spare_ids() {
+        return;
+    }
+    // The directions we are likely to travel: our velocity, and toward the target (the plan's goal).
+    let mut lanes: [Option<(f32, f32)>; 2] = [None, None];
+    let speed = own.vel.x.hypot(own.vel.y);
+    if speed >= SPARE_BODY_MIN_SPEED {
+        lanes[0] = Some((own.vel.x / speed, own.vel.y / speed));
+    }
+    if let Some(tt) = tees.get(target) {
+        let (dx, dy) = (tt.pos.x - own.pos.x, tt.pos.y - own.pos.y);
+        let len = dx.hypot(dy);
+        if len > 1.0 {
+            lanes[1] = Some((dx / len, dy / len));
+        }
+    }
+    let mut bodies: [(f32, i32); MAX_SPARE_BODIES] = [(f32::INFINITY, -1); MAX_SPARE_BODIES];
+    for t in tees.iter() {
+        if t.id == own.id || t.id == target || keep[t.id as usize] || !spared(t) {
+            continue;
+        }
+        let d = dist(own.pos, t.pos);
+        let in_lane = d <= SPARE_BODY_AHEAD_PX && ahead_of_us(own, t, lanes);
+        if d > SPARE_BODY_RANGE_PX && !in_lane {
+            continue;
+        }
+        // Rank: tees in our lane first (the ones we will run into), then by distance — a tee straight
+        // ahead must not lose its body to side tees nearer in raw distance (review round 2, F8).
+        let rank = if in_lane { d } else { d + LANE_PRIORITY_OFFSET_PX };
+        // Insert into the sorted fixed array when it beats the worst entry.
+        let last = MAX_SPARE_BODIES - 1;
+        if (rank, t.id) < bodies[last] {
+            bodies[last] = (rank, t.id);
+            bodies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        }
+    }
+    for &(_, id) in bodies.iter().filter(|b| b.1 >= 0) {
+        keep[id as usize] = true;
+    }
+}
+
+/// Added to the distance of a spared tee outside our lane when ranking body candidates (more than any
+/// distance that can qualify).
+const LANE_PRIORITY_OFFSET_PX: f32 = 1000.0;
+
+/// Whether `t` lies in a lane `SPARE_BODY_LANE_PX` wide ahead of us along one of `lanes` (unit vectors).
+fn ahead_of_us(own: &Tee, t: &Tee, lanes: [Option<(f32, f32)>; 2]) -> bool {
+    let (rx, ry) = (t.pos.x - own.pos.x, t.pos.y - own.pos.y);
+    lanes.into_iter().flatten().any(|(dx, dy)| {
+        let along = rx * dx + ry * dy;
+        let lateral = (rx * dy - ry * dx).abs();
+        along > 0.0 && lateral <= SPARE_BODY_LANE_PX
+    })
 }
 
 /// The hook veto (`planAction` step 9, `bot.ts:4785`): drop a hook that would catch a spared tee
@@ -1129,7 +1285,7 @@ fn hook_veto(
 }
 
 /// The hammer veto (review round 1, F1, the second line of defence): withhold a fire press when the
-/// current weapon is the hammer and the swing would hit a spared tee. DDNet's `fire_hammer` geometry
+/// effective weapon is the hammer (F9, below) and the swing would hit a spared tee. DDNet's `fire_hammer` geometry
 /// (as derived in `ddai-planner`'s physics adapter and its `hammer_would_hit`): everybody within
 /// `1.5 * 28` px of the point `0.75 * 28 = 21` px in front of us along the aim is hit. The input
 /// takes effect `ahead` ticks after the snapshot, so the swing is checked from our predicted
@@ -1137,7 +1293,12 @@ fn hook_veto(
 /// and two more ticks on (as `hammer_would_hit` does): conservative on purpose. Walls are ignored
 /// (a miss through a wall is not worth the risk).
 fn hammer_veto(action: &mut Action, own: &Tee, own_then: Vec2<f32>, ahead: f32, spared: &[Tee]) -> bool {
-    if !action.fire || !own.holding_hammer() || spared.is_empty() {
+    // The *effective* weapon (review F9): DDNet spawns a tee with the gun active and `FireWeapon`
+    // switches to the wanted weapon before it fires, so in the 1-3 ticks after a spawn a press that
+    // asks for the hammer swings it while the snapshot still says "gun". The encoder always asks for
+    // the hammer unless the action names another weapon.
+    let swings_hammer = action.wanted_weapon.unwrap_or(WEAPON_HAMMER) == WEAPON_HAMMER || own.holding_hammer();
+    if !action.fire || !swings_hammer || spared.is_empty() {
         return false;
     }
     let (ax, ay) = (action.target.x as f32, action.target.y as f32);
@@ -1252,12 +1413,36 @@ mod tests {
         ));
     }
 
+    /// Review F9: the 1-3 ticks after a spawn the snapshot still says "gun", but the press asks for the
+    /// hammer (the default) and `FireWeapon` switches before it fires.
+    #[test]
+    fn the_hammer_veto_tests_the_effective_weapon_not_the_one_the_snapshot_reports() {
+        let mut me = tee_at(0, 1000.0, 0.0);
+        me.weapon = 1; // just spawned: the gun is active
+        let friend = [tee_at(1, 1030.0, 0.0)];
+        let mut a = swing_right(); // wanted_weapon: None = the hammer
+        assert!(hammer_veto(&mut a, &me, me.pos, 0.0, &friend), "the swing is withheld");
+        assert!(!a.fire);
+        let mut a = Action {
+            wanted_weapon: Some(WEAPON_HAMMER),
+            ..swing_right()
+        };
+        assert!(hammer_veto(&mut a, &me, me.pos, 0.0, &friend));
+        // The hammer in hand and no other weapon asked for: also a swing.
+        me.weapon = WEAPON_HAMMER;
+        let mut a = swing_right();
+        assert!(hammer_veto(&mut a, &me, me.pos, 0.0, &friend));
+    }
+
     #[test]
     fn the_hammer_veto_leaves_other_weapons_non_fire_and_zero_aim_alone() {
         let mut me = tee_at(0, 1000.0, 0.0);
         let friend = [tee_at(1, 1030.0, 0.0)];
-        me.weapon = 1; // the gun
-        let mut a = swing_right();
+        me.weapon = 1; // the gun in hand, and the action asks for the gun too: a bullet, no swing
+        let mut a = Action {
+            wanted_weapon: Some(1),
+            ..swing_right()
+        };
         assert!(!hammer_veto(&mut a, &me, me.pos, 0.0, &friend));
         me.weapon = 0;
         let mut a = Action {
@@ -1272,5 +1457,157 @@ mod tests {
         assert!(!hammer_veto(&mut a, &me, me.pos, 0.0, &friend), "no aim, no geometry");
         let mut a = swing_right();
         assert!(!hammer_veto(&mut a, &me, me.pos, 0.0, &[]), "nobody spared");
+    }
+
+    fn snap(tick: i32, pred_tick: i32, next_input_in_ms: Option<u64>) -> LiveWorldSnapshot {
+        LiveWorldSnapshot {
+            tick,
+            own_id: Some(0),
+            characters: Vec::new(),
+            tuning: ddai_net::tuning::DEFAULT_TUNE_PARAMS,
+            switch_states: Vec::new(),
+            teams: None,
+            projectiles: Vec::new(),
+            players: Vec::new(),
+            pred_tick,
+            next_input_in: next_input_in_ms.map(Duration::from_millis),
+            arrived: Instant::now(),
+        }
+    }
+
+    /// Review F2a: however slow the estimate, the tag stays within the driver's `MAX_HOLD_TICKS` of its
+    /// next input (so it is never adopted early), and a stall-inflated estimate is clamped below one
+    /// snapshot period.
+    #[test]
+    fn the_tag_distance_is_bounded_by_the_drivers_hold_limit_whatever_the_estimate() {
+        for first_ms in [0u64, 1, 5, 10, 19] {
+            for ready_ms in [0u64, 3, 12, 25, 39, 40, 100, 500, 60_000] {
+                let sn = snap(1000, 1005, Some(first_ms));
+                let p = prediction_target(&sn, 12, Duration::from_millis(ready_ms));
+                // The driver's next send is for pred_tick + 1 (at the earliest); the tag is to_tick + 1.
+                let distance = (p.to_tick + 1) - (sn.pred_tick + 1);
+                assert!(
+                    (0..=ddai_client::MAX_HOLD_TICKS).contains(&distance),
+                    "first {first_ms} ms, ready {ready_ms} ms: distance {distance}"
+                );
+                assert!(distance <= 2, "with the estimate below one snapshot period: {distance}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_enormous_ready_estimate_is_clamped_below_one_snapshot_period() {
+        let sn = snap(1000, 1005, Some(5));
+        let huge = prediction_target(&sn, 12, Duration::from_secs(10));
+        let at_period = prediction_target(&sn, 12, SNAPSHOT_PERIOD - Duration::from_millis(1));
+        assert_eq!(huge, at_period);
+    }
+
+    /// Residual: the horizon cap follows the driver's lead (a long RTT) instead of under-predicting.
+    #[test]
+    fn the_horizon_cap_follows_a_long_rtt_and_says_so_only_when_it_binds() {
+        // Normal link: pred_tick 5 ahead, cap 12: not clamped.
+        let p = prediction_target(&snap(1000, 1005, Some(15)), 12, Duration::from_millis(8));
+        assert_eq!((p.to_tick, p.clamped(), p.cap), (1005, false, 12));
+        // 400 ms RTT: the driver is 25 ticks ahead; the old fixed cap of 12 would have stopped at 1012.
+        let p = prediction_target(&snap(1000, 1025, Some(15)), 12, Duration::from_millis(8));
+        assert_eq!(p.to_tick, 1025, "predicted to the driver's tick");
+        assert!(!p.clamped());
+        assert_eq!(p.cap, 28);
+        // A decision that misses the next input is one tick farther, still within the RTT-aware cap.
+        let p = prediction_target(&snap(1000, 1025, Some(1)), 12, Duration::from_millis(8));
+        assert_eq!(p.to_tick, 1026);
+        // An absurd RTT hits the absolute cap and is reported.
+        let p = prediction_target(&snap(1000, 1200, Some(15)), 12, Duration::from_millis(8));
+        assert!(p.clamped());
+        assert_eq!(p.to_tick, 1000 + MAX_PREDICT_TICKS_ABSOLUTE);
+        // Before the bootstrap: the 2-tick guess.
+        let p = prediction_target(&snap(1000, 0, None), 12, Duration::from_millis(8));
+        assert_eq!(p.to_tick, 1002);
+    }
+
+    fn keep_with(own: Tee, target: Tee, others: &[Tee], spared: &[i32]) -> Vec<i32> {
+        let mut tees = TeeSet::new();
+        tees.set_for_test(own);
+        tees.set_for_test(target);
+        for t in others {
+            tees.set_for_test(*t);
+        }
+        let cfg = BotConfig::default(); // Planner honours spare_ids
+        let mut keep = [false; MAX_CLIENTS];
+        let spared = spared.to_vec();
+        compute_keep(&own, target.id, &tees, &cfg, &|t| spared.contains(&t.id), &mut keep);
+        (0..MAX_CLIENTS as i32)
+            .filter(|&i| keep[i as usize] && i != target.id)
+            .collect()
+    }
+
+    /// Review F3: a spared tee far ahead on our path is a body (the plan's rollouts reach 380 px), one
+    /// off the lane or behind us is not, and the cap of 3 holds.
+    #[test]
+    fn spared_tees_ahead_along_our_velocity_or_toward_the_target_are_bodies_up_to_380_px() {
+        let mut me = tee_at(0, 1000.0, 8.0); // running right
+        me.pos.y = 500.0;
+        let target = tee_at(1, 1900.0, 0.0);
+        let at = |id, dx: f32, dy: f32| {
+            let mut t = tee_at(id, 1000.0 + dx, 0.0);
+            t.pos.y = 500.0 + dy;
+            t
+        };
+        // 300 px ahead on the lane (velocity and target both to the right): kept.
+        assert_eq!(keep_with(me, target, &[at(2, 300.0, 10.0)], &[2]), vec![2]);
+        // 300 px behind: not. 300 px ahead but 150 px off the lane: not. 450 px ahead: beyond the reach.
+        assert!(keep_with(me, target, &[at(2, -300.0, 0.0)], &[2]).is_empty());
+        assert!(keep_with(me, target, &[at(2, 300.0, 150.0)], &[2]).is_empty());
+        assert!(keep_with(me, target, &[at(2, 450.0, 0.0)], &[2]).is_empty());
+        // Within 200 px it is kept whatever the direction (contact range).
+        assert_eq!(keep_with(me, target, &[at(2, -150.0, 0.0)], &[2]), vec![2]);
+        // Standing still, only the target's direction defines the lane: still toward the target.
+        let still = tee_at(0, 1000.0, 0.0);
+        let mut still = still;
+        still.pos.y = 500.0;
+        let mut tgt = tee_at(1, 1000.0, 0.0);
+        tgt.pos.y = 1300.0; // straight down
+        assert_eq!(
+            keep_with(still, tgt, &[at(2, 5.0, 300.0)], &[2]),
+            vec![2],
+            "toward the target"
+        );
+        assert!(
+            keep_with(still, tgt, &[at(2, 300.0, 0.0)], &[2]).is_empty(),
+            "not toward anything"
+        );
+        // The cap: five spared tees on the lane, three bodies.
+        let crowd: Vec<Tee> = (2..7).map(|i| at(i, 60.0 * i as f32, 0.0)).collect();
+        let kept = keep_with(me, target, &crowd, &[2, 3, 4, 5, 6]);
+        assert_eq!(kept, vec![2, 3, 4], "the nearest three");
+    }
+
+    /// Review round 2, F8: a tee straight ahead in our lane keeps its body slot against nearer side tees.
+    #[test]
+    fn a_spared_tee_in_our_lane_outranks_nearer_side_tees_for_a_body_slot() {
+        let mut me = tee_at(0, 1000.0, 8.0);
+        me.pos.y = 500.0;
+        let target = tee_at(1, 1900.0, 0.0);
+        let at = |id, dx: f32, dy: f32| {
+            let mut t = tee_at(id, 1000.0 + dx, 0.0);
+            t.pos.y = 500.0 + dy;
+            t
+        };
+        // Three side tees 120-150 px to the side (beyond the lane) and one 300 px straight ahead.
+        let others = [
+            at(2, 0.0, 120.0),
+            at(3, 0.0, 135.0),
+            at(4, 0.0, 150.0),
+            at(5, 300.0, 0.0),
+        ];
+        let kept = keep_with(me, target, &others, &[2, 3, 4, 5]);
+        assert!(kept.contains(&5), "the tee in the lane is a body: {kept:?}");
+        assert_eq!(kept.len(), MAX_SPARE_BODIES);
+        assert_eq!(
+            kept,
+            vec![2, 3, 5],
+            "and the two nearest side tees take the other slots"
+        );
     }
 }

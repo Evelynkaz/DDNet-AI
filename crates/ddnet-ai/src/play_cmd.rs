@@ -562,6 +562,9 @@ fn log_event(
                 p90_ms = ?s.p90_ms,
                 p99_ms = ?s.p99_ms,
                 max_ms = ?s.max_ms,
+                margin_ms = s.margin_ms,
+                margin_changes = s.margin_changes,
+                adaptive = s.adaptive,
                 "margin summary"
             );
         }

@@ -59,14 +59,12 @@ pub fn neutral_input(fire: i32) -> PlayerInput {
     }
 }
 
-/// The fire counter after `action_fire` given the counter we last sent (see the module docs).
+/// The fire counter after `action_fire` given the counter we last sent (see the module docs). The
+/// driver applies the same rule to the counter actually on the wire when it adopts a decision
+/// (`ddai_client::next_fire_counter`), so a decision that was replaced before it went out cannot leak
+/// its press into the next one (task 4.1b, review F2c).
 pub fn next_fire_counter(prev: i32, action_fire: bool) -> i32 {
-    let held = prev & 1 != 0;
-    match (action_fire, held) {
-        (true, true) => prev + 2,
-        (true, false) | (false, true) => prev + 1,
-        (false, false) => prev,
-    }
+    ddai_client::next_fire_counter(prev, action_fire)
 }
 
 impl InputEncoder {

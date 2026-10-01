@@ -147,6 +147,10 @@ pub struct ClientConfig {
     pub version_str: String,
     /// `cl_prediction_margin`-equivalent, milliseconds — see `crate::timing`.
     pub prediction_margin_ms: i32,
+    /// Task 4.1b (D-063): adapt the margin to the `NETMSG_INPUTTIMING` feedback
+    /// ([`crate::timing::MarginController`]), starting from `prediction_margin_ms`. `false` (the
+    /// default) keeps the fixed margin, exactly the real client's `cl_prediction_margin`.
+    pub adaptive_margin: bool,
     /// See [`DEFAULT_MAX_MAP_SIZE_BYTES`].
     pub max_map_size_bytes: usize,
     /// [`ddai_net::conn::Connection`]'s silence timeout — defaults to the real
@@ -246,6 +250,7 @@ impl Default for ClientConfig {
             ddnet_version: 20010,
             version_str: DEFAULT_VERSION_STR.to_string(),
             prediction_margin_ms: crate::timing::DEFAULT_PREDICTION_MARGIN_MS,
+            adaptive_margin: false,
             max_map_size_bytes: DEFAULT_MAX_MAP_SIZE_BYTES,
             timeout: conn::DEFAULT_TIMEOUT,
             handshake_timeout: crate::driver::DEFAULT_HANDSHAKE_TIMEOUT,
@@ -636,6 +641,7 @@ pub struct Session {
 impl Session {
     pub fn new(config: ClientConfig) -> Self {
         let margin = config.prediction_margin_ms;
+        let adaptive = config.adaptive_margin;
         let timeout = config.timeout;
         Session {
             connection: Connection::new(conn::Config {
@@ -645,7 +651,11 @@ impl Session {
             huffman: Huffman::new(),
             registry: Registry::new(),
             snap_assembler: SnapAssembler::new(StaticSizes::ddnet_06()),
-            timing: InputTiming::new(margin),
+            timing: if adaptive {
+                InputTiming::adaptive(margin)
+            } else {
+                InputTiming::new(margin)
+            },
             state: JoinState::Handshaking,
             server_capabilities: ServerCapabilities::default(),
             can_receive_capabilities: true,

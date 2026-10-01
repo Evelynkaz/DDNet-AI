@@ -72,6 +72,254 @@ const INPUT_HISTORY_LEN: usize = 200;
 /// percentiles without unbounded memory growth (task acceptance criterion 7: bounded memory).
 const MARGIN_SAMPLE_WINDOW: usize = 8192;
 
+/// Task 4.1b (D-063, reworked in round 1 of its review): the adaptive prediction margin's bounds and
+/// rule — see [`MarginController`].
+pub const ADAPTIVE_MARGIN_MIN_MS: i32 = 3;
+pub const ADAPTIVE_MARGIN_MAX_MS: i32 = 20;
+/// The `time_left` the controller aims the rolling p1 at.
+pub const ADAPTIVE_SAFETY_MS: i32 = 2;
+/// The rolling window of `time_left` samples (about 5 s at 50 inputs/s).
+pub const ADAPTIVE_WINDOW_NS: i64 = 5_000_000_000;
+/// Fewest samples in the window before the margin may be lowered (about 3 s at 50 Hz; after every
+/// change the window starts over, because the old samples describe the old margin).
+pub const ADAPTIVE_MIN_SAMPLES_TO_LOWER: usize = 150;
+/// Fewest samples before a p1 below the safety level raises the margin (about 2 s; with fewer the
+/// "p1" is the minimum, and one slow sample would move the margin).
+pub const ADAPTIVE_MIN_SAMPLES_TO_RAISE: usize = 100;
+/// The margin is raised by this much when the window holds [`ADAPTIVE_LATES_TO_RAISE`] late inputs.
+pub const ADAPTIVE_LATE_STEP_MS: i32 = 2;
+/// Late inputs (not stalls) in the current window that raise the margin. **One late input never
+/// does**: on a shared host a scheduler pause makes an input late every ~10 s whatever the margin, and
+/// raising on each of them ratcheted the margin to its cap (review F1).
+pub const ADAPTIVE_LATES_TO_RAISE: usize = 2;
+/// The margin is lowered by at most 1 ms, and not more often than this.
+pub const ADAPTIVE_LOWER_EVERY_NS: i64 = 3_000_000_000;
+/// Lowering is allowed only after this long without a late input (not a stall): the hold after a
+/// raise decays instead of being a fixed 30 s that a late input every 13 s could never outlast.
+pub const ADAPTIVE_QUIET_BEFORE_LOWER_NS: i64 = 10_000_000_000;
+/// Lowering also needs hysteresis: p1 must be at least `SAFETY + ADAPTIVE_LOWER_HYSTERESIS_MS` above
+/// zero, so that after the 1 ms step p1 is still above the safety level instead of sitting exactly on
+/// the edge where the next two lates raise the margin again (review round 2, F7: 135 changes in 10 min).
+pub const ADAPTIVE_LOWER_HYSTERESIS_MS: i32 = 2;
+/// The stall watch looks at windows of this length (one warning per minute at most).
+pub const STALL_WATCH_WINDOW_NS: i64 = 60_000_000_000;
+/// Fewest inputs in a window before the stall watch judges it (about 10 s at 50 Hz).
+pub const STALL_WATCH_MIN_SAMPLES: u64 = 500;
+/// Stalls above this share of a window's inputs are reported.
+pub const STALL_WATCH_RATE: f64 = 0.005;
+/// A late input is a **stall** when it was sent more than `MAX - SAFETY` ms later than the margin in
+/// force allowed (`margin - time_left`, the implied send delay): no margin in range would have saved
+/// it, so it neither raises the margin nor enters the window. Judged by the implied delay rather than
+/// by raw lateness, because a late input at margin `m` means the send stalled by more than `m` ms.
+pub const ADAPTIVE_STALL_DELAY_MS: i32 = ADAPTIVE_MARGIN_MAX_MS - ADAPTIVE_SAFETY_MS;
+
+/// The adaptive prediction margin (task 4.1b; D-023's `INPUTTIMING` feedback is the sensor): keeps
+/// `margin` just large enough that inputs reach the server `ADAPTIVE_SAFETY_MS` before their tick, so
+/// the live bot gets the most decision time per snapshot the connection allows (the first input slot
+/// after a snapshot comes `20 ms - margin` later) without late inputs.
+///
+/// * **Rolling p1** of `time_left` over [`ADAPTIVE_WINDOW_NS`] (instead of the session-wide
+///   [`MarginStats`]); the window starts over after every change.
+/// * **Raise only on a windowed signal:** the window holds [`ADAPTIVE_LATES_TO_RAISE`] late inputs
+///   (by [`ADAPTIVE_LATE_STEP_MS`]), or p1 is below the safety level over at least
+///   [`ADAPTIVE_MIN_SAMPLES_TO_RAISE`] samples (by the shortfall).
+/// * **Stalls** (see [`ADAPTIVE_STALL_DELAY_MS`]) are ignored.
+/// * **Samples of inputs sent before the last change are ignored** (`stale`): they describe the old
+///   margin, and counting them wound the margin up while the change was still in flight.
+/// * **Lower slowly:** by at most 1 ms, not more often than [`ADAPTIVE_LOWER_EVERY_NS`], only from a
+///   full window ([`ADAPTIVE_MIN_SAMPLES_TO_LOWER`]) with p1 at least [`ADAPTIVE_LOWER_HYSTERESIS_MS`]
+///   above the safety level, and only after
+///   [`ADAPTIVE_QUIET_BEFORE_LOWER_NS`] without a late input.
+/// * **Reset** to the initial margin on a new map / connection ([`MarginController::reset`]).
+#[derive(Debug, Clone)]
+pub struct MarginController {
+    initial_ms: i32,
+    margin_ms: i32,
+    window: VecDeque<(i64, i32)>,
+    last_change_ns: i64,
+    last_late_ns: i64,
+    last_sample_ns: i64,
+    first_sample_ns: Option<i64>,
+    changes: u32,
+    /// When the last few changes happened (for [`MarginController::changes_within_ms`]).
+    change_times: VecDeque<i64>,
+    /// `(ms since the first sample, new margin)` of every change (capped), for the report.
+    trajectory: Vec<(u64, i32)>,
+    /// Time (ms) spent at each margin value `0..=MAX`, sample to sample.
+    time_at_margin_ms: [i64; ADAPTIVE_MARGIN_MAX_MS as usize + 1],
+}
+
+impl MarginController {
+    pub fn new(initial_ms: i32) -> Self {
+        let initial_ms = initial_ms.clamp(ADAPTIVE_MARGIN_MIN_MS, ADAPTIVE_MARGIN_MAX_MS);
+        MarginController {
+            initial_ms,
+            margin_ms: initial_ms,
+            window: VecDeque::with_capacity(512),
+            last_change_ns: i64::MIN / 2,
+            last_late_ns: i64::MIN / 2,
+            last_sample_ns: 0,
+            first_sample_ns: None,
+            changes: 0,
+            change_times: VecDeque::new(),
+            trajectory: Vec::new(),
+            time_at_margin_ms: [0; ADAPTIVE_MARGIN_MAX_MS as usize + 1],
+        }
+    }
+
+    pub fn margin_ms(&self) -> i32 {
+        self.margin_ms
+    }
+
+    /// How many times the margin has been changed (sessions-wide, survives `reset`).
+    pub fn changes(&self) -> u32 {
+        self.changes
+    }
+
+    /// `(ms since the first sample, new margin)` of every change (the first 4096).
+    pub fn trajectory(&self) -> &[(u64, i32)] {
+        &self.trajectory
+    }
+
+    /// Time (ms) spent at each margin value (index = margin in ms).
+    pub fn time_at_margin_ms(&self) -> &[i64] {
+        &self.time_at_margin_ms
+    }
+
+    /// How many times the margin changed in the `ms` before the last sample ("has it settled").
+    pub fn changes_within_ms(&self, ms: i64) -> u32 {
+        let from = self.last_sample_ns - ms * 1_000_000;
+        self.change_times.iter().filter(|&&t| t >= from).count() as u32
+    }
+
+    /// How long (ms) the margin has been unchanged as of the last sample; since the controller
+    /// started if it never changed.
+    pub fn stable_for_ms(&self) -> i64 {
+        let since = if self.changes == 0 || self.last_change_ns < 0 {
+            0
+        } else {
+            self.last_change_ns
+        };
+        (self.last_sample_ns - since).max(0) / 1_000_000
+    }
+
+    /// Back to the initial margin with an empty window (new map or connection).
+    pub fn reset(&mut self) {
+        self.margin_ms = self.initial_ms;
+        self.window.clear();
+        self.last_change_ns = i64::MIN / 2;
+        self.last_late_ns = i64::MIN / 2;
+    }
+
+    /// The rolling p1 of `time_left` (ms); `None` for an empty window.
+    pub fn p1_ms(&self) -> Option<i32> {
+        if self.window.is_empty() {
+            return None;
+        }
+        let mut v: Vec<i32> = self.window.iter().map(|&(_, t)| t).collect();
+        v.sort_unstable();
+        Some(v[((v.len() - 1) as f64 * 0.01).round() as usize])
+    }
+
+    /// Whether `time_left_ms` would be a stall at the margin now in force (see
+    /// [`ADAPTIVE_STALL_DELAY_MS`]).
+    pub fn is_stall(&self, time_left_ms: i32) -> bool {
+        time_left_ms < 0 && self.margin_ms - time_left_ms > ADAPTIVE_STALL_DELAY_MS
+    }
+
+    /// One `NETMSG_INPUTTIMING` sample at `now_ns`; `stale` is true for an input sent before the last
+    /// margin change. Returns the new margin if it changed.
+    pub fn on_sample(&mut self, time_left_ms: i32, now_ns: i64, stale: bool) -> Option<i32> {
+        let had_sample = self.first_sample_ns.is_some();
+        let first = *self.first_sample_ns.get_or_insert(now_ns);
+        if had_sample {
+            let dt = (now_ns - self.last_sample_ns).clamp(0, 1_000_000_000) / 1_000_000;
+            self.time_at_margin_ms[self.margin_ms as usize] += dt;
+        }
+        self.last_sample_ns = now_ns;
+        let stall = self.is_stall(time_left_ms);
+        if time_left_ms < 0 && !stall {
+            self.last_late_ns = now_ns;
+        }
+        if stale || stall {
+            return None;
+        }
+        self.window.push_back((now_ns, time_left_ms));
+        while self
+            .window
+            .front()
+            .is_some_and(|&(t, _)| now_ns.saturating_sub(t) > ADAPTIVE_WINDOW_NS)
+        {
+            self.window.pop_front();
+        }
+        let old = self.margin_ms;
+        let mut new = old;
+        let lates = self.window.iter().filter(|&&(_, t)| t < 0).count();
+        if lates >= ADAPTIVE_LATES_TO_RAISE {
+            new = old + ADAPTIVE_LATE_STEP_MS;
+        } else if self.window.len() >= ADAPTIVE_MIN_SAMPLES_TO_RAISE {
+            let delta = self.p1_ms().unwrap_or(time_left_ms) - ADAPTIVE_SAFETY_MS;
+            if delta < 0 {
+                new = old - delta;
+            } else if delta >= ADAPTIVE_LOWER_HYSTERESIS_MS
+                && self.window.len() >= ADAPTIVE_MIN_SAMPLES_TO_LOWER
+                && now_ns.saturating_sub(self.last_change_ns) >= ADAPTIVE_LOWER_EVERY_NS
+                && now_ns.saturating_sub(self.last_late_ns) >= ADAPTIVE_QUIET_BEFORE_LOWER_NS
+            {
+                new = old - 1;
+            }
+        }
+        let new = new.clamp(ADAPTIVE_MARGIN_MIN_MS, ADAPTIVE_MARGIN_MAX_MS);
+        if new == old {
+            return None;
+        }
+        self.margin_ms = new;
+        self.window.clear();
+        self.last_change_ns = now_ns;
+        self.changes += 1;
+        self.change_times.push_back(now_ns);
+        if self.change_times.len() > 64 {
+            self.change_times.pop_front();
+        }
+        if self.trajectory.len() < 4096 {
+            self.trajectory
+                .push((((now_ns - first).max(0) / 1_000_000) as u64, new));
+        }
+        Some(new)
+    }
+}
+
+/// Reports a link whose stalls (see [`ADAPTIVE_STALL_DELAY_MS`]) stay above [`STALL_WATCH_RATE`] of its
+/// inputs: no margin in range can absorb them, so this is what the operator should hear about (a link
+/// with jitter beyond 18 ms, a starved host). Judged per window of [`STALL_WATCH_WINDOW_NS`], so it
+/// speaks at most once per minute, and it carries only counts and rates — no names, no addresses.
+#[derive(Debug, Clone, Default)]
+pub struct StallWatch {
+    window_start_ns: Option<i64>,
+    count: u64,
+    stalls: u64,
+}
+
+impl StallWatch {
+    /// One `NETMSG_INPUTTIMING` at `now_ns`. Returns `Some((stalls, count))` when a window just ended
+    /// above the threshold.
+    pub fn on_sample(&mut self, now_ns: i64, stall: bool) -> Option<(u64, u64)> {
+        let start = *self.window_start_ns.get_or_insert(now_ns);
+        self.count += 1;
+        self.stalls += u64::from(stall);
+        if now_ns - start < STALL_WATCH_WINDOW_NS {
+            return None;
+        }
+        let verdict = (self.count >= STALL_WATCH_MIN_SAMPLES
+            && self.stalls as f64 > STALL_WATCH_RATE * self.count as f64)
+            .then_some((self.stalls, self.count));
+        self.window_start_ns = Some(now_ns);
+        self.count = 0;
+        self.stalls = 0;
+        verdict
+    }
+}
+
 /// One past `NETMSG_INPUT` send, remembered so a later `NETMSG_INPUTTIMING` for the same
 /// `pred_tick` can compute how far off the predicted clock was (`client.cpp:2099-2104`).
 #[derive(Debug, Clone, Copy)]
@@ -85,12 +333,16 @@ struct HistoryEntry {
 
 /// A snapshot of [`MarginStats`], suitable for logging/reporting (task acceptance criterion h:
 /// "report the margin distribution").
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MarginSummary {
     /// Total `NETMSG_INPUTTIMING` messages ever observed (unbounded, exact).
     pub count: u64,
     /// How many had `time_left_ms < 0` (the input arrived too late) — unbounded, exact.
     pub late_count: u64,
+    /// Of those, how many were **stalls**: sent more than [`ADAPTIVE_STALL_DELAY_MS`] later than the
+    /// margin in force allowed (`margin - time_left`; a paused thread, a route change) — no margin in
+    /// the adaptive range could have absorbed them.
+    pub stall_count: u64,
     /// `late_count as f64 / count as f64`, or `0.0` if `count == 0`.
     pub late_fraction: f64,
     /// Mean `time_left_ms`, over the same unbounded/exact count.
@@ -102,6 +354,30 @@ pub struct MarginSummary {
     pub p90_ms: Option<i32>,
     pub p99_ms: Option<i32>,
     pub max_ms: Option<i32>,
+    /// Task 4.1b: the prediction margin in force when this summary was taken (the fixed value, or
+    /// the adaptive controller's current one).
+    pub margin_ms: i32,
+    /// How many times the adaptive controller changed the margin (0 for a fixed margin).
+    pub margin_changes: u32,
+    /// Whether the margin is adaptive.
+    pub adaptive: bool,
+    /// How long (ms) the adaptive margin has been unchanged as of the last `NETMSG_INPUTTIMING`
+    /// (0 for a fixed margin): "the margin settled" means this is long.
+    pub margin_stable_ms: i64,
+    /// How many times the adaptive margin changed in the last 30 s ("settled" = few).
+    pub margin_changes_last_30s: u32,
+    /// `(ms since the first `NETMSG_INPUTTIMING`, new margin)` of every change of the adaptive margin
+    /// (the first 4096): the margin's trajectory.
+    pub margin_trajectory: Vec<(u64, i32)>,
+    /// Time (ms) the adaptive margin spent at each value (index = margin in ms; empty for a fixed
+    /// margin): `time_at_margin_ms[20]` is the time pinned at the cap.
+    pub time_at_margin_ms: Vec<i64>,
+    /// Task 4.1b (driver): tagged decisions that were replaced by a newer one before their tick
+    /// came, so they never went out ([`ClientEvent::MarginSummary`] carries it from the driver).
+    pub superseded_decisions: u64,
+    /// Task 4.1b (driver): decisions adopted more than 2 ticks after their tick whose fire press was
+    /// dropped (the hammer veto only covers the intended tick plus 2).
+    pub late_presses_dropped: u64,
 }
 
 /// Running/windowed statistics over every `time_left_ms` this session has observed via
@@ -110,15 +386,19 @@ pub struct MarginSummary {
 pub struct MarginStats {
     count: u64,
     late_count: u64,
+    stall_count: u64,
     sum_ms: i64,
     recent: VecDeque<i32>,
 }
 
 impl MarginStats {
-    fn record(&mut self, time_left_ms: i32) {
+    fn record(&mut self, time_left_ms: i32, stall: bool) {
         self.count += 1;
         if time_left_ms < 0 {
             self.late_count += 1;
+        }
+        if stall {
+            self.stall_count += 1;
         }
         self.sum_ms += i64::from(time_left_ms);
         self.recent.push_back(time_left_ms);
@@ -130,6 +410,10 @@ impl MarginStats {
     /// A point-in-time [`MarginSummary`]. `O(n log n)` in the recent-window size (sorts a copy) —
     /// meant to be called occasionally for reporting, not on every sample.
     pub fn summary(&self) -> MarginSummary {
+        self.summary_with(None, 0)
+    }
+
+    fn summary_with(&self, controller: Option<&MarginController>, margin_ms: i32) -> MarginSummary {
         let mut sorted: Vec<i32> = self.recent.iter().copied().collect();
         sorted.sort_unstable();
         let percentile = |p: f64| -> Option<i32> {
@@ -142,6 +426,7 @@ impl MarginStats {
         MarginSummary {
             count: self.count,
             late_count: self.late_count,
+            stall_count: self.stall_count,
             late_fraction: if self.count == 0 {
                 0.0
             } else {
@@ -157,6 +442,15 @@ impl MarginStats {
             p90_ms: percentile(0.90),
             p99_ms: percentile(0.99),
             max_ms: sorted.last().copied(),
+            margin_ms,
+            margin_changes: controller.map_or(0, MarginController::changes),
+            adaptive: controller.is_some(),
+            margin_stable_ms: controller.map_or(0, MarginController::stable_for_ms),
+            margin_changes_last_30s: controller.map_or(0, |c| c.changes_within_ms(30_000)),
+            margin_trajectory: controller.map_or_else(Vec::new, |c| c.trajectory().to_vec()),
+            time_at_margin_ms: controller.map_or_else(Vec::new, |c| c.time_at_margin_ms().to_vec()),
+            superseded_decisions: 0,
+            late_presses_dropped: 0,
         }
     }
 }
@@ -181,11 +475,38 @@ pub struct InputTiming {
     pred_tick: i32,
     history: VecDeque<HistoryEntry>,
     margin_stats: MarginStats,
+    /// Task 4.1b: `Some` when the margin adapts to the `NETMSG_INPUTTIMING` feedback.
+    controller: Option<MarginController>,
+    /// Inputs for ticks up to this one were sent before the last margin change (their `INPUTTIMING`
+    /// describes the old margin and is ignored by the controller).
+    stale_through_tick: i32,
+    /// Task 4.1b round 2 (F7): warns about a link whose stalls stay above the threshold.
+    stall_watch: StallWatch,
 }
 
 impl InputTiming {
     pub fn new(prediction_margin_ms: i32) -> Self {
         InputTiming {
+            controller: None,
+            ..Self::with_fixed_margin(prediction_margin_ms)
+        }
+    }
+
+    /// Task 4.1b: a timing whose margin starts at `initial_ms` and follows
+    /// [`MarginController`]'s rule.
+    pub fn adaptive(initial_ms: i32) -> Self {
+        let controller = MarginController::new(initial_ms);
+        InputTiming {
+            controller: Some(controller.clone()),
+            ..Self::with_fixed_margin(controller.margin_ms())
+        }
+    }
+
+    fn with_fixed_margin(prediction_margin_ms: i32) -> Self {
+        InputTiming {
+            controller: None,
+            stale_through_tick: 0,
+            stall_watch: StallWatch::default(),
             prediction_margin_ms,
             predicted_time: None,
             received_snapshots: 0,
@@ -194,6 +515,15 @@ impl InputTiming {
             history: VecDeque::with_capacity(INPUT_HISTORY_LEN),
             margin_stats: MarginStats::default(),
         }
+    }
+
+    /// Task 4.1b: the runtime margin setter (what `advance`'s per-call `update_margin` reads).
+    pub fn set_prediction_margin_ms(&mut self, margin_ms: i32) {
+        self.prediction_margin_ms = margin_ms;
+    }
+
+    pub fn prediction_margin_ms(&self) -> i32 {
+        self.prediction_margin_ms
     }
 
     /// Resets every piece of per-connection state this module owns — call this exactly where
@@ -208,7 +538,12 @@ impl InputTiming {
         self.received_snapshots = 0;
         self.latest_snapshot_tick = 0;
         self.pred_tick = 0;
+        self.stale_through_tick = 0;
         self.history.clear();
+        if let Some(c) = self.controller.as_mut() {
+            c.reset();
+            self.prediction_margin_ms = c.margin_ms();
+        }
     }
 
     /// The predicted tick the next `NETMSG_INPUT` should carry, or `0` before the two-snapshot
@@ -218,7 +553,8 @@ impl InputTiming {
     }
 
     pub fn margin_summary(&self) -> MarginSummary {
-        self.margin_stats.summary()
+        self.margin_stats
+            .summary_with(self.controller.as_ref(), self.prediction_margin_ms)
     }
 
     /// Task 4.1: how long until [`InputTiming::advance`] next fires (the next `NETMSG_INPUT` goes
@@ -322,7 +658,27 @@ impl InputTiming {
     /// found (acceptance criterion h asks for the margin distribution of every `INPUTTIMING`
     /// message observed, not just the ones this session can still correlate).
     pub fn on_input_timing(&mut self, pred_tick: i32, time_left_ms: i32, now_ns: i64) {
-        self.margin_stats.record(time_left_ms);
+        let stall = time_left_ms < 0 && self.prediction_margin_ms - time_left_ms > ADAPTIVE_STALL_DELAY_MS;
+        self.margin_stats.record(time_left_ms, stall);
+        if let Some((stalls, count)) = self.stall_watch.on_sample(now_ns, stall) {
+            tracing::warn!(
+                stalls,
+                inputs = count,
+                stall_rate_percent = 100.0 * stalls as f64 / count as f64,
+                margin_ms = self.prediction_margin_ms,
+                "input timing: more than {}% of the inputs in the last minute were sent over {} ms later than the margin allows; no margin in range absorbs that (jitter beyond the range, or a starved host)",
+                STALL_WATCH_RATE * 100.0,
+                ADAPTIVE_STALL_DELAY_MS
+            );
+        }
+        let stale = pred_tick <= self.stale_through_tick;
+        if let Some(c) = self.controller.as_mut()
+            && let Some(new) = c.on_sample(time_left_ms, now_ns, stale)
+        {
+            self.prediction_margin_ms = new;
+            // Inputs already sent (up to `pred_tick`) went out with the old margin.
+            self.stale_through_tick = self.pred_tick;
+        }
 
         let target = self.history.iter().find(|e| e.tick == pred_tick).map(|entry| {
             let raw = entry.predicted_time_ns + (now_ns - entry.sent_at_ns);
@@ -585,5 +941,303 @@ mod tests {
         assert_eq!(timing.margin_stats.recent.len(), MARGIN_SAMPLE_WINDOW);
         // Exact/unbounded counters must still reflect every sample, not just the window.
         assert_eq!(timing.margin_summary().count, (MARGIN_SAMPLE_WINDOW * 3) as u64);
+    }
+
+    // --- Task 4.1b: the adaptive margin -----------------------------------------------------------
+
+    const MS: i64 = 1_000_000;
+
+    /// Feeds `n` fresh samples 20 ms apart starting at `*now`, each `left_ms`; returns the last change.
+    fn feed(c: &mut MarginController, now: &mut i64, n: usize, left_ms: i32) -> Option<i32> {
+        let mut last = None;
+        for _ in 0..n {
+            *now += 20 * MS;
+            if let Some(m) = c.on_sample(left_ms, *now, false) {
+                last = Some(m);
+            }
+        }
+        last
+    }
+
+    /// One fresh sample 20 ms after the last.
+    fn one(c: &mut MarginController, now: &mut i64, left_ms: i32) -> Option<i32> {
+        *now += 20 * MS;
+        c.on_sample(left_ms, *now, false)
+    }
+
+    #[test]
+    fn a_quiet_link_lowers_the_margin_one_ms_at_a_time_down_to_the_clamp() {
+        let mut c = MarginController::new(10);
+        let mut now = 0;
+        // time_left follows the margin: always margin + 1 (plenty of slack).
+        let mut seen = vec![10];
+        for _ in 0..40 {
+            let left = c.margin_ms() + 1;
+            feed(&mut c, &mut now, 160, left);
+            if *seen.last().unwrap() != c.margin_ms() {
+                seen.push(c.margin_ms());
+            }
+        }
+        assert_eq!(*seen.last().unwrap(), ADAPTIVE_MARGIN_MIN_MS, "{seen:?}");
+        for w in seen.windows(2) {
+            assert_eq!(w[0] - w[1], 1, "at most 1 ms at a time: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn lowering_waits_for_a_full_window_and_the_interval() {
+        let mut c = MarginController::new(10);
+        let mut now = 0;
+        assert_eq!(
+            feed(&mut c, &mut now, ADAPTIVE_MIN_SAMPLES_TO_LOWER - 10, 11),
+            None,
+            "too few samples"
+        );
+        let first = feed(&mut c, &mut now, 20, 11);
+        assert_eq!(first, Some(9));
+        // The window starts over after a change: no second change until it refills.
+        assert_eq!(feed(&mut c, &mut now, 100, 10), None);
+    }
+
+    /// Review F1: ONE late input never raises the margin.
+    #[test]
+    fn a_single_late_input_does_not_raise_the_margin_but_two_in_the_window_do() {
+        let mut c = MarginController::new(8);
+        let mut now = 0;
+        feed(&mut c, &mut now, 10, 8);
+        assert_eq!(one(&mut c, &mut now, -3), None, "one late input: nothing");
+        assert_eq!(feed(&mut c, &mut now, 30, 8), None);
+        assert_eq!(
+            one(&mut c, &mut now, -4),
+            Some(8 + ADAPTIVE_LATE_STEP_MS),
+            "the second one in the window"
+        );
+        // The window started over: it takes two new lates to raise again.
+        assert_eq!(one(&mut c, &mut now, -3), None);
+        // ... and two lates farther apart than the window never raise it.
+        let mut c = MarginController::new(8);
+        let mut now = 0;
+        for _ in 0..4 {
+            assert_eq!(one(&mut c, &mut now, -2), None);
+            feed(&mut c, &mut now, 300, 8); // 6 s later: the first one has left the window
+        }
+        assert_eq!(c.margin_ms(), 8);
+    }
+
+    #[test]
+    fn clamped_at_the_top_and_stalls_are_ignored() {
+        let mut c = MarginController::new(17);
+        let mut now = 0;
+        one(&mut c, &mut now, -1);
+        assert_eq!(one(&mut c, &mut now, -1), Some(19));
+        // From margin 19 on, any late input was sent > 18 ms late (a stall): the cap is reached by
+        // the p1 rule only, never by lates.
+        one(&mut c, &mut now, -1);
+        assert_eq!(one(&mut c, &mut now, -1), None);
+        assert_eq!(c.margin_ms(), 19);
+        // A stall is judged by the implied send delay (margin - time_left): at margin 10 an input that
+        // is 9 ms late was sent 19 ms too late (> 18): a stall; 5 ms late (delay 15) is jitter.
+        let mut c = MarginController::new(10);
+        assert!(!c.is_stall(-5));
+        assert!(c.is_stall(-9));
+        assert!(!c.is_stall(3), "an on-time input is never a stall");
+        // ... so at margin 3 a 15 ms late input (delay 18) is still absorbable, 16 ms is not.
+        let c3 = MarginController::new(3);
+        assert!(!c3.is_stall(-15));
+        assert!(c3.is_stall(-16));
+        // Stalls neither count as lates in the window nor raise the margin.
+        let mut now = 0;
+        feed(&mut c, &mut now, 5, 11);
+        for _ in 0..6 {
+            assert_eq!(one(&mut c, &mut now, -30), None);
+        }
+        assert_eq!(c.margin_ms(), 10);
+        assert_eq!(c.p1_ms(), Some(11));
+    }
+
+    /// Review F1: samples of inputs sent before the last change do not count.
+    #[test]
+    fn samples_of_inputs_sent_before_the_last_change_are_ignored() {
+        let mut c = MarginController::new(8);
+        let mut now = 0;
+        one(&mut c, &mut now, -3);
+        assert_eq!(one(&mut c, &mut now, -3), Some(10));
+        for _ in 0..10 {
+            now += 20 * MS;
+            assert_eq!(c.on_sample(-4, now, true), None, "stale: the old margin's lateness");
+        }
+        assert_eq!(c.margin_ms(), 10);
+        assert_eq!(c.p1_ms(), None, "and not in the window either");
+    }
+
+    #[test]
+    fn a_low_p1_over_enough_samples_raises_it_and_an_outlier_among_many_does_not() {
+        let mut c = MarginController::new(10);
+        let mut now = 0;
+        assert_eq!(
+            feed(&mut c, &mut now, ADAPTIVE_MIN_SAMPLES_TO_RAISE - 5, 0),
+            None,
+            "too few samples"
+        );
+        assert_eq!(feed(&mut c, &mut now, 10, 0), Some(12));
+        // One 1 ms sample among 200 healthy ones: p1 stays healthy, nothing changes.
+        let mut c = MarginController::new(10);
+        let mut now = 0;
+        feed(&mut c, &mut now, 100, 3);
+        one(&mut c, &mut now, 1);
+        assert_eq!(feed(&mut c, &mut now, 20, 3), None);
+        assert_eq!(c.margin_ms(), 10);
+    }
+
+    /// The hold after a raise decays: lowering is allowed after 10 s without a late input.
+    #[test]
+    fn lowering_is_allowed_again_after_ten_quiet_seconds() {
+        let mut c = MarginController::new(10);
+        let mut now = 0;
+        feed(&mut c, &mut now, 5, 11);
+        one(&mut c, &mut now, -4);
+        assert_eq!(one(&mut c, &mut now, -4), Some(12), "two lates: raised");
+        let raised_at = now;
+        // Plenty of slack, but a late input 6 s in keeps the quiet period from starting over before 16 s.
+        let mut lowered_at = None;
+        let mut late_done = false;
+        while now - raised_at < 40_000 * MS && lowered_at.is_none() {
+            let left = if !late_done && now - raised_at >= 6_000 * MS {
+                late_done = true;
+                -1
+            } else {
+                c.margin_ms() + 1
+            };
+            if one(&mut c, &mut now, left) == Some(11) {
+                lowered_at = Some(now);
+            }
+        }
+        let after = (lowered_at.expect("lowered") - raised_at) / MS;
+        assert!((16_000..=20_000).contains(&after), "lowered {after} ms after the raise");
+    }
+
+    #[test]
+    fn the_window_is_five_seconds_and_reset_restores_the_initial_margin() {
+        let mut c = MarginController::new(10);
+        let mut now = 0;
+        feed(&mut c, &mut now, 50, 3);
+        assert_eq!(c.p1_ms(), Some(3));
+        now += 6_000 * MS;
+        one(&mut c, &mut now, 9);
+        assert_eq!(c.p1_ms(), Some(9), "old samples drop out of the window");
+        one(&mut c, &mut now, -4);
+        one(&mut c, &mut now, -4); // two lates: raised
+        assert_ne!(c.margin_ms(), 10);
+        let changes = c.changes();
+        c.reset();
+        assert_eq!(c.margin_ms(), 10);
+        assert_eq!(c.p1_ms(), None);
+        assert_eq!(c.changes(), changes, "the change counter is a session total");
+    }
+
+    #[test]
+    fn input_timing_applies_the_controllers_margin_ignores_stale_samples_and_resets_on_a_new_map() {
+        let mut timing = InputTiming::adaptive(10);
+        timing.on_snapshot(100, 0);
+        timing.on_snapshot(101, 0);
+        timing.advance(0).expect("the bootstrap tick");
+        let sent = timing.pred_tick();
+        timing.on_input_timing(sent, -3, 0);
+        assert_eq!(timing.prediction_margin_ms(), 10, "one late input: no change");
+        timing.on_input_timing(sent, -3, 20 * MS);
+        assert_eq!(timing.prediction_margin_ms(), 10 + ADAPTIVE_LATE_STEP_MS);
+        let s = timing.margin_summary();
+        assert_eq!(
+            (s.margin_ms, s.margin_changes, s.adaptive),
+            (10 + ADAPTIVE_LATE_STEP_MS, 1, true)
+        );
+        assert_eq!(s.margin_trajectory.len(), 1);
+        assert_eq!(s.margin_trajectory[0].1, 12);
+        // The input for `sent` went out with the old margin: its late reports no longer count.
+        for i in 0..10 {
+            timing.on_input_timing(sent, -3, (40 + 20 * i) * MS);
+        }
+        assert_eq!(
+            timing.prediction_margin_ms(),
+            12,
+            "stale samples do not wind the margin up"
+        );
+        timing.reset();
+        assert_eq!(timing.prediction_margin_ms(), 10, "reset on a new map / connection");
+        // A fixed timing never moves, and has a runtime setter.
+        let mut fixed = InputTiming::new(10);
+        fixed.on_input_timing(1, -3, 0);
+        fixed.on_input_timing(1, -3, MS);
+        assert_eq!(fixed.prediction_margin_ms(), 10);
+        assert!(!fixed.margin_summary().adaptive);
+        fixed.set_prediction_margin_ms(4);
+        assert_eq!(fixed.margin_summary().margin_ms, 4);
+    }
+
+    #[test]
+    fn changes_within_counts_recent_changes_only_and_time_at_margin_is_tracked() {
+        let mut c = MarginController::new(10);
+        let mut now = 0;
+        one(&mut c, &mut now, -1);
+        assert_eq!(one(&mut c, &mut now, -1), Some(12));
+        now += 40_000 * MS;
+        feed(&mut c, &mut now, 1, 13);
+        assert_eq!(c.changes(), 1);
+        assert_eq!(c.changes_within_ms(30_000), 0, "the change is 40 s old");
+        assert!(c.time_at_margin_ms()[12] >= 1_000, "{:?}", c.time_at_margin_ms());
+        assert!(c.time_at_margin_ms()[10] > 0);
+    }
+
+    #[test]
+    fn stalls_are_late_inputs_sent_too_late_for_any_margin_in_range() {
+        let mut timing = InputTiming::new(10);
+        // margin 10: delay = 10 - left. 18 is the limit.
+        for left in [5, -1, -8, -9, -120] {
+            timing.on_input_timing(1, left, 0);
+        }
+        let s = timing.margin_summary();
+        assert_eq!((s.count, s.late_count, s.stall_count), (5, 4, 2));
+    }
+
+    /// Review round 2, F7: lowering needs p1 two ms above the safety level, so it stops one step earlier
+    /// than before and does not sit on the edge.
+    #[test]
+    fn lowering_stops_while_p1_is_less_than_the_safety_level_plus_the_hysteresis() {
+        let mut c = MarginController::new(10);
+        let mut now = 0;
+        // p1 = margin - 5: lowers while p1 - 2 >= 2, i.e. margin >= 9.
+        for _ in 0..40 {
+            let left = c.margin_ms() - 5;
+            feed(&mut c, &mut now, 160, left.max(0));
+        }
+        // At margin 9 p1 = 4: 4 - 2 = 2 still lowers (to 8); at 8, p1 = 3 leaves 1 < 2: it stops with p1 one
+        // above the safety level instead of on it.
+        assert_eq!(c.margin_ms(), 8);
+    }
+
+    #[test]
+    fn the_stall_watch_speaks_once_per_window_and_only_above_the_threshold() {
+        let mut w = StallWatch::default();
+        let mut now = 0i64;
+        let mut verdicts = vec![];
+        // 3 minutes at 50 inputs/s with 1 stall per 100 inputs (1%): one verdict per minute.
+        for i in 0..9000u64 {
+            now += 20 * MS;
+            if let Some(v) = w.on_sample(now, i % 100 == 0) {
+                verdicts.push(v);
+            }
+        }
+        assert_eq!(verdicts.len(), 2, "windows ending inside the 3 minutes: {verdicts:?}");
+        assert!(verdicts.iter().all(|&(s, c)| s as f64 > 0.005 * c as f64 && c > 2500));
+        // 0.2% stalls: silent. Too few samples: silent.
+        let mut w = StallWatch::default();
+        let mut now = 0i64;
+        for i in 0..6000u64 {
+            now += 20 * MS;
+            assert_eq!(w.on_sample(now, i % 500 == 0), None);
+        }
+        let mut w = StallWatch::default();
+        assert_eq!(w.on_sample(0, true), None);
+        assert_eq!(w.on_sample(61_000 * MS, true), None, "two samples are no evidence");
     }
 }

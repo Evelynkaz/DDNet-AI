@@ -533,12 +533,28 @@ fn before_the_timing_bootstrap_a_two_tick_guess_is_used_and_the_horizon_is_cappe
         run_active(&mut bot, &mut sc, &[1], 3);
         assert_eq!(log.borrow().last().unwrap().obs_tick, sc.tick - 2 + 2);
         let (mut bot, mut sc, (log, ..)) = setup(vec![tee(0, 1000), tee(1, 1100)], Relations::new());
-        sc.pred_ahead = 500;
+        // A long RTT (the driver 20 ticks ahead): the horizon follows it instead of stopping at 12.
+        sc.pred_ahead = 20;
         run_active(&mut bot, &mut sc, &[1], 3);
+        assert_eq!(log.borrow().last().unwrap().obs_tick, sc.tick - 2 + 20, "RTT-aware cap");
+        assert_eq!(bot.stats().predict_clamped, 0);
+        // An absurd one hits the absolute cap, and the bot says so (once, rate-limited).
+        let (mut bot, mut sc, (log, ..)) = setup(vec![tee(0, 1000), tee(1, 1100)], Relations::new());
+        sc.pred_ahead = 500;
+        run_active(&mut bot, &mut sc, &[1], 30);
         assert_eq!(
             log.borrow().last().unwrap().obs_tick,
-            sc.tick - 2 + 12,
-            "MAX_PREDICT_TICKS"
+            sc.tick - 2 + ddai_bot::bot::MAX_PREDICT_TICKS_ABSOLUTE,
+            "MAX_PREDICT_TICKS_ABSOLUTE"
+        );
+        assert!(bot.stats().predict_clamped >= 20);
+        let evs: Vec<_> = bot.drain_events().collect();
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, BotEvent::PredictionClamped { .. }))
+                .count(),
+            1,
+            "reported once per 10 s: {evs:?}"
         );
     });
 }
@@ -668,55 +684,126 @@ fn the_brain_is_reset_on_the_first_life_and_on_every_respawn() {
     });
 }
 
+/// Opponents p6..p11 at 160..610 px (the nearest five are kept), the target p1 at 150 px, and spared
+/// tees: friends p2 (50 px), p5 (140 px) and p12 (500 px, out of contact range), ignored p3 (80 px),
+/// AFK p4 (110 px).
+fn crowd_with_spared() -> (Vec<TeeSpec>, Relations) {
+    let mut rel = Relations::new();
+    rel.add(ListKind::Friend, "p2");
+    rel.add(ListKind::Ignore, "p3");
+    rel.add(ListKind::Friend, "p5");
+    rel.add(ListKind::Friend, "p12");
+    let mut tees = vec![tee(0, 1000), tee(1, 1150)];
+    for (id, dx) in [(2, 50), (3, 80), (4, 110), (5, 140), (12, 500)] {
+        tees.push(tee(id, 1000 + dx));
+    }
+    for (i, id) in (6..=11).enumerate() {
+        tees.push(tee(id, 1000 + 160 + 90 * i as i32));
+    }
+    (tees, rel)
+}
+
 #[test]
-fn spared_tees_are_not_in_the_brains_world_unless_roped_to_us() {
+fn spared_tees_within_contact_range_are_bodies_counted_apart_from_the_local_others() {
     support::big_stack(|| {
-        // F1 (review round 1): a friend, an ignored tee and an AFK player near us must not be handed to
-        // the brain as opponents (the hybrid's threat model would plan against them); a roped spared
-        // tee is still kept (the rope is a physical fact). The brain is told about them as spares.
-        let mut rel = Relations::new();
-        rel.add(ListKind::Friend, "p2");
-        rel.add(ListKind::Ignore, "p3");
-        rel.add(ListKind::Friend, "p5");
-        let tees = vec![
-            tee(0, 1000),
-            tee(1, 1300),
-            tee(2, 1050),
-            tee(3, 1080),
-            tee(4, 1110),
-            tee(5, 1140),
-        ];
+        // Review F8 (task 4.1b): the planner honours `spare_ids`, so it gets the nearest three spared
+        // tees within 200 px as physical bodies, in addition to the target and its five nearest others.
+        let (tees, rel) = crowd_with_spared();
         let (mut bot, mut sc, (log, ..)) = setup(tees, rel);
-        // p4 carries the server's AFK flag; p5 hooks us, so it is kept even if spared.
-        sc.tee_mut(5).hooked_player = 0;
         sc.player_mut(4).ex_flags = explayerflagflag::AFK;
-        run_active(&mut bot, &mut sc, &[1, 2, 3, 5], 8);
+        let active: Vec<i32> = (1..=12).filter(|&i| i != 4).collect();
+        run_active(&mut bot, &mut sc, &active, 8);
         let seen = log.borrow();
         let last = seen.last().unwrap();
         assert_eq!(last.target, Some(1));
-        assert!(last.others.contains(&1));
+        let world: Vec<i32> = last.world_ids.iter().copied().filter(|&i| i != 0).collect();
+        // Target + the 5 nearest opponents (p6..p10) + the 3 nearest spared (p2, p3, p4).
+        for id in [1, 6, 7, 8, 9, 10] {
+            assert!(world.contains(&id), "{id} in {world:?}");
+        }
         assert!(
-            !last.others.contains(&2),
-            "a friend is not an opponent: {:?}",
-            last.others
+            !world.contains(&11),
+            "only five opponents besides the target: {world:?}"
         );
+        for id in [2, 3, 4] {
+            assert!(world.contains(&id), "spared body {id} in {world:?}");
+        }
+        assert!(!world.contains(&5), "at most three spared bodies: {world:?}");
+        assert!(!world.contains(&12), "beyond contact range: {world:?}");
+        assert_eq!(world.len(), 1 + 5 + 3);
+        // The brain is told who is spared (every spared tee in hook reach + 64 px, not just the bodies).
+        let mut ids = last.spare_ids.clone();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![2, 3, 4, 5], "ids; p12 is 500 px away");
+        assert_eq!(last.spares.len(), 4, "and their positions stay for the geometric gates");
+    });
+}
+
+#[test]
+fn a_brain_that_does_not_honour_spare_ids_gets_no_spared_bodies_unless_roped_to_us() {
+    support::big_stack(|| {
+        // The hybrid (until task 3.5b) would read a body as an opponent: round-1 behaviour stays.
+        let (tees, rel) = crowd_with_spared();
+        let (mut bot, mut sc, (log, ..)) = setup_on(room(&[]), tees, rel, BrainKind::Hybrid);
+        sc.player_mut(4).ex_flags = explayerflagflag::AFK;
+        sc.tee_mut(5).hooked_player = 0; // p5 (a friend) is roped to us: kept
+        let active: Vec<i32> = (1..=12).filter(|&i| i != 4).collect();
+        run_active(&mut bot, &mut sc, &active, 8);
+        let seen = log.borrow();
+        let last = seen.last().unwrap();
+        for id in [2, 3, 4, 12] {
+            assert!(
+                !last.world_ids.contains(&id),
+                "{id} must not be in {:?}",
+                last.world_ids
+            );
+            assert!(!last.others.contains(&id));
+        }
         assert!(
-            !last.others.contains(&3),
-            "an ignored tee is not an opponent: {:?}",
-            last.others
+            last.world_ids.contains(&5),
+            "a tee roped to us stays: {:?}",
+            last.world_ids
         );
+        assert!(last.world_ids.contains(&1), "and the target");
         assert!(
-            !last.others.contains(&4),
-            "an AFK tee is not an opponent: {:?}",
-            last.others
+            last.spare_ids.contains(&2) && last.spare_ids.len() >= 3,
+            "{:?}",
+            last.spare_ids
         );
-        assert!(!last.world_ids.contains(&2) && !last.world_ids.contains(&3) && !last.world_ids.contains(&4));
-        assert!(last.world_ids.contains(&5), "a tee roped to us stays in the world");
-        assert!(
-            last.spares.len() >= 3,
-            "the brain is told who is spared: {:?}",
-            last.spares
+    });
+}
+
+#[test]
+fn a_spared_body_between_us_and_a_freeze_edge_is_simulated_so_the_brain_does_not_plan_through_it() {
+    support::big_stack(|| {
+        // A friend stands 30 px to our right, a freeze strip starts 24 px behind it, and we run right.
+        // Tees collide, so the predicted tee is held back by the body and stays out of the freeze;
+        // for a brain that gets no body (the round-1 behaviour) the same inputs run into the strip.
+        let predicted = |kind: BrainKind| {
+            let mut rel = Relations::new();
+            rel.add(ListKind::Friend, "p2");
+            let map = room(&[(32, 38, FREEZE), (33, 38, FREEZE), (34, 38, FREEZE)]);
+            let (mut bot, mut sc, (log, _, act)) =
+                setup_on(map, vec![tee(0, 1000), tee(1, 1400), tee(2, 1030)], rel, kind);
+            *act.borrow_mut() = Action {
+                direction: 1,
+                ..neutral()
+            };
+            sc.pred_ahead = 10;
+            run_active(&mut bot, &mut sc, &[1, 2], 6);
+            let seen = log.borrow();
+            let last = seen.last().unwrap();
+            (last.self_x, last.self_frozen, last.world_ids.contains(&2))
+        };
+        let (with_x, with_frozen, has_body) = predicted(BrainKind::Planner);
+        let (without_x, without_frozen, no_body) = predicted(BrainKind::Hybrid);
+        println!(
+            "predicted: with the body x={with_x} frozen={with_frozen}; without x={without_x} frozen={without_frozen}"
         );
+        assert!(has_body && !no_body);
+        assert!(!with_frozen, "the body keeps us out of the freeze");
+        assert!(with_x < without_x - 1.0, "{with_x} vs {without_x}");
+        assert!(without_frozen, "control: with no body the same run ends in the freeze");
     });
 }
 
@@ -1077,6 +1164,44 @@ fn a_hammer_swing_that_would_hit_a_spared_tee_is_withheld_and_a_clear_one_is_not
     });
 }
 
+/// Review F9 (task 4.1b): for 1-3 ticks after a spawn the snapshot still says the gun is in hand, yet
+/// the press asks for the hammer (the default) and `FireWeapon` switches before it fires.
+#[test]
+fn a_swing_in_the_first_ticks_after_a_spawn_is_vetoed_although_the_snapshot_says_gun() {
+    support::big_stack(|| {
+        let mut rel = Relations::new();
+        rel.add(ListKind::Friend, "p2");
+        let (mut bot, mut sc, (_, _, act)) = setup(vec![tee(0, 1000), tee(1, 1060), tee(2, 1030)], rel);
+        *act.borrow_mut() = Action {
+            fire: true,
+            target: IVec2::new(300, 0),
+            ..neutral()
+        };
+        sc.tee_mut(0).weapon = 1; // just spawned: the gun is the active weapon
+        run_active(&mut bot, &mut sc, &[1, 2], 6);
+        let mut prev = 0;
+        for _ in 0..4 {
+            wiggle(&mut sc, 1);
+            wiggle(&mut sc, 2);
+            let input = run(&mut bot, &mut sc, 1)[0].input.unwrap();
+            assert_eq!(input.wanted_weapon, 1, "the encoder asks for the hammer");
+            assert!(!pressed(prev, input.fire), "the swing would hit the friend: {input:?}");
+            prev = input.fire;
+        }
+        assert!(bot.stats().vetoed_fires >= 4, "{}", bot.stats().vetoed_fires);
+        // An action that names the gun is a bullet, not a swing: not vetoed.
+        *act.borrow_mut() = Action {
+            fire: true,
+            target: IVec2::new(300, 0),
+            wanted_weapon: Some(1),
+            ..neutral()
+        };
+        let vetoed = bot.stats().vetoed_fires;
+        run(&mut bot, &mut sc, 3);
+        assert_eq!(bot.stats().vetoed_fires, vetoed);
+    });
+}
+
 /// The real hybrid with its fire key forced down and its aim forced at the target: static tees give
 /// it no reason to swing, so this makes it the worst case the veto must hold against. Everything
 /// else (reset, live context, the world it plans in) is the hybrid's own.
@@ -1298,5 +1423,113 @@ fn the_wayblock_kill_hook_gets_the_real_frozen_duration() {
         let seen = seen.borrow();
         assert_eq!(seen[0], 0, "first frozen snapshot");
         assert!(*seen.last().unwrap() >= 50, "grows with the frozen time: {seen:?}");
+    });
+}
+
+// --- review round 2, F6: re-basing and late adoption through the driver's real adoption rules -----
+
+/// How many presses `CountInput` sees between two inputs: every odd counter value in `(prev, cur]`.
+fn wire_presses(prev: i32, cur: i32) -> i32 {
+    (prev + 1..=cur).filter(|v| v & 1 == 1).count() as i32
+}
+
+/// The bot's decisions go through `ddai_client::InputState`, exactly as the driver adopts them. Every
+/// decision presses (fire level true). The script: decision 0 adopted on time (one press); decision 1
+/// replaced by decision 2 before its tick (its press never goes out); decision 2 adopted 2 ticks late
+/// (still pressed); decision 3 adopted 3 ticks late (no press).
+#[test]
+fn the_wire_carries_exactly_the_presses_of_decisions_adopted_in_time() {
+    support::big_stack(|| {
+        let (mut bot, mut sc, (_, _, act)) = setup(vec![tee(0, 1000), tee(1, 1300)], Relations::new());
+        *act.borrow_mut() = Action {
+            fire: true,
+            target: IVec2::new(300, 0),
+            ..neutral()
+        };
+        run_active(&mut bot, &mut sc, &[1], 4); // warm up (the encoder counter is nonzero by now)
+        let mut driver = ddai_client::InputState::new();
+        let decide = |bot: &mut Bot, sc: &mut Scenario, driver: &mut ddai_client::InputState| {
+            wiggle(sc, 1);
+            let snap = sc.snapshot();
+            let out = bot.on_snapshot(&snap);
+            sc.tick += 2;
+            let tag = out.tag.expect("a brain decision is tagged");
+            driver.decide(out.input.expect("a decision"), snap.arrived, Some(tag));
+            tag.expected_tick
+        };
+        let mut wire = driver.current().fire;
+        let take = |driver: &ddai_client::InputState, wire: &mut i32| {
+            let now = driver.current().fire;
+            let n = wire_presses(*wire, now);
+            *wire = now;
+            n
+        };
+        // Decision 0: adopted on time.
+        let e0 = decide(&mut bot, &mut sc, &mut driver);
+        driver.adopt_if_due(Some(e0));
+        assert_eq!(take(&driver, &mut wire), 1, "one press on time");
+        // Decision 1 is replaced by decision 2 before its tick comes: its press never goes out.
+        let e1 = decide(&mut bot, &mut sc, &mut driver);
+        driver.adopt_if_due(Some(e1 - 1));
+        assert_eq!(take(&driver, &mut wire), 0, "held, nothing sent");
+        let e2 = decide(&mut bot, &mut sc, &mut driver);
+        assert_eq!(driver.superseded(), 1);
+        // Decision 2 is adopted 2 ticks late: still one press (the veto looked 2 ticks on).
+        driver.adopt_if_due(Some(e2 + ddai_client::MAX_LATE_PRESS_TICKS));
+        // The bot's own counter assumed decision 1 went out; the wire still shows exactly ONE press for it.
+        assert_eq!(
+            take(&driver, &mut wire),
+            1,
+            "decision 1's press did not leak into decision 2's"
+        );
+        // Decision 3 is adopted 3 ticks late: its press is dropped, the hammer cannot swing at a tick the
+        // veto did not check.
+        let e3 = decide(&mut bot, &mut sc, &mut driver);
+        driver.adopt_if_due(Some(e3 + ddai_client::MAX_LATE_PRESS_TICKS + 1));
+        let released = take(&driver, &mut wire);
+        assert_eq!(released, 0, "no press 3 ticks late");
+        assert_eq!(driver.current().fire & 1, 0, "even parity: nothing held");
+        assert_eq!(driver.late_presses_dropped(), 1);
+        // The next decision on time presses again.
+        let e4 = decide(&mut bot, &mut sc, &mut driver);
+        driver.adopt_if_due(Some(e4));
+        assert_eq!(take(&driver, &mut wire), 1);
+    });
+}
+
+#[test]
+fn no_swing_at_a_spared_tee_reaches_the_wire_whatever_the_adoption_pattern() {
+    support::big_stack(|| {
+        let mut rel = Relations::new();
+        rel.add(ListKind::Friend, "p2");
+        let (mut bot, mut sc, (_, _, act)) = setup(vec![tee(0, 1000), tee(1, 1060), tee(2, 1030)], rel);
+        *act.borrow_mut() = Action {
+            fire: true,
+            target: IVec2::new(300, 0),
+            ..neutral()
+        };
+        let mut driver = ddai_client::InputState::new();
+        let mut wire = 0;
+        let mut presses = 0;
+        for i in 0..40 {
+            wiggle(&mut sc, 1);
+            wiggle(&mut sc, 2);
+            let snap = sc.snapshot();
+            let out = bot.on_snapshot(&snap);
+            sc.tick += 2;
+            let tag = out.tag.expect("tagged");
+            driver.decide(out.input.unwrap(), snap.arrived, Some(tag));
+            // On time, late, or replaced by the next one (no adoption this round).
+            match i % 3 {
+                0 => driver.adopt_if_due(Some(tag.expected_tick)),
+                1 => driver.adopt_if_due(Some(tag.expected_tick + 4)),
+                _ => {}
+            }
+            let now = driver.current().fire;
+            presses += wire_presses(wire, now);
+            wire = now;
+        }
+        assert_eq!(presses, 0, "the friend stands in the hammer's reach: no press ever");
+        assert!(bot.stats().vetoed_fires >= 30);
     });
 }

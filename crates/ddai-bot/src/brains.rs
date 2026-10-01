@@ -61,6 +61,18 @@ impl BrainKind {
     pub fn has_own_shield(self) -> bool {
         matches!(self, BrainKind::Hybrid | BrainKind::Planner | BrainKind::Idle)
     }
+
+    /// Whether the brain honours `LiveContext::spare_ids` (never treats those ids as target, threat,
+    /// victim or hook target), so spared tees may sit in its world as physical bodies (task 4.1b,
+    /// review F8). A brain that does not would read a body as an opponent, which is worse than not
+    /// simulating it, so for those the bot keeps the round-1 behaviour (spared tees out of the world).
+    ///
+    /// **Task 3.5b: `HybridBrain::set_live_context` must filter `spare_ids` out of its threat,
+    /// victim and hook-target sets; then add `BrainKind::Hybrid` here** (one line) and the hybrid
+    /// gets the bodies too. Until then the hybrid is left out on purpose.
+    pub fn honours_spare_ids(self) -> bool {
+        matches!(self, BrainKind::Planner)
+    }
 }
 
 /// Knobs for building brains.

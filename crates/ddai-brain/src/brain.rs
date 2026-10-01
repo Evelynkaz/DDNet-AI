@@ -62,6 +62,12 @@ pub struct LiveContext<'a> {
     /// `bot.ts:3009-3018`): `(position, velocity)` in pixels and pixels per tick. The planner
     /// vetoes candidate plans whose rope would catch one (`setSpareBystanders`).
     pub spares: &'a [(Vec2<f32>, Vec2<f32>)],
+    /// The client ids of the same spared tees (task 4.1b, review F8). The bot keeps those within
+    /// contact range **in the world as physical bodies** (collisions, pushes and rope pulls are
+    /// simulated), so a brain must not mistake them for opponents: it excludes these ids from its
+    /// target, threat, victim and hook-target sets (a spared tee is neither chased, planned against,
+    /// nor hooked). `spares` keeps their positions for the geometric swing and hook gates.
+    pub spare_ids: &'a [i32],
     /// An intermediate point to head for when the target is far or behind a wall (`pathGoal` /
     /// `trekGoal`, `setTravelGoal`); `None` (always, until task 4.2's navigation) means head for the
     /// target itself.

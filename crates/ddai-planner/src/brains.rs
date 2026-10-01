@@ -377,6 +377,9 @@ pub struct PlannerBrain {
     scratch: Option<Scratch>,
     stats: PlannerStats,
     name: String,
+    /// Task 4.1b: the live bot's spared tees (`LiveContext::spare_ids`). They are in the world as
+    /// bodies but are never the target nor a frozen bystander (their own geometric gate is `spares`).
+    spare_ids: Vec<i32>,
 }
 
 impl PlannerBrain {
@@ -397,6 +400,7 @@ impl PlannerBrain {
             scratch: None,
             stats: PlannerStats::default(),
             name,
+            spare_ids: Vec::new(),
         }
     }
 
@@ -427,6 +431,11 @@ impl PlannerBrain {
         target_id: i32,
         in_flight: &[ddai_physics::core::PlayerInput],
     ) -> Action {
+        if self.spare_ids.contains(&target_id) {
+            // A spared tee is never a target (the bot's picker does not choose one); do not plan
+            // against it if a caller hands one over anyway.
+            return action_from_input(&self.prev);
+        }
         let (Some(me), Some(target)) = (world.get_tee(self_id), world.get_tee(target_id)) else {
             return action_from_input(&self.prev);
         };
@@ -458,6 +467,7 @@ impl PlannerBrain {
                 && other.id != target_id
                 && other.alive
                 && other.frozen
+                && !self.spare_ids.contains(&other.id)
                 && js::hypot2(other.pos.x - me.pos.x, other.pos.y - me.pos.y) <= BYSTANDER_PX
             {
                 frozen.push(other.pos);
@@ -542,6 +552,8 @@ impl Brain for PlannerBrain {
             })
             .collect();
         self.planner.set_spare_bystanders(pos, vel);
+        self.spare_ids.clear();
+        self.spare_ids.extend_from_slice(ctx.spare_ids);
         self.planner.set_travel_goal(ctx.travel_goal.map(|g| Vec2 {
             x: f64::from(g.x),
             y: f64::from(g.y),
