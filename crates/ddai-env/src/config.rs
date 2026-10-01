@@ -155,6 +155,13 @@ pub struct PlayerSpec {
     /// Display label; defaults to the brain's own name.
     #[serde(default)]
     pub label: Option<String>,
+    /// Task 4.2: tell this player what the live bot's wayblock hook tells its planner (the hall's
+    /// `WB_PLAN_OVERRIDES` and band) -- only on a wayblock arena (`[wayblock]` in its definition).
+    #[serde(default)]
+    pub wb: bool,
+    /// With `wb`: strong mode (`STRONG_WB` in the hall).
+    #[serde(default)]
+    pub wb_strong: bool,
 }
 
 impl PlayerSpec {
@@ -172,6 +179,8 @@ impl PlayerSpec {
             select: None,
             hybrid: None,
             label: None,
+            wb: false,
+            wb_strong: false,
         }
     }
 }

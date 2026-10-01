@@ -375,6 +375,42 @@ pub const ENTITY_ARMOR_1: u8 = 6;
 /// "Health" pickup — in DDRace this is `POWERUP_FREEZE` (freezes on touch), not a health refill.
 /// `mapitems.h` `ENTITY_HEALTH_1`.
 pub const ENTITY_HEALTH_1: u8 = 7;
+/// Which tiles lie inside the freeze reach of a heart pickup (`ENTITY_HEALTH_1`, game or front layer): a tee
+/// whose centre is within `PICKUP_PROXIMITY_RADIUS (20) + 28 = 48` px of the pickup's centre is frozen
+/// (`pickup.cpp`, `gamecontroller.cpp:288`). For a tee standing at a tile centre that is the 3x3 block
+/// of tiles around the heart (`32 * sqrt(2) = 45 < 48`, `64 > 48`). Row-major, `width * height`.
+///
+/// **Data for the tile-based helpers only** (navigation, the shield's "rests in freeze", the bot's
+/// hazard gate): the physics itself handles pickups as entities and never reads this.
+pub fn pickup_freeze_mask(map: &MapData) -> Vec<bool> {
+    let (w, h) = (map.width as i32, map.height as i32);
+    let mut mask = vec![false; (w.max(0) * h.max(0)) as usize];
+    let heart = ENTITY_OFFSET + ENTITY_HEALTH_1;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let here = map.game.get(i).is_some_and(|t| t.index == heart)
+                || map
+                    .front
+                    .as_ref()
+                    .and_then(|f| f.get(i))
+                    .is_some_and(|t| t.index == heart);
+            if !here {
+                continue;
+            }
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if nx >= 0 && ny >= 0 && nx < w && ny < h {
+                        mask[(ny * w + nx) as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+    mask
+}
+
 /// Shotgun pickup. `mapitems.h` `ENTITY_WEAPON_SHOTGUN`.
 pub const ENTITY_WEAPON_SHOTGUN: u8 = 8;
 /// Grenade launcher pickup. `mapitems.h` `ENTITY_WEAPON_GRENADE`.
@@ -534,6 +570,38 @@ pub const TILESLAYERFLAG_TUNE: u32 = 1 << 5;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_heart_pickup_freezes_the_3x3_tiles_around_it_in_either_layer() {
+        let (w, h) = (9usize, 7usize);
+        let mut game = vec![Tile::default(); w * h];
+        game[2 * w + 2].index = ENTITY_OFFSET + ENTITY_HEALTH_1;
+        let mut front = vec![Tile::default(); w * h];
+        front[4 * w + 7].index = ENTITY_OFFSET + ENTITY_HEALTH_1;
+        // An armor pickup (index 197) freezes nothing.
+        game[5 * w + 5].index = ENTITY_OFFSET + ENTITY_ARMOR_1;
+        let map = MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: Some(front),
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        };
+        let mask = pickup_freeze_mask(&map);
+        let on: Vec<(usize, usize)> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| mask[y * w + x])
+            .collect();
+        assert_eq!(on.len(), 9 + 9, "two hearts, a 3x3 block each: {on:?}");
+        assert!(mask[2 * w + 2] && mask[w + 1] && mask[3 * w + 3]);
+        assert!(!mask[2 * w + 4], "two tiles away");
+        assert!(mask[4 * w + 7] && mask[3 * w + 8]);
+        assert!(!mask[5 * w + 5], "armor is not a hazard");
+    }
+
     use super::*;
 
     fn small_map() -> MapData {

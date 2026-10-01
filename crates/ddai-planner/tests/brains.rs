@@ -597,3 +597,62 @@ fn sync_from_copies_the_world_and_the_held_inputs() {
     assert_eq!(copy.get_tee(1).unwrap().pos, pw.get_tee(1).unwrap().pos);
     assert!(copy.get_tee(1).unwrap().pos.x > 24.0 * 32.0 + 16.0 + 10.0);
 }
+
+/// Task 4.2: `LiveContext::wb` turns the wayblock hall's overrides on and off (`planner.setOverrides`),
+/// `strong` widens the search of a small population, and the band is only passed while in the hall.
+#[test]
+fn the_wayblock_hints_apply_and_lift_the_hall_overrides() {
+    let mut b = fixed_planner();
+    let base = b.current_config();
+    assert!(
+        !base.no_thaw_rope && base.frozen_throw == 3,
+        "the live preset already throws at frozen tees"
+    );
+    let hall = ddai_brain::LiveContext {
+        wb: ddai_brain::WbHints {
+            in_hall: true,
+            strong: false,
+            band: Some((0.0, 0.0, 64.0, 64.0)),
+        },
+        ..Default::default()
+    };
+    b.set_live_context(&hall);
+    let in_hall = b.current_config();
+    assert!(in_hall.no_thaw_rope, "WB_PLAN_OVERRIDES: noThawRope");
+    assert_eq!(in_hall.frozen_throw, 3);
+    assert!((in_hall.air_jump_cost - 0.3).abs() < 1e-9);
+    assert!((in_hall.launch_exact_reach - 100.0).abs() < 1e-9);
+    assert_eq!(
+        in_hall.population, base.population,
+        "not strong: the search is as wide as before"
+    );
+    // Leaving the hall restores the preset.
+    b.set_live_context(&ddai_brain::LiveContext::default());
+    assert_eq!(b.current_config(), base);
+    // Strong mode in the hall: STRONG_WB when the base population is below 40.
+    let strong = ddai_brain::LiveContext {
+        wb: ddai_brain::WbHints {
+            in_hall: true,
+            strong: true,
+            band: None,
+        },
+        ..Default::default()
+    };
+    b.set_live_context(&strong);
+    let c = b.current_config();
+    if base.population < 40 {
+        assert_eq!((c.population, c.iterations), (40, 3));
+    } else {
+        assert_eq!(c.population, base.population);
+    }
+    // Strong without the hall does nothing.
+    b.set_live_context(&ddai_brain::LiveContext {
+        wb: ddai_brain::WbHints {
+            in_hall: false,
+            strong: true,
+            band: Some((0.0, 0.0, 1.0, 1.0)),
+        },
+        ..Default::default()
+    });
+    assert_eq!(b.current_config(), base);
+}

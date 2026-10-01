@@ -60,7 +60,7 @@ use ddai_world::{LiveWorld, SnapshotInput, player_input_from_net};
 use crate::activity::{ActivityClock, BlockEvent, BlockStats};
 use crate::brains::BrainKind;
 use crate::consts::*;
-use crate::hooks::{HookContext, Hooks, NavStep};
+use crate::hooks::{HookContext, Hooks, MapIdent, NavStep};
 use crate::input::InputEncoder;
 use crate::latency::{DecisionEstimator, LatencyStats};
 use crate::mapgrid::MapGrid;
@@ -82,8 +82,9 @@ pub enum Mode {
     Passive,
     /// Do nothing (neutral input; the unstick rules still ignore us).
     Hold,
-    /// A goto is in progress. Stub until task 4.2: the no-op navigator never drives, so this behaves
-    /// like `Fight`.
+    /// A goto / follow walk is in progress (task 4.2): the navigator hook drives the input; when the walk
+    /// ends the navigator hands the bot back to the mode the walk began from. With the no-op navigator
+    /// (`Hooks::default()`) nothing ever drives and this behaves like `Fight`.
     Goto,
 }
 
@@ -128,6 +129,12 @@ pub struct BotConfig {
     /// The quantile of recent decision times used as the estimate that picks the input slot
     /// (task 4.1b; 0.9 = p90).
     pub estimate_quantile: f64,
+    /// **Tests only.** When set, the bot's estimate of its own decision (queue delay + decision time, the
+    /// input of the slot choice in `prediction_target`) is this fixed value instead of the measured
+    /// rolling quantile, so a scenario's expected prediction tick does not depend on how long the host
+    /// happened to take (a ~10 ms pause on a loaded CI machine flips it). `None` (the default and every
+    /// production path) measures as before. The latency statistics still record the real times.
+    pub decision_time_override: Option<Duration>,
 }
 
 impl Default for BotConfig {
@@ -144,6 +151,7 @@ impl Default for BotConfig {
             max_join_attempts: 10,
             async_seal: false,
             estimate_quantile: DEFAULT_ESTIMATE_QUANTILE,
+            decision_time_override: None,
         }
     }
 }
@@ -289,6 +297,8 @@ pub struct Bot {
     sent: SentLog,
 
     map: Option<Arc<MapData>>,
+    /// Name and hash of the map being loaded (set by the runner before `on_map_loaded`).
+    map_ident: MapIdent,
     grid: Option<MapGrid>,
     live: Option<LiveWorld>,
     plan: Option<PlanScratch>,
@@ -341,6 +351,7 @@ impl Bot {
             encoder: InputEncoder::new(),
             sent: SentLog::new(),
             map: None,
+            map_ident: MapIdent::default(),
             grid: None,
             live: None,
             plan: None,
@@ -356,7 +367,7 @@ impl Bot {
             last_aim: (0, -1),
             last_sent: PhysInput::default(),
             queue_delay: Duration::ZERO,
-            est_decision: Duration::from_millis(1),
+            est_decision: cfg.decision_time_override.unwrap_or(Duration::from_millis(1)),
             estimator: DecisionEstimator::new(cfg.estimate_quantile, Duration::from_millis(1)),
             in_flight: Vec::with_capacity(64),
             keep: Box::new([false; MAX_CLIENTS]),
@@ -483,7 +494,7 @@ impl Bot {
     pub fn on_map_loaded(&mut self, map: Arc<MapData>) {
         self.grid = Some(MapGrid::new(&map));
         self.plan = Some(PlanScratch::new(Arc::clone(&map)));
-        self.hooks.navigator.on_map(&map);
+        self.hooks.navigator.on_map(&map, &self.map_ident);
         if self.cfg.async_seal {
             match crate::seal_worker::SealWorker::spawn(Arc::clone(&map)) {
                 Ok(w) => self.picker.set_seal_worker(Some(w)),
@@ -499,8 +510,15 @@ impl Bot {
         self.reset_world_state();
     }
 
+    /// The name and hash of the map the next [`Bot::on_map_loaded`] brings (the wayblock is chosen by
+    /// name, the freeze memory is keyed by the hash).
+    pub fn set_map_ident(&mut self, ident: MapIdent) {
+        self.map_ident = ident;
+    }
+
     /// `SessionEvent::MapChanging`: the old map's state is stale from here on.
     pub fn on_map_changing(&mut self) {
+        self.hooks.navigator.on_map_changing();
         self.picker.set_seal_worker(None);
         self.map = None;
         self.grid = None;
@@ -540,6 +558,11 @@ impl Bot {
         self.sent.on_timing(tick, time_left_ms);
     }
 
+    /// The run is over: the hooks save what they keep (the freeze memory).
+    pub fn shutdown(&mut self) {
+        self.hooks.navigator.stop();
+    }
+
     /// `SV_KILLMSG` (`onKill`, `bot.ts:2120`).
     ///
     /// Our own death: DDNet respawns a player right after `Cl_Kill` (`gamecontext.cpp:3008-3009`,
@@ -548,6 +571,9 @@ impl Bot {
     /// and the next snapshot with our tee starts a new life (brain reset, `Respawned`).
     pub fn on_kill_message(&mut self, victim: i32) {
         self.clock.on_kill(victim, self.last_tick);
+        self.hooks
+            .navigator
+            .on_kill(victim, self.players.own_id().unwrap_or(-2), self.last_tick);
         if victim == self.players.own_id().unwrap_or(-2) && self.was_alive {
             self.stats.deaths += 1;
             self.was_alive = false;
@@ -577,8 +603,13 @@ impl Bot {
     /// Decides one snapshot. `Output::default()` (no input) until a map is loaded and our id known.
     pub fn on_snapshot(&mut self, snap: &LiveWorldSnapshot) -> Output {
         let started = Instant::now();
-        self.queue_delay = started.saturating_duration_since(snap.arrived);
-        self.latency.queue.push(self.queue_delay);
+        let real_queue_delay = started.saturating_duration_since(snap.arrived);
+        self.latency.queue.push(real_queue_delay);
+        self.queue_delay = if self.cfg.decision_time_override.is_some() {
+            Duration::ZERO
+        } else {
+            real_queue_delay
+        };
         self.stats.snapshots += 1;
         let mut brain_time = Duration::ZERO;
         let out = self.decide(snap, &mut brain_time);
@@ -589,7 +620,10 @@ impl Bot {
             // A rolling high quantile, not a mean (task 4.1b): the driver holds the decision until
             // the tick it was aimed at, so a conservative estimate only costs latency.
             self.estimator.push(total);
-            self.est_decision = self.estimator.estimate();
+            self.est_decision = self
+                .cfg
+                .decision_time_override
+                .unwrap_or_else(|| self.estimator.estimate());
         }
         out
     }
@@ -731,19 +765,40 @@ impl Bot {
             push_event(events, BotEvent::Respawned { tick });
         }
 
-        // 7. unstick.
-        let acting = *mode != Mode::Hold;
-        let wb_kill = hooks.wayblock.holding()
-            && hooks.wayblock.wants_kill(
-                &HookContext {
+        // 6b. the navigator's housekeeping: commands, the end of a walk, the freeze memory.
+        let lag_ticks = (snap.pred_tick.max(snap.tick) + 1 - tick).max(0);
+        macro_rules! hook_ctx {
+            () => {
+                HookContext {
                     tick,
                     own: &own,
                     tees,
                     players,
                     grid,
-                },
-                unstick.frozen_for(tick, &own),
-            );
+                    clock,
+                    world: live.base_world(),
+                    lag_ticks,
+                    mode: *mode,
+                }
+            };
+        }
+        let poll = hooks.navigator.poll(&hook_ctx!());
+        if let Some(m) = poll.mode
+            && m != *mode
+        {
+            *mode = m;
+            if !matches!(m, Mode::Fight | Mode::Goto) {
+                picker.set_target(-1);
+            }
+        }
+        if let Some(k) = poll.knowledge {
+            brain.set_map_knowledge(&k);
+        }
+
+        // 7. unstick.
+        let acting = *mode != Mode::Hold;
+        let wb_kill =
+            hooks.wayblock.holding() && hooks.wayblock.wants_kill(&hook_ctx!(), unstick.frozen_for(tick, &own));
         let verdict = unstick.step(&UnstickCtx {
             tick,
             own: &own,
@@ -758,6 +813,7 @@ impl Bot {
         if let Verdict::Kill(reason) = verdict {
             out.kill = true;
             stats.self_kills += 1;
+            hooks.navigator.kill_sent(tick, false);
             push_event(events, BotEvent::Killed { tick, reason });
         }
 
@@ -768,24 +824,23 @@ impl Bot {
             *status = make_status(tick, own_id, *mode, Some(&own), picker.target(), clock.stats(), *stats);
             return out;
         }
-        let nav = hooks.navigator.drive(&HookContext {
-            tick,
-            own: &own,
-            tees,
-            players,
-            grid,
-        });
+        let nav = hooks.navigator.drive(&hook_ctx!());
         let mut navigated = None;
+        let mut nav_guard = false;
         match nav {
-            Some(NavStep::Kill) => {
+            Some(NavStep::Kill { action }) => {
                 if !out.kill && unstick.cooldown_ready(tick) {
                     unstick.note_external_kill(tick);
+                    hooks.navigator.kill_sent(tick, true);
                     stats.self_kills += 1;
                     out.kill = true;
                 }
-                navigated = Some(Action::neutral());
+                navigated = Some(action);
             }
-            Some(NavStep::Input(a)) => navigated = Some(a),
+            Some(NavStep::Input { action, guard }) => {
+                navigated = Some(action);
+                nav_guard = guard;
+            }
             None => {}
         }
         let previous_target = picker.target();
@@ -802,6 +857,8 @@ impl Bot {
                     clock,
                     grid,
                     base: live.base_world(),
+                    lag_ticks,
+                    mode: *mode,
                 },
                 hooks,
                 plan,
@@ -816,6 +873,11 @@ impl Bot {
             push_event(events, BotEvent::TargetChanged { tick, to });
         }
 
+        // 8b. the walk-to-the-game / seek / home rules (nothing is navigating).
+        if navigated.is_none() && matches!(*mode, Mode::Fight | Mode::Goto) {
+            hooks.trek.steer(&hook_ctx!(), target);
+        }
+
         // 9. the action.
         let mut action;
         let mut expected_tick: Option<i32> = None;
@@ -823,6 +885,22 @@ impl Bot {
         if let Some(a) = navigated {
             action = a;
             stats.idle_decisions += 1;
+            if nav_guard && grid.hazard_within(own.pos.x, own.pos.y, GUARD_HAZARD_TILES) {
+                // `driveNav`: `crossing || plannedFreeze ? want : guard(self, want)`.
+                let t_guard = Instant::now();
+                let prev_planner = from_ddnet_input(last_sent);
+                // As the TS `guard` and the brain path do: on the world our input will act in (our own
+                // in-flight inputs applied up to the tick it takes effect), not the snapshot's.
+                let ready_in = *queue_delay + *est_decision + DRIVER_PICKUP;
+                let predicted = predict_own(live, snap, cfg, ready_in, sent, in_flight, keep, own_id, tick);
+                let g = plan.guard(predicted, own_id, action, &prev_planner);
+                if g != action {
+                    stats.guarded_inputs += 1;
+                    hooks.navigator.vetoed();
+                }
+                action = g;
+                *brain_time += t_guard.elapsed();
+            }
         } else if target < 0 {
             if cfg.brain == BrainKind::Idle {
                 action = Action::neutral();
@@ -838,9 +916,22 @@ impl Bot {
                     }
                 }
                 let prev_planner = from_ddnet_input(last_sent);
+                let hint = if hooks.wayblock.holding() {
+                    hooks.wayblock.wander_hint(&hook_ctx!())
+                } else {
+                    None
+                };
+                // The guard only runs near freeze or death; there it checks the world the input will act
+                // in (own in-flight inputs applied), like the brain path; elsewhere nothing is predicted.
+                let guard_world = if grid.hazard_within(own.pos.x, own.pos.y, GUARD_HAZARD_TILES) {
+                    let ready_in = *queue_delay + *est_decision + DRIVER_PICKUP;
+                    predict_own(live, snap, cfg, ready_in, sent, in_flight, keep, own_id, tick)
+                } else {
+                    live.base_world()
+                };
                 let mut env = WanderEnvImpl {
                     plan,
-                    world: live.base_world(),
+                    world: guard_world,
                     own: &own,
                     tees,
                     grid,
@@ -854,8 +945,8 @@ impl Bot {
                         own: &own,
                         grid,
                         prev_aim: *last_aim,
-                        anchor_x: None,
-                        look_at: None,
+                        anchor_x: hint.map(|h| h.anchor_x),
+                        look_at: hint.and_then(|h| h.look_at).map(|(x, y)| Vec2 { x, y }),
                     },
                     &mut env,
                 );
@@ -897,7 +988,6 @@ impl Bot {
             sent.in_flight(tick, to_tick, in_flight);
             // The observation's target is a tee that is still in the world (it may have just died).
             let target_id = target_tee.map(|t| t.id);
-            let predicted = live.predict_local_observation(to_tick, in_flight, keep, target_id, obs);
 
             spares.clear();
             spare_ids.clear();
@@ -914,23 +1004,24 @@ impl Bot {
                 }
             }
             let travel_goal = match target_tee.as_ref() {
-                Some(tt) => hooks.trek.goal(
-                    &HookContext {
-                        tick,
-                        own: &own,
-                        tees,
-                        players,
-                        grid,
-                    },
-                    tt,
-                ),
+                Some(tt) => hooks.trek.goal(&hook_ctx!(), tt),
                 None => None,
             };
+            if hooks.trek.take_kill() && !out.kill && unstick.cooldown_ready(tick) {
+                // `trekGoal`: a respawn step on the way there.
+                unstick.note_external_kill(tick);
+                hooks.navigator.kill_sent(tick, false);
+                stats.self_kills += 1;
+                out.kill = true;
+            }
+            let wb = hooks.wayblock.brain_hints(&hook_ctx!());
             brain.set_live_context(&LiveContext {
                 spares: spares.as_slice(),
                 spare_ids: spare_ids.as_slice(),
                 travel_goal,
+                wb,
             });
+            let predicted = live.predict_local_observation(to_tick, in_flight, keep, target_id, obs);
             let view = WorldView {
                 world: predicted,
                 self_id: own_id,
@@ -1320,6 +1411,30 @@ fn hammer_veto(action: &mut Action, own: &Tee, own_then: Vec2<f32>, ahead: f32, 
         action.fire = false;
     }
     would_hit
+}
+
+/// Our own tee alone, predicted to the tick an input decided now takes effect, with our inputs already
+/// sent but not yet applied (`in_flight`) in the world: what `guard` needs for a navigator or wander
+/// step (the brain path builds the same world with the others kept as well).
+#[allow(clippy::too_many_arguments)]
+fn predict_own<'a>(
+    live: &'a mut LiveWorld,
+    snap: &LiveWorldSnapshot,
+    cfg: &BotConfig,
+    ready_in: Duration,
+    sent: &SentLog,
+    in_flight: &mut Vec<(i32, PhysInput)>,
+    keep: &mut [bool; MAX_CLIENTS],
+    own_id: i32,
+    tick: i32,
+) -> &'a ddai_physics::world::World<f32> {
+    let prediction = prediction_target(snap, cfg.max_predict_ticks, ready_in);
+    sent.in_flight(tick, prediction.to_tick, in_flight);
+    keep.fill(false);
+    if let Some(k) = usize::try_from(own_id).ok().and_then(|i| keep.get_mut(i)) {
+        *k = true;
+    }
+    live.predict_local(prediction.to_tick, in_flight, keep)
 }
 
 /// The wander step's guard and rope check, over the planner helpers.

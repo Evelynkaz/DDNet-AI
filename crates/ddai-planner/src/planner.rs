@@ -150,7 +150,9 @@ struct Band {
 #[derive(Debug, Clone)]
 pub struct DeadZoneGrid {
     pub width: i32,
-    pub cells: Vec<u8>,
+    /// Shared and never mutated: the live bot hands the same grid to every brain and planner clone
+    /// (task 4.2, review F4: a map-sized copy per hand-off was too much for the decision thread).
+    pub cells: std::sync::Arc<Vec<u8>>,
 }
 
 /// `inDead(dead, x, y)` (`planner.ts:512-516`) — deliberately reproduces the TS bug

@@ -67,6 +67,8 @@ E-005), поэтому `W/(W+L+D)` (`PLAN.md` §0) остаётся **втори
 | `clb-left` | train | Copy Love Box (sha256 `6e79ef43…fd25`), левый ВБ-зал: боксы L1 `{79..104, 67..79}` ∪ L2 `{78..104, 79..87}`, стоячие клетки, спавн 3–12 |
 | `clb-right` | **holdout** | зеркало (`234 − x`): L1 → `{130..155, 67..79}`, L2 → `{130..156, 79..87}` |
 | `chillblock5-ruler` | **holdout** | ChillBlock5 (sha256 `44f8343a…b378`), «ruler area»: `{416..468, 201..212}` |
+| `clb-wb-left` | train | задача 4.2, ВБ-удержание: тот же зал и боксы, но слот 0 стоит на первом споте ВБ (`[wayblock] side = "left"`), нарушители входят из боксов зала на 3–14 тайлов; считается время в зале (`inWbHall`) и в полосе `wbBand` |
+| `clb-wb-right` | **holdout** | зеркало `clb-wb-left` (правый зал) |
 
 **Порядок спавна тоже симметрия (раунд 1 ревью, F1).** Слот 0 всегда имеет client id 0 и спавнится первым; ти, спавнившийся
 последним, обрабатывается в тике первым и держит «сильный» хук (`m_StrongWeakId`). Обмен позиций (`swap`) этого не
@@ -105,6 +107,10 @@ arena = "clb-left"
 players = [{ brain = "planner", mode = "deadline", budget_ms = 4.0, lag = 0 },
            { brain = "scripted", count = 3 }]
 ```
+
+На ВБ-арене партии не меняются сторонами (`swap` выключен: слот 0 всегда держит спот), чередуется только порядок спавна.
+
+`wb = true` (задача 4.2) — игроку сообщают то, что бот-ВБ сообщает планировщику в зале (`WB_PLAN_OVERRIDES`, полоса; `wb_strong` — `STRONG_WB`); только на арене с `[wayblock]`; сценарии — `configs/arena/wb-hold.toml`.
 
 `brain` = `idle` / `scripted` / `planner` (`preset` normal|low|strong, `mode` fixed|deadline, `budget_ms`,
 `clock` wall|step) / `hybrid` (гибридный мозг D-041, задача 3.5; те же `preset`/`mode`/`budget_ms`/`clock` плюс таблица

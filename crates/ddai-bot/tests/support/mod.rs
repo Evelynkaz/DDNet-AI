@@ -332,6 +332,9 @@ pub fn cfg(kind: BrainKind) -> BotConfig {
     BotConfig {
         brain: kind,
         salt: [7; 16],
+        // Deterministic slot choice: the scenarios assert exact prediction ticks, and the real decision
+        // and queue times of the host must not move them (3.5b review F8).
+        decision_time_override: Some(std::time::Duration::from_millis(1)),
         ..BotConfig::default()
     }
 }

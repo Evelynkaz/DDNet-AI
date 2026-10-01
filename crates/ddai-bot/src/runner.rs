@@ -32,8 +32,9 @@ use ddai_physics::map::MapData;
 use crate::bot::{Bot, BotConfig, BotEvent, BotStats, Output};
 use crate::brains::{BrainError, BrainOptions, make_brain};
 use crate::bridge::{Bridge, FrameChar, MapMessage, PlayerEntry, PlayersMessage, StatusMessage};
-use crate::hooks::Hooks;
+use crate::hooks::MapIdent;
 use crate::latency::{LatencyStats, Summary};
+use crate::nav_hooks::{NavConfig, NavHandle, nav_hooks};
 use crate::relations::Relations;
 
 /// Process exit codes (`ddnet-ai record` uses the same).
@@ -106,6 +107,10 @@ pub struct RunnerConfig {
     pub audit_outgoing: bool,
     /// Set by a signal handler to ask for a graceful stop.
     pub shutdown: Arc<AtomicBool>,
+    /// Navigation, wayblock and freeze memory (task 4.2).
+    pub nav: NavConfig,
+    /// How commands (`--goto`, `--follow`, task 4.3's chat commands) reach the navigation.
+    pub nav_handle: NavHandle,
 }
 
 /// What a finished run reports.
@@ -187,7 +192,12 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
 
     let mut bot_cfg = cfg.bot.clone();
     bot_cfg.async_seal = true; // the decision path must stay cheap (D-042)
-    let mut bot = Bot::new(bot_cfg, brain, Hooks::default(), cfg.relations.clone());
+    let mut bot = Bot::new(
+        bot_cfg,
+        brain,
+        nav_hooks(cfg.nav.clone(), cfg.nav_handle.clone()),
+        cfg.relations.clone(),
+    );
     tracing::info!(server = %cfg.server, brain = bot.brain_name(), mode = bot.mode().name(), "starting the bot");
     let mut client = Client::connect(cfg.server, client_cfg);
 
@@ -297,6 +307,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
             count_outgoing(&mut report, label, *accepted);
         }
     }
+    bot.shutdown();
     report.stats = bot.stats();
     report.latency = bot.latency().clone();
     report.block_stats = bot.block_stats();
@@ -377,6 +388,10 @@ fn handle_event(
             SessionEvent::MapLoaded(loaded) => match load_map(cache_dir, &loaded.name, &loaded.sha256) {
                 Some(data) => {
                     let (w, h) = (data.width, data.height);
+                    bot.set_map_ident(MapIdent {
+                        name: loaded.name.clone(),
+                        sha256: loaded.sha256,
+                    });
                     bot.on_map_loaded(Arc::new(data));
                     report.map_name = Some(loaded.name.clone());
                     if let Some(b) = bridge.as_mut() {

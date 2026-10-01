@@ -22,6 +22,8 @@ ddai-controls = { path = "../ddai-controls" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-jsmath = { path = "../ddai-jsmath" }
 ddai-map = { path = "../ddai-map" }
+# Task 4.2: the wayblock tables (hall, spots, band) for the WB hold scenarios.
+ddai-nav = { path = "../ddai-nav" }
 ddai-physics = { path = "../ddai-physics" }
 ddai-planner = { path = "../ddai-planner" }
 # Games are independent, so a batch is one `par_iter` over game indices (per-game seeds, results

@@ -4927,3 +4927,62 @@ zstd (уровень 5) структуры `TeacherChunk { format_version, episo
 пороги в конце фазы, по `teacher-val` и `dagger-val`) / `collect` (в т.ч. `jobs_resumed`) / `hook_play` (раунд DAgger: частота старта и отпускания хука у
 ученика против учителя на тех же состояниях) / `arena`), `status.json` (фаза, шаг, время),
 `state.bin` (параметры + моменты Adam + шаг — точка возобновления, формат как выше), `checkpoints/{last,final,step-NNNNNNNN}.bundle`, `rounds/round-R.bundle`.
+
+## 23. Навигация, вейблок, память о фризах (задача 4.2, `crates/ddai-nav`, `ddai-bot::nav_hooks`)
+
+### 23.1 Файл памяти о фризах — `~/aiddnet/data/bot/memory/<sha256 карты>.json`
+
+Ключ — **sha256 файла карты** (строчный hex), а не имя: две разные карты с одним именем не смешиваются (в TS ключом было имя
+без CRC, `memory.ts`). Каталог создаётся с правами `0700`; запись атомарная (`<файл>.json.tmp` → `rename`). В git не попадает.
+
+```json
+{ "width": 387, "height": 250, "events": 412,
+  "idx": [5940, 5941], "val": [1.0, 0.4],         // freeze-счётчики: индекс тайла (y*width+x), значение (3 знака)
+  "pidx": [5800], "pval": [3.0] }                   // счётчики безопасных проходов (2 знака)
+```
+
+- `note(x, y)` (замёрзли): +1 в тайле, +0.4 (`SPREAD`) в восьми соседях; `events` растёт на 1. `notePass` — +1 при входе в новый
+  тайл свободным. `safety = clean · good/(good+10)`, `clean = good/(good+15·bad)`; `risk = v/(1+v)`.
+- **Сохранение:** каждый 20-й `note` (`SAVE_EVERY_NOTES`), при смене карты, при остановке. Каждое сохранение **затухает** все
+  счётчики в `0.97` (`DECAY`); `cells < 0.01` и `passes < 0.05` отбрасываются.
+- Размер карты не совпал, файл отсутствует или не разбирается — память пустая (без ошибки).
+- Планировщик получает **общие неизменяемые снимки** (`Brain::set_map_knowledge(MapKnowledge)`: `dead_zone: Arc<Vec<u8>>`, `freeze_memory { cells, passes: Arc<Vec<f32>>, events }`)
+  при загрузке карты и в тик, когда бот замёрз (глубокая копия делается один раз именно тогда: замёрзший тий всё равно ничего не решает; на решающем потоке
+  больших копий нет, планировщик и его клоны делят `Arc`); `memoryTrust 0.9` — в пресете планировщика. Каталог памяти — только абсолютный путь
+  (`default_memory_dir()` даёт `None`, если `HOME` не задан: относительный путь мог бы лечь внутрь репозитория).
+
+### 23.2 API навигации для консольных команд (задача 4.3)
+
+`ddai_bot::nav_hooks::NavHandle` — `Clone + Send`; команды берутся ботом на ближайшем снапшоте с живым тием, ответы (то, что TS
+возвращал текстом команды) — `drain_replies()`, состояние — `status()` (`NavStatus`).
+
+| `NavCommand` | TS |
+|---|---|
+| `Goto { tx, ty, through_freeze }`, `GotoTele` | `?goto <x> <y>`, `?goto tele` |
+| `Follow { client_id }` | `?goto <ник>` / `@ник` (по id клиента: ники не в коде бота) |
+| `Stop` | `?stop`, `?goto stop` |
+| `SetHome { tx, ty }`, `HomeHere`, `HomeOff` | `!home …` |
+| `Wb(WbMode)` | `!wb off\|left\|right\|auto` |
+| `Seek(bool)` | `!seek` |
+
+**Пикапы-сердца** (`ENTITY_HEALTH_1`, игровой / фронтальный слой) замораживают тия в радиусе 48 px: тайловые проверки (`NavGrid`, `MapGrid`, `seal::rests_in_freeze`, щит бота) видят зону 3×3 тайла вокруг сердца как фриз (`ddai_physics::map::pickup_freeze_mask`; только живой бэкенд — мир TS пикапов не знает).
+
+Режим бота: ход (`goto`) переводит бота в `Mode::Goto` и по окончании возвращает в режим, с которого он начался; смена режима
+снаружи (`Bot::set_mode`) обрывает ход. CLI: `ddnet-ai play --goto X,Y`, `--follow <client-id>`, `--wb auto|left|right|off`,
+`--strong`, `--no-seek`, `--memory-dir`, `--no-memory`.
+
+### 23.3 Кто управляет вводом
+
+Пока идёт ход, ввод решает **навигатор** (`driveNav`): бот отправляет его ввод, пропущенный через щит, кроме тиков перехода трубы
+(`crossing`) и «запланированного фриза» (`planned_freeze`); мозг не спрашивается, цель не выбирается. Если ход начинается с
+респавна, навигатор просит `Cl_Kill` (никогда не чат), бот отправляет его не чаще `KILL_COOLDOWN_TICKS = 500` (общий кулдаун
+с анстиком; правило «лежим во фризе на ВБ» — собственные 100 тиков). Без хода решает **мозг**: он получает следующую точку
+trek/пути как `LiveContext::travel_goal` и подсказки ВБ `LiveContext::wb`; правила «пойти туда, где игра», «seek», «домой» и
+«назад на спот ВБ» (`Trek::steer`) запускают ход для следующего снапшота.
+
+### 23.4 `WbHints` и `MapKnowledge` (`ddai-brain`)
+
+`LiveContext::wb: WbHints { in_hall, strong, band: Option<(x0,y0,x1,y1)> }` — «мы в зале удерживаемого ВБ» (применить
+`WB_PLAN_OVERRIDES`, при `strong` и популяции < 40 — `STRONG_WB`) и прямоугольник `wbBand` в пикселях (штраф `bandCost`, по
+умолчанию 0). `MapKnowledge { width, height, dead_zone: Option<Vec<u8>>, freeze_memory: Option<FreezeMemoryData> }` — карта-уровневые
+данные, передаваемые `Brain::set_map_knowledge`.

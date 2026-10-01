@@ -69,9 +69,49 @@ pub struct LiveContext<'a> {
     /// nor hooked). `spares` keeps their positions for the geometric swing and hook gates.
     pub spare_ids: &'a [i32],
     /// An intermediate point to head for when the target is far or behind a wall (`pathGoal` /
-    /// `trekGoal`, `setTravelGoal`); `None` (always, until task 4.2's navigation) means head for the
-    /// target itself.
+    /// `trekGoal`, `setTravelGoal`); `None` means head for the target itself.
     pub travel_goal: Option<Vec2<f32>>,
+    /// Wayblock hints (task 4.2): what the bot's wayblock mode tells the planner this decision.
+    pub wb: WbHints,
+}
+
+/// What the wayblock mode (`bot.ts` `wbBand` / `wbPlanOverrides`, task 4.2) asks of a search brain this
+/// decision. All-default means "not holding a wayblock hall": plan as usual.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WbHints {
+    /// We hold a wayblock and stand inside its hall on the chosen side: the planner applies
+    /// `WB_PLAN_OVERRIDES` (`noThawRope`, `frozenThrow 3`, `airJumpCost 0.3`, `launchExactReach 100`).
+    pub in_hall: bool,
+    /// The bot runs in strong mode: with `in_hall` the planner searches wider (`STRONG_WB`: population
+    /// 40, 3 iterations, 30 ms) unless it already does.
+    pub strong: bool,
+    /// `wbBand`: the pixel rectangle `(x0, y0, x1, y1)` the planner is penalised for leaving
+    /// (`bandCost`, zero by default), only while `in_hall`.
+    pub band: Option<(f32, f32, f32, f32)>,
+}
+
+/// What the bot learned about the map that outlives a decision (task 4.2): the dead-zone grid and the
+/// freeze memory. Plain data so `ddai-brain` stays free of planner types; a search brain copies what it
+/// needs. Handed over with [`Brain::set_map_knowledge`] when the map loads and whenever the memory has
+/// changed (at most a few times a minute).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MapKnowledge {
+    pub width: i32,
+    pub height: i32,
+    /// `deadZone` of `route.ts`: one byte per tile, row-major, `1` = no route leads back to the game.
+    pub dead_zone: Option<Arc<Vec<u8>>>,
+    /// `FreezeMemory` (`memory.ts`): freeze counts and safe-pass counts per tile, row-major, and the
+    /// number of freezes noted.
+    pub freeze_memory: Option<FreezeMemoryData>,
+}
+
+/// The persisted shape of a `FreezeMemory`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FreezeMemoryData {
+    /// Shared, immutable snapshots: handing one over copies nothing (task 4.2, review F4).
+    pub cells: Arc<Vec<f32>>,
+    pub passes: Arc<Vec<f32>>,
+    pub events: i64,
 }
 
 /// The shared decision-maker interface (task 7.3, acceptance criterion 1). Every implementer is
@@ -109,6 +149,11 @@ pub trait Brain {
     /// [`LiveContext`]). The default ignores it.
     fn set_live_context(&mut self, ctx: &LiveContext<'_>) {
         let _ = ctx;
+    }
+
+    /// Task 4.2: the map's dead zone and freeze memory. The default ignores them.
+    fn set_map_knowledge(&mut self, knowledge: &MapKnowledge) {
+        let _ = knowledge;
     }
 
     /// A short, human-readable name for logs/telemetry (e.g. `"fly-S"`, `"planner"`,

@@ -16,16 +16,19 @@ pub use ddai_brain::IdleBrain;
 
 use std::sync::Arc;
 
-use ddai_brain::{Action, Brain, CharacterObservation, IVec2, LiveContext, Observation, ResetContext, WorldView};
+use ddai_brain::{
+    Action, Brain, CharacterObservation, IVec2, LiveContext, MapKnowledge, Observation, ResetContext, WorldView,
+};
 use ddai_jsmath as js;
 use ddai_jsmath::Rng;
 use ddai_physics::map::MapData;
 
 use crate::clock::{Clock, StepClock, WallClock};
-use crate::config::{PlannerConfig, preset_low_cpu, preset_normal, preset_strong_wb};
+use crate::config::{PlannerConfig, preset_low_cpu, preset_normal, preset_strong_wb, wb_overrides};
+use crate::memory::FreezeMemory;
 use crate::physics_adapter::{PhysicsWorld, from_ddnet_input};
 use crate::plan_world::PlanWorld;
-use crate::planner::{DecisionInfo, Planner};
+use crate::planner::{DeadZoneGrid, DecisionInfo, Planner};
 use crate::scripted::scripted_action;
 use crate::types::{PlayerInput, TeeState, blank_tee_state, empty_input};
 use crate::vmath::Vec2;
@@ -380,6 +383,9 @@ pub struct PlannerBrain {
     /// Task 4.1b: the live bot's spared tees (`LiveContext::spare_ids`). They are in the world as
     /// bodies but are never the target nor a frozen bystander (their own geometric gate is `spares`).
     spare_ids: Vec<i32>,
+    /// Task 4.2: which `WB_PLAN_OVERRIDES` variant the planner currently runs with, `(in_hall, strong)`;
+    /// `set_overrides` recomputes the config, so it is only called when this changes.
+    wb_applied: (bool, bool),
 }
 
 impl PlannerBrain {
@@ -401,11 +407,18 @@ impl PlannerBrain {
             stats: PlannerStats::default(),
             name,
             spare_ids: Vec::new(),
+            wb_applied: (false, false),
         }
     }
 
     pub fn stats(&self) -> PlannerStats {
         self.stats
+    }
+
+    /// The planner configuration in effect now (the preset, or the preset with the wayblock hall's
+    /// overrides applied by [`Brain::set_live_context`]).
+    pub fn current_config(&self) -> PlannerConfig {
+        self.planner.config()
     }
 
     /// The planner and the previous input, for the 8.2 teacher (`crate::teacher`), which labels
@@ -557,6 +570,43 @@ impl Brain for PlannerBrain {
         self.planner.set_travel_goal(ctx.travel_goal.map(|g| Vec2 {
             x: f64::from(g.x),
             y: f64::from(g.y),
+        }));
+        // Task 4.2: `planner.setOverrides(wbPlanOverrides(self))` / `setBand(wbBand(self))`
+        // (`bot.ts:4778-4779`): inside a held wayblock hall the planner runs `WB_PLAN_OVERRIDES` (and
+        // `STRONG_WB` on top when the bot is in strong mode and the base population is below 40).
+        let want = (ctx.wb.in_hall, ctx.wb.in_hall && ctx.wb.strong);
+        if want != self.wb_applied {
+            self.wb_applied = want;
+            self.planner.set_overrides(match want {
+                (false, _) => None,
+                (true, false) => Some(Box::new(wb_overrides)),
+                (true, true) => Some(Box::new(|base: PlannerConfig| {
+                    if base.population < 40 {
+                        preset_strong_wb(base)
+                    } else {
+                        wb_overrides(base)
+                    }
+                })),
+            });
+        }
+        self.planner.set_band(
+            ctx.wb
+                .band
+                .filter(|_| ctx.wb.in_hall)
+                .map(|(x0, y0, x1, y1)| (f64::from(x0), f64::from(y0), f64::from(x1), f64::from(y1))),
+        );
+    }
+
+    fn set_map_knowledge(&mut self, k: &MapKnowledge) {
+        // `planner.setDeadZone(deadZone)` / the freeze memory (`bot.ts` `memory`, `memoryTrust` from
+        // the preset): shared snapshots (no copy), the bot keeps owning, mutating and saving its own.
+        self.planner
+            .set_dead_zone(k.dead_zone.as_ref().map(|cells| DeadZoneGrid {
+                width: k.width,
+                cells: Arc::clone(cells),
+            }));
+        self.planner.set_freeze_memory(k.freeze_memory.as_ref().and_then(|m| {
+            FreezeMemory::from_shared(k.width, k.height, Arc::clone(&m.cells), Arc::clone(&m.passes), m.events)
         }));
     }
 

@@ -44,7 +44,7 @@
 | `target` | порт `pickTarget` (§7.1-§7.2): фильтры, таблица очков, sealed/settled, фиксированная цель; `is_spared` |
 | `activity` | часы активности/AFK (§7.4), `lastTouch`, `onFreezeOnset`, окно кредита 50 тиков |
 | `relations`, `names`, `players` | списки friend/war/ignore/clanWar/clanFriend, **точное** сравнение после нормализации, таблица игроков, соль-хэши для логов |
-| `reach` | достижимость: кэш ответов (25 тиков) и бюджет поисков; `FloodRoute` — заливка по воздуху без фриза; `RouteFinder` — хук под 4.2 |
+| `reach` | достижимость: кэш ответов (25 тиков) и бюджет поисков; `FloodRoute` — заливка по воздуху без фриза (по умолчанию и в тестах); `RouteFinder` — хук, в живом боте им служит настоящий `findRoute` из `ddai-nav` |
 | `unstick` | самоубийство при зависании/фризе: константы §8.6, кулдаун 500 тиков |
 | `wander` | блуждание (§8.7) с детерминированным ГСЧ |
 | `planning` | `PhysicsWorld`-мост к `ddai-planner`: `sealed_in`, щит, `rope_catches` |
@@ -53,7 +53,8 @@
 | `input` | `Action` -> `PlayerInput`: счётчик огня (нажатие/отпускание), молот по умолчанию |
 | `latency` | p50/p99, доля мозга отдельно от накладных расходов бота (D-042); `DecisionEstimator` — скользящий p95 времени решения (4.1b) |
 | `brains` | `--brain hybrid\|planner\|scripted\|idle\|fly`, `make_brain` — одна ветка `match` на мозг; hybrid — `HybridConfig::default()` (бюджет 4 мс, потолок 5 мс, адаптивное продление до 15 мс, модель угроз 1vN), без proposer'а (муха не обучена) |
-| `hooks` | `Navigator`, `WayBlock`, `Trek`, `RouteFinder` — no-op заглушки под 4.2 |
+| `hooks` | `Navigator`, `WayBlock`, `Trek`, `RouteFinder` — трейты и no-op заглушки (тесты бота, `Hooks::default()`) |
+| `nav_hooks` | **настоящие тела хуков (4.2):** goto / follow / seek / trek / home, вейблок Copy Love Box, память фризов по sha256 карты; `NavHandle` / `NavCommand` — API для консольных команд 4.3; описание — `docs/formats.md` §23 и `crates/ddai-nav/README.md` |
 | `bridge` | мост к веб-юниту: Unix-сокет, только чтение (`docs/formats.md` §21.2) |
 | `mapgrid`, `tees` | плоский вид карты (слой игры + front) и тиев снапшота |
 
@@ -82,7 +83,7 @@
   `nearTiles: 3`, 20 000 узлов). Это верхняя граница настоящего поиска: цель, запертая стеной или фризом, остаётся
   недостижимой.
 - **Не портировано** (DROP по ТЗ и D-021): чат, авточат, LLM, дамми, партнёр, спасение друга, эмоции, дуэль-авто через
-  `/accept`. **Вынесено в 4.2/4.3**: goto/seek/trek/home, вейблок (хуки), клипы, команды консоли, память фризов.
+  `/accept`. **Вынесено:** goto/seek/trek/home, вейблок и память фризов сделаны в 4.2 (`nav_hooks`); клипы и команды консоли — 4.3.
 
 ## Задержка (D-042)
 

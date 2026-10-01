@@ -144,6 +144,13 @@ pub struct ConditionSummary {
     pub blocks_per_min: f64,
     pub a_self_freezes: u32,
     pub self_freezes_per_min: f64,
+    /// Wayblock arenas: the share of the focal player's game time spent inside the hall's band
+    /// (`wbBand`); `None` on other arenas.
+    #[serde(default)]
+    pub band_fraction: Option<f64>,
+    /// Wayblock arenas: the share of the focal player's game time spent inside the held hall.
+    #[serde(default)]
+    pub hall_fraction: Option<f64>,
     /// Focal-player survival in seconds (censored at the deciding tick of games it did not lose).
     pub a_survival_s: Distribution,
     /// Games where the focal player never went out before the game was decided.
@@ -245,6 +252,14 @@ pub fn summarize(run: &ConditionRun, arena_tag: &str, map_sha256: Option<String>
         blocks_per_min: per_min(blocks),
         a_self_freezes: freezes,
         self_freezes_per_min: per_min(freezes),
+        band_fraction: {
+            let total: u64 = games.iter().map(|g| u64::from(g.a_ticks)).sum();
+            (total > 0).then(|| games.iter().map(|g| f64::from(g.a_band_ticks)).sum::<f64>() / total as f64)
+        },
+        hall_fraction: {
+            let total: u64 = games.iter().map(|g| u64::from(g.a_ticks)).sum();
+            (total > 0).then(|| games.iter().map(|g| f64::from(g.a_hall_ticks)).sum::<f64>() / total as f64)
+        },
         a_survival_s: Distribution::of(survival),
         a_survival_censored: censored,
         time_to_first_block_s: Distribution::of(first_block),
@@ -451,6 +466,19 @@ pub fn markdown(s: &RunSummary) -> String {
             dec(b),
             c.games_per_s
         );
+    }
+    if s.conditions.iter().any(|c| c.band_fraction.is_some()) {
+        let _ = writeln!(
+            out,
+            "\nВейблок (задача 4.2): доля игрового времени игрока A в зале (`inWbHall`: зоны плюс 3 тайла) — держит ли он место — и в полосе `wbBand` \
+             (прямоугольник у основания трубы, `bot.ts:4799`; планировщик штрафуется за пребывание в нём только при `bandCost > 0`, по умолчанию 0).\n"
+        );
+        let _ = writeln!(out, "| Условие | в зале, % | в полосе, % |\n|---|---:|---:|");
+        for c in &s.conditions {
+            if let (Some(f), Some(h)) = (c.band_fraction, c.hall_fraction) {
+                let _ = writeln!(out, "| {} | {:.1} | {:.1} |", c.name, 100.0 * h, 100.0 * f);
+            }
+        }
     }
     let _ = writeln!(
         out,

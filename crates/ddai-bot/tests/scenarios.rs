@@ -525,6 +525,65 @@ fn a_decision_that_misses_the_next_input_is_predicted_one_tick_further() {
     });
 }
 
+/// A brain that takes its time: the host's real decision time must not move the expected tick of the
+/// scenarios above (3.5b review F8: a ~10 ms host pause flipped it on a loaded machine).
+struct Slow {
+    inner: Probe,
+    delay: std::time::Duration,
+}
+
+impl ddai_brain::Brain for Slow {
+    fn reset(&mut self, ctx: &ddai_brain::ResetContext) {
+        self.inner.reset(ctx);
+    }
+    fn decide(&mut self, obs: &ddai_brain::Observation) -> Action {
+        self.inner.decide(obs)
+    }
+    fn decide_in(&mut self, obs: &ddai_brain::Observation, view: Option<&ddai_brain::WorldView<'_>>) -> Action {
+        std::thread::sleep(self.delay);
+        self.inner.decide_in(obs, view)
+    }
+    fn set_live_context(&mut self, ctx: &ddai_brain::LiveContext<'_>) {
+        self.inner.set_live_context(ctx);
+    }
+    fn name(&self) -> &str {
+        "slow"
+    }
+}
+
+#[test]
+fn the_slot_choice_does_not_depend_on_how_long_the_host_takes_to_decide() {
+    support::big_stack(|| {
+        let obs_tick_with = |delay_ms: u64, fixed: bool| {
+            let (probe, log, ..) = Probe::new(neutral());
+            let mut c = cfg(BrainKind::Planner);
+            if !fixed {
+                c.decision_time_override = None;
+            }
+            let slow = Slow {
+                inner: probe,
+                delay: std::time::Duration::from_millis(delay_ms),
+            };
+            let mut bot = bot_with(Box::new(slow), c, Relations::new());
+            let map = room(&[]);
+            bot.on_map_loaded(map.clone());
+            let mut sc = Scenario::new(map, vec![tee(0, 1000), tee(1, 1100)]);
+            sc.pred_ahead = 4;
+            sc.next_input_in = Some(std::time::Duration::from_millis(15));
+            run_active(&mut bot, &mut sc, &[1], 6);
+            let last_snapshot_tick = sc.tick - 2;
+            log.borrow().last().unwrap().obs_tick - last_snapshot_tick
+        };
+        // With the fixed estimate a 40 ms brain changes nothing: the input due in 15 ms is predicted
+        // to the last sent tick, as for an instant brain.
+        assert_eq!(obs_tick_with(0, true), 4);
+        assert_eq!(obs_tick_with(40, true), 4, "real time is ignored under the override");
+        // Without it (production) the measured time does count: a 40 ms decision misses the input due
+        // in 15 ms and is aimed further out.
+        assert!(obs_tick_with(40, false) > 4, "production still measures");
+    });
+}
+
 #[test]
 fn before_the_timing_bootstrap_a_two_tick_guess_is_used_and_the_horizon_is_capped() {
     support::big_stack(|| {
@@ -1531,5 +1590,319 @@ fn no_swing_at_a_spared_tee_reaches_the_wire_whatever_the_adoption_pattern() {
         }
         assert_eq!(presses, 0, "the friend stands in the hammer's reach: no press ever");
         assert!(bot.stats().vetoed_fires >= 30);
+    });
+}
+
+// --- task 4.2 (review F6, F9): the navigator hooks through the whole bot, with a stub navigator -------
+
+mod nav_stub {
+    use super::*;
+    use ddai_bot::hooks::{HookContext, NavStep, Navigator, Poll, WayBlock};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    pub struct Log {
+        pub vetoed: u32,
+        pub kills: Vec<(i32, bool)>,
+        pub polls: u32,
+    }
+
+    /// Answers `drive` with the scripted steps (the last one repeats), `poll` with the scripted mode
+    /// requests, and records what the bot tells it back.
+    pub struct Stub {
+        pub log: Rc<RefCell<Log>>,
+        pub steps: VecDeque<Option<NavStep>>,
+        pub modes: VecDeque<Option<Mode>>,
+    }
+
+    impl Navigator for Stub {
+        fn poll(&mut self, _ctx: &HookContext<'_>) -> Poll {
+            self.log.borrow_mut().polls += 1;
+            Poll {
+                mode: self.modes.pop_front().flatten(),
+                knowledge: None,
+            }
+        }
+        fn drive(&mut self, _ctx: &HookContext<'_>) -> Option<NavStep> {
+            if self.steps.len() > 1 {
+                self.steps.pop_front().flatten()
+            } else {
+                self.steps.front().copied().flatten()
+            }
+        }
+        fn vetoed(&mut self) {
+            self.log.borrow_mut().vetoed += 1;
+        }
+        fn kill_sent(&mut self, tick: i32, by_route: bool) {
+            self.log.borrow_mut().kills.push((tick, by_route));
+        }
+    }
+
+    pub struct WantsKill;
+    impl WayBlock for WantsKill {
+        fn holding(&self) -> bool {
+            true
+        }
+        fn wants_kill(&mut self, _ctx: &HookContext<'_>, _frozen_for: i32) -> bool {
+            true
+        }
+    }
+
+    pub fn bot_with_nav(
+        steps: Vec<Option<NavStep>>,
+        modes: Vec<Option<Mode>>,
+        map: std::sync::Arc<ddai_physics::map::MapData>,
+        wb: bool,
+    ) -> (Bot, Rc<RefCell<Log>>) {
+        let log = Rc::new(RefCell::new(Log::default()));
+        let mut hooks = Hooks {
+            navigator: Box::new(Stub {
+                log: Rc::clone(&log),
+                steps: steps.into(),
+                modes: modes.into(),
+            }),
+            ..Hooks::default()
+        };
+        if wb {
+            hooks.wayblock = Box::new(WantsKill);
+        }
+        let (probe, ..) = Probe::new(neutral());
+        let mut bot = Bot::new(cfg(BrainKind::Planner), Box::new(probe), hooks, Relations::new());
+        bot.on_map_loaded(map);
+        (bot, log)
+    }
+}
+
+/// `n` snapshots with tee 1 wiggling (so it never looks AFK), returning the outputs.
+fn run_wiggling(bot: &mut Bot, sc: &mut Scenario, n: usize) -> Vec<ddai_bot::Output> {
+    let mut outs = Vec::new();
+    for _ in 0..n {
+        wiggle(sc, 1);
+        outs.extend(run(bot, sc, 1));
+    }
+    outs
+}
+
+fn run_right() -> Action {
+    Action {
+        direction: 1,
+        ..neutral()
+    }
+}
+
+#[test]
+fn a_guarded_nav_step_that_runs_into_freeze_is_vetoed_and_the_navigator_is_told() {
+    use ddai_bot::hooks::NavStep;
+    support::big_stack(|| {
+        for (guard, expect_veto) in [(true, true), (false, false)] {
+            let map = room(&[(36, 38, FREEZE)]);
+            let (mut bot, log) = nav_stub::bot_with_nav(
+                vec![Some(NavStep::Input {
+                    action: run_right(),
+                    guard,
+                })],
+                vec![],
+                map.clone(),
+                false,
+            );
+            let mut sc = Scenario::new(map, vec![tee(0, 36 * 32 - 1), tee(1, 600)]);
+            let outs = run_wiggling(&mut bot, &mut sc, 6);
+            let vetoed = log.borrow().vetoed;
+            assert_eq!(vetoed > 0, expect_veto, "guard={guard}: vetoes {vetoed}");
+            if expect_veto {
+                assert!(
+                    vetoed as u64 <= bot.stats().guarded_inputs,
+                    "every veto is a guarded input"
+                );
+                assert!(
+                    outs.iter().any(|o| o.input.is_some_and(|i| i.direction != 1)),
+                    "the sent input changed"
+                );
+            } else {
+                assert_eq!(
+                    bot.stats().guarded_inputs,
+                    0,
+                    "crossing / planned-freeze steps skip the guard"
+                );
+                assert!(
+                    outs.iter().all(|o| o.input.is_some_and(|i| i.direction == 1)),
+                    "passed through"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn the_nav_guard_checks_the_world_our_inflight_inputs_lead_to_not_the_snapshot() {
+    use ddai_bot::hooks::NavStep;
+    support::big_stack(|| {
+        // The tee stands 36 px short of a freeze tile. Run right from standing still: two more ticks of
+        // it do not reach the freeze, so the guard lets the step through. With "run right" already in
+        // flight for the 4 ticks up to the driver's pred tick, the tee will be at the edge when this
+        // input acts: the same step must now be vetoed (TS `guard` rolls `lagTicks` ticks first).
+        let vetoes_with = |in_flight_right: bool| {
+            let map = room(&[(36, 38, FREEZE)]);
+            let (mut bot, log) = nav_stub::bot_with_nav(
+                vec![Some(NavStep::Input {
+                    action: run_right(),
+                    guard: true,
+                })],
+                vec![],
+                map.clone(),
+                false,
+            );
+            let mut sc = Scenario::new(map, vec![tee(0, 36 * 32 - 36), tee(1, 600)]);
+            sc.pred_ahead = 4;
+            for _ in 0..3 {
+                wiggle(&mut sc, 1);
+                let snap = sc.snapshot();
+                if in_flight_right {
+                    for t in (snap.tick - 6)..=snap.pred_tick {
+                        let mut input = ddai_bot::input::neutral_input(0);
+                        input.direction = 1;
+                        bot.on_input_sent(t, &input);
+                    }
+                }
+                bot.on_snapshot(&snap);
+                sc.tick += 2;
+            }
+            log.borrow().vetoed
+        };
+        assert_eq!(
+            vetoes_with(false),
+            0,
+            "from standing still the step is safe for two ticks"
+        );
+        assert!(
+            vetoes_with(true) > 0,
+            "with the lag in flight the same step walks into the freeze"
+        );
+    });
+}
+
+#[test]
+fn a_nav_kill_goes_out_only_when_the_cooldown_allows_and_the_navigator_hears_of_it() {
+    use ddai_bot::consts::KILL_COOLDOWN_TICKS;
+    use ddai_bot::hooks::NavStep;
+    support::big_stack(|| {
+        let map = room(&[]);
+        let (mut bot, log) = nav_stub::bot_with_nav(
+            vec![Some(NavStep::Kill { action: neutral() })],
+            vec![],
+            map.clone(),
+            false,
+        );
+        let mut sc = Scenario::new(map, vec![tee(0, 1000), tee(1, 1100)]);
+        let mut sent = Vec::new();
+        for _ in 0..700 {
+            wiggle(&mut sc, 1);
+            let t = sc.tick;
+            if run(&mut bot, &mut sc, 1)[0].kill {
+                sent.push(t);
+            }
+        }
+        assert!(sent.len() >= 2, "a kill every 500 ticks over 1400 ticks: {sent:?}");
+        for w in sent.windows(2) {
+            assert!(w[1] - w[0] >= KILL_COOLDOWN_TICKS, "cooldown kept: {sent:?}");
+        }
+        let told = log.borrow().kills.clone();
+        assert_eq!(
+            told.len(),
+            sent.len(),
+            "the navigator hears of every kill that went out and no other"
+        );
+        assert!(told.iter().all(|&(_, by_route)| by_route), "and that they were its own");
+        assert_eq!(bot.stats().self_kills as usize, sent.len());
+    });
+}
+
+#[test]
+fn the_wayblock_lying_kill_shares_the_cooldown_with_every_other_kill() {
+    use ddai_bot::consts::{KILL_COOLDOWN_TICKS, WB_KILL_COOLDOWN_TICKS};
+    use ddai_bot::hooks::NavStep;
+    support::big_stack(|| {
+        // WB alone: a frozen tee lying in the freeze tiles is killed every WB_KILL_COOLDOWN_TICKS.
+        let map = room(&[(10, 38, FREEZE)]);
+        let (mut bot, log) = nav_stub::bot_with_nav(vec![None], vec![], map.clone(), true);
+        let mut sc = Scenario::new(map.clone(), vec![tee(0, 10 * 32 + 16), tee(1, 1100)]);
+        sc.tee_mut(0).frozen = true;
+        let mut kills = Vec::new();
+        for _ in 0..200 {
+            wiggle(&mut sc, 1);
+            let t = sc.tick;
+            if run(&mut bot, &mut sc, 1)[0].kill {
+                kills.push(t);
+            }
+        }
+        assert!(kills.len() >= 3, "{kills:?}");
+        assert!(
+            kills.windows(2).all(|w| w[1] - w[0] >= WB_KILL_COOLDOWN_TICKS),
+            "never closer than the WB cooldown: {kills:?}"
+        );
+        assert!(
+            kills.windows(2).any(|w| w[1] - w[0] < KILL_COOLDOWN_TICKS),
+            "the WB rule is the short one: {kills:?}"
+        );
+        assert_eq!(
+            log.borrow().kills.len(),
+            kills.len(),
+            "the navigator hears of the unstick's kills too"
+        );
+        assert!(log.borrow().kills.iter().all(|&(_, by_route)| !by_route));
+
+        // A navigator kill first: the WB rule must wait its 100 ticks after it (one shared clock).
+        let (mut bot, _log) = nav_stub::bot_with_nav(
+            vec![Some(NavStep::Kill { action: neutral() }), None],
+            vec![],
+            map.clone(),
+            true,
+        );
+        let mut sc = Scenario::new(map, vec![tee(0, 10 * 32 + 16), tee(1, 1100)]);
+        sc.tee_mut(0).frozen = true;
+        let mut kills = Vec::new();
+        for _ in 0..120 {
+            wiggle(&mut sc, 1);
+            let t = sc.tick;
+            if run(&mut bot, &mut sc, 1)[0].kill {
+                kills.push(t);
+            }
+        }
+        assert!(kills.len() >= 2, "{kills:?}");
+        assert!(kills[1] - kills[0] >= WB_KILL_COOLDOWN_TICKS, "shared clock: {kills:?}");
+    });
+}
+
+#[test]
+fn the_navigators_mode_requests_are_applied_before_the_unstick_and_the_pipeline() {
+    support::big_stack(|| {
+        let map = room(&[]);
+        let (mut bot, log) = nav_stub::bot_with_nav(
+            vec![None],
+            vec![None, Some(Mode::Goto), None, Some(Mode::Hold), Some(Mode::Fight)],
+            map.clone(),
+            false,
+        );
+        let mut sc = Scenario::new(map, vec![tee(0, 1000), tee(1, 1100)]);
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            wiggle(&mut sc, 1);
+            run(&mut bot, &mut sc, 1);
+            seen.push(bot.mode());
+        }
+        assert_eq!(seen, vec![Mode::Fight, Mode::Goto, Mode::Goto, Mode::Hold, Mode::Fight]);
+        assert_eq!(log.borrow().polls, 5, "polled every snapshot with a live tee");
+        // Hold really holds: the request took effect on the snapshot that carried it.
+        let (mut bot, _) = nav_stub::bot_with_nav(vec![None], vec![Some(Mode::Hold)], room(&[]), false);
+        let mut sc = Scenario::new(room(&[]), vec![tee(0, 1000), tee(1, 1100)]);
+        let out = run_wiggling(&mut bot, &mut sc, 1).pop().unwrap();
+        assert_eq!(bot.mode(), Mode::Hold);
+        assert_eq!(
+            bot.stats().brain_decisions,
+            0,
+            "no brain decision in the snapshot that said hold: {out:?}"
+        );
     });
 }

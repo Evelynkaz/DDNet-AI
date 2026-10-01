@@ -82,6 +82,16 @@ fn config(name: &str, kind: BrainKind, seed: u64, bridge: Option<PathBuf>, durat
         debug_names_log: None,
         audit_outgoing: true,
         shutdown: Arc::new(AtomicBool::new(false)),
+        nav: ddai_bot::nav_hooks::NavConfig {
+            // The e2e runs must not leave memory files next to the real ones.
+            memory_dir: None,
+            // The TS default (`wbMode auto`) holds the wayblock on Copy Love Box: a bot there ignores
+            // everybody outside its hall who is not attacking it, so two default bots never fight. These
+            // runs are about the pipeline and the blocks between the bots, so the wayblock is off.
+            wb_mode: ddai_bot::nav_hooks::WbMode::Off,
+            ..ddai_bot::nav_hooks::NavConfig::default()
+        },
+        nav_handle: ddai_bot::nav_hooks::NavHandle::new(),
     }
 }
 

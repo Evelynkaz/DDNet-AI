@@ -1,0 +1,23 @@
+# Copy Love Box, right wayblock hold (task 4.2): the focal player (slot 0) stands on the hall's first WB
+# spot and holds it; intruders (slots 1..) come in from the standing tiles of the two hall boxes 3..14
+# tiles away. `time in band` is measured against `wbBand` (`bot.ts:4799`). Same map and boxes as
+# `clb-left`; tagged holdout like it.
+name = "clb-wb-right"
+tag = "holdout"
+description = "Copy Love Box right WB hold (mirror, holdout): slot 0 on the first WB spot, intruders in the hall boxes."
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[spawn]
+min_tiles = 3.0
+max_tiles = 14.0
+boxes = [
+    { x0 = 130, y0 = 67, x1 = 155, y1 = 79 },
+    { x0 = 130, y0 = 79, x1 = 156, y1 = 87 },
+]
+
+[wayblock]
+side = "right"

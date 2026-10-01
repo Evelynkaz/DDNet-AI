@@ -8,7 +8,8 @@
 //! - the parts: [`relations`] / [`names`] / [`players`] (lists, exact matching, log hashes),
 //!   [`activity`] (AFK clock, block attribution), [`target`] (`pickTarget`), [`reach`], [`unstick`],
 //!   [`wander`], [`input`] (fire counter), [`sent`] (in-flight inputs), [`planning`] (shield / seal /
-//!   rope helpers), [`latency`], [`brains`], [`hooks`] (no-op hooks for task 4.2).
+//!   rope helpers), [`latency`], [`brains`], [`hooks`] (the navigation / wayblock / trek hook traits) and [`nav_hooks`] (their real bodies over
+//!   `ddai-nav`, task 4.2: goto, follow, seek, home, the Copy Love Box wayblock, the freeze memory).
 //!
 //! The bot never writes chat (D-007): the client API has no way to, and the unstick kill is the
 //! `Cl_Kill` protocol message. It never evades a kick or ban (D-016/D-037): the runner stops.
@@ -23,6 +24,7 @@ pub mod input;
 pub mod latency;
 pub mod mapgrid;
 pub mod names;
+pub mod nav_hooks;
 pub mod planning;
 pub mod players;
 pub mod reach;

@@ -963,6 +963,7 @@ dependencies = [
  "ddai-fly",
  "ddai-flyg",
  "ddai-map",
+ "ddai-nav",
  "ddai-net",
  "ddai-physics",
  "ddai-planner",
@@ -975,6 +976,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1070,6 +1072,7 @@ dependencies = [
  "ddai-fly",
  "ddai-jsmath",
  "ddai-map",
+ "ddai-nav",
  "ddai-physics",
  "ddai-planner",
  "rayon",
@@ -1125,6 +1128,21 @@ dependencies = [
  "ddai-physics",
  "flate2",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "ddai-nav"
+version = "0.1.0"
+dependencies = [
+ "ddai-jsmath",
+ "ddai-map",
+ "ddai-physics",
+ "ddai-planner",
+ "ddai-tsworld",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

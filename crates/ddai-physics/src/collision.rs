@@ -205,6 +205,9 @@ pub struct Collision<R: Real> {
     /// layers (game/front/tele/speedup/switch/tune, plus `TileExistsNext`'s door/game/front
     /// neighbor checks) instead of 1. Task 1.10, acceptance criterion 2.
     tile_exists_cache: Vec<bool>,
+    /// [`map::pickup_freeze_mask`]: tiles inside a heart pickup's freeze reach. Read only by
+    /// [`Collision::pickup_freeze_at`] (tile-based helpers); the physics never looks at it.
+    pickup_freeze: Vec<bool>,
     game: Vec<Tile>,
     front: Option<Vec<Tile>>,
     tele: Option<Vec<TeleTile>>,
@@ -233,6 +236,7 @@ impl<R: Real> Collision<R> {
             solid: Vec::new(),
             solid_sat: Vec::new(),
             tile_exists_cache: Vec::new(),
+            pickup_freeze: Vec::new(),
             game: Vec::new(),
             front: None,
             tele: None,
@@ -321,6 +325,7 @@ impl<R: Real> Collision<R> {
             solid,
             solid_sat,
             tile_exists_cache: Vec::new(),
+            pickup_freeze: map::pickup_freeze_mask(map),
             game: map.game.clone(),
             front: map.front.clone(),
             tele: map.tele.clone(),
@@ -1468,6 +1473,19 @@ impl<R: Real> Collision<R> {
     }
 
     // --- `TileExists`/`TileExistsNext`/`GetMapIndex`/`GetMapIndices` ------------------------
+
+    /// Is the tile inside the freeze reach of a heart pickup ([`map::pickup_freeze_mask`])?
+    pub fn pickup_freeze_at(&self, tx: i32, ty: i32) -> bool {
+        tx >= 0
+            && ty >= 0
+            && tx < self.width
+            && ty < self.height
+            && self
+                .pickup_freeze
+                .get((ty * self.width + tx) as usize)
+                .copied()
+                .unwrap_or(false)
+    }
 
     /// `CCollision::TileExists(int Index)`. Reads the private `tile_exists_cache` field
     /// (precomputed once, in [`Collision::new`], from `tile_exists_uncached` — see that field's

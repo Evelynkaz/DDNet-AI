@@ -126,6 +126,29 @@ pub struct ArenaDef {
     pub description: String,
     pub map: MapSource,
     pub spawn: SpawnDef,
+    /// Task 4.2: a wayblock hold scenario (Copy Love Box only): slot 0 spawns on the hall's first WB
+    /// spot and `time in band` is measured.
+    #[serde(default)]
+    pub wayblock: Option<WayblockDef>,
+}
+
+/// `[wayblock]` of an arena definition.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WayblockDef {
+    /// `left` or `right`.
+    pub side: String,
+}
+
+/// What a wayblock arena adds: the hall the focal player holds.
+#[derive(Debug, Clone)]
+pub struct WbArena {
+    pub def: ddai_nav::wayblock::WbDef,
+    pub side: ddai_nav::wayblock::WbSide,
+    /// The WB spot slot 0 spawns on (tile).
+    pub focal: (i32, i32),
+    /// `wbBand` in pixels `(x0, y0, x1, y1)`.
+    pub band: (f32, f32, f32, f32),
 }
 
 impl ArenaDef {
@@ -292,6 +315,8 @@ pub struct Arena {
     slots: Vec<(i32, i32)>,
     min_tiles: f64,
     max_tiles: f64,
+    /// `Some` for a wayblock hold scenario.
+    pub wb: Option<WbArena>,
 }
 
 impl std::fmt::Debug for Arena {
@@ -329,6 +354,36 @@ impl Arena {
                 def.name
             )));
         }
+        let wb = match &def.wayblock {
+            None => None,
+            Some(w) => {
+                let side = match w.side.as_str() {
+                    "left" => ddai_nav::wayblock::WbSide::Left,
+                    "right" => ddai_nav::wayblock::WbSide::Right,
+                    other => {
+                        return Err(EnvError::new(format!(
+                            "arena {}: wayblock side {other:?} (left|right)",
+                            def.name
+                        )));
+                    }
+                };
+                let wb_def = ddai_nav::wayblock::wayblock_for("Copy Love Box", Some(&*template.collision))
+                    .ok_or_else(|| EnvError::new(format!("arena {}: the map is not a known wayblock map", def.name)))?;
+                let focal = *wb_def
+                    .side(side)
+                    .spots
+                    .first()
+                    .ok_or_else(|| EnvError::new(format!("arena {}: the wayblock side has no spot", def.name)))?;
+                let band = ddai_nav::wayblock::wb_band(&wb_def, side)
+                    .ok_or_else(|| EnvError::new(format!("arena {}: the wayblock side has no band", def.name)))?;
+                Some(WbArena {
+                    def: wb_def,
+                    side,
+                    focal,
+                    band,
+                })
+            }
+        };
         Ok(Arena {
             name: def.name.clone(),
             tag: def.tag,
@@ -340,6 +395,7 @@ impl Arena {
             slots,
             min_tiles: def.spawn.min_tiles,
             max_tiles: def.spawn.max_tiles,
+            wb,
         })
     }
 
@@ -377,7 +433,29 @@ impl Arena {
             return Ok(Vec::new());
         }
         if players == 1 {
-            return Ok(vec![pick(&mut rng)]);
+            return Ok(vec![self.wb.as_ref().map_or_else(|| pick(&mut rng), |w| w.focal)]);
+        }
+        if let Some(w) = &self.wb {
+            // A wayblock hold: slot 0 holds the spot, the others come in from the hall's standing
+            // tiles `[min_tiles, max_tiles]` away and at least `min_tiles` from each other.
+            let mut out = vec![w.focal];
+            while out.len() < players {
+                let mut next = None;
+                for _ in 0..10_000 {
+                    let c = pick(&mut rng);
+                    if self.within(out[0], c) && out[1..].iter().all(|&t| dist(t, c) >= self.min_tiles) {
+                        next = Some(c);
+                        break;
+                    }
+                }
+                out.push(next.ok_or_else(|| {
+                    EnvError::new(format!(
+                        "arena {}: no intruder slot within reach of the WB spot",
+                        self.name
+                    ))
+                })?);
+            }
+            return Ok(out);
         }
         'redraw: for _ in 0..1_000 {
             let mut out = Vec::with_capacity(players);
@@ -547,6 +625,7 @@ mod tests {
                 file: "m.map".into(),
                 sha256: "00".repeat(32),
             }),
+            wayblock: None,
             spawn: SpawnDef {
                 min_tiles: 3.0,
                 max_tiles: 12.0,

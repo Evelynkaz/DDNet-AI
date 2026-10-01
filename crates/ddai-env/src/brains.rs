@@ -189,3 +189,106 @@ pub fn actions_to_toml(actions: &[(i32, Action)]) -> String {
     }
     out
 }
+
+/// The live bot's wayblock hints for an arena player (task 4.2): wraps a brain so that, while the tee
+/// stands in the hall of the held side, it is told what `ddai-bot`'s wayblock hook tells the planner
+/// (`WB_PLAN_OVERRIDES` and the band, `LiveContext::wb`). Everything else passes through.
+pub struct WbHintBrain {
+    inner: Box<dyn Brain>,
+    def: ddai_nav::wayblock::WbDef,
+    side: ddai_nav::wayblock::WbSide,
+    strong: bool,
+    name: String,
+}
+
+impl WbHintBrain {
+    pub fn new(
+        inner: Box<dyn Brain>,
+        def: ddai_nav::wayblock::WbDef,
+        side: ddai_nav::wayblock::WbSide,
+        strong: bool,
+    ) -> Self {
+        let name = format!("{}+wb", inner.name());
+        WbHintBrain {
+            inner,
+            def,
+            side,
+            strong,
+            name,
+        }
+    }
+
+    fn hints(&self, pos: ddai_physics::vmath::Vec2<f32>) -> ddai_brain::WbHints {
+        let (tx, ty) = ((pos.x / 32.0).trunc() as i32, (pos.y / 32.0).trunc() as i32);
+        if !self.def.in_hall(self.side, tx, ty) {
+            return ddai_brain::WbHints::default();
+        }
+        ddai_brain::WbHints {
+            in_hall: true,
+            strong: self.strong,
+            band: ddai_nav::wayblock::wb_band(&self.def, self.side),
+        }
+    }
+}
+
+impl Brain for WbHintBrain {
+    fn reset(&mut self, ctx: &ResetContext) {
+        self.inner.reset(ctx);
+    }
+
+    fn decide(&mut self, obs: &Observation) -> Action {
+        let wb = self.hints(obs.self_state.pos);
+        self.inner.set_live_context(&ddai_brain::LiveContext {
+            wb,
+            ..Default::default()
+        });
+        self.inner.decide(obs)
+    }
+
+    fn decide_in(&mut self, obs: &Observation, world: Option<&WorldView<'_>>) -> Action {
+        let wb = self.hints(obs.self_state.pos);
+        self.inner.set_live_context(&ddai_brain::LiveContext {
+            wb,
+            ..Default::default()
+        });
+        self.inner.decide_in(obs, world)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn telemetry(&self) -> Option<String> {
+        self.inner.telemetry()
+    }
+}
+
+#[cfg(test)]
+mod wb_hint_tests {
+    use super::*;
+    use ddai_nav::wayblock::{WbSide, wayblocks};
+    use ddai_physics::vmath::Vec2;
+
+    struct Nothing;
+    impl Brain for Nothing {
+        fn reset(&mut self, _ctx: &ResetContext) {}
+        fn decide(&mut self, _obs: &Observation) -> Action {
+            Action::neutral()
+        }
+        fn name(&self) -> &str {
+            "nothing"
+        }
+    }
+
+    #[test]
+    fn hints_exist_only_while_the_tee_stands_in_the_hall() {
+        let def = wayblocks().into_iter().next().unwrap();
+        let zone = def.left.zone[0];
+        let b = WbHintBrain::new(Box::new(Nothing), def, WbSide::Left, true);
+        assert_eq!(b.name(), "nothing+wb");
+        let inside = b.hints(Vec2::new((zone.x0 * 32 + 40) as f32, (zone.y0 * 32 + 40) as f32));
+        assert!(inside.in_hall && inside.strong && inside.band.is_some(), "{inside:?}");
+        let outside = b.hints(Vec2::new(100.0, 100.0));
+        assert_eq!(outside, ddai_brain::WbHints::default());
+    }
+}

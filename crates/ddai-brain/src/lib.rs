@@ -15,7 +15,7 @@ mod mirror;
 mod observation;
 
 pub use action::{Action, IVec2};
-pub use brain::{Brain, LiveContext, ResetContext, WorldView};
+pub use brain::{Brain, FreezeMemoryData, LiveContext, MapKnowledge, ResetContext, WbHints, WorldView};
 pub use idle::IdleBrain;
 pub use mirror::mirror_map_data;
 pub use observation::{

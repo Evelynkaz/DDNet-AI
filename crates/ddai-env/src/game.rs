@@ -93,6 +93,15 @@ pub struct GameReport {
     pub blocks_by_a: u32,
     /// Tick of the first such block.
     pub first_block_tick: Option<i32>,
+    /// Wayblock arenas: ticks the focal player spent inside the hall's band (`wbBand`), of `a_ticks`
+    /// (the ticks played until the game was decided); both 0 elsewhere.
+    #[serde(default)]
+    pub a_band_ticks: u32,
+    /// Ticks inside the held hall (`inWbHall`: the zone boxes grown by three tiles).
+    #[serde(default)]
+    pub a_hall_ticks: u32,
+    #[serde(default)]
+    pub a_ticks: u32,
     /// Opponent onsets *not* credited to the focal player before the game was decided (1vN only).
     pub bystander_outs: u32,
     pub players: Vec<PlayerReport>,
@@ -163,6 +172,7 @@ pub fn play_game(
     let mut blocks_by_a = 0u32;
     let mut first_block_tick: Option<i32> = None;
     let mut bystander_outs = 0u32;
+    let (mut a_band_ticks, mut a_hall_ticks, mut a_ticks) = (0u32, 0u32, 0u32);
 
     let limit = rules.max_ticks + rules.after_ticks;
     for _ in 0..limit {
@@ -181,6 +191,19 @@ pub fn play_game(
             if h >= 0 && (h as usize) < n {
                 last_touch[h as usize] = Some((i, now));
             }
+        }
+        if result.is_none()
+            && let Some(w) = &arena.wb
+            && let Some(core) = sim.pw.inner().cores.get(sim.ids[0] as u8)
+        {
+            a_ticks += 1;
+            let (x0, y0, x1, y1) = w.band;
+            a_band_ticks += u32::from(core.pos.x >= x0 && core.pos.x <= x1 && core.pos.y >= y0 && core.pos.y <= y1);
+            a_hall_ticks += u32::from(w.def.in_hall(
+                w.side,
+                (core.pos.x / 32.0).trunc() as i32,
+                (core.pos.y / 32.0).trunc() as i32,
+            ));
         }
         let out_now: Vec<bool> = sim.ids.iter().map(|&id| observe::is_out(sim.pw.inner(), id)).collect();
         let onset: Vec<bool> = (0..n).map(|i| out_now[i] && !was_out[i]).collect();
@@ -294,6 +317,9 @@ pub fn play_game(
         a_self_freezes,
         blocks_by_a,
         first_block_tick,
+        a_band_ticks,
+        a_hall_ticks,
+        a_ticks,
         bystander_outs,
         players: reports,
         timing: Timing {

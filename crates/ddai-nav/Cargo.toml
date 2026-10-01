@@ -1,0 +1,36 @@
+[package]
+name = "ddai-nav"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Task 4.2: navigation for the live bot — route search (findRoute/deadZone), the route runner and Navigator, freeze-tube crossings, the Copy Love Box wayblock, trek/seek/home/follow and the persistent freeze memory, generic over the planner's PlanCollision/PlanWorld (bit-exact against the TS sources on ddai-tsworld, live on ddai-physics::World<f32>)."
+
+[lib]
+name = "ddai_nav"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The parity tests against the real TS sources (`tools/ts-trace/gen-nav-dump.mjs`) and the TS-side
+# arrival-rate comparison need the f64 `ddai-tsworld` world as a `PlanWorld`.
+ts-parity = ["ddai-planner/ts-parity", "dep:ddai-tsworld"]
+
+[dependencies]
+ddai-jsmath = { path = "../ddai-jsmath" }
+ddai-physics = { path = "../ddai-physics" }
+ddai-planner = { path = "../ddai-planner" }
+ddai-tsworld = { path = "../ddai-tsworld", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+ddai-map = { path = "../ddai-map", features = ["test-util"] }
+ddai-tsworld = { path = "../ddai-tsworld" }
+sha2 = "0.10"
+tempfile = "3.14"

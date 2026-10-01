@@ -11,6 +11,8 @@
 //! [`FreezeMemory::new`] is bit-identical to a freshly-constructed TS `FreezeMemory` for every
 //! query this crate's tests exercise.
 
+use std::sync::Arc;
+
 const TILE_PX: f64 = 32.0;
 const SPREAD: f32 = 0.4;
 
@@ -19,8 +21,11 @@ const SPREAD: f32 = 0.4;
 pub struct FreezeMemory {
     pub width: i32,
     pub height: i32,
-    cells: Vec<f32>,
-    passes: Vec<f32>,
+    // `Arc`: the live bot hands one snapshot to the planner and its clones (hybrid workers) without a
+    // map-sized copy each (task 4.2, review F4); the rare mutation (`note`, `notePass`, the save's
+    // decay) copies on write.
+    cells: Arc<Vec<f32>>,
+    passes: Arc<Vec<f32>>,
     events: i64,
 }
 
@@ -30,8 +35,8 @@ impl FreezeMemory {
         FreezeMemory {
             width,
             height,
-            cells: vec![0.0; n],
-            passes: vec![0.0; n],
+            cells: Arc::new(vec![0.0; n]),
+            passes: Arc::new(vec![0.0; n]),
             events: 0,
         }
     }
@@ -48,7 +53,7 @@ impl FreezeMemory {
     /// `notePass(x, y)` (`memory.ts:25-30`).
     pub fn note_pass(&mut self, x: f64, y: f64) {
         if let Some(i) = self.tile_index(x, y) {
-            self.passes[i] += 1.0;
+            Arc::make_mut(&mut self.passes)[i] += 1.0;
         }
     }
 
@@ -68,6 +73,67 @@ impl FreezeMemory {
         self.events
     }
 
+    /// The raw per-tile freeze counts (`cells`, row-major) — for persistence (task 4.2).
+    pub fn cells(&self) -> &[f32] {
+        &self.cells
+    }
+
+    /// The raw per-tile safe-pass counts (`passes`, row-major) — for persistence (task 4.2).
+    pub fn passes(&self) -> &[f32] {
+        &self.passes
+    }
+
+    /// Mutable `cells`/`passes` (the save step decays them in place, `memory.ts:72-90`).
+    pub fn grids_mut(&mut self) -> (&mut [f32], &mut [f32]) {
+        (
+            Arc::make_mut(&mut self.cells).as_mut_slice(),
+            Arc::make_mut(&mut self.passes).as_mut_slice(),
+        )
+    }
+
+    /// The two grids as shared handles (no copy): what the bot hands a brain.
+    pub fn shared_grids(&self) -> (Arc<Vec<f32>>, Arc<Vec<f32>>) {
+        (Arc::clone(&self.cells), Arc::clone(&self.passes))
+    }
+
+    /// [`FreezeMemory::from_parts`] over shared grids (no copy); `None` if a grid does not have
+    /// `width * height` entries.
+    pub fn from_shared(
+        width: i32,
+        height: i32,
+        cells: Arc<Vec<f32>>,
+        passes: Arc<Vec<f32>>,
+        events: i64,
+    ) -> Option<FreezeMemory> {
+        let n = (width * height).max(0) as usize;
+        if cells.len() != n || passes.len() != n {
+            return None;
+        }
+        Some(FreezeMemory {
+            width,
+            height,
+            cells,
+            passes,
+            events,
+        })
+    }
+
+    /// Rebuilds a memory from persisted grids (`memory.ts:93-129`'s `load`); `None` if a grid does not
+    /// have `width * height` entries.
+    pub fn from_parts(width: i32, height: i32, cells: Vec<f32>, passes: Vec<f32>, events: i64) -> Option<FreezeMemory> {
+        let n = (width * height).max(0) as usize;
+        if cells.len() != n || passes.len() != n {
+            return None;
+        }
+        Some(FreezeMemory {
+            width,
+            height,
+            cells: Arc::new(cells),
+            passes: Arc::new(passes),
+            events,
+        })
+    }
+
     /// `note(x, y)` (`memory.ts:49-62`): +1 at the center tile, `+SPREAD` at the 8 neighbours.
     pub fn note(&mut self, x: f64, y: f64) {
         let tx = ddai_jsmath::trunc(x / TILE_PX) as i32;
@@ -84,7 +150,7 @@ impl FreezeMemory {
                     continue;
                 }
                 let idx = (ny * self.width + nx) as usize;
-                self.cells[idx] += if ox == 0 && oy == 0 { 1.0 } else { SPREAD };
+                Arc::make_mut(&mut self.cells)[idx] += if ox == 0 && oy == 0 { 1.0 } else { SPREAD };
             }
         }
     }

@@ -1,0 +1,69 @@
+# Task 4.2: the wayblock hold on Copy Love Box. The focal player (slot 0) starts on the hall's first WB
+# spot; scripted intruders come in from the hall boxes. Headline: credited wins (D-059); beside it the
+# time in `wbBand` and self-freezes per minute. `+wb` = the planner is told what the live bot's WB hook
+# tells it in the hall (`WB_PLAN_OVERRIDES`, band); the plain planner is the control.
+#   ddnet-ai arena run --config configs/arena/wb-hold.toml --out ~/aiddnet/data/runs/wb-hold
+name = "wb-hold"
+base_seed = 4200
+games = 200
+
+[[condition]]
+name = "idle vs 1 intruder"
+arena = "clb-wb-left"
+players = [{ brain = "idle" }, { brain = "scripted" }]
+
+[[condition]]
+name = "scripted vs 1 intruder"
+arena = "clb-wb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "planner vs 1 intruder"
+arena = "clb-wb-left"
+players = [{ brain = "planner" }, { brain = "scripted" }]
+
+[[condition]]
+name = "planner+wb vs 1 intruder"
+arena = "clb-wb-left"
+players = [{ brain = "planner", wb = true }, { brain = "scripted" }]
+
+[[condition]]
+name = "idle vs 2 intruders"
+arena = "clb-wb-left"
+players = [{ brain = "idle" }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "scripted vs 2 intruders"
+arena = "clb-wb-left"
+players = [{ brain = "scripted" }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "planner vs 2 intruders"
+arena = "clb-wb-left"
+players = [{ brain = "planner" }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "planner+wb vs 2 intruders"
+arena = "clb-wb-left"
+players = [{ brain = "planner", wb = true }, { brain = "scripted", count = 2 }]
+
+# The mirror hall is a holdout: the same four planner conditions, never used for tuning.
+[[condition]]
+name = "holdout: planner vs 1 intruder"
+arena = "clb-wb-right"
+players = [{ brain = "planner" }, { brain = "scripted" }]
+
+[[condition]]
+name = "holdout: planner+wb vs 1 intruder"
+arena = "clb-wb-right"
+players = [{ brain = "planner", wb = true }, { brain = "scripted" }]
+
+[[condition]]
+name = "holdout: planner vs 2 intruders"
+arena = "clb-wb-right"
+players = [{ brain = "planner" }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "holdout: planner+wb vs 2 intruders"
+arena = "clb-wb-right"
+players = [{ brain = "planner", wb = true }, { brain = "scripted", count = 2 }]

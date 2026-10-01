@@ -28,6 +28,7 @@
 use ddai_physics::world::World;
 
 use crate::activity::ActivityClock;
+use crate::bot::Mode;
 use crate::consts::*;
 use crate::hooks::{HookContext, Hooks};
 use crate::mapgrid::MapGrid;
@@ -49,6 +50,8 @@ pub struct PickCtx<'a> {
     pub grid: &'a MapGrid,
     /// The base world (snapshot tick) the seal check copies.
     pub base: &'a World<f32>,
+    pub lag_ticks: i32,
+    pub mode: Mode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -164,6 +167,10 @@ impl TargetPicker {
             tees: ctx.tees,
             players: ctx.players,
             grid: ctx.grid,
+            clock: ctx.clock,
+            world: ctx.base,
+            lag_ticks: ctx.lag_ticks,
+            mode: ctx.mode,
         };
         self.reach.begin_snapshot();
         self.seal_left = SEAL_CHECKS_PER_SNAPSHOT;
@@ -210,7 +217,11 @@ impl TargetPicker {
             // candidate, `settled` is true whatever `sealed` says, so the ~0.5 ms `sealedIn` search is
             // skipped: the result is identical and the search only runs where it can matter (the
             // first frozen tick, a finishing target, a free current target near freeze).
-            let finishing_candidate = is_current && tee.frozen && frozen_for <= FINISH_BLOCK_TICKS && near_freeze;
+            // `wbFinish` (`bot.ts:3080`): a frozen tee in the WB zone, seen from inside the hall, is a
+            // finishing target (unless sealed) however long it has been frozen.
+            let wb_finish_candidate = wb.finish_zone && tee.frozen;
+            let finishing_candidate =
+                wb_finish_candidate || (is_current && tee.frozen && frozen_for <= FINISH_BLOCK_TICKS && near_freeze);
             let settled_anyway = frozen_for > SETTLED_FREEZE_TICKS && !finishing_candidate;
             let sealed = (tee.frozen || (is_current && near_freeze))
                 && !settled_anyway
@@ -486,6 +497,8 @@ mod tests {
                     clock: &self.clock,
                     grid: &self.grid,
                     base: &self.world,
+                    lag_ticks: 0,
+                    mode: Mode::Fight,
                 },
                 &mut self.hooks,
                 &mut self.plan,
@@ -764,6 +777,7 @@ mod tests {
             WbFilter {
                 skip: self.skip.contains(&t.id),
                 in_zone: self.zone.contains(&t.id),
+                finish_zone: false,
             }
         }
     }

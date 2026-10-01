@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use clap::Args;
 use ddai_bot::brains::{BrainKind, BrainOptions};
+use ddai_bot::nav_hooks::{NavCommand, NavConfig, NavHandle, WbMode};
 use ddai_bot::runner::{RunReport, RunnerConfig, RunnerError};
 use ddai_bot::{BotConfig, Mode, Relations};
 use ddai_client::ClientConfig;
@@ -20,7 +21,8 @@ use crate::play_cmd::{Brain, PlayArgs};
 /// The bot-specific flags of `ddnet-ai play`.
 #[derive(Debug, Args, Default)]
 pub struct BotOpts {
-    /// `fight` (default), `passive` (wander only), `hold` (stand still) or `goto` (stub until 4.2).
+    /// `fight` (default), `passive` (wander only), `hold` (stand still) or `goto` (a walk begun by
+    /// `--goto`/`--follow` ends back in the mode the bot started in).
     #[arg(long, default_value = "fight")]
     pub mode: String,
     /// Fight only this player (exact name, folded); every other filter is ignored for them.
@@ -66,6 +68,29 @@ pub struct BotOpts {
     /// report's `input_margin`).
     #[arg(long)]
     pub prediction_margin_ms: Option<i32>,
+    /// Walk to this tile `X,Y` as soon as the tee has spawned (task 4.2); afterwards the bot returns to
+    /// its mode. Crosses freeze tubes where it must (the Copy Love Box wayblock tubes).
+    #[arg(long, value_parser = parse_pair, conflicts_with = "follow")]
+    pub goto: Option<(i32, i32)>,
+    /// Walk to the player with this client id and keep following them while they move (task 4.2).
+    #[arg(long)]
+    pub follow: Option<i32>,
+    /// Wayblock on Copy Love Box: `auto` (default; the side with fewer players), `left`, `right`, `off`.
+    #[arg(long, default_value = "auto")]
+    pub wb: String,
+    /// Strong mode: inside a wayblock hall the planner searches wider (`STRONG_WB`, more CPU).
+    #[arg(long)]
+    pub strong: bool,
+    /// Never walk to where the game is when it is dull here.
+    #[arg(long)]
+    pub no_seek: bool,
+    /// Directory of the freeze memories (one file per map, keyed by the map's sha256). Default
+    /// `<data-dir>/bot/memory`.
+    #[arg(long)]
+    pub memory_dir: Option<PathBuf>,
+    /// Do not read or write a freeze memory.
+    #[arg(long)]
+    pub no_memory: bool,
     /// `Cl_ShowDistance` half-extents `X,Y` (default 3000,2000 — D-007's replacement for /showall).
     #[arg(long, value_parser = parse_pair)]
     pub show_distance: Option<(i32, i32)>,
@@ -143,6 +168,36 @@ pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
         seed: args.seed,
         ..BotConfig::default()
     };
+    let Some(wb_mode) = WbMode::parse(&o.wb) else {
+        eprintln!("unknown --wb {:?} (auto|left|right|off)", o.wb);
+        return ExitCode::FAILURE;
+    };
+    let nav = NavConfig {
+        memory_dir: if o.no_memory {
+            None
+        } else {
+            Some(
+                o.memory_dir
+                    .clone()
+                    .unwrap_or_else(|| data_dir.join("bot").join("memory")),
+            )
+        },
+        wb_mode,
+        strong: o.strong,
+        seek: !o.no_seek,
+        ..NavConfig::default()
+    };
+    let nav_handle = NavHandle::new();
+    if let Some((tx, ty)) = o.goto {
+        nav_handle.send(NavCommand::Goto {
+            tx,
+            ty,
+            through_freeze: true,
+        });
+    }
+    if let Some(id) = o.follow {
+        nav_handle.follow(id);
+    }
     let shutdown = Arc::new(AtomicBool::new(false));
     {
         let flag = Arc::clone(&shutdown);
@@ -171,6 +226,8 @@ pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
         debug_names_log: o.debug_names.clone(),
         audit_outgoing: o.report.is_some(),
         shutdown,
+        nav,
+        nav_handle,
     };
     // A big stack: the planner's helpers copy whole worlds by value.
     let handle = std::thread::Builder::new()

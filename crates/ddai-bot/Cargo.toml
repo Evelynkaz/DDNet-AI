@@ -19,6 +19,7 @@ workspace = true
 ddai-brain = { path = "../ddai-brain" }
 ddai-client = { path = "../ddai-client" }
 ddai-fly = { path = "../ddai-fly" }
+ddai-nav = { path = "../ddai-nav" }
 ddai-flyg = { path = "../ddai-flyg" }
 ddai-map = { path = "../ddai-map" }
 ddai-net = { path = "../ddai-net" }
@@ -34,6 +35,8 @@ tracing = "0.1"
 [dev-dependencies]
 allocation-counter = "0.8.1"
 tempfile = "3.14"
+# The nav e2e prints the navigation log (`RUST_LOG=nav=info`).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The gated e2e test runs the real web-side reader (`ddai_web::live::bot_source::BotSource`) against the
 # real bot's socket — the end-to-end proof of the live bridge.
 ddai-web = { path = "../ddai-web" }

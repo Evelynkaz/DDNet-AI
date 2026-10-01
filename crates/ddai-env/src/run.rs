@@ -18,11 +18,25 @@ use crate::game::{GameReport, Layout, play_game};
 use crate::sim::PlayerSetup;
 
 /// Builds the players of one game from the condition's slot specs.
-fn setups(slots: &[PlayerSpec], factory: &BrainFactory) -> Result<Vec<PlayerSetup>, EnvError> {
+fn setups(slots: &[PlayerSpec], factory: &BrainFactory, arena: &Arena) -> Result<Vec<PlayerSetup>, EnvError> {
     slots
         .iter()
         .map(|spec| {
-            let brain = factory(spec)?;
+            let mut brain = factory(spec)?;
+            if spec.wb {
+                let Some(w) = &arena.wb else {
+                    return Err(EnvError::new(format!(
+                        "player {:?} asks for wb hints but arena {} has no [wayblock]",
+                        spec.brain, arena.name
+                    )));
+                };
+                brain = Box::new(crate::brains::WbHintBrain::new(
+                    brain,
+                    w.def.clone(),
+                    w.side,
+                    spec.wb_strong,
+                ));
+            }
             let label = spec.label.clone().unwrap_or_else(|| brain.name().to_string());
             Ok(PlayerSetup {
                 brain,
@@ -33,7 +47,8 @@ fn setups(slots: &[PlayerSpec], factory: &BrainFactory) -> Result<Vec<PlayerSetu
         .collect()
 }
 
-/// Plays game number `g` of a condition: seed `base_seed + g` and a 4-way balanced layout -- sides
+/// Plays game number `g` of a condition: seed `base_seed + g` and a 4-way balanced layout (a wayblock arena
+/// never swaps sides: the spawn order alternates only) -- sides
 /// swapped on odd games (the harness's `swap: g % 2 === 1`), spawn order reversed on games
 /// `g % 4 >= 2`. Positions and spawn order (client-id/entity order, strong/weak hook) are thereby
 /// crossed evenly in every block of four games.
@@ -49,11 +64,21 @@ pub fn play_indexed(
         arena,
         rules,
         base_seed.wrapping_add(u64::from(g)),
-        Layout {
-            swap: g % 2 == 1,
-            reverse_order: (g / 2) % 2 == 1,
+        if arena.wb.is_some() {
+            // A wayblock hold has a holder and an intruder: slot 0 stays on the WB spot (a swap would put
+            // the focal player on the intruder's tile and an intruder on the spot), so only the spawn
+            // order alternates (task 4.2, review F7).
+            Layout {
+                swap: false,
+                reverse_order: g % 2 == 1,
+            }
+        } else {
+            Layout {
+                swap: g % 2 == 1,
+                reverse_order: (g / 2) % 2 == 1,
+            }
         },
-        setups(slots, factory)?,
+        setups(slots, factory, arena)?,
     )
 }
 

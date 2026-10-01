@@ -45,6 +45,13 @@ impl MapGrid {
                 *cell |= classify(t.index) & (CELL_FREEZE | CELL_DEATH);
             }
         }
+        // Heart pickups freeze whoever comes within 48 px (task 4.2, review F2): the tile-based helpers
+        // (unstick, the guard's hazard gate, the reachability flood) see that zone as freeze.
+        for (cell, hazard) in cells.iter_mut().zip(ddai_physics::map::pickup_freeze_mask(map)) {
+            if hazard {
+                *cell |= CELL_FREEZE;
+            }
+        }
         MapGrid {
             width: map.width as i32,
             height: map.height as i32,
@@ -187,6 +194,22 @@ mod tests {
         assert!(g.is_solid(5.0 * 32.0, 5.0 * 32.0));
         assert!(!g.is_solid(2.0 * 32.0, 2.0 * 32.0));
         assert!(g.is_solid(-10.0, 50.0) && g.is_solid(50.0, 9999.0), "outside is solid");
+    }
+
+    #[test]
+    fn a_heart_pickup_makes_its_3x3_neighbourhood_freeze() {
+        // ENTITY_HEALTH_1 = 7 + ENTITY_OFFSET (191) = 198: it freezes whoever is within 48 px.
+        let m = room(10, 10, &[(5, 5, 198)]);
+        let g = MapGrid::new(&m);
+        for (dx, dy) in [(0, 0), (1, 0), (-1, 1), (1, 1), (0, -1)] {
+            let (x, y) = ((5 + dx) as f32 * 32.0 + 16.0, (5 + dy) as f32 * 32.0 + 16.0);
+            assert!(g.is_freeze(x, y), "({dx},{dy}) around the heart");
+        }
+        assert!(
+            !g.is_freeze(7.0 * 32.0 + 16.0, 5.0 * 32.0 + 16.0),
+            "two tiles away is out of reach"
+        );
+        assert!(g.hazard_within(7.0 * 32.0 + 16.0, 5.0 * 32.0 + 16.0, 1));
     }
 
     #[test]

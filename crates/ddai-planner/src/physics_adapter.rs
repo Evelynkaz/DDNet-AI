@@ -26,6 +26,7 @@
 //!   TS itself treats a missing value as "leave the current value alone").
 
 use crate::plan_world::{CFLAG_DEATH, CFLAG_NOHOOK, CFLAG_SOLID, LineHit, PlanCollision, PlanWorld};
+use crate::tuning::{TILE_TELEIN, TILE_TELEINEVIL};
 use crate::types::{PlayerInput, TeeState, WorldEvent};
 use crate::vmath::Vec2;
 use ddai_physics::core::MAX_CLIENTS;
@@ -132,6 +133,11 @@ impl PlanCollision for Collision32 {
         let ty = (y / 32.0).floor() as i32;
         self.game_tile(tx, ty) == ddai_physics::map::TILE_FREEZE
             || front_tile(self, tx, ty) == ddai_physics::map::TILE_FREEZE
+            // Task 4.2 (review F2): a heart pickup freezes whoever comes within 48 px of it. The World
+            // models that as an entity; this is the tile-based view of it, for navigation, the shield's
+            // "rests in freeze" and the like. Live-only by construction: the TS-parity backend
+            // (`ts_adapter`, the TS world) has no such tiles.
+            || self.pickup_freeze_at(tx, ty)
     }
     /// See [`Collision32::is_freeze`]'s doc comment (review round 1, F9) -- same reasoning for
     /// `TILE_UNFREEZE`.
@@ -172,21 +178,35 @@ impl PlanCollision for Collision32 {
         }
     }
     fn has_tele(&self) -> bool {
-        self.has_hook_tele_ins(false) || (1..=255u8).any(|n| !self.tele_outs(n).is_empty())
+        self.has_hook_tele_ins(false) || (0..=254u8).any(|n| !self.tele_outs(n).is_empty())
     }
     fn tele_at(&self, x: f64, y: f64) -> (i32, i32) {
+        // `teleAt(x, y)` -> `[type, number]` (`collision.ts`). `is_teleport`/`is_evil_teleport` return the
+        // tele *number* (0 = not that tile), so the type has to be rebuilt from which one matched; an
+        // earlier revision returned `(number, number)`, which no caller could tell from "no tele" on a
+        // map with teleporters (task 4.2 found it: routes through teleporters were walled off live).
+        // Only the two entrance kinds are reported -- the only ones the planner and the navigator ask for.
         let index = self.get_pure_map_index(x as f32, y as f32);
-        let kind = self.is_teleport(index as i32);
-        if kind != 0 {
-            return (kind, kind);
+        let number = self.is_teleport(index as i32);
+        if number != 0 {
+            return (i32::from(TILE_TELEIN), number);
+        }
+        let number = self.is_evil_teleport(index as i32);
+        if number != 0 {
+            return (i32::from(TILE_TELEINEVIL), number);
         }
         (0, 0)
     }
     fn tele_outs_for(&self, number: i32) -> Vec<Vec2> {
-        if !(0..=255).contains(&number) {
+        // The tables of `Collision` are keyed by `number - 1` (as in `CCollision`); `number` here is the
+        // 1-based tele number `tele_at` and the map give, as in the TS `teleOutsFor`.
+        if !(1..=256).contains(&number) {
             return Vec::new();
         }
-        self.tele_outs(number as u8).iter().map(|&v| from_p_vec2(v)).collect()
+        self.tele_outs((number - 1) as u8)
+            .iter()
+            .map(|&v| from_p_vec2(v))
+            .collect()
     }
 }
 
@@ -934,6 +954,40 @@ mod tests {
             tune: None,
             settings: Vec::new(),
         })
+    }
+
+    #[test]
+    fn a_heart_pickup_counts_as_freeze_in_its_3x3_neighbourhood_for_the_tile_based_checks() {
+        let (w, h) = (12usize, 10usize);
+        let mut game = vec![ddai_physics::map::Tile::default(); w * h];
+        game[3 * w + 5].index = ddai_physics::map::ENTITY_OFFSET + ddai_physics::map::ENTITY_HEALTH_1;
+        let map = Arc::new(MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        });
+        let world = PhysicsWorld::new(map, 1);
+        let col = world.collision();
+        let at = |tx: i32, ty: i32| PlanCollision::is_freeze(col, f64::from(tx * 32 + 16), f64::from(ty * 32 + 16));
+        assert!(
+            at(5, 3) && at(4, 2) && at(6, 4) && at(5, 4),
+            "the heart's own tile and its neighbours"
+        );
+        assert!(!at(7, 3) && !at(5, 5), "two tiles away: out of reach");
+        assert!(
+            !PlanCollision::is_solid(col, 5.0 * 32.0 + 16.0, 3.0 * 32.0 + 16.0),
+            "a heart is not a wall"
+        );
+        assert!(
+            crate::seal::touches_freeze(col, 5.0 * 32.0 + 16.0, 4.0 * 32.0 + 16.0),
+            "the shield's rest check sees it"
+        );
     }
 
     #[test]
