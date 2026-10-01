@@ -363,24 +363,55 @@ impl Trainer {
         Ok(())
     }
 
+    /// Training window `i` of batch `step`, deterministic in `(seed, step, i)`, plus the optional
+    /// *second view* of it (the window with a different observation for a second loss pass; always
+    /// `None` in this tree). The **one** place that turns a batch index into a window, shared by
+    /// the per-sequence and the batched path, so whatever is done to a freshly sampled window
+    /// (augmentation, own-hook treatment, ...) applies to both backends.
+    ///
+    /// TODO(8.2b merge): 8.2b's own-hook treatment goes right after `sample_window` here:
+    /// `let masked = prepare_own_hook(&mut window, &cfg.own_hook, &mut rng);` and `(window,
+    /// masked)` is returned (its per-sequence two-view loss stays in `batch`). The batched path
+    /// refuses a second view ([`Trainer::batch_batched`]) and the options that need one
+    /// ([`Trainer::ensure_batched_supported`]) until `Learner::batch_grad` implements them.
+    fn training_window(&self, step: u64, i: usize, mirror: bool) -> (Window, Option<Window>) {
+        let cfg = &self.cfg;
+        let mut rng = SplitMix64::new(mix(cfg.seed, step, i as u64));
+        let use_human = !self.human.is_empty() && (self.teacher.is_empty() || rng.next_f32_unit() < cfg.human_fraction);
+        let corpus = if use_human { &self.human } else { &self.teacher };
+        let flip = mirror && rng.next_f32_unit() < 0.5;
+        let window = corpus.sample_window(&mut rng, cfg.window_len, cfg.burn_in, flip);
+        (window, None)
+    }
+
+    /// Refuses the batched backend for training options it does not implement, so that it can
+    /// never silently train something other than what the per-sequence backend would.
+    ///
+    /// TODO(8.2b merge): `TrainConfig` gets an `own_hook` section there (`mode`, `dropout`,
+    /// `switch_weight`). Until the batched path supports it, this must return an error when
+    /// `cfg.own_hook.mode != OwnHookMode::Off` or `cfg.own_hook.switch_weight != 1.0`; whichever
+    /// of 7.2b/8.2b merges second adds that condition (or implements the option in
+    /// `batch_grad` and deletes this hook point). There is nothing to refuse in this tree.
+    fn ensure_batched_supported(&self) -> Result<(), TrainError> {
+        Ok(())
+    }
+
     /// One batch: summed (unnormalised) gradient and stats, deterministic in `(seed, step)`.
-    fn batch(&self, step: u64) -> (Vec<f32>, WindowStats, usize) {
+    fn batch(&self, step: u64) -> Result<(Vec<f32>, WindowStats, usize), TrainError> {
         let cfg = &self.cfg;
         let learner = self.learner.as_ref();
         let n = learner.num_params();
         let mirror = learner.mirror_augment();
+        if learner.uses_batched_backend() {
+            return self.batch_batched(step);
+        }
         let results: Vec<(Vec<f32>, WindowStats, usize)> = self.pool.install(|| {
             (0..cfg.batch_windows)
                 .into_par_iter()
                 .map_init(
                     || learner.new_workspace(cfg.window_len),
                     |ws: &mut Workspace, i| {
-                        let mut rng = SplitMix64::new(mix(cfg.seed, step, i as u64));
-                        let use_human = !self.human.is_empty()
-                            && (self.teacher.is_empty() || rng.next_f32_unit() < cfg.human_fraction);
-                        let corpus = if use_human { &self.human } else { &self.teacher };
-                        let flip = mirror && rng.next_f32_unit() < 0.5;
-                        let window: Window = corpus.sample_window(&mut rng, cfg.window_len, cfg.burn_in, flip);
+                        let (window, _second_view) = self.training_window(step, i, mirror);
                         let mut grad = vec![0.0f32; n];
                         let stats = learner.window_grad(&window, &cfg.loss, ws, &mut grad);
                         (grad, stats, window.len())
@@ -400,7 +431,46 @@ impl Trainer {
             stats.activity_loss += s.activity_loss;
             decisions += d;
         }
-        (grad, stats, decisions)
+        Ok((grad, stats, decisions))
+    }
+
+    /// [`Trainer::batch`] for a learner with a batched backend (task 7.2b): the same windows
+    /// (same per-`(seed, step, index)` sampling), but forward/backward run once over the whole
+    /// batch instead of once per window.
+    fn batch_batched(&self, step: u64) -> Result<(Vec<f32>, WindowStats, usize), TrainError> {
+        self.ensure_batched_supported()?;
+        let cfg = &self.cfg;
+        let learner = self.learner.as_ref();
+        let n = learner.num_params();
+        let mirror = learner.mirror_augment();
+        let windows = self.pool.install(|| {
+            (0..cfg.batch_windows)
+                .into_par_iter()
+                .map(|i| {
+                    let (window, second_view) = self.training_window(step, i, mirror);
+                    if second_view.is_some() {
+                        return Err(TrainError(
+                            "the batched backend does not support a second window view (own-hook mask_hook_head)"
+                                .into(),
+                        ));
+                    }
+                    Ok(window)
+                })
+                .collect::<Result<Vec<Window>, TrainError>>()
+        })?;
+        let mut grad = vec![0.0f32; n];
+        let per_window = self
+            .pool
+            .install(|| learner.batch_grad(&windows, &cfg.loss, &mut grad))?;
+        let mut stats = WindowStats::default();
+        let mut decisions = 0;
+        for (s, w) in per_window.iter().zip(&windows) {
+            stats.loss.add(&s.loss);
+            stats.weight_sum += s.weight_sum;
+            stats.activity_loss += s.activity_loss;
+            decisions += w.len();
+        }
+        Ok((grad, stats, decisions))
     }
 
     /// Trains `n_steps` steps as one schedule phase; logs to `metrics.jsonl`, checkpoints at the
@@ -436,7 +506,7 @@ impl Trainer {
         let mut params = self.learner.params();
         for k in 0..n_steps {
             let step = start_step + k;
-            let (mut grad, stats, decisions) = self.batch(step);
+            let (mut grad, stats, decisions) = self.batch(step)?;
             total_decisions += decisions;
             if stats.weight_sum <= 0.0 {
                 // A batch with nothing to score: no update, but the step still counts (the schedule,

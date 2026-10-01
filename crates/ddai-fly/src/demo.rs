@@ -22,6 +22,7 @@
 use ddai_flyg::Side;
 
 use crate::backward::BackwardIndex;
+use crate::batched::{BatchedEngine, TrainBackend, train_step_batched};
 use crate::model::FlyModel;
 use crate::optim::{GuardedAdamConfig, GuardedAdamState, GuardedStepOutcome, clip_grad_norm, guarded_adam_step};
 use crate::rng::SplitMix64;
@@ -218,6 +219,20 @@ pub fn run_direction_demo(
     config: &DirectionDemoConfig,
     v_init: &[f32],
 ) -> Vec<StepMetric> {
+    run_direction_demo_with_backend(model, index, config, v_init, TrainBackend::PerSequence)
+}
+
+/// [`run_direction_demo`] with a choice of forward/backward backend (task 7.2b): the per-sequence
+/// path of task 7.2 or the batched one ([`crate::batched`]). The loss, the data, the optimiser and
+/// the guard are the same; only `train_step` vs `train_step_batched` differs.
+pub fn run_direction_demo_with_backend(
+    model: &mut FlyModel,
+    index: &BackwardIndex,
+    config: &DirectionDemoConfig,
+    v_init: &[f32],
+    backend: TrainBackend,
+) -> Vec<StepMetric> {
+    let mut engine = (backend == TrainBackend::Batched).then(|| BatchedEngine::new(model));
     let mut rng = SplitMix64::new(config.seed);
     let mut guarded_state = GuardedAdamState::new(model.params());
     let num_inputs = model.num_inputs();
@@ -261,7 +276,11 @@ pub fn run_direction_demo(
         }
         batch_loss /= (config.batch_size * config.readout_decisions) as f32;
 
-        let batch = train_step(model, index, &sequences, None).expect("shapes are self-consistent by construction");
+        let batch = match engine.as_mut() {
+            Some(engine) => train_step_batched(model, engine, &sequences, None),
+            None => train_step(model, index, &sequences, None),
+        }
+        .expect("shapes are self-consistent by construction");
         let mut grad = batch.grad;
         grad.scale(1.0 / config.batch_size as f32);
         let grad_norm = clip_grad_norm(&mut grad, config.grad_clip_norm);

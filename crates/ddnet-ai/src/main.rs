@@ -61,8 +61,27 @@ enum Command {
     Rec(rec_cmd::RecArgs),
 }
 
+/// True in the opt-in **training-only build** (`tools/train-v3-build.sh`: `-C target-cpu=x86-64-v3`,
+/// task 7.2b, D-064): the CPU features AVX2 and FMA are then part of the binary, so it cannot run
+/// on (or be bit-compared with) the default x86-64 baseline the bot is built for.
+const TRAIN_ONLY_BUILD: bool = cfg!(target_feature = "avx2");
+
+/// The subcommands a training-only build may run (an allow-list, so a command added later is
+/// refused there until someone decides otherwise): offline training/inference tooling only,
+/// never anything that connects to a game server or serves the web UI.
+fn allowed_in_train_only_build(command: &Option<Command>) -> bool {
+    matches!(command, None | Some(Command::Train(_)) | Some(Command::Fly(_)))
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if TRAIN_ONLY_BUILD && !allowed_in_train_only_build(&cli.command) {
+        eprintln!(
+            "error: this ddnet-ai was built with target-cpu=x86-64-v3 (the opt-in training-only build, D-064) \
+             and may only run `train` and `fly`; use the default build (`cargo build --release`) for everything else"
+        );
+        return ExitCode::from(2);
+    }
     match cli.command {
         None => ExitCode::SUCCESS,
         Some(Command::Trace(args)) => trace_cmd::run(args),
@@ -82,8 +101,26 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, allowed_in_train_only_build};
     use clap::Parser;
+
+    #[test]
+    fn the_training_only_build_allows_offline_training_commands_and_nothing_that_goes_online() {
+        let allowed = |args: &[&str]| allowed_in_train_only_build(&Cli::try_parse_from(args).unwrap().command);
+        assert!(allowed(&["ddnet-ai"]));
+        assert!(allowed(&["ddnet-ai", "train", "info", "some-dir"]));
+        assert!(allowed(&["ddnet-ai", "fly", "train-demo", "--flyg", "x"]));
+        assert!(!allowed(&["ddnet-ai", "play", "--server", "127.0.0.1:8303"]));
+        assert!(!allowed(&[
+            "ddnet-ai",
+            "record",
+            "--server",
+            "127.0.0.1:8303",
+            "--out",
+            "x"
+        ]));
+        assert!(!allowed(&["ddnet-ai", "web"]));
+    }
 
     #[test]
     fn no_args_parses_successfully() {
@@ -626,6 +663,26 @@ mod tests {
             },
             other => panic!("expected Fly command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fly_train_demo_backend_flag_parses_and_defaults_to_per_seq() {
+        use super::fly_cmd::{BackendArg, FlyCommand};
+        let backend_of = |extra: &[&str]| {
+            let mut argv = vec!["ddnet-ai", "fly", "train-demo", "--flyg", "fly-S-v1.flyg"];
+            argv.extend_from_slice(extra);
+            match Cli::try_parse_from(argv).expect("fly train-demo should parse").command {
+                Some(super::Command::Fly(args)) => match args.command {
+                    FlyCommand::TrainDemo { backend, .. } => backend,
+                    other => panic!("expected TrainDemo, got {other:?}"),
+                },
+                other => panic!("expected Fly command, got {other:?}"),
+            }
+        };
+        assert_eq!(backend_of(&[]), BackendArg::PerSeq);
+        assert_eq!(backend_of(&["--backend", "per-seq"]), BackendArg::PerSeq);
+        assert_eq!(backend_of(&["--backend", "batched"]), BackendArg::Batched);
+        assert!(Cli::try_parse_from(["ddnet-ai", "fly", "train-demo", "--flyg", "x", "--backend", "gpu"]).is_err());
     }
 
     #[test]

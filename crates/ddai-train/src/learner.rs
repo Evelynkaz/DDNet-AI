@@ -13,21 +13,24 @@
 //! them twice the data (review F4 of E-005).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use ddai_controls::bundle::{ControlBundle, save_control_bundle};
 use ddai_controls::features::{extract, input_dim};
 use ddai_controls::net::SeqNet;
 use ddai_fly::backward::BackwardIndex;
+use ddai_fly::batched::{BatchedEngine, BatchedPlan, TrainBackend};
 use ddai_fly::bc::{HeadLogits, HeadThresholds, LossConfig, StepLoss};
 use ddai_fly::brain_bc::{BcSequence, BcStepConfig, BcStepOutput, BcWorkspace, brain_bc_forward, brain_bc_step};
+use ddai_fly::brain_bc_batched::brain_bc_batched_step;
 use ddai_fly::brain_config::{BrainConfig, parse_brain_config};
 use ddai_fly::bundle::{BUNDLE_FORMAT_VERSION, BundleMeta, FlyBundle, save_bundle, sha256_hex_of_file};
 use ddai_fly::calibration::calibrate_from_windows;
 use ddai_fly::config::FlyConfig;
-use ddai_fly::decoder::{DecoderModel, DecoderParams, DnCalibration, calibrate_from_rest};
-use ddai_fly::encoder::{EncoderModel, EncoderParams, RayGridConfig, RayGridFeatures};
+use ddai_fly::decoder::{DecoderGradients, DecoderModel, DecoderParams, DnCalibration, calibrate_from_rest};
+use ddai_fly::encoder::{EncoderGradients, EncoderModel, EncoderParams, RayGridConfig, RayGridFeatures};
 use ddai_fly::model::FlyModel;
-use ddai_fly::optim::ActivityRegularizerConfig;
+use ddai_fly::optim::{ActivityRegularizerConfig, ParamGradients};
 use ddai_fly::params::FlyParams;
 use ddai_fly::state::FlyState;
 use serde::{Deserialize, Serialize};
@@ -62,6 +65,22 @@ pub trait Learner: Send + Sync {
     fn new_workspace(&self, max_window: usize) -> Workspace;
     /// Forward + backward over `window`; **adds** the gradient of the summed loss into `grad`.
     fn window_grad(&self, window: &Window, loss: &LossConfig, ws: &mut Workspace, grad: &mut [f32]) -> WindowStats;
+    /// Whether [`Learner::batch_grad`] is available: a model with a batched backend (the fly's
+    /// `backend = "batched"`) runs a whole batch of windows through one forward/backward pass, and
+    /// the trainer then calls it instead of [`Learner::window_grad`] once per window.
+    fn uses_batched_backend(&self) -> bool {
+        false
+    }
+    /// Forward + backward over all of `windows` at once (see [`Learner::uses_batched_backend`]);
+    /// **adds** the summed gradient into `grad` and returns every window's stats, in window order.
+    fn batch_grad(
+        &self,
+        _windows: &[Window],
+        _loss: &LossConfig,
+        _grad: &mut [f32],
+    ) -> LearnerResult<Vec<WindowStats>> {
+        Err("this learner has no batched backend".to_string())
+    }
     /// Forward only: the logits of every decision of `window`.
     fn window_logits(&self, window: &Window) -> Vec<HeadLogits>;
     /// Adds a regulariser's gradient (not normalised by the batch weight) and returns its value.
@@ -100,6 +119,20 @@ pub struct FlyTrainConfig {
     /// Initial `softplus(a)` of every type-pair strength (`0` = the crate default,
     /// `ddai_fly::params::DEFAULT_ALPHA_INIT`).
     pub alpha_init: f32,
+    /// Forward/backward backend: `"per-seq"` (the default: every window through task 7.2's
+    /// per-sequence BPTT, windows in parallel) or `"batched"` (task 7.2b: all windows of a batch
+    /// at once, state `[neuron][window]`, threads split the neurons -- what makes the M graph
+    /// trainable). Same loss and gradients up to f32 summation order.
+    pub backend: TrainBackend,
+    /// Cap (MiB) on the batched backend's working set (`0` = none): when a batch's `r`/`X`/`f'(V)`
+    /// recording does not fit, BPTT over the windows is chunked in time with recomputation
+    /// (exact gradients, one extra forward pass).
+    pub batched_memory_cap_mb: usize,
+    /// Work (`edges x 8-lane cells`) below which a batched substep runs on the calling thread
+    /// instead of the thread pool (`None` = the engine's default, see
+    /// `ddai_fly::batched::DEFAULT_PAR_MIN_EDGE_CELLS`; `0` = always on the pool). A tuning knob
+    /// for the thread rendezvous cost: it never changes the results (bitwise).
+    pub batched_parallel_threshold: Option<usize>,
 }
 
 impl Default for FlyTrainConfig {
@@ -116,6 +149,9 @@ impl Default for FlyTrainConfig {
             activity_high: 6.0,
             calibration_windows: 300,
             alpha_init: 0.0,
+            backend: TrainBackend::default(),
+            batched_memory_cap_mb: 3072,
+            batched_parallel_threshold: None,
         }
     }
 }
@@ -254,6 +290,8 @@ pub struct FlyLearner {
     cfg: FlyTrainConfig,
     layout: Layout,
     thresholds: HeadThresholds,
+    /// The batched engine (buffers + topology plan), present iff `cfg.backend` is `Batched`.
+    batched: Option<Mutex<BatchedEngine>>,
 }
 
 impl FlyLearner {
@@ -378,6 +416,13 @@ impl FlyLearner {
             },
         };
         let layout = Layout::of(&fly_params, &enc_params, &dec_params);
+        let batched = (cfg.backend == TrainBackend::Batched).then(|| {
+            let mut plan = BatchedPlan::new(&model);
+            if let Some(threshold) = cfg.batched_parallel_threshold {
+                plan = plan.with_parallel_threshold(threshold);
+            }
+            Mutex::new(BatchedEngine::with_plan(plan))
+        });
         Ok(FlyLearner {
             flyg_path,
             flyg_sha256,
@@ -396,6 +441,7 @@ impl FlyLearner {
             cfg,
             layout,
             thresholds: HeadThresholds::default(),
+            batched,
         })
     }
 
@@ -438,6 +484,18 @@ impl FlyLearner {
     }
 
     fn add_step_grads(&self, out: &BcStepOutput, grad: &mut [f32]) {
+        self.add_parts_grads(&out.fly, &out.encoder, &out.decoder, grad);
+    }
+
+    /// Adds the three gradient groups of a step into the flat vector (the layout of
+    /// [`Learner::params`]).
+    fn add_parts_grads(
+        &self,
+        fly: &ParamGradients,
+        encoder: &EncoderGradients,
+        d: &DecoderGradients,
+        grad: &mut [f32],
+    ) {
         let l = &self.layout;
         let mut at = 0;
         let mut add = |src: &[f32]| {
@@ -446,13 +504,12 @@ impl FlyLearner {
             }
             at += src.len();
         };
-        add(&out.fly.a);
-        add(&out.fly.b);
-        add(&out.fly.theta);
-        add(&out.encoder.g);
-        add(&out.encoder.c);
-        add(&out.encoder.bin_gain);
-        let d = &out.decoder;
+        add(&fly.a);
+        add(&fly.b);
+        add(&fly.theta);
+        add(&encoder.g);
+        add(&encoder.c);
+        add(&encoder.bin_gain);
         add(&d.direction_lr_w);
         add(&[d.direction_lr_b]);
         add(&d.direction_stop_w);
@@ -559,6 +616,63 @@ impl Learner for FlyLearner {
             weight_sum: out.weight_sum,
             activity_loss: out.activity_loss,
         }
+    }
+
+    fn uses_batched_backend(&self) -> bool {
+        self.batched.is_some()
+    }
+
+    fn batch_grad(&self, windows: &[Window], loss: &LossConfig, grad: &mut [f32]) -> LearnerResult<Vec<WindowStats>> {
+        let engine = self
+            .batched
+            .as_ref()
+            .ok_or("the fly learner runs the per-seq backend")?;
+        let seqs: Vec<BcSequence> = windows
+            .iter()
+            .map(|w| BcSequence {
+                v_init: self.v_rest.clone(),
+                observations: w.observations.clone(),
+                targets: w.targets.clone(),
+            })
+            .collect();
+        let cfg = BcStepConfig {
+            loss: *loss,
+            activity: self.act_config(),
+        };
+        let cap = (self.cfg.batched_memory_cap_mb > 0).then(|| self.cfg.batched_memory_cap_mb.saturating_mul(1 << 20));
+        let mut engine = engine.lock().map_err(|_| "batched engine lock poisoned".to_string())?;
+        let out = brain_bc_batched_step(
+            &self.model,
+            &mut engine,
+            &self.encoder,
+            &self.enc_params,
+            &self.decoder,
+            &self.dec_params,
+            &self.calib,
+            &seqs,
+            &cfg,
+            cap,
+        )
+        .map_err(|e| e.to_string())?;
+        // The connectome gradient is already the batch sum; the encoder/decoder parts are added
+        // window by window in index order, like the per-window path's reduction.
+        self.add_parts_grads(
+            &out.fly,
+            &self.encoder.zero_grads(),
+            &self.decoder.zeros_gradients(),
+            grad,
+        );
+        let no_fly = ParamGradients::zeros_like(self.model.params());
+        let mut stats = Vec::with_capacity(out.windows.len());
+        for w in &out.windows {
+            self.add_parts_grads(&no_fly, &w.encoder, &w.decoder, grad);
+            stats.push(WindowStats {
+                loss: w.loss,
+                weight_sum: w.weight_sum,
+                activity_loss: w.activity_loss,
+            });
+        }
+        Ok(stats)
     }
 
     fn window_logits(&self, window: &Window) -> Vec<HeadLogits> {

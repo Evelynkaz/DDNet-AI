@@ -73,3 +73,15 @@ fn the_round0_collection_config_parses_and_labels_the_holdout_arenas_too() {
     assert_eq!(seeds.len(), c.jobs.len(), "every job has its own seed range");
     assert!(c.jobs.iter().any(|j| j.opponents.len() == 3), "1v3 data");
 }
+
+#[test]
+fn the_batched_m_smoke_config_parses_and_the_e005_configs_keep_the_per_sequence_backend() {
+    use ddai_fly::TrainBackend;
+    let smoke = experiment("smoke-fly-m-batched");
+    assert_eq!(smoke.fly.backend, TrainBackend::Batched);
+    assert!(smoke.flyg.ends_with("fly-M-v1.flyg") && smoke.brain_config.ends_with("M-brain.toml"));
+    assert_eq!(smoke.fly.batched_memory_cap_mb, 3072);
+    for name in ["e005-fly", "e005-fly-noclb", "e005-fly-s2"] {
+        assert_eq!(experiment(name).fly.backend, TrainBackend::PerSequence, "{name}");
+    }
+}

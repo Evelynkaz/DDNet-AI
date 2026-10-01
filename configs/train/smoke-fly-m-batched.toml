@@ -1,0 +1,50 @@
+# Task 7.2b: a tiny behaviour-cloning smoke of the fly on the M graph through the batched training
+# backend (`[fly] backend = "batched"`). M is ~330-450 sample-steps/s per-sequence, i.e. not
+# trainable; the batched backend is what makes this run at all. Eight steps of 8 windows x 16
+# decisions: a plumbing check (data -> encoder -> batched fly -> decoder -> Adam -> checkpoint ->
+# evaluation), not a training result.
+#   ddnet-ai train run --config configs/train/smoke-fly-m-batched.toml
+name = "smoke-fly-m-batched"
+flyg = "~/aiddnet/data/connectome/compiled/fly-M-v1.flyg"
+brain_config = "configs/fly/M-brain.toml"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+run_dir = "~/aiddnet/data/runs/7.2b/smoke-fly-m-batched"
+teacher_base = ["~/aiddnet/data/datasets/teacher/round0-v1"]
+teacher_dagger = "~/aiddnet/data/runs/7.2b/smoke-fly-m-batched-dagger"
+bc_steps = 8
+eval_every = 0
+
+[model]
+kind = "fly"
+
+[fly]
+lr_a = 3e-3
+lr_b = 5e-3
+lr_theta = 5e-3
+lr_encoder = 2e-2
+lr_decoder = 2e-2
+l2_a = 1e-4
+alpha_init = 4.0
+calibration_windows = 24
+backend = "batched"
+# Cap on the batched backend's working set (MiB): this run needs ~0.9 GiB.
+batched_memory_cap_mb = 3072
+
+[train]
+seed = 1
+batch_windows = 8
+window_len = 16
+burn_in = 4
+human_fraction = 0.0
+warmup_steps = 2
+lr_final_frac = 0.1
+threads = 3
+log_every = 2
+eval_windows = 24
+
+[train.loss]
+pos_weight = [3.0, 1.0, 6.0]
+
+[teacher_data]
+val_mod = 10

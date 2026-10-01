@@ -45,7 +45,7 @@ pub struct Sequence {
 }
 
 impl Sequence {
-    fn validate(&self, model: &FlyModel) {
+    pub(crate) fn validate(&self, model: &FlyModel) {
         let t = self.inputs.len();
         assert_eq!(self.grad_dn.len(), t, "Sequence: grad_dn.len() must equal inputs.len()");
         assert_eq!(

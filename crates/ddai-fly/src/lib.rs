@@ -12,6 +12,7 @@
 
 pub mod activation;
 pub mod backward;
+pub mod batched;
 pub mod bc;
 mod bench;
 pub mod brain_checkpoint;
@@ -42,6 +43,7 @@ pub mod world_model;
 
 pub mod brain;
 pub mod brain_bc;
+pub mod brain_bc_batched;
 
 #[doc(hidden)] // test/bench support only, not covered by semver — see its own doc comment.
 pub mod brain_fixtures;
@@ -49,6 +51,7 @@ pub mod brain_fixtures;
 pub mod test_fixtures;
 
 pub use backward::{BackwardIndex, BpttGradients, BpttScratch, ExtraRateGrad, backward};
+pub use batched::{BatchedEngine, BatchedPlan, TrainBackend, train_step_batched};
 pub use bench::{DutyCycleReport, refresh_inputs_partial, run_duty_cycle};
 pub use checkpoint::{
     Checkpoint, CheckpointMeta, load_checkpoint, load_checkpoint_for_flyg, save_checkpoint, sha256_hex_of_file,

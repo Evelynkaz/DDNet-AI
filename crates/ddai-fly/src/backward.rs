@@ -240,7 +240,7 @@ impl BpttScratch {
 /// theta further keeps helping, when the forward pass has in fact stopped listening).
 /// Otherwise: `d tau/d theta = sigmoid(theta)` (softplus'), `d decay/d tau = -exp(-dt/tau) * dt /
 /// tau^2` (`decay = 1 - exp(-dt/tau)`), chained together.
-fn d_decay_d_theta_per_type(model: &FlyModel, out: &mut [f32]) {
+pub(crate) fn d_decay_d_theta_per_type(model: &FlyModel, out: &mut [f32]) {
     let dt_s = model.config().dt_s();
     let tau_max = model.config().tau_max_s;
     for (t, &theta) in model.params().theta.iter().enumerate() {

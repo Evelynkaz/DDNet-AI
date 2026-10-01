@@ -12,7 +12,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
-use ddai_fly::demo::{DirectionDemoConfig, direction_inputs_outputs_from_flyg, evaluate_direction, run_direction_demo};
+use ddai_fly::demo::{
+    DirectionDemoConfig, direction_inputs_outputs_from_flyg, evaluate_direction, run_direction_demo_with_backend,
+};
 use ddai_fly::optim::{AdamConfig, GuardedAdamConfig};
 use ddai_fly::{BackwardIndex, FlyConfig, FlyModel, FlyParams, FlyState};
 
@@ -81,6 +83,11 @@ pub enum FlyCommand {
         /// the repo — see `CLAUDE.md`).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Forward/backward backend: `per-seq` (task 7.2's per-sequence BPTT, the reference) or
+        /// `batched` (task 7.2b: the whole batch at once, state `[neuron][sequence]`; same loss and
+        /// gradients up to f32 summation order, much faster on the M graph).
+        #[arg(long, value_enum, default_value_t = BackendArg::PerSeq)]
+        backend: BackendArg,
     },
     /// Task 7.3, acceptance criterion 9: the encoder + fly + decoder learning demo — synthetic
     /// observations (a random spawn on a real block map, an opponent at a random relative
@@ -145,6 +152,7 @@ pub fn run(args: FlyArgs) -> ExitCode {
             left_action,
             right_action,
             out,
+            backend,
         } => train_demo(TrainDemoArgs {
             flyg,
             steps,
@@ -160,6 +168,7 @@ pub fn run(args: FlyArgs) -> ExitCode {
             left_action,
             right_action,
             out,
+            backend,
         }),
         FlyCommand::BrainDemo {
             flyg,
@@ -364,6 +373,27 @@ struct TrainDemoArgs {
     left_action: String,
     right_action: String,
     out: Option<PathBuf>,
+    backend: BackendArg,
+}
+
+/// `--backend` of `fly train-demo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum BackendArg {
+    /// Task 7.2's per-sequence BPTT (the reference).
+    #[value(name = "per-seq")]
+    PerSeq,
+    /// Task 7.2b's batched backend.
+    #[value(name = "batched")]
+    Batched,
+}
+
+impl BackendArg {
+    fn backend(self) -> ddai_fly::TrainBackend {
+        match self {
+            BackendArg::PerSeq => ddai_fly::TrainBackend::PerSequence,
+            BackendArg::Batched => ddai_fly::TrainBackend::Batched,
+        }
+    }
 }
 
 fn default_csv_out_path(flyg_path: &Path) -> Result<PathBuf, ExitCode> {
@@ -449,7 +479,7 @@ fn train_demo(args: TrainDemoArgs) -> ExitCode {
     let eval_before = evaluate_direction(&model, &demo, &v_init, held_out_seed, 60);
 
     let start = Instant::now();
-    let metrics = run_direction_demo(&mut model, &index, &demo, &v_init);
+    let metrics = run_direction_demo_with_backend(&mut model, &index, &demo, &v_init, args.backend.backend());
     let elapsed = start.elapsed();
 
     let not_applied = metrics.iter().filter(|m| !m.applied).count();
@@ -468,6 +498,7 @@ fn train_demo(args: TrainDemoArgs) -> ExitCode {
     };
     let eval_after = evaluate_direction(&model, &demo, &v_init, held_out_seed, 60);
 
+    println!("backend: {:?}", args.backend.backend());
     println!("trained {} steps in {elapsed:?}", metrics.len());
     println!("loss: initial={initial_loss:.4}, final (last 10 avg)={final_loss:.4}");
     println!(
