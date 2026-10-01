@@ -247,6 +247,13 @@ pub struct RayGridConfig {
     /// it by a constant before the `atan2` cannot affect the `azimuth -> -azimuth` mirror
     /// argument, which only depends on `atan2`'s `x`-argument sign.
     pub elevation_gain: f32,
+    /// Task 8.2: learn a gain per **distance bin** for every `(type, channel)` (see
+    /// [`EncoderParams::bin_gain`]). Off (the default, and the 7.3 behaviour) the current of a
+    /// spatial term sums a ray's distance bins with equal weight, and because the Gaussian bins
+    /// partition distance (their sum is ~constant), a neuron cannot tell a wall, hazard or
+    /// opponent that is one tile away from one that is twenty tiles away.
+    #[serde(default)]
+    pub learn_distance_gains: bool,
 }
 
 impl Default for RayGridConfig {
@@ -260,6 +267,7 @@ impl Default for RayGridConfig {
             looming_k: 0.03,
             velocity_norm_scale: 30.0,
             elevation_gain: 2.0,
+            learn_distance_gains: false,
         }
     }
 }
@@ -808,6 +816,10 @@ fn tile_class(map: &ddai_physics::map::MapData, x: f32, y: f32) -> TileClass {
 pub struct EncoderParams {
     pub g: Vec<f32>,
     pub c: Vec<f32>,
+    /// Per-distance-bin gain of each `(type, channel)` assignment, `param * num_bins + bin`
+    /// (task 8.2, [`RayGridConfig::learn_distance_gains`]); it multiplies the ray-weighted sum of
+    /// that bin. **Empty** = every bin has gain `1` (the 7.3 encoder, bit for bit).
+    pub bin_gain: Vec<f32>,
 }
 
 impl EncoderParams {
@@ -817,10 +829,24 @@ impl EncoderParams {
         EncoderParams {
             g: vec![1.0; num_params],
             c: vec![0.0; num_params],
+            bin_gain: Vec::new(),
         }
     }
 
-    pub fn validate_shape(&self, num_params: usize) -> Result<(), EncoderError> {
+    /// `num_bins` is the ray grid's distance-bin count: `bin_gain` is empty (no learned gains) or
+    /// has exactly `num_params * num_bins` entries (a count that is merely a multiple would index
+    /// the wrong bin of the wrong assignment, or panic on a slice).
+    pub fn validate_shape(&self, num_params: usize, num_bins: usize) -> Result<(), EncoderError> {
+        if !self.bin_gain.is_empty() && self.bin_gain.len() != num_params * num_bins {
+            return Err(EncoderError::ParamShapeMismatch(format!(
+                "bin_gain.len()={} but {num_params} assignments x {num_bins} bins = {}",
+                self.bin_gain.len(),
+                num_params * num_bins
+            )));
+        }
+        if self.bin_gain.iter().any(|x| !x.is_finite()) {
+            return Err(EncoderError::ParamShapeMismatch("bin_gain must be finite".to_string()));
+        }
         if self.g.len() != num_params || self.c.len() != num_params {
             return Err(EncoderError::ParamShapeMismatch(format!(
                 "g.len()={}, c.len()={}, expected {num_params}",
@@ -842,6 +868,8 @@ impl EncoderParams {
 pub struct EncoderGradients {
     pub g: Vec<f32>,
     pub c: Vec<f32>,
+    /// Same layout as [`EncoderParams::bin_gain`]; empty when that is empty.
+    pub bin_gain: Vec<f32>,
 }
 
 impl EncoderGradients {
@@ -849,6 +877,7 @@ impl EncoderGradients {
         EncoderGradients {
             g: vec![0.0; num_params],
             c: vec![0.0; num_params],
+            bin_gain: Vec::new(),
         }
     }
 }
@@ -878,6 +907,9 @@ impl std::fmt::Display for EncoderError {
 }
 
 impl std::error::Error for EncoderError {}
+
+/// Largest number of distance bins the per-bin gains support.
+const MAX_BINS: usize = 8;
 
 /// One term of one input neuron's current formula — a `(channel, param_id)` pair, plus (for a
 /// spatial VPN channel) the neuron's precomputed per-ray-direction Gaussian weight, shared across
@@ -1099,6 +1131,49 @@ impl EncoderModel {
             .collect()
     }
 
+    /// Fresh parameters for this model: unit gains, zero offsets, and (when
+    /// [`RayGridConfig::learn_distance_gains`] is set) unit per-bin gains.
+    pub fn init_params(&self) -> EncoderParams {
+        let mut p = EncoderParams::init_default(self.num_params());
+        if self.ray_cfg.learn_distance_gains {
+            p.bin_gain = vec![1.0; self.num_params() * self.ray_cfg.num_distance_bins];
+        }
+        p
+    }
+
+    /// Zero gradients shaped like [`EncoderModel::init_params`].
+    pub fn zero_grads(&self) -> EncoderGradients {
+        let mut g = EncoderGradients::zeros(self.num_params());
+        if self.ray_cfg.learn_distance_gains {
+            g.bin_gain = vec![0.0; self.num_params() * self.ray_cfg.num_distance_bins];
+        }
+        g
+    }
+
+    /// Ray-weighted sum of each distance bin of a spatial channel, `sums[b] = sum_d w_d *
+    /// feat[d, b]`; `sums[..num_bins]` is meaningful. The uniform-gain contribution is their sum.
+    fn spatial_bin_sums(
+        &self,
+        info: &InputNeuronInfo,
+        channel: Channel,
+        features: &RayGridFeatures,
+    ) -> [f32; MAX_BINS] {
+        let w = info.ray_weight.as_deref().expect("spatial term implies ray_weight");
+        let feat = features.spatial(channel);
+        let nb = features.num_bins();
+        assert!(nb <= MAX_BINS, "at most {MAX_BINS} distance bins are supported");
+        let mut sums = [0.0f32; MAX_BINS];
+        for (d, &wd) in w.iter().enumerate() {
+            if wd == 0.0 {
+                continue;
+            }
+            for b in 0..nb {
+                sums[b] += wd * feat[d * nb + b];
+            }
+        }
+        sums
+    }
+
     /// The raw (pre-`g`/`c`) contribution of one **visual** channel term — never called for an
     /// [`InputChannel::Ascending`] term, which reads straight from `an_values` at the call site
     /// instead (there is no ray grid or direction factor for a proprioceptive channel).
@@ -1162,7 +1237,15 @@ impl EncoderModel {
             for term in &info.terms {
                 let g = params.g[term.param_id as usize];
                 let c = params.c[term.param_id as usize];
-                let contribution = self.term_contribution(info, term, features, an_values);
+                let contribution = match (&term.channel, params.bin_gain.is_empty()) {
+                    (InputChannel::Visual(ch), false) if ch.is_spatial() => {
+                        let nb = features.num_bins();
+                        let gains = &params.bin_gain[term.param_id as usize * nb..(term.param_id as usize + 1) * nb];
+                        let sums = self.spatial_bin_sums(info, *ch, features);
+                        gains.iter().zip(&sums[..nb]).map(|(&gb, &sb)| gb * sb).sum()
+                    }
+                    _ => self.term_contribution(info, term, features, an_values),
+                };
                 i_k += g * contribution + c;
             }
             out[k] = i_k;
@@ -1183,6 +1266,21 @@ impl EncoderModel {
         grad_input_currents: &[f32],
         grads: &mut EncoderGradients,
     ) {
+        let unit = EncoderParams::init_default(self.num_params());
+        self.backward_with_params(features, an_values, &unit, grad_input_currents, grads);
+    }
+
+    /// [`EncoderModel::backward`] for parameters that may carry per-bin gains: `params` are the
+    /// values the forward pass used (only its `g` and `bin_gain` matter here, and only when
+    /// `bin_gain` is non-empty; with it empty this is exactly [`EncoderModel::backward`]).
+    pub fn backward_with_params(
+        &self,
+        features: &RayGridFeatures,
+        an_values: &ProprioceptionValues,
+        params: &EncoderParams,
+        grad_input_currents: &[f32],
+        grads: &mut EncoderGradients,
+    ) {
         assert_eq!(
             grad_input_currents.len(),
             self.per_input.len(),
@@ -1194,9 +1292,24 @@ impl EncoderModel {
                 continue;
             }
             for term in &info.terms {
-                let contribution = self.term_contribution(info, term, features, an_values);
-                grads.g[term.param_id as usize] += gi * contribution;
-                grads.c[term.param_id as usize] += gi;
+                let pid = term.param_id as usize;
+                if let (InputChannel::Visual(ch), false) = (&term.channel, params.bin_gain.is_empty())
+                    && ch.is_spatial()
+                {
+                    let nb = features.num_bins();
+                    let sums = self.spatial_bin_sums(info, *ch, features);
+                    let gains = &params.bin_gain[pid * nb..(pid + 1) * nb];
+                    let g = params.g[pid];
+                    let contribution: f32 = gains.iter().zip(&sums[..nb]).map(|(&gb, &sb)| gb * sb).sum();
+                    grads.g[pid] += gi * contribution;
+                    for (b, &sb) in sums.iter().enumerate().take(nb) {
+                        grads.bin_gain[pid * nb + b] += gi * g * sb;
+                    }
+                } else {
+                    let contribution = self.term_contribution(info, term, features, an_values);
+                    grads.g[pid] += gi * contribution;
+                }
+                grads.c[pid] += gi;
             }
         }
     }
@@ -1270,6 +1383,24 @@ mod tests {
     use ddai_physics::map::{TILE_AIR, TILE_FREEZE, TILE_SOLID, Tile};
     use std::f32::consts::PI;
     use std::sync::Arc;
+
+    #[test]
+    fn bin_gain_must_have_exactly_params_times_bins_entries() {
+        let mut p = EncoderParams::init_default(5);
+        p.validate_shape(5, 4).unwrap();
+        p.bin_gain = vec![1.0; 20];
+        p.validate_shape(5, 4).unwrap();
+        // A multiple of the parameter count that is not params x bins used to pass.
+        p.bin_gain = vec![1.0; 10];
+        assert!(p.validate_shape(5, 4).is_err());
+        p.bin_gain = vec![1.0; 40];
+        assert!(p.validate_shape(5, 4).is_err());
+        // Another bin count makes the same vector wrong.
+        p.bin_gain = vec![1.0; 20];
+        assert!(p.validate_shape(5, 3).is_err());
+        p.bin_gain[3] = f32::NAN;
+        assert!(p.validate_shape(5, 4).is_err());
+    }
 
     // --- Config validation ------------------------------------------------------------------
 
@@ -1953,6 +2084,138 @@ mod tests {
         assert!((out[2] - 3.5).abs() < 1e-6, "out={out:?}");
         assert!((out[0]).abs() < 1e-6);
         assert!((out[1]).abs() < 1e-6);
+    }
+
+    /// Per-distance-bin gains (task 8.2): with unit gains the current equals the 7.3 encoder's,
+    /// with a near-bin-only gain a near object drives a neuron and a far one does not (distance is
+    /// no longer summed away), and `backward_with_params` matches finite differences of `forward`
+    /// for `g`, `c` and the bin gains.
+    #[test]
+    fn distance_bin_gains_restore_distance_and_have_correct_gradients() {
+        let model = model_from(vpn_an_flyg());
+        let cfg = RayGridConfig {
+            learn_distance_gains: true,
+            ..RayGridConfig::default()
+        };
+        let enc = EncoderModel::new(&model, cfg, &default_proprio()).unwrap();
+        let nb = cfg.num_distance_bins;
+        let plain = enc.init_params();
+        assert_eq!(plain.bin_gain.len(), enc.num_params() * nb);
+        assert!(plain.bin_gain.iter().all(|&g| g == 1.0));
+
+        let map = Arc::new(ddai_physics::map::MapData {
+            width: 40,
+            height: 40,
+            game: vec![tile(TILE_AIR); 1600],
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        });
+        let obs_at = |dx: f32| {
+            let mut me = CharacterObservation::at_rest(0);
+            me.pos = ddai_physics::vmath::Vec2::new(300.0, 300.0);
+            let mut opp = CharacterObservation::at_rest(1);
+            opp.pos = ddai_physics::vmath::Vec2::new(300.0 + dx, 300.0);
+            ddai_brain::Observation {
+                map: map.clone(),
+                tick: 0,
+                self_state: me,
+                others: vec![opp],
+                target_id: None,
+                tuning: ddai_physics::tuning::TuningParams::default(),
+            }
+        };
+        let an = ProprioceptionValues {
+            grounded: 0.0,
+            airborne: 0.0,
+            own_hook: 0.0,
+            jumps_left: 0.0,
+            freeze_timer: 0.0,
+            speed: 0.0,
+        };
+        let currents = |p: &EncoderParams, dx: f32| {
+            let mut f = RayGridFeatures::new(enc.ray_grid_config());
+            f.compute(&obs_at(dx), enc.ray_grid_config());
+            let mut out = vec![0.0; enc.num_inputs()];
+            enc.forward(&f, &an, p, &mut out);
+            out
+        };
+        // Unit gains equal the encoder without gains.
+        let legacy = EncoderParams::init_default(enc.num_params());
+        for dx in [60.0f32, 400.0] {
+            for (a, b) in currents(&plain, dx).iter().zip(&currents(&legacy, dx)) {
+                assert!((a - b).abs() < 1e-5);
+            }
+        }
+        // Only the nearest bin has gain: a near opponent drives the VPN neurons, a far one hardly.
+        let mut near_only = plain.clone();
+        for p in 0..enc.num_params() {
+            for b in 0..nb {
+                near_only.bin_gain[p * nb + b] = f32::from(b == 0);
+            }
+        }
+        let near: f32 = currents(&near_only, 60.0).iter().map(|x| x.abs()).sum();
+        let far: f32 = currents(&near_only, 500.0).iter().map(|x| x.abs()).sum();
+        assert!(near > 5.0 * far.max(1e-6), "near {near} vs far {far}");
+        // With uniform gains the two distances are indistinguishable in magnitude (the 7.3 flaw).
+        let near_u: f32 = currents(&plain, 60.0).iter().map(|x| x.abs()).sum();
+        let far_u: f32 = currents(&plain, 500.0).iter().map(|x| x.abs()).sum();
+        assert!(
+            (near_u - far_u).abs() < 0.35 * near_u.max(far_u),
+            "uniform: near {near_u} far {far_u}"
+        );
+
+        // Gradients against finite differences of the forward pass.
+        let mut params = plain.clone();
+        for (i, g) in params.g.iter_mut().enumerate() {
+            *g = 0.8 + 0.2 * i as f32;
+        }
+        for (i, g) in params.bin_gain.iter_mut().enumerate() {
+            *g = 0.5 + 0.1 * (i % 7) as f32;
+        }
+        let mut f = RayGridFeatures::new(enc.ray_grid_config());
+        f.compute(&obs_at(90.0), enc.ray_grid_config());
+        let grad_input: Vec<f32> = (0..enc.num_inputs()).map(|k| 1.0 + 0.5 * k as f32).collect();
+        let mut analytic = enc.zero_grads();
+        enc.backward_with_params(&f, &an, &params, &grad_input, &mut analytic);
+        let loss = |p: &EncoderParams| -> f64 {
+            let mut out = vec![0.0f32; enc.num_inputs()];
+            enc.forward(&f, &an, p, &mut out);
+            out.iter()
+                .zip(&grad_input)
+                .map(|(&i, &g)| f64::from(i) * f64::from(g))
+                .sum()
+        };
+        let h = 1e-3f32;
+        let mut checked = 0;
+        for i in 0..params.bin_gain.len() {
+            let (mut a, mut b) = (params.clone(), params.clone());
+            a.bin_gain[i] += h;
+            b.bin_gain[i] -= h;
+            let fd = (loss(&a) - loss(&b)) / (2.0 * f64::from(h));
+            if fd.abs() > 0.05 {
+                checked += 1;
+                assert!(
+                    (f64::from(analytic.bin_gain[i]) - fd).abs() / fd.abs() < 1e-3,
+                    "bin_gain[{i}]: {} vs {fd}",
+                    analytic.bin_gain[i]
+                );
+            }
+        }
+        assert!(checked > 0, "the check must exercise at least one non-zero gradient");
+        for pid in 0..enc.num_params() {
+            let (mut a, mut b) = (params.clone(), params.clone());
+            a.g[pid] += h;
+            b.g[pid] -= h;
+            let fd = (loss(&a) - loss(&b)) / (2.0 * f64::from(h));
+            assert!(
+                (f64::from(analytic.g[pid]) - fd).abs() <= 1e-3 * fd.abs().max(1e-3),
+                "g[{pid}]"
+            );
+        }
     }
 
     /// Encoder-only finite-difference gradient check (task spec's "tiny graphs, f64 reference"):

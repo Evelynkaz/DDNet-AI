@@ -1,0 +1,28 @@
+[package]
+name = "ddai-controls"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Task 8.2: the D-014 controls -- an MLP and a GRU that read the same ray-grid features as the fly and decode the same five action heads, trained by the same loss; hand-written forward/backward, `Brain` adapters, checkpoint format."
+
+[lib]
+name = "ddai_controls"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-brain = { path = "../ddai-brain" }
+# The controls read the fly's own feature extraction (`RayGridFeatures`, proprioception) and share
+# its head loss (`ddai_fly::bc`), checkpoint helpers and aim-to-target conversion, so that "same
+# inputs, same outputs, same loss" is true by construction.
+ddai-fly = { path = "../ddai-fly" }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.14"
+ddai-physics = { path = "../ddai-physics" }

@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
-use ddai_env::EnvError;
 use ddai_env::arena::{Arena, load_arena_defs};
-use ddai_env::config::{BrainFactory, HybridSpec, PlayerSpec, RunConfig, builtin_brain, hybrid_config};
+use ddai_env::config::{HybridSpec, PlayerSpec, RunConfig};
+use ddai_env::models::{ModelBrains, label_of_arg, player_from_arg};
 use ddai_env::output::{RunOptions, git_info, run_config};
 use ddai_env::report::measure_stall_baseline;
 use ddai_env::run::load_arenas;
@@ -54,6 +54,13 @@ pub enum ArenaCommand {
         /// (D-041/D-045: published next to wall-clock decision times). 0 = skip.
         #[arg(long, default_value_t = 0)]
         stall_ms: u64,
+        /// Replaces the focal player (slot 0) of every selected condition with this brain:
+        /// `fly:<checkpoint>`, `mlp:<checkpoint>`, `gru:<checkpoint>`, `hybrid:fly:<checkpoint>` (hybrid with a trained fly proposer), `planner`, `scripted` or `idle`.
+        #[arg(long)]
+        brain: Option<String>,
+        /// `.flyg` to load fly checkpoints against (default: the path stored in the checkpoint).
+        #[arg(long)]
+        flyg: Option<PathBuf>,
     },
     /// Technique scenarios (T1-T18): success rate per brain, reference-solution check, traces.
     Scenarios {
@@ -79,11 +86,21 @@ pub enum ArenaCommand {
         #[arg(long)]
         trace_trial: Option<u32>,
         /// `reference` (default), `idle`, `scripted`, `planner` or `hybrid` (`-fixed` suffix: the
-        /// deterministic mode).
+        /// deterministic mode), or a model (`fly:<checkpoint>`, `hybrid:fly:<checkpoint>`, ...).
         #[arg(long, default_value = "reference")]
         trace_brain: String,
         #[arg(long)]
         map_dir: Option<PathBuf>,
+        /// Extra brains to score, in addition to the config's: `fly:<checkpoint>`, `mlp:<..>`,
+        /// `gru:<..>`, `planner`, ... (repeatable; the argument is the column label).
+        #[arg(long = "brain")]
+        brains: Vec<String>,
+        /// Overrides the trials per scenario (the config's or each scenario's own).
+        #[arg(long)]
+        trials: Option<u32>,
+        /// `.flyg` to load fly checkpoints against.
+        #[arg(long)]
+        flyg: Option<PathBuf>,
     },
     /// Lists the arena definitions (name, split, map, standing slots).
     List {
@@ -103,42 +120,6 @@ fn source_git_info() -> (String, bool) {
     let same = now == built;
     (built, dirty || !same)
 }
-
-/// The arena's brain factory: the built-in brains plus `hybrid` with the fly as proposer (which
-/// needs the model file, so it lives here and not in `ddai-env`).
-fn arena_brain(spec: &PlayerSpec) -> Result<Box<dyn ddai_brain::Brain>, EnvError> {
-    let fly = spec.hybrid.as_ref().is_some_and(|h| h.proposer_name() == "fly");
-    if spec.brain != "hybrid" || !fly {
-        return builtin_brain(spec);
-    }
-    let h: &HybridSpec = spec.hybrid.as_ref().expect("checked above");
-    let flyg = spec
-        .model
-        .as_deref()
-        .ok_or_else(|| EnvError::new("hybrid with proposer = \"fly\" needs model = <.flyg path>"))?;
-    let flyg = expand_home(flyg);
-    let cfg_path = h.fly_config.as_deref().map_or_else(
-        || {
-            let m = flyg.file_name().is_some_and(|n| n.to_string_lossy().contains("-M-"));
-            PathBuf::from(if m {
-                "configs/fly/M-brain.toml"
-            } else {
-                "configs/fly/S-brain.toml"
-            })
-        },
-        expand_home,
-    );
-    let (cfg, clock) = hybrid_config(spec)?;
-    let seed = 1;
-    let brain = ddai_fly::proposer::untrained_fly_brain(&flyg, &cfg_path, seed).map_err(EnvError::new)?;
-    let proposer = Box::new(ddai_fly::proposer::FlyProposer::new(brain, seed));
-    let hybrid = ddai_planner::hybrid::HybridBrain::new(cfg, clock, proposer).map_err(EnvError::new)?;
-    Ok(Box::new(hybrid))
-}
-
-const _: fn() = || {
-    let _: &BrainFactory = &arena_brain;
-};
 
 fn default_map_dir() -> PathBuf {
     match std::env::var_os("HOME") {
@@ -166,6 +147,8 @@ pub fn run(args: ArenaArgs) -> ExitCode {
             arenas_dir,
             map_dir,
             stall_ms,
+            brain,
+            flyg,
         } => run_cmd(
             &config,
             &out,
@@ -176,6 +159,8 @@ pub fn run(args: ArenaArgs) -> ExitCode {
             arenas_dir,
             map_dir,
             stall_ms,
+            brain.as_deref(),
+            flyg,
         ),
         ArenaCommand::Scenarios {
             dir,
@@ -187,6 +172,9 @@ pub fn run(args: ArenaArgs) -> ExitCode {
             trace_trial,
             trace_brain,
             map_dir,
+            brains,
+            trials,
+            flyg,
         } => scenarios_cmd(
             &dir,
             config.as_deref(),
@@ -197,6 +185,9 @@ pub fn run(args: ArenaArgs) -> ExitCode {
             trace_trial,
             &trace_brain,
             map_dir,
+            &brains,
+            trials,
+            flyg,
         ),
         ArenaCommand::List { arenas_dir, map_dir } => list_cmd(&arenas_dir, map_dir),
     };
@@ -220,6 +211,8 @@ fn run_cmd(
     arenas_dir: Option<PathBuf>,
     map_dir: Option<PathBuf>,
     stall_ms: u64,
+    brain: Option<&str>,
+    flyg: Option<PathBuf>,
 ) -> Result<(), String> {
     let text = std::fs::read_to_string(config).map_err(|e| format!("{}: {e}", config.display()))?;
     let mut cfg = RunConfig::parse(&text).map_err(|e| e.to_string())?;
@@ -228,6 +221,24 @@ fn run_cmd(
     }
     if let Some(s) = seed {
         cfg.base_seed = s;
+    }
+    if let Some(arg) = brain {
+        for cond in &mut cfg.condition {
+            let first = cond
+                .players
+                .first_mut()
+                .ok_or_else(|| format!("condition {:?} has no players", cond.name))?;
+            if first.count != 1 {
+                return Err(format!(
+                    "condition {:?}: --brain needs a single focal player in slot 0",
+                    cond.name
+                ));
+            }
+            let mut spec = player_from_arg(arg);
+            spec.lag = first.lag;
+            spec.label = Some(label_of_arg(arg));
+            *first = spec;
+        }
     }
     let arenas_dir = arenas_dir
         .or_else(|| cfg.arenas_dir.as_deref().map(expand_home))
@@ -249,8 +260,10 @@ fn run_cmd(
         git: source_git_info(),
         stall_baseline,
     };
+    let models = std::sync::Arc::new(ModelBrains::new(flyg));
+    let factory = models.factory();
     let summary =
-        run_config(&cfg, &arenas, &arena_brain, &opts, &mut |line| eprintln!("{line}")).map_err(|e| e.to_string())?;
+        run_config(&cfg, &arenas, &factory, &opts, &mut |line| eprintln!("{line}")).map_err(|e| e.to_string())?;
     println!("{}", ddai_env::report::markdown(&summary));
     eprintln!("wrote {}", out.display());
     Ok(())
@@ -288,13 +301,16 @@ fn scenarios_cmd(
     trace_trial: Option<u32>,
     trace_brain: &str,
     map_dir: Option<PathBuf>,
+    extra_brains: &[String],
+    trials: Option<u32>,
+    flyg: Option<PathBuf>,
 ) -> Result<(), String> {
-    use ddai_env::config::PlayerSpec;
     use ddai_env::scenario::{
         ScenarioDef, ScenarioRunConfig, load_world, markdown, reference_brain, run_scenarios, run_trial,
     };
 
     let map_dir = map_dir.unwrap_or_else(default_map_dir);
+    let models = std::sync::Arc::new(ModelBrains::new(flyg));
     let mut defs = ScenarioDef::load_dir(dir).map_err(|e| e.to_string())?;
     if let Some(list) = only {
         let want: Vec<&str> = list.split(',').map(str::trim).collect();
@@ -315,7 +331,7 @@ fn scenarios_cmd(
                 .map_or((trace_brain, false), |n| (n, true));
             // `hybrid-work`: the hybrid's 4 ms deadline on the work clock.
             let (name, work) = name.strip_suffix("-work").map_or((name, false), |n| (n, true));
-            let mut spec = PlayerSpec::simple(name);
+            let mut spec = player_from_arg(name);
             if fixed {
                 spec.mode = Some("fixed".to_string());
             }
@@ -324,14 +340,14 @@ fn scenarios_cmd(
                 spec.clock = Some("work".to_string());
                 spec.budget_ms = Some(4.0);
             }
-            if name == "hybrid" {
+            if spec.brain == "hybrid" {
                 // The trace is a diagnostic: show the candidates and their scores.
                 spec.hybrid = Some(HybridSpec {
                     debug_dump: Some(true),
-                    ..HybridSpec::default()
+                    ..spec.hybrid.take().unwrap_or_default()
                 });
             }
-            arena_brain(&spec).map_err(|e| e.to_string())?
+            models.make(&spec).map_err(|e| e.to_string())?
         };
         let (subject, log, tlog) = ddai_env::brains::RecordingBrain::with_telemetry(subject);
         let outcome = run_trial(
@@ -420,11 +436,30 @@ fn scenarios_cmd(
             Err(format!("{failed} reference solutions fail"))
         };
     }
-    let config = config.ok_or("--config is required (or use --check-reference / --trace)")?;
-    let text = std::fs::read_to_string(config).map_err(|e| format!("{}: {e}", config.display()))?;
-    let cfg = ScenarioRunConfig::parse(&text).map_err(|e| e.to_string())?;
+    let mut cfg = match config {
+        Some(config) => {
+            let text = std::fs::read_to_string(config).map_err(|e| format!("{}: {e}", config.display()))?;
+            ScenarioRunConfig::parse(&text).map_err(|e| e.to_string())?
+        }
+        None if !extra_brains.is_empty() => ScenarioRunConfig {
+            name: "scenarios".to_string(),
+            seed: 1,
+            trials: None,
+            brain: Vec::new(),
+        },
+        None => return Err("--config or --brain is required (or use --check-reference / --trace)".to_string()),
+    };
+    for arg in extra_brains {
+        let mut spec: PlayerSpec = player_from_arg(arg);
+        spec.label = Some(label_of_arg(arg));
+        cfg.brain.push(spec);
+    }
+    if trials.is_some() {
+        cfg.trials = trials;
+    }
+    let factory = models.factory();
     let scores =
-        run_scenarios(&defs, &cfg, &arena_brain, &map_dir, &mut |l| eprintln!("{l}")).map_err(|e| e.to_string())?;
+        run_scenarios(&defs, &cfg, &factory, &map_dir, &mut |l| eprintln!("{l}")).map_err(|e| e.to_string())?;
     let md = markdown(&scores, &defs);
     println!("{md}");
     if let Some(out) = out {

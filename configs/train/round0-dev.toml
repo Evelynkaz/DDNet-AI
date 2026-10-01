@@ -1,0 +1,53 @@
+# A small round-0 teacher dataset for pipeline development: the planner plays and labels.
+# Half of the games run with exploration-noise bursts (DART-style) so the data also covers states a
+# student drifts into; labels are always the clean teacher action.
+name = "round0-dev"
+out = "~/aiddnet/data/datasets/teacher/round0-dev"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+threads = 6
+round = 0
+actor = "teacher"
+
+[[job]]
+arena = "clb-left"
+games = 400
+base_seed = 1000000
+[[job]]
+arena = "clb-left"
+games = 400
+noise_prob = 0.04
+base_seed = 2000000
+[[job]]
+arena = "pit"
+games = 200
+base_seed = 3000000
+[[job]]
+arena = "pit"
+games = 200
+noise_prob = 0.04
+base_seed = 4000000
+[[job]]
+arena = "platform"
+games = 200
+base_seed = 5000000
+[[job]]
+arena = "platform"
+games = 200
+noise_prob = 0.04
+base_seed = 6000000
+[[job]]
+arena = "clb-left"
+games = 200
+opponents = ["scripted", "scripted"]
+noise_prob = 0.02
+base_seed = 7000000
+# Evaluation-only arenas (holdout maps): labelled planner play, never trained on.
+[[job]]
+arena = "clb-right"
+games = 200
+base_seed = 8000000
+[[job]]
+arena = "chillblock5-ruler"
+games = 200
+base_seed = 9000000

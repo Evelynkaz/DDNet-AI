@@ -1,0 +1,168 @@
+//! Teacher labelling in the arena: determinism, thread independence, and that a game the teacher
+//! plays itself is exactly the game the plain planner brain plays (same decisions, tick by tick).
+
+use std::path::PathBuf;
+
+use ddai_env::arena::{Arena, load_arena_defs};
+use ddai_env::brains::RecordingBrain;
+use ddai_env::config::{PlayerSpec, Rules, builtin_brain};
+use ddai_env::game::{Layout, play_game};
+use ddai_env::sim::PlayerSetup;
+use ddai_train::collect::{CollectJob, Mixing, collect};
+use ddai_train::types::{Episode, action_of, step_flags};
+
+fn pit() -> Arena {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../configs/arenas");
+    let defs = load_arena_defs(&dir).expect("arena defs");
+    Arena::build(&defs["pit"], std::path::Path::new("/nonexistent")).expect("pit is synthetic")
+}
+
+fn job(actor: Option<PlayerSpec>, mixing: Mixing, games: u32) -> CollectJob {
+    CollectJob {
+        arena: "pit".into(),
+        games,
+        opponents: vec![PlayerSpec::simple("scripted")],
+        actor,
+        mixing,
+        base_seed: 11,
+    }
+}
+
+/// Short games: the planner is slow in a test build, and a few hundred ticks show everything.
+fn rules() -> Rules {
+    Rules {
+        max_ticks: 240,
+        after_ticks: 30,
+        ..Rules::default()
+    }
+}
+
+fn run(job: &CollectJob, threads: usize) -> Vec<Episode> {
+    collect(&pit(), 0, &rules(), job, &builtin_brain, threads).expect("collect")
+}
+
+#[test]
+fn a_game_the_teacher_plays_is_the_planner_brains_game() {
+    let j = job(None, Mixing::default(), 3);
+    let eps = run(&j, 2);
+    let rules = rules();
+    let arena = pit();
+    for (g, ep) in eps.iter().enumerate() {
+        // The plain planner brain plays the same game (same seed, same layout), recorded.
+        let (rec, log) = RecordingBrain::new(builtin_brain(&PlayerSpec::simple("planner")).unwrap());
+        let players = vec![
+            PlayerSetup {
+                brain: Box::new(rec),
+                lag: 0,
+                label: "planner".into(),
+            },
+            PlayerSetup {
+                brain: builtin_brain(&PlayerSpec::simple("scripted")).unwrap(),
+                lag: 0,
+                label: "scripted".into(),
+            },
+        ];
+        let g32 = g as u32;
+        let report = play_game(
+            &arena,
+            &rules,
+            j.base_seed + u64::from(g32),
+            Layout {
+                swap: g32 % 2 == 1,
+                reverse_order: (g32 / 2) % 2 == 1,
+            },
+            players,
+        )
+        .unwrap();
+        let plain = log.lock().unwrap().clone();
+        assert_eq!(ep.steps.len(), plain.len(), "game {g}: decisions");
+        assert_eq!(ep.end_tick, report.end_tick, "game {g}");
+        for (i, (s, (tick, a))) in ep.steps.iter().zip(&plain).enumerate() {
+            // The record has no weapon-switch field (the planner always asks for the hammer).
+            let mut mine = action_of(&s.played);
+            mine.wanted_weapon = a.wanted_weapon;
+            assert_eq!((s.tick, mine), (*tick, *a), "game {g} decision {i}");
+            assert_eq!(s.label, s.played);
+            assert!(s.teacher_acted() && !s.noise());
+            assert!(s.soft.is_some(), "a fixed-iteration decision has a soft target");
+        }
+    }
+}
+
+#[test]
+fn labels_are_deterministic_and_independent_of_the_thread_count() {
+    let j = job(
+        Some(PlayerSpec::simple("scripted")),
+        Mixing {
+            beta: 0.3,
+            noise_prob: 0.1,
+            noise_len: (2, 4),
+        },
+        3,
+    );
+    let (a, b, c) = (run(&j, 1), run(&j, 1), run(&j, 3));
+    assert_eq!(a, b, "same seed, same labels");
+    assert_eq!(a, c, "1 and 3 threads give the same episodes");
+    let bytes = |e: &Vec<Episode>| postcard::to_allocvec(e).unwrap();
+    assert_eq!(bytes(&a), bytes(&c));
+}
+
+#[test]
+fn a_student_plays_and_the_teacher_still_labels_every_state() {
+    // The scripted bot is the "student"; with beta = 0 it always plays, so played != label
+    // somewhere, and every step still carries the teacher's label and soft target.
+    let eps = run(&job(Some(PlayerSpec::simple("scripted")), Mixing::default(), 3), 2);
+    let steps: Vec<_> = eps.iter().flat_map(|e| &e.steps).collect();
+    assert!(steps.len() > 30);
+    assert!(steps.iter().all(|s| !s.teacher_acted() && s.soft.is_some()));
+    assert!(
+        steps.iter().any(|s| s.label != s.played),
+        "a student differs from the teacher"
+    );
+}
+
+#[test]
+fn beta_one_makes_the_teacher_play_and_noise_marks_its_steps() {
+    let mixed = run(
+        &job(
+            Some(PlayerSpec::simple("scripted")),
+            Mixing {
+                beta: 1.0,
+                ..Mixing::default()
+            },
+            4,
+        ),
+        2,
+    );
+    assert!(
+        mixed
+            .iter()
+            .flat_map(|e| &e.steps)
+            .all(|s| s.label == s.played && s.teacher_acted())
+    );
+
+    let noisy = run(
+        &job(
+            None,
+            Mixing {
+                beta: 0.0,
+                noise_prob: 0.5,
+                noise_len: (2, 3),
+            },
+            4,
+        ),
+        2,
+    );
+    let steps: Vec<_> = noisy.iter().flat_map(|e| &e.steps).collect();
+    let n_noise = steps.iter().filter(|s| s.noise()).count();
+    assert!(
+        n_noise > 0 && n_noise < steps.len(),
+        "some but not all steps are noise ({n_noise}/{})",
+        steps.len()
+    );
+    for s in steps.iter().filter(|s| s.noise()) {
+        assert_eq!(s.flags & step_flags::TEACHER_ACTED, 0);
+    }
+    // Noise never changes what the teacher says about the state: label steps are still searched.
+    assert!(steps.iter().all(|s| s.searched()));
+}

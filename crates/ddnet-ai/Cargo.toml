@@ -39,10 +39,14 @@ ddai-physics = { path = "../ddai-physics" }
 # Task 8.4a: rec v1 format/writer/reader/anonymize/reconstruct (`record_cmd`/`rec_cmd`).
 ddai-recorder = { path = "../ddai-recorder" }
 ddai-trace = { path = "../ddai-trace" }
+# Task 8.2: `train` subcommands (teacher data, behaviour cloning, DAgger).
+ddai-train = { path = "../ddai-train" }
 ddai-web = { path = "../ddai-web" }
 # Task 8.4a's `rec reconstruct --validate` deserializes `ddnet-ai play --input-log`'s JSON lines.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
+# Task 8.2: `train` run/collect configs are TOML (same version as ddai-connectome/ddai-env).
+toml = "1.1.6"
 # `demo stats`/`demo info`: falls back to hashing the embedded map's own bytes when a pre-v6 demo
 # has no SHA256 extension, matching `CDemoPlayer::ExtractMap`'s fallback (`demo.cpp:940-950`,
 # review round 1 finding F7) — same version already pinned by `ddai-map`'s own Cargo.toml.

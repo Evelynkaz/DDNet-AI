@@ -12,10 +12,13 @@
 
 pub mod activation;
 pub mod backward;
+pub mod bc;
 mod bench;
 pub mod brain_checkpoint;
 pub mod brain_config;
 pub mod brain_train;
+pub mod bundle;
+pub mod calibration;
 pub mod checkpoint;
 pub mod config;
 pub mod decoder;
@@ -38,6 +41,7 @@ pub mod train;
 pub mod world_model;
 
 pub mod brain;
+pub mod brain_bc;
 
 #[doc(hidden)] // test/bench support only, not covered by semver — see its own doc comment.
 pub mod brain_fixtures;

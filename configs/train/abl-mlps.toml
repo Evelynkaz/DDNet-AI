@@ -1,0 +1,30 @@
+# Pipeline development run: BC of the fly on the small round-0 teacher set + the human mix.
+name = "abl-mlps"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+brain_config = "configs/fly/S-brain.toml"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+run_dir = "~/aiddnet/data/runs/E-005/abl-mlps"
+teacher_base = ["~/aiddnet/data/datasets/teacher/round0-dev"]
+teacher_dagger = "~/aiddnet/data/datasets/teacher/abl-mlps-dagger"
+bc_steps = 600
+eval_every = 0
+
+[model]
+kind = "mlp"
+hidden = 5
+lr = 5e-3
+
+[train]
+seed = 1
+batch_windows = 24
+window_len = 32
+burn_in = 6
+human_fraction = 0.25
+warmup_steps = 60
+threads = 6
+log_every = 50
+eval_windows = 200
+
+[human]
+dataset_dirs = ["~/aiddnet/data/datasets/human/chillerdragon-block06-v1"]

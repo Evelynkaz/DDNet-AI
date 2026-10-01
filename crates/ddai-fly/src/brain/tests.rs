@@ -340,3 +340,35 @@ fn name_is_non_empty_and_mentions_graph_size() {
     let name = Brain::name(&brain);
     assert!(name.contains('n'), "name={name}");
 }
+
+#[test]
+fn thresholds_decide_each_binary_head_under_argmax() {
+    let obs = sample_observation(400.0);
+    let probe = |th: crate::bc::HeadThresholds| {
+        let mut b = make_brain(1, ActionSelection::Argmax);
+        b.set_thresholds(th);
+        b.reset(&ddai_brain::ResetContext {
+            map: obs.map.clone(),
+            self_id: 0,
+            seed: 1,
+        });
+        let a = b.decide(&obs);
+        let d = *b.last_decoded().unwrap();
+        (a, d)
+    };
+    let (a0, d) = probe(crate::bc::HeadThresholds::default());
+    assert_eq!(a0.jump, d.jump_prob >= 0.5);
+    assert_eq!(a0.hook, d.hook_prob >= 0.5);
+    assert_eq!(a0.fire, d.fire_prob >= 0.5);
+    // A threshold just below a head's probability presses it, just above releases it.
+    let eps = 1e-4;
+    let at = |j: f32, h: f32, f: f32| crate::bc::HeadThresholds {
+        jump: j,
+        hook: h,
+        fire: f,
+    };
+    let (below, _) = probe(at(d.jump_prob - eps, d.hook_prob - eps, d.fire_prob - eps));
+    assert!(below.jump && below.hook && below.fire);
+    let (above, _) = probe(at(d.jump_prob + eps, d.hook_prob + eps, d.fire_prob + eps));
+    assert!(!above.jump && !above.hook && !above.fire);
+}

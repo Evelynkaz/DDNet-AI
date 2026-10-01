@@ -10,6 +10,7 @@ pub mod action;
 pub mod brains;
 pub mod clock;
 pub mod config;
+pub mod elite;
 pub mod fields;
 pub mod hybrid;
 pub mod memory;
@@ -21,6 +22,7 @@ pub mod prof;
 pub mod scripted;
 pub mod seal;
 pub mod shield;
+pub mod teacher;
 pub mod throw_lines;
 #[cfg(feature = "ts-parity")]
 pub mod ts_adapter;

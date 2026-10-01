@@ -1020,6 +1020,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-controls"
+version = "0.1.0"
+dependencies = [
+ "ddai-brain",
+ "ddai-fly",
+ "ddai-physics",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "ddai-dataset"
 version = "0.1.0"
 dependencies = [
@@ -1055,6 +1066,8 @@ name = "ddai-env"
 version = "0.1.0"
 dependencies = [
  "ddai-brain",
+ "ddai-controls",
+ "ddai-fly",
  "ddai-jsmath",
  "ddai-map",
  "ddai-physics",
@@ -1177,6 +1190,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddai-train"
+version = "0.1.0"
+dependencies = [
+ "ddai-brain",
+ "ddai-controls",
+ "ddai-dataset",
+ "ddai-env",
+ "ddai-fly",
+ "ddai-flyg",
+ "ddai-map",
+ "ddai-physics",
+ "ddai-planner",
+ "postcard",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml",
+ "zstd",
+]
+
+[[package]]
 name = "ddai-tsworld"
 version = "0.1.0"
 dependencies = [
@@ -1254,12 +1290,14 @@ dependencies = [
  "ddai-planner",
  "ddai-recorder",
  "ddai-trace",
+ "ddai-train",
  "ddai-web",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

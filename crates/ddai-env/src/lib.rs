@@ -13,6 +13,7 @@ pub mod arena;
 pub mod brains;
 pub mod config;
 pub mod game;
+pub mod models;
 pub mod observe;
 pub mod output;
 pub mod report;

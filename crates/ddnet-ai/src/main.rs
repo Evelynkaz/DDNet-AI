@@ -14,6 +14,7 @@ mod play_cmd;
 mod rec_cmd;
 mod record_cmd;
 mod trace_cmd;
+mod train_cmd;
 mod web_cmd;
 
 use clap::{Parser, Subcommand};
@@ -36,6 +37,9 @@ enum Command {
     /// Offline evaluation arena (task 8.1): N-player block matches on the bit-exact world,
     /// W:L:D:T with Wilson CIs, JSONL + summary output, technique scenarios.
     Arena(arena_cmd::ArenaArgs),
+    /// Behaviour cloning and DAgger for the fly and its MLP/GRU controls (task 8.2, `ddai-train`):
+    /// `collect` teacher data, `run` an experiment, `eval` a checkpoint offline, `info` on a dataset.
+    Train(train_cmd::TrainArgs),
     /// Real DDNet `.map` file inspection (task 1.4, `ddai-map`).
     Map(map_cmd::MapArgs),
     /// Real DDNet `.demo` file inspection (task 8.4b, `ddai-demo`): info/dump/stats.
@@ -64,6 +68,7 @@ fn main() -> ExitCode {
         Some(Command::Trace(args)) => trace_cmd::run(args),
         Some(Command::Fly(args)) => fly_cmd::run(args),
         Some(Command::Arena(args)) => arena_cmd::run(args),
+        Some(Command::Train(args)) => train_cmd::run(args),
         Some(Command::Map(args)) => map_cmd::run(args),
         Some(Command::Demo(args)) => demo_cmd::run(args),
         Some(Command::Dataset(args)) => dataset_cmd::run(args),

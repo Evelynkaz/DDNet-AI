@@ -1,0 +1,19 @@
+# Quick arena check of one brain (the focal slot is replaced by --brain).
+name = "dev-quick"
+base_seed = 9000
+games = 200
+
+[[condition]]
+name = "clb-left vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "pit vs scripted"
+arena = "pit"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "platform vs scripted"
+arena = "platform"
+players = [{ brain = "scripted" }, { brain = "scripted" }]

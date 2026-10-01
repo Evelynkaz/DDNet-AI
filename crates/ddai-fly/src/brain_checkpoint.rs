@@ -277,7 +277,7 @@ pub fn validate_brain_checkpoint_shapes(
 ) -> Result<(), BrainCheckpointError> {
     checkpoint
         .encoder_params
-        .validate_shape(encoder.num_params())
+        .validate_shape(encoder.num_params(), encoder.ray_grid_config().num_distance_bins)
         .map_err(|e| BrainCheckpointError::InvalidEncoderParams(e.to_string()))?;
     decoder
         .validate_params_shape(&checkpoint.decoder_params)

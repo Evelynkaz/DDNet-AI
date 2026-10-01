@@ -11,6 +11,7 @@ use ddai_brain::{Action, IVec2, Observation, ResetContext};
 use ddai_flyg::NeuronRole;
 use serde::{Deserialize, Serialize};
 
+use crate::bc::HeadThresholds;
 use crate::decoder::{DecodedAction, DecoderModel, DecoderParams, DecoderScratch, DnCalibration, decoder_forward_into};
 use crate::encoder::{EncoderModel, EncoderParams, RayGridFeatures, compute_proprioception_values};
 use crate::model::FlyModel;
@@ -109,7 +110,7 @@ impl FlyTelemetry {
 /// non-`aim_slot` target: "vector of length 1000" — reused here rather than invented fresh).
 const AIM_TARGET_LENGTH: f32 = 1000.0;
 
-fn aim_angle_to_target(angle: f32) -> IVec2 {
+pub fn aim_angle_to_target(angle: f32) -> IVec2 {
     let x = (angle.cos() * AIM_TARGET_LENGTH).round() as i32;
     let y = (-angle.sin() * AIM_TARGET_LENGTH).round() as i32;
     IVec2::new(x, y)
@@ -143,6 +144,7 @@ pub struct FlyBrain {
     decoder_params: DecoderParams,
     calib: DnCalibration,
     config: FlyBrainConfig,
+    thresholds: HeadThresholds,
 
     role_of_type: Vec<Option<NeuronRole>>,
     ray_features: RayGridFeatures,
@@ -154,6 +156,10 @@ pub struct FlyBrain {
     rng: SplitMix64,
     last_latency: Duration,
     last_warmup_converged: bool,
+    /// `true` once a pre-warmed resting state was adopted ([`FlyBrain::adopt_rest`]): `reset` then
+    /// restores it instead of re-running the warm-up search (an arena batch builds a brain per
+    /// game from one template, so warming up per game would repeat identical work).
+    rest_adopted: bool,
     name: String,
 }
 
@@ -190,6 +196,7 @@ impl FlyBrain {
             decoder_params,
             calib,
             config,
+            thresholds: HeadThresholds::default(),
             role_of_type,
             ray_features,
             input_buf,
@@ -200,8 +207,29 @@ impl FlyBrain {
             rng: SplitMix64::new(seed),
             last_latency: Duration::ZERO,
             last_warmup_converged: false,
+            rest_adopted: false,
             name,
         }
+    }
+
+    /// Sets the decision thresholds of the jump/hook/fire heads (argmax selection only; default
+    /// `0.5`). A trained model's calibrated thresholds come from its bundle.
+    pub fn set_thresholds(&mut self, thresholds: HeadThresholds) {
+        self.thresholds = thresholds;
+    }
+
+    pub fn thresholds(&self) -> HeadThresholds {
+        self.thresholds
+    }
+
+    /// Adopts an already warmed-up state (`rest` must come from `warm_up` on an identical model):
+    /// [`ddai_brain::Brain::reset`] will then restore it in `O(neurons)` instead of searching for
+    /// convergence again. `converged` is what that warm-up reported.
+    pub fn adopt_rest(&mut self, rest: &FlyState, converged: bool) {
+        self.state = rest.clone();
+        self.state.reset_to_rest(&self.model);
+        self.rest_adopted = true;
+        self.last_warmup_converged = converged;
     }
 
     pub fn model(&self) -> &FlyModel {
@@ -253,9 +281,9 @@ impl FlyBrain {
         [-1, 0, 1][idx]
     }
 
-    fn select_bool(&mut self, prob: f32) -> bool {
+    fn select_bool(&mut self, prob: f32, threshold: f32) -> bool {
         match self.config.action_selection {
-            ActionSelection::Argmax => prob >= 0.5,
+            ActionSelection::Argmax => prob >= threshold,
             ActionSelection::Sampled => self.rng.next_f32_unit() < prob,
         }
     }
@@ -316,7 +344,11 @@ impl ddai_brain::Brain for FlyBrain {
         // reproducibly from *this*"). `self.config.seed` remains what `FlyBrain::new` seeds from
         // before any `reset` call.
         self.rng = SplitMix64::new(ctx.seed);
-        self.last_warmup_converged = self.state.warm_up(&self.model).converged;
+        if self.rest_adopted {
+            self.state.reset_to_rest(&self.model);
+        } else {
+            self.last_warmup_converged = self.state.warm_up(&self.model).converged;
+        }
         self.last_decoded = None;
     }
 
@@ -345,9 +377,9 @@ impl ddai_brain::Brain for FlyBrain {
         );
 
         let direction = self.select_direction(decoded.direction_probs);
-        let jump = self.select_bool(decoded.jump_prob);
-        let hook = self.select_bool(decoded.hook_prob);
-        let fire = self.select_bool(decoded.fire_prob);
+        let jump = self.select_bool(decoded.jump_prob, self.thresholds.jump);
+        let hook = self.select_bool(decoded.hook_prob, self.thresholds.hook);
+        let fire = self.select_bool(decoded.fire_prob, self.thresholds.fire);
         let target = aim_angle_to_target(decoded.aim_angle);
 
         self.last_decoded = Some(decoded);

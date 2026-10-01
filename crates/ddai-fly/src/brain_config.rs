@@ -47,7 +47,13 @@ impl std::error::Error for BrainConfigError {}
 
 pub fn load_brain_config(path: &Path) -> Result<BrainConfig, BrainConfigError> {
     let text = std::fs::read_to_string(path).map_err(BrainConfigError::Io)?;
-    let file: BrainConfigFile = toml::from_str(&text).map_err(BrainConfigError::Toml)?;
+    parse_brain_config(&text)
+}
+
+/// [`load_brain_config`] on already-read text (a training bundle embeds the config it was trained
+/// with, so a checkpoint stays loadable when `configs/fly/*.toml` later changes).
+pub fn parse_brain_config(text: &str) -> Result<BrainConfig, BrainConfigError> {
+    let file: BrainConfigFile = toml::from_str(text).map_err(BrainConfigError::Toml)?;
     Ok(BrainConfig {
         ray_grid: file.ray_grid,
         decoder: file.decoder,

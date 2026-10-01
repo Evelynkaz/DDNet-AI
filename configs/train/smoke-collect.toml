@@ -1,0 +1,14 @@
+# Timing probe: 24 planner-played games on the clb-left hall, labels + soft targets, no noise.
+name = "smoke"
+out = "~/aiddnet/data/datasets/teacher/smoke"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+threads = 6
+round = 0
+actor = "teacher"
+
+[[job]]
+arena = "clb-left"
+games = 24
+opponents = ["scripted"]
+base_seed = 5000000

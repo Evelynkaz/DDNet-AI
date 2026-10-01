@@ -17,6 +17,9 @@ workspace = true
 
 [dependencies]
 ddai-brain = { path = "../ddai-brain" }
+# Task 8.2: the brain factory loads the fly and the MLP/GRU controls from checkpoints.
+ddai-controls = { path = "../ddai-controls" }
+ddai-fly = { path = "../ddai-fly" }
 ddai-jsmath = { path = "../ddai-jsmath" }
 ddai-map = { path = "../ddai-map" }
 ddai-physics = { path = "../ddai-physics" }

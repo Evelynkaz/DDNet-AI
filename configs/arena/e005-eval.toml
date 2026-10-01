@@ -1,0 +1,79 @@
+# E-005: the evaluation matrix of a brain. The focal slot (slot 0, `scripted` here as a placeholder)
+# is replaced by `--brain fly:<bundle>` / `mlp:` / `gru:` / `planner`. 1000 games per condition, seed 1,
+# the arena's 4-way balanced layout. Headline: the credited win rate (games won by the focal player's own block,
+# D-059) with blocks/min and self-freezes/min; W/(W+L+D) (PLAN section 0) is the secondary column. Baselines of every
+# table: `--brain idle` and `--brain scripted` (scripted vs scripted), see tools/e005/baselines.sh.
+#   ddnet-ai arena run --config configs/arena/e005-eval.toml --brain fly:<bundle> --out <dir> --threads 6
+name = "E-005 evaluation"
+base_seed = 1
+games = 1000
+
+[[condition]]
+name = "clb-left vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "pit vs scripted"
+arena = "pit"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "platform vs scripted"
+arena = "platform"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right vs scripted"
+arena = "clb-right"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left vs planner"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "planner" }]
+
+[[condition]]
+name = "clb-right vs planner"
+arena = "clb-right"
+players = [{ brain = "scripted" }, { brain = "planner" }]
+
+[[condition]]
+name = "chillblock5-ruler vs planner"
+arena = "chillblock5-ruler"
+players = [{ brain = "scripted" }, { brain = "planner" }]
+
+[[condition]]
+name = "clb-left 1v2 vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left 1v3 vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right 1v2 vs scripted"
+arena = "clb-right"
+players = [{ brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right 1v3 vs scripted"
+arena = "clb-right"
+players = [{ brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler 1v2 vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler 1v3 vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }]

@@ -365,8 +365,9 @@ impl PlannerStats {
 }
 
 /// The CEM planner as a [`Brain`]: over `PhysicsWorld` (real DDNet physics). See the module docs
-/// for the world/opponent handling. Not `Send` (the planner holds `Rc`s): build it inside the
-/// thread that plays the game.
+/// for the world/opponent handling. `Send` (the planner shares its hazard fields through `Arc`; a
+/// compile-time check in `tests/teacher.rs`), but a game still builds its own brain in the thread that
+/// plays it.
 pub struct PlannerBrain {
     cfg: PlannerBrainConfig,
     // Boxed: a planner is hundreds of kB, and test threads have 2 MB stacks.
@@ -401,6 +402,20 @@ impl PlannerBrain {
 
     pub fn stats(&self) -> PlannerStats {
         self.stats
+    }
+
+    /// The planner and the previous input, for the 8.2 teacher (`crate::teacher`), which labels
+    /// states through [`Brain::decide_in`] and reads the planner's search statistics afterwards.
+    pub(crate) fn planner_mut(&mut self) -> &mut Planner<PhysicsWorld> {
+        &mut self.planner
+    }
+
+    pub(crate) fn prev_input(&self) -> PlayerInput {
+        self.prev
+    }
+
+    pub(crate) fn set_prev_input(&mut self, prev: PlayerInput) {
+        self.prev = prev;
     }
 
     /// The single decision path both entry points share: `world` is the private planning world,

@@ -145,6 +145,9 @@ pub struct PlayerSpec {
     /// Brains loaded from a file (`fly`): path of the model.
     #[serde(default)]
     pub model: Option<String>,
+    /// Model brains: `argmax` (default) or `sampled` (each head drawn from its probabilities).
+    #[serde(default)]
+    pub select: Option<String>,
     /// `hybrid`: the hybrid brain's own settings (`preset`, `mode`, `budget_ms`, `clock` and
     /// `step_ms` above apply to it as well).
     #[serde(default)]
@@ -166,6 +169,7 @@ impl PlayerSpec {
             clock: None,
             step_ms: None,
             model: None,
+            select: None,
             hybrid: None,
             label: None,
         }
@@ -239,6 +243,11 @@ pub struct HybridSpec {
     /// the `.flyg` graph is the player's `model`. The fly is untrained (plumbing and cost only).
     #[serde(default)]
     pub fly_config: Option<String>,
+    /// `proposer = "fly"`: a **trained** fly (an 8.2 `.bundle`) instead of the untrained one built
+    /// from `model` (a `.flyg`); the bundle carries its own brain config and graph reference.
+    /// CLI: `--brain hybrid:fly:<bundle>`.
+    #[serde(default)]
+    pub fly_model: Option<String>,
     /// Diagnostics: candidates and scores in the telemetry (`ddnet-ai arena scenarios --trace`).
     #[serde(default)]
     pub debug_dump: Option<bool>,

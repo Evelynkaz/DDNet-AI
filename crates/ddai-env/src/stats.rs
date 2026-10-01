@@ -91,6 +91,17 @@ impl Tally {
         })
     }
 
+    /// D-059 headline: games won **by the focal player's own credited block** over all games
+    /// (`credited_wins / (W + L + D + T)`), with its 95% Wilson interval. A win without credit is the
+    /// opponent freezing itself, which a brain that does nothing collects as well.
+    pub fn credited_win_rate(&self, credited_wins: u32) -> Option<(f64, f64, f64)> {
+        let n = f64::from(self.total());
+        (n > 0.0).then(|| {
+            let (lo, hi) = wilson95(f64::from(credited_wins), n);
+            (f64::from(credited_wins) / n, lo, hi)
+        })
+    }
+
     /// `W / (W + L + D + T)`: the stricter rate that counts timeouts against the player.
     pub fn win_rate_all(&self) -> Option<(f64, f64, f64)> {
         let n = f64::from(self.total());
@@ -104,6 +115,26 @@ impl Tally {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credited_win_rate_counts_only_credited_wins_over_all_games() {
+        let mut t = Tally::default();
+        for r in [
+            GameResult::W,
+            GameResult::W,
+            GameResult::W,
+            GameResult::L,
+            GameResult::T,
+        ] {
+            t.record(r);
+        }
+        // Three wins, one of them credited, five games.
+        let (p, lo, hi) = t.credited_win_rate(1).unwrap();
+        assert!((p - 0.2).abs() < 1e-12);
+        let (wlo, whi) = wilson95(1.0, 5.0);
+        assert!((lo - wlo).abs() < 1e-12 && (hi - whi).abs() < 1e-12);
+        assert_eq!(Tally::default().credited_win_rate(0), None);
+    }
 
     #[test]
     fn wilson_matches_reference_values() {

@@ -130,6 +130,9 @@ pub struct ConditionSummary {
     pub win_rate: Option<Rate>,
     /// `W / (W + L + D + T)`.
     pub win_rate_all: Option<Rate>,
+    /// D-059 headline: `credited_w / games` (games won by the focal player's own credited block,
+    /// timeouts counted against it) with its Wilson interval.
+    pub credited_win_rate: Option<Rate>,
     pub credited_w: u32,
     pub held_w: u32,
     pub credited_l: u32,
@@ -232,6 +235,7 @@ pub fn summarize(run: &ConditionRun, arena_tag: &str, map_sha256: Option<String>
         tally,
         win_rate: Rate::from(tally.win_rate()),
         win_rate_all: Rate::from(tally.win_rate_all()),
+        credited_win_rate: Rate::from(tally.credited_win_rate(credited_w)),
         credited_w,
         held_w,
         credited_l,
@@ -400,15 +404,19 @@ pub fn markdown(s: &RunSummary) -> String {
     let _ = writeln!(out, "- общее время: {:.1} с\n", m.total_wall_s);
     let _ = writeln!(
         out,
-        "Победа игрока A: он заморозил соперника (или соперник сам замёрз), пока сам не выбыл. Винрейт = W/(W+L+D) \
-         с 95% ДИ Уилсона [нижняя; верхняя]; «W/все» считает и таймауты. credited/held — среди побед W. \
+        "Победа игрока A: он заморозил соперника (или соперник сам замёрз), пока сам не выбыл. Главная метрика (D-059) — «credited-побед» = игры, выигранные собственным засчитанным блоком, / все игры \
+         (победа без credit — соперник сам замёрз, её набирает и бездействие); рядом блоки и самозаморозки в минуту. Винрейт = W/(W+L+D) — \
+         вторичная колонка, с 95% ДИ Уилсона [нижняя; верхняя]; «W/все» считает и таймауты. credited/held — среди побед W. \
          Решение — реальное время (мс) p50/p99 по всем решениям игрока; хвост p99 включает паузы ВМ (D-045).\n"
     );
     let _ = writeln!(
         out,
-        "| Условие | Арена | Игр | W:L:D:T | Винрейт, % [ДИ] | W/все, % [ДИ] | credited | held | блоков/мин | самозаморозок/мин | до 1-го блока, с | решение A, мс | решение соперн., мс | игр/с |"
+        "| Условие | Арена | Игр | W:L:D:T | credited-побед, % [ДИ] | Винрейт, % [ДИ] | W/все, % [ДИ] | credited | held | блоков/мин | самозаморозок/мин | до 1-го блока, с | решение A, мс | решение соперн., мс | игр/с |"
     );
-    let _ = writeln!(out, "|---|---|---:|---|---|---|---:|---:|---:|---:|---:|---|---|---:|");
+    let _ = writeln!(
+        out,
+        "|---|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---|---:|"
+    );
     for c in &s.conditions {
         let t = c.tally;
         let a = c.players.first();
@@ -420,7 +428,7 @@ pub fn markdown(s: &RunSummary) -> String {
         };
         let _ = writeln!(
             out,
-            "| {} | {} ({}) | {} | {}:{}:{}:{} | {} | {} | {}/{} | {}/{} | {:.2} | {:.2} | {} | {} | {} | {:.2} |",
+            "| {} | {} ({}) | {} | {}:{}:{}:{} | {} | {} | {} | {}/{} | {}/{} | {:.2} | {:.2} | {} | {} | {} | {:.2} |",
             c.name,
             c.arena,
             c.arena_tag,
@@ -429,6 +437,7 @@ pub fn markdown(s: &RunSummary) -> String {
             t.l,
             t.d,
             t.t,
+            pct(&c.credited_win_rate),
             pct(&c.win_rate),
             pct(&c.win_rate_all),
             c.credited_w,

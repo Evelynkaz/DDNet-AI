@@ -1,0 +1,73 @@
+# E-005: e005-mlp-w-s2. BC on the shared round-0 teacher data + the human mix, then 5 DAgger rounds.
+name = "e005-mlp-w-s2"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+brain_config = "configs/fly/S-brain-dg.toml"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+run_dir = "~/aiddnet/data/runs/E-005/e005-mlp-w-s2"
+teacher_base = ["~/aiddnet/data/datasets/teacher/round0-v1"]
+teacher_dagger = "~/aiddnet/data/datasets/teacher/e005-mlp-w-s2-dagger"
+bc_steps = 3000
+eval_every = 1000
+
+[model]
+kind = "mlp"
+hidden = 64
+lr = 0.002
+
+[train]
+seed = 2
+batch_windows = 24
+window_len = 32
+burn_in = 6
+human_fraction = 0.10
+warmup_steps = 100
+lr_final_frac = 0.1
+threads = 6
+log_every = 50
+eval_windows = 400
+
+[train.loss]
+# The rare heads (jump ~20%, fire ~3% of teacher decisions) would never cross 0.5 at plain BCE.
+pos_weight = [3.0, 1.0, 6.0]
+
+[teacher_data]
+val_mod = 10
+# DAgger rounds are ~5% of the aggregated corpus each; without a weight their corrections barely count.
+round_weights = [[1, 4.0], [2, 4.0], [3, 4.0], [4, 4.0], [5, 4.0]]
+
+[human]
+idle_weight = 0.02
+dataset_dirs = ["~/aiddnet/data/datasets/human/chillerdragon-block06-v1", "~/aiddnet/data/datasets/human/owner-2026-09-29-v1"]
+exclude_map_names = ["ChillBlock5"]
+
+[dagger]
+betas = [0.5, 0.3, 0.15, 0.0, 0.0]
+noise_prob = 0.02
+steps_per_round = 1000
+retrain_lr_scale = 0.5
+eval_games = 200
+eval_arenas = ["clb-left", "clb-right", "chillblock5-ruler", "pit", "platform"]
+
+[[dagger.job]]
+arena = "clb-left"
+games = 400
+base_seed = 1000000
+[[dagger.job]]
+arena = "pit"
+games = 100
+base_seed = 2000000
+[[dagger.job]]
+arena = "platform"
+games = 100
+base_seed = 3000000
+[[dagger.job]]
+arena = "clb-left"
+games = 150
+opponents = ["scripted", "scripted"]
+base_seed = 4000000
+[[dagger.job]]
+arena = "clb-left"
+games = 60
+opponents = ["scripted", "scripted", "scripted"]
+base_seed = 5000000

@@ -510,6 +510,11 @@ pub struct Planner<W: PlanWorld> {
 
     pub last_info: DecisionInfo,
 
+    /// Task 8.2: the first-step statistics of the elite set of the last CEM iteration of the most
+    /// recent [`Planner::decide`] (`None` after a committed decision, and never filled by
+    /// `decide_production`). Written once per iteration, never read by the search itself.
+    pub last_elite: Option<crate::elite::EliteFirstStep>,
+
     last_search_tick: i64,
     pub(crate) warm_shift_steps: i32,
     pub(crate) dir_since: i64,
@@ -581,6 +586,7 @@ impl<W: PlanWorld> Planner<W> {
             rollout_enemy_sealed: false,
             rollout_self_out: 0,
             last_info: DecisionInfo::default(),
+            last_elite: None,
             last_search_tick: -1,
             warm_shift_steps: 1,
             dir_since: -1,
@@ -793,6 +799,7 @@ impl<W: PlanWorld> Planner<W> {
     ) -> PlayerInput {
         self.opp_seed = js::opp_seed_next(self.opp_seed);
         self.thaw_memo.clear();
+        self.last_elite = None;
         let Some(me) = world.get_tee(self_id) else { return prev };
         let Some(en) = world.get_tee(enemy_id) else { return prev };
         if !me.alive || !en.alive {
@@ -993,6 +1000,7 @@ impl<W: PlanWorld> Planner<W> {
             scored.sort_by(|a, b| score_desc(a.1, b.1));
             let elite_n = self.cfg.elite.max(0) as usize;
             let elites: Vec<Vec<PlanStep>> = scored.iter().take(elite_n).map(|(p, _)| p.clone()).collect();
+            self.last_elite = crate::elite::summarize_first_step(&elites, self.cfg.track_aim, aim_at);
             self.refit(&mut dist, &elites);
         }
 

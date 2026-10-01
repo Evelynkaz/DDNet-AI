@@ -1,0 +1,59 @@
+# Round-0 teacher dataset (task 8.2, E-005): the fixed-iteration planner (D-017) plays and labels.
+# About half of each arena's games run with exploration-noise bursts (DART-style) so the data also
+# covers the states a student drifts into; labels are always the clean teacher action.
+# Evaluation-only arenas (holdout maps) are labelled too, for held-out per-head metrics.
+name = "round0-v1"
+out = "~/aiddnet/data/datasets/teacher/round0-v1"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+threads = 6
+round = 0
+actor = "teacher"
+
+[[job]]
+arena = "clb-left"
+games = 3000
+base_seed = 10000000
+[[job]]
+arena = "clb-left"
+games = 3000
+noise_prob = 0.04
+base_seed = 20000000
+[[job]]
+arena = "clb-left"
+games = 800
+opponents = ["scripted", "scripted"]
+noise_prob = 0.02
+base_seed = 30000000
+[[job]]
+arena = "clb-left"
+games = 400
+opponents = ["scripted", "scripted", "scripted"]
+noise_prob = 0.02
+base_seed = 40000000
+[[job]]
+arena = "pit"
+games = 500
+base_seed = 50000000
+[[job]]
+arena = "pit"
+games = 500
+noise_prob = 0.04
+base_seed = 60000000
+[[job]]
+arena = "platform"
+games = 500
+base_seed = 70000000
+[[job]]
+arena = "platform"
+games = 500
+noise_prob = 0.04
+base_seed = 80000000
+[[job]]
+arena = "clb-right"
+games = 400
+base_seed = 90000000
+[[job]]
+arena = "chillblock5-ruler"
+games = 400
+base_seed = 100000000
