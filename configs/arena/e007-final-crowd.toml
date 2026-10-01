@@ -1,0 +1,50 @@
+# E-007 final matrix (task 3.5b): the final defaults on the work clock (hybrid = {} is the default config), credited win
+# rate (D-059) with an idle baseline on the same arenas and seeds (e007-idle*.toml).
+#   ddnet-ai arena run --config configs/arena/e007-final-crowd.toml --out ~/aiddnet/data/runs/E-007/final/crowd --threads 4
+name = "E-007 final: crowds"
+base_seed = 900
+games = 200
+
+[rules]
+crowd_from = 2
+crowd_spacing = 1.0
+
+[[condition]]
+name = "8 tees idle bystanders: hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "8 tees scripted crowd: hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 7 }]
+
+[[condition]]
+name = "10 tees idle bystanders: hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 8 }]
+
+[[condition]]
+name = "10 tees scripted crowd: hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 9 }]
+
+[[condition]]
+name = "12 tees idle bystanders: hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 10 }]
+
+[[condition]]
+name = "12 tees scripted crowd: hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 11 }]
+
+[[condition]]
+name = "15 tees idle bystanders: hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 13 }]
+
+[[condition]]
+name = "15 tees scripted crowd: hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 14 }]

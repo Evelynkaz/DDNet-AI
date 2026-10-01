@@ -1,0 +1,16 @@
+# E-007 final matrix (task 3.5b): the final defaults on the work clock (hybrid = {} is the default config), credited win
+# rate (D-059) with an idle baseline on the same arenas and seeds (e007-idle*.toml).
+#   ddnet-ai arena run --config configs/arena/e007-idle-p.toml --out ~/aiddnet/data/runs/E-007/idle-p --threads 4
+name = "E-007 idle baseline vs planner (seed 1)"
+base_seed = 1
+games = 400
+
+[[condition]]
+name = "clb-right: idle vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "idle" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: idle vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "idle" }, { brain = "planner", mode = "fixed" }]

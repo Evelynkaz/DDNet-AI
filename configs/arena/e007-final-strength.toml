@@ -1,0 +1,105 @@
+# E-007 final matrix (task 3.5b): the final defaults on the work clock (hybrid = {} is the default config), credited win
+# rate (D-059) with an idle baseline on the same arenas and seeds (e007-idle*.toml).
+#   ddnet-ai arena run --config configs/arena/e007-final-strength.toml --out ~/aiddnet/data/runs/E-007/final/strength --threads 4
+name = "E-007 final: strength"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: hybrid 4 ms vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left: hybrid fixed vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left: planner fixed vs scripted"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms vs planner fixed"
+arena = "clb-left"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid fixed vs planner fixed"
+arena = "clb-left"
+games = 400
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms vs scripted"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: hybrid fixed vs scripted"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: planner fixed vs scripted"
+arena = "clb-right"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms vs planner fixed"
+arena = "clb-right"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid fixed vs planner fixed"
+arena = "clb-right"
+games = 400
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid fixed vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler: planner fixed vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms vs planner fixed"
+arena = "chillblock5-ruler"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid fixed vs planner fixed"
+arena = "chillblock5-ruler"
+games = 400
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WALL vs planner 4 ms WALL"
+arena = "clb-left"
+games = 200
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0 }, { brain = "planner", mode = "deadline", budget_ms = 4.0 }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WALL vs planner 4 ms WALL"
+arena = "clb-right"
+games = 200
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0 }, { brain = "planner", mode = "deadline", budget_ms = 4.0 }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms WALL vs planner 4 ms WALL"
+arena = "chillblock5-ruler"
+games = 200
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0 }, { brain = "planner", mode = "deadline", budget_ms = 4.0 }]

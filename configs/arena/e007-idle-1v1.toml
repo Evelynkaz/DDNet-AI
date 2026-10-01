@@ -1,0 +1,20 @@
+# E-007 idle baseline (D-059), 1v1 vs the fixed planner, seed 500 (the e007-1v1 / e007-dyn rows): idle on the same arenas.
+#   ddnet-ai arena run --config configs/arena/e007-idle-1v1.toml --out ~/aiddnet/data/runs/E-007/idle-1v1 --threads 1
+name = "E-007 idle baseline (1v1 vs planner, seed 500)"
+base_seed = 500
+games = 400
+
+[[condition]]
+name = "clb-left: idle vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: idle vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "idle" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: idle vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "idle" }, { brain = "planner", mode = "fixed" }]

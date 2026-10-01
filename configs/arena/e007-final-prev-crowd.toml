@@ -1,0 +1,51 @@
+# E-007 final matrix, the 3.5-like reference rows: the same binary with every 3.5b option switched off
+# (all tees in the rollouts, no crowd stage, no commitment bonus, no air cost, no dynamic stage 2, the shield without plan escape,
+# hook anchors and skipping). The new techniques T1b/T29/T42 cannot be switched off separately and stay in.
+#   ddnet-ai arena run --config configs/arena/e007-final-prev-crowd.toml --out ~/aiddnet/data/runs/E-007/final/prev-crowd --threads 3
+name = "E-007 final: 3.5-like reference, crowds"
+base_seed = 900
+games = 200
+
+[rules]
+crowd_from = 2
+crowd_spacing = 1.0
+
+[[condition]]
+name = "8 tees idle bystanders: hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "8 tees scripted crowd: hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted", count = 7 }]
+
+[[condition]]
+name = "10 tees idle bystanders: hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted" }, { brain = "idle", count = 8 }]
+
+[[condition]]
+name = "10 tees scripted crowd: hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted", count = 9 }]
+
+[[condition]]
+name = "12 tees idle bystanders: hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted" }, { brain = "idle", count = 10 }]
+
+[[condition]]
+name = "12 tees scripted crowd: hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted", count = 11 }]
+
+[[condition]]
+name = "15 tees idle bystanders: hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted" }, { brain = "idle", count = 13 }]
+
+[[condition]]
+name = "15 tees scripted crowd: hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted", count = 14 }]

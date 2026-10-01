@@ -25,6 +25,9 @@
 //! | T5 | body push at the edge, brake before going in | victim within 320 px (run-in), both grounded, hazard beside it |
 //! | T7 | push a frozen victim deeper, never go in ourselves | victim frozen, hazard near |
 //! | T8 | hands off a frozen victim (no hammer) | victim frozen and close |
+//! | T29 | jump before a freeze ahead when running or falling sideways fast | `|vx| > 2.2`, freeze 1-3 tiles ahead |
+//! | T1b | hook the victim, jump past it, pull it on toward the hazard behind it | hazard beyond the victim, away from us |
+//! | T42 | hook the victim along a ray that clears the corner blocking the direct line | victim in rope range, direct line blocked |
 
 use crate::fields::{HazardField, hazard_nearness};
 use crate::hybrid::abs_aim;
@@ -63,6 +66,12 @@ pub enum Tech {
     T21,
     /// Release our own hook when holding it drags us into a hazard (T28).
     T28,
+    /// Jump before the freeze ahead at speed (R1 catalogue T29).
+    T29,
+    /// Hook aimed past the corner that blocks the direct line to the victim (T42).
+    T42,
+    /// Hook the victim, jump past it and pull it on toward the hazard behind it (leapfrog, a T1 variant).
+    T1b,
 }
 
 impl Tech {
@@ -87,6 +96,9 @@ impl Tech {
             Tech::T20 => "T20 friction stand against a far hook",
             Tech::T21 => "T21 counter-steer after a hammer hit",
             Tech::T28 => "T28 release the hook that drags us in",
+            Tech::T29 => "T29 jump before the freeze ahead",
+            Tech::T42 => "T42 hook past the corner",
+            Tech::T1b => "T1b hook leapfrog",
         }
     }
 
@@ -106,6 +118,7 @@ impl Tech {
                 | Tech::T20
                 | Tech::T21
                 | Tech::T28
+                | Tech::T29
         )
     }
 }
@@ -404,6 +417,27 @@ fn defence<C: PlanCollision>(ctx: &TechCtx<'_, C>, anchors: &[Anchor], caps: &Te
         });
     }
 
+    // T29: fast sideways toward a freeze one to three tiles ahead at our level: a jump over it (from the
+    // ground, or the air jump when falling onto it) beats running or falling in.
+    if me.vel.x.abs() > 2.2 && me.jumps_left > 0 {
+        let dir = sign_dir(me.vel.x, 0.0);
+        let ahead = (1..=3).any(|k| {
+            let x = me.pos.x + f64::from(dir) * f64::from(k) * 32.0;
+            hazard_at(ctx.col, x, me.pos.y + 24.0) || hazard_at(ctx.col, x, me.pos.y + 56.0)
+        });
+        if ahead && (!air || me.vel.y > 1.0) {
+            specific = true;
+            out.push(TechPlan {
+                tech: Tech::T29,
+                plan: plan(n, |s| st(dir, s == 0, false, false, 0.0)),
+            });
+            out.push(TechPlan {
+                tech: Tech::T29,
+                plan: plan(n, |s| st(dir, s == 1, false, false, 0.0)),
+            });
+        }
+    }
+
     // T28: holding our own hook drags us toward a hazard: let go.
     if (me.hook_state == HOOK_GRABBED || me.hook_state == HOOK_FLYING)
         && !specific
@@ -686,6 +720,12 @@ fn offence<C: PlanCollision>(ctx: &TechCtx<'_, C>, anchors: &[Anchor], caps: &Te
             tech,
             plan: plan(n, |s| st(0, false, false, s >= 1, 0.0)),
         });
+        // Stand and swing at once: when the hammer is already out (or the victim is in reach) a plan that
+        // waits one step first is re-decided every two ticks and may wait for ever (E-007: T18 0%).
+        out.push(TechPlan {
+            tech,
+            plan: plan(n, |_| st(0, false, false, true, 0.0)),
+        });
     }
 
     // T3 (swing): hook an anchor above us, swing toward the victim, hammer.
@@ -708,7 +748,8 @@ fn offence<C: PlanCollision>(ctx: &TechCtx<'_, C>, anchors: &[Anchor], caps: &Te
         }
     }
 
-    // T4: pull down a jumper: the victim is in the air over a hazard and within the rope.
+    // T4: pull down a jumper: the victim is in the air over a hazard and within the rope. (Tried: also while
+    // it is still rising, vy > -3: 60% instead of 85% on the T4 scenario, E-007.)
     if sep < *HOOK_LENGTH - 30.0
         && !grounded(ctx.col, v.pos)
         && v.vel.y > 1.0
@@ -731,6 +772,51 @@ fn offence<C: PlanCollision>(ctx: &TechCtx<'_, C>, anchors: &[Anchor], caps: &Te
             tech: Tech::T4,
             plan: plan(n, |_| st(0, false, true, false, 0.0)),
         });
+    }
+
+    // T1b: leapfrog. The hazard lies beyond the victim, so a plain drag pulls it *away* from the hazard (T1 needs
+    // the hazard between us). Hook it, jump over and past it, and the rope that now points back across it
+    // pulls it on toward the hazard (hook held to the end, or let go after two thirds).
+    if me.jumps_left > 0 && sep < *HOOK_LENGTH - 40.0 && v_near >= 0.4 && (v.pos.y - me.pos.y).abs() < 96.0 {
+        let beyond = toward_hazard(ctx.field, v.pos);
+        if beyond.x * f64::from(toward) > 0.5 {
+            out.push(TechPlan {
+                tech: Tech::T1b,
+                plan: plan(n, |s| st(toward, s == 0, true, false, 0.0)),
+            });
+            out.push(TechPlan {
+                tech: Tech::T1b,
+                plan: plan(n, |s| st(toward, s == 0, s < (2 * n) / 3, false, 0.0)),
+            });
+        }
+    }
+
+    // T42: the direct hook line to the victim is cut by a solid corner, but the hook box is generous
+    // (the rope catches a tee whose centre is within 30 px of it): aim a little past the corner, up
+    // or down the victim's body, where the line is clear.
+    if sep > 60.0 && sep < *HOOK_LENGTH - 20.0 {
+        let direct = ctx.col.intersect_line_hook(me.pos, v.pos);
+        if direct.collision != 0 {
+            let ang0 = js::atan2(v.pos.y - me.pos.y, v.pos.x - me.pos.x);
+            // Offsets of 10, 18 and 26 px at the victim's end (the rope catches within 30 px), up or
+            // down, smallest first; the first clear one of each sign is one plan.
+            'signs: for sign in [1.0, -1.0] {
+                for px in [10.0, 18.0, 26.0] {
+                    let ang = ang0 + sign * js::atan2(px, sep);
+                    let end = Vec2 {
+                        x: me.pos.x + js::cos(ang) * sep,
+                        y: me.pos.y + js::sin(ang) * sep,
+                    };
+                    if ctx.col.intersect_line_hook(me.pos, end).collision == 0 {
+                        out.push(TechPlan {
+                            tech: Tech::T42,
+                            plan: plan(n, |_| st(0, false, true, false, abs_aim(ang))),
+                        });
+                        continue 'signs;
+                    }
+                }
+            }
+        }
     }
 
     // T5: body push at the edge: run in, then stop before we go over ourselves; the push needs
@@ -757,12 +843,21 @@ mod tests {
     /// Grid: `#` solid, `f` freeze, `.` air (32 px tiles), everything outside solid.
     struct Grid {
         rows: Vec<Vec<u8>>,
+        /// Whether `intersect_line_hook` stops at solid tiles (off for the older tests).
+        blocking: bool,
     }
 
     impl Grid {
         fn new(rows: &[&str]) -> Grid {
             Grid {
                 rows: rows.iter().map(|r| r.bytes().collect()).collect(),
+                blocking: false,
+            }
+        }
+        fn blocking(rows: &[&str]) -> Grid {
+            Grid {
+                blocking: true,
+                ..Grid::new(rows)
             }
         }
         fn at(&self, x: f64, y: f64) -> u8 {
@@ -813,6 +908,26 @@ mod tests {
             self.intersect_line_hook(a, b)
         }
         fn intersect_line_hook(&self, a: Vec2, b: Vec2) -> LineHit {
+            if self.blocking {
+                let len = vdistance(a, b).max(1.0);
+                let steps = (len / 4.0).ceil() as i32;
+                let mut before = a;
+                for i in 1..=steps {
+                    let t = f64::from(i) / f64::from(steps);
+                    let p = Vec2 {
+                        x: a.x + (b.x - a.x) * t,
+                        y: a.y + (b.y - a.y) * t,
+                    };
+                    if self.is_solid(p.x, p.y) {
+                        return LineHit {
+                            collision: 1,
+                            out_pos: p,
+                            out_before_pos: before,
+                        };
+                    }
+                    before = p;
+                }
+            }
             LineHit {
                 collision: 0,
                 out_pos: b,
@@ -1134,5 +1249,79 @@ mod tests {
         for p in g.defence.iter().chain(g.offence.iter()) {
             assert_eq!(p.plan.len(), 7, "{}", p.tech.name());
         }
+    }
+
+    #[test]
+    fn t29_jumps_before_a_freeze_ahead_when_fast_and_has_a_jump() {
+        // A floor with a freeze strip two tiles to the right of us.
+        let col = Grid::new(&[
+            "####################",
+            "#..................#",
+            "#..................#",
+            "#..................#",
+            "###fff##############",
+            "####################",
+        ]);
+        let field = crate::fields::hazard_field(&col);
+        let mut me = tee(48.0, 112.0);
+        me.vel = Vec2 { x: 4.0, y: 0.0 };
+        let v = tee(500.0, 100.0);
+        let g = generate(&ctx(&col, &field, &me, &v), &[], &TechCaps::default());
+        assert!(g.defence.iter().any(|p| p.tech == Tech::T29), "no T29 plan");
+        let t29 = g.defence.iter().find(|p| p.tech == Tech::T29).unwrap();
+        assert_eq!(t29.plan[0].jump, 1);
+        assert_eq!(t29.plan[0].dir, 1);
+        // Slow, or no jumps left: no T29.
+        let mut slow = me;
+        slow.vel.x = 1.0;
+        assert!(
+            !generate(&ctx(&col, &field, &slow, &v), &[], &TechCaps::default())
+                .defence
+                .iter()
+                .any(|p| p.tech == Tech::T29)
+        );
+        let mut spent = me;
+        spent.jumps_left = 0;
+        assert!(
+            !generate(&ctx(&col, &field, &spent, &v), &[], &TechCaps::default())
+                .defence
+                .iter()
+                .any(|p| p.tech == Tech::T29)
+        );
+    }
+
+    #[test]
+    fn t42_aims_past_the_corner_that_blocks_the_direct_hook_line() {
+        // A solid stub sits on the line between us and the victim, two tiles in front of it.
+        let col = Grid::blocking(&[
+            "####################",
+            "#..................#",
+            "#..................#",
+            "#..................#",
+            "#...........#......#",
+            "####################",
+        ]);
+        let field = crate::fields::hazard_field(&col);
+        // Us at tile (3, 4), the victim at tile (14, 4): the stub at x = 12 blocks the level line.
+        let me = tee(3.0 * 32.0 + 16.0, 4.0 * 32.0 + 16.0);
+        let v = tee(14.0 * 32.0 + 16.0, 4.0 * 32.0 + 16.0);
+        let g = generate(&ctx(&col, &field, &me, &v), &[], &TechCaps::default());
+        let t42: Vec<_> = g.offence.iter().filter(|p| p.tech == Tech::T42).collect();
+        assert!(!t42.is_empty(), "an aim that clears the stub");
+        let aim = t42[0].plan[0].aim - crate::hybrid::ABS_AIM;
+        assert!(aim.abs() > 0.01 && aim.abs() < 0.3, "aim offset {aim}");
+        assert_eq!(t42[0].plan[0].hook, 1);
+        // With a clear line there is nothing to fix.
+        let clear = Grid::blocking(&[
+            "####################",
+            "#..................#",
+            "#..................#",
+            "#..................#",
+            "#..................#",
+            "####################",
+        ]);
+        let field2 = crate::fields::hazard_field(&clear);
+        let g = generate(&ctx(&clear, &field2, &me, &v), &[], &TechCaps::default());
+        assert!(!g.offence.iter().any(|p| p.tech == Tech::T42));
     }
 }

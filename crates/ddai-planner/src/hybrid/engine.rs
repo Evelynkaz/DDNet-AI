@@ -20,6 +20,7 @@
 //! the context and the job list are read-locked while workers run and written only between
 //! batches. The caller works too (it is worker 0), so `workers = N` means N threads scoring.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -31,6 +32,7 @@ use crate::hybrid::threat::ThreatSet;
 use crate::physics_adapter::{PhysicsSavedState, PhysicsWorld};
 use crate::plan_world::PlanWorld;
 use crate::planner::{PlanStep, Planner};
+use crate::shield::Bounded;
 use crate::types::PlayerInput;
 use crate::vmath::Vec2;
 
@@ -51,6 +53,12 @@ pub struct Ctx {
     pub unfreeze: Arc<HazardField>,
     pub frozen_bystanders: Vec<Vec2>,
     pub frozen_bystander_vels: Vec<Vec2>,
+    /// Tees the rope and the hammer must spare (the live bot's friends, ignored, AFK; task 3.5b):
+    /// positions and velocities, empty in the arena.
+    pub spares: Vec<Vec2>,
+    pub spare_vels: Vec<Vec2>,
+    /// An intermediate point to head for (the live bot's navigation), `None` = the target itself.
+    pub travel_goal: Option<Vec2>,
     /// Threat tees besides the victim and the inputs they hold (`None` = the 1v1 model).
     pub threats: Option<ThreatSet>,
     /// Multiplier of the self-freeze weight: `1` normally, the planner's `escapeBias` during the
@@ -64,6 +72,9 @@ pub struct Ctx {
 pub struct Job {
     pub plan: usize,
     pub combo: u32,
+    /// Steps of the plan to roll out (`0` = all of them). A short horizon is the early-pruning
+    /// pre-score (task 3.5b): the same rollout, cut after the first steps.
+    pub horizon: u32,
 }
 
 /// A batch: `plans` flat with `stride` steps each, and the jobs over them.
@@ -93,7 +104,16 @@ impl Batch {
     }
 
     pub fn push_job(&mut self, plan: usize, combo: u32) {
-        self.jobs.push(Job { plan, combo });
+        self.jobs.push(Job {
+            plan,
+            combo,
+            horizon: 0,
+        });
+    }
+
+    /// A job over the first `horizon` steps of the plan only.
+    pub fn push_job_short(&mut self, plan: usize, combo: u32, horizon: u32) {
+        self.jobs.push(Job { plan, combo, horizon });
     }
 }
 
@@ -125,6 +145,8 @@ pub struct Worker {
     world: Box<PhysicsWorld>,
     loaded: u64,
     base_bias: f64,
+    /// Snapshot buffer of the shield's escape phase (`plan_escape`).
+    escape_slot: Box<Option<PhysicsSavedState>>,
 }
 
 impl Worker {
@@ -137,6 +159,7 @@ impl Worker {
             planner,
             world: Box::new(world),
             loaded: 0,
+            escape_slot: Box::new(None),
         }
     }
 
@@ -150,6 +173,10 @@ impl Worker {
         let (bp, bv) = self.planner.frozen_bystanders_mut();
         bp.clone_from(&ctx.frozen_bystanders);
         bv.clone_from(&ctx.frozen_bystander_vels);
+        let (sp, sv) = self.planner.spares_mut();
+        sp.clone_from(&ctx.spares);
+        sv.clone_from(&ctx.spare_vels);
+        self.planner.set_travel_goal(ctx.travel_goal);
         self.planner.threats.clone_from(&ctx.threats);
         self.planner.cfg_mut().self_freeze_bias = self.base_bias * ctx.self_freeze_bias;
         self.loaded = ctx.generation;
@@ -160,6 +187,66 @@ impl Worker {
     /// when the generation changes (review round 1, N3).
     fn invalidate(&mut self) {
         self.loaded = u64::MAX;
+    }
+
+    /// The hybrid shield's first escape (task 3.5b): rolls `plan` out exactly from the decision state
+    /// under the model combination `combo` and asks whether we are safe: never frozen or dead on the
+    /// way, and -- from where the plan ends -- some escape (the ordinary ones, then `extras`) settles.
+    /// Returns the answer and the physics ticks it simulated beyond the rollout's own (none counted
+    /// twice: the caller adds `ticks` to the work meter). The worker's world is restored afterwards.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_escape(
+        &mut self,
+        ctx: &Ctx,
+        plan: &[PlanStep],
+        combo: u32,
+        chosen: &PlayerInput,
+        others: &HashMap<i32, PlayerInput>,
+        deadline: Option<(&dyn Clock, f64)>,
+        extras: &[PlayerInput],
+    ) -> (Bounded<bool>, u32) {
+        if self.loaded != ctx.generation {
+            self.load(ctx);
+        }
+        self.planner.react_this_pass = combo & 1 == 1;
+        if let Some(t) = &mut self.planner.threats {
+            t.react_mask = combo >> 1;
+        }
+        let before = self.planner.eval_ticks;
+        self.planner.keep_final = true;
+        let res = self.planner.evaluate_impl(
+            &mut self.world,
+            ctx.self_id,
+            ctx.victim_id,
+            ctx.prev,
+            plan,
+            ctx.victim_input,
+            &ctx.field,
+            &ctx.unfreeze,
+            None,
+        );
+        self.planner.keep_final = false;
+        self.planner.react_this_pass = false;
+        let ticks = (self.planner.eval_ticks - before) as u32;
+        let verdict = if res.is_none() || self.planner.rollout_self_out > 0 {
+            Bounded::Done(false)
+        } else {
+            // From where the plan ends the tee first keeps doing what the plan's last step did (a
+            // hook held, a swing), and only then tries the standard escapes.
+            let lead = [self.planner.last_input];
+            crate::shield::escape_tail(
+                &mut *self.world,
+                ctx.self_id,
+                chosen,
+                others,
+                deadline,
+                &mut self.escape_slot,
+                &lead,
+                extras,
+            )
+        };
+        self.world.restore_state(&ctx.saved);
+        (verdict, ticks)
     }
 
     fn eval(&mut self, ctx: &Ctx, plan: &[PlanStep], combo: u32, deadline: Option<(&dyn Clock, f64)>) -> EvalOut {
@@ -237,7 +324,15 @@ impl Shared {
             // Do not start a rollout the deadline has already passed.
             let out = match deadline {
                 Some((c, d)) if c.now_ms() >= d => NO_OUT,
-                _ => worker.eval(&ctx, batch.plan(job.plan), job.combo, deadline),
+                _ => {
+                    let plan = batch.plan(job.plan);
+                    let plan = if job.horizon > 0 && (job.horizon as usize) < plan.len() {
+                        &plan[..job.horizon as usize]
+                    } else {
+                        plan
+                    };
+                    worker.eval(&ctx, plan, job.combo, deadline)
+                }
             };
             if let Some(m) = &meter {
                 m.add(u64::from(out.ticks));
@@ -300,6 +395,27 @@ impl Engine {
     /// Makes every finished rollout advance the work clock's meter (see `Shared::meter`).
     pub fn set_meter(&mut self, meter: Option<Arc<crate::hybrid::work::WorkMeter>>) {
         *self.shared.meter.lock().expect("meter lock") = meter;
+    }
+
+    /// See [`Worker::plan_escape`]; runs on the deciding thread's own worker.
+    #[allow(clippy::too_many_arguments)]
+    pub fn plan_escape(
+        &mut self,
+        plan: &[PlanStep],
+        combo: u32,
+        chosen: &PlayerInput,
+        others: &HashMap<i32, PlayerInput>,
+        deadline: Option<(&dyn Clock, f64)>,
+        extras: &[PlayerInput],
+    ) -> (Bounded<bool>, u32) {
+        let ctx = self.shared.ctx.read().expect("ctx lock");
+        let out = self
+            .worker0
+            .plan_escape(&ctx, plan, combo, chosen, others, deadline, extras);
+        if let Some(m) = self.shared.meter.lock().expect("meter lock").as_ref() {
+            m.add(u64::from(out.1));
+        }
+        out
     }
 
     pub fn workers(&self) -> usize {
@@ -393,5 +509,114 @@ impl Drop for Engine {
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use ddai_physics::map::{MapData, TILE_SOLID, Tile};
+    use std::time::Instant;
+
+    fn hall() -> Arc<MapData> {
+        let (w, h) = (60usize, 30usize);
+        let mut game = vec![Tile::default(); w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if y >= 20 || x == 0 || x == w - 1 || y == 0 {
+                    game[y * w + x] = Tile {
+                        index: TILE_SOLID,
+                        ..Tile::default()
+                    };
+                }
+            }
+        }
+        Arc::new(MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        })
+    }
+
+    /// Where a rollout's time goes: the same 27 ticks of the same tees, raw physics against
+    /// `evaluate_impl` (physics + scoring + hook logic). Run with
+    /// `cargo test -p ddai-planner --release --lib rollout_cost_split -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "micro-benchmark"]
+    fn rollout_cost_split() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                for tees in [2usize, 4, 6] {
+                    let mut w = PhysicsWorld::new(hall(), 1);
+                    for i in 0..tees {
+                        w.add_tee(
+                            i as i32,
+                            Vec2 {
+                                x: (20.0 + 2.5 * i as f64) * 32.0,
+                                y: 19.0 * 32.0 - 20.0,
+                            },
+                        );
+                    }
+                    let mut pl = Box::new(Planner::<PhysicsWorld>::new(crate::hybrid::config::hybrid_planner_preset()));
+                    pl.track_rollout = true;
+                    pl.deterministic_thaw = true;
+                    let (field, unfreeze) = pl.hazard_fields(w.collision());
+                    pl.saved = Some(w.save_state());
+                    let saved = w.save_state();
+                    let plan: Vec<PlanStep> = (0..9)
+                        .map(|s| PlanStep {
+                            dir: if s % 3 == 0 { 1 } else { 0 },
+                            jump: i32::from(s == 2),
+                            hook: 0,
+                            fire: 0,
+                            aim: 0.0,
+                        })
+                        .collect();
+                    let n = 3000;
+                    let t0 = Instant::now();
+                    for _ in 0..n {
+                        let _ = pl.evaluate_impl(
+                            &mut w,
+                            0,
+                            1,
+                            crate::types::empty_input(),
+                            &plan,
+                            crate::types::empty_input(),
+                            &field,
+                            &unfreeze,
+                            None,
+                        );
+                    }
+                    let full = t0.elapsed().as_secs_f64() * 1e6 / f64::from(n);
+                    let mut ev = Vec::new();
+                    let t0 = Instant::now();
+                    for _ in 0..n {
+                        for k in 0..27 {
+                            let mut i = crate::types::empty_input();
+                            i.direction = i32::from(k % 9 < 3);
+                            w.set_input(0, i);
+                            w.step_into(&mut ev);
+                        }
+                        w.restore_state(&saved);
+                    }
+                    let phys = t0.elapsed().as_secs_f64() * 1e6 / f64::from(n);
+                    println!(
+                        "{tees} tees: rollout {full:.1} us ({:.2} us/tick), raw physics {phys:.1} us ({:.2} us/tick) -> physics share {:.0}%",
+                        full / 27.0,
+                        phys / 27.0,
+                        100.0 * phys / full
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

@@ -1,0 +1,31 @@
+# E-007 (task 3.5b): the R1 technique scenarios (configs/scenarios-r1: T21, T22, T29), hybrid at 4 ms on the
+# work clock (adaptive on, the default) against the plain planner and the idle control.
+#   ddnet-ai arena scenarios --dir configs/scenarios-r1 --config configs/arena/scenarios-r1.toml --out ~/aiddnet/data/runs/E-007/r1-scenarios
+name = "scenarios R1"
+seed = 1
+trials = 200
+
+[[brain]]
+label = "planner-fixed"
+brain = "planner"
+mode = "fixed"
+
+[[brain]]
+label = "hybrid-fixed"
+brain = "hybrid"
+mode = "fixed"
+
+[[brain]]
+label = "hybrid-4ms"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+
+[[brain]]
+label = "hybrid-4ms-no-techniques"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { techniques = false }

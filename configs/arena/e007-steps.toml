@@ -1,0 +1,33 @@
+# E-007 (task 3.5b), part 5: a shorter planning horizon (9 x 3 = 27 ticks by default): 6 or 7 steps of 3 ticks, or
+# 9 steps of 2 ticks (18 ticks). Every rollout costs proportionally less, so more candidates fit in 4 ms; the payoff
+# of a plan beyond the horizon is lost (T5, T18). Hybrid 4 ms (work clock, adaptive on) against the fixed planner on
+# clb-left, 400 games per variant; the T1-T18 scenarios in scenarios-e007-steps.toml.
+#   ddnet-ai arena run --config configs/arena/e007-steps.toml --out ~/aiddnet/data/runs/E-007/steps --threads 4
+name = "E-007 horizon"
+base_seed = 500
+games = 400
+
+[[condition]]
+name = "base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "steps 6 x 3"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { plan_steps = 6 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "steps 7 x 3"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { plan_steps = 7 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "steps 9 x 2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { plan_step_ticks = 2 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "steps 6 x 3 + dynamic"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { plan_steps = 6, stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]

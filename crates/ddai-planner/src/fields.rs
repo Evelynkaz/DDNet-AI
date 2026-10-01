@@ -47,6 +47,11 @@ fn is_wall(t: u8) -> bool {
 /// matters for which of several equal-distance predecessors is enqueued first, though the
 /// resulting *distance* grid is order-independent (BFS on an unweighted graph).
 fn bfs_field(col: &impl PlanCollision, is_source: impl Fn(u8) -> bool) -> HazardField {
+    bfs_field_at(col, |x, y| is_source(col.game_tile(x, y)))
+}
+
+/// [`bfs_field`] with the sources given by tile coordinates (so a source may depend on more than the game layer).
+fn bfs_field_at(col: &impl PlanCollision, is_source: impl Fn(i32, i32) -> bool) -> HazardField {
     let width = col.width();
     let height = col.height();
     let n = (width * height) as usize;
@@ -55,7 +60,7 @@ fn bfs_field(col: &impl PlanCollision, is_source: impl Fn(u8) -> bool) -> Hazard
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) as usize;
-            if is_source(col.game_tile(x, y)) {
+            if is_source(x, y) {
                 dist[idx] = 0;
                 queue.push(y * width + x);
             }
@@ -104,6 +109,19 @@ fn bfs_field(col: &impl PlanCollision, is_source: impl Fn(u8) -> bool) -> Hazard
 /// field, matching TS, `docs/research/orig-plan.md` §9/§11 item 9).
 pub fn hazard_field(col: &impl PlanCollision) -> HazardField {
     bfs_field(col, |t| t == TILE_FREEZE || t == TILE_DEATH)
+}
+
+/// Distance field to the hazards the *physics* sees (task 3.5b, review F5): the freeze/death tiles of the game layer
+/// **and the front layer** (`PlanCollision::is_freeze` of the production adapter looks at both; [`hazard_field`]
+/// stays game-layer only on purpose, it is the TS-parity field). Used only to skip the shield far from any hazard.
+pub fn hazard_field_full(col: &impl PlanCollision) -> HazardField {
+    bfs_field_at(col, |x, y| {
+        let (cx, cy) = (
+            f64::from(x) * TILE_PX + TILE_PX / 2.0,
+            f64::from(y) * TILE_PX + TILE_PX / 2.0,
+        );
+        col.is_freeze(cx, cy) || col.is_death(cx, cy)
+    })
 }
 
 /// `unfreezeField(collision)` (`planner.ts:346-352`).
@@ -177,6 +195,19 @@ pub fn hazard_nearness(field: &HazardField, x: f64, y: f64) -> f64 {
         return 0.0;
     }
     f64::from(HAZARD_HORIZON_TILES - d) / f64::from(HAZARD_HORIZON_TILES)
+}
+
+/// Path distance in tiles (BFS around walls) from `(x, y)` to the nearest hazard tile the field was built
+/// from; `i32::MAX` outside the map or when no hazard is reachable. Task 3.5b: the hybrid shield is
+/// skipped when this is large (nothing to freeze on within reach of the own path).
+pub fn hazard_tiles(field: &HazardField, x: f64, y: f64) -> i32 {
+    let tx = js::floor(x / TILE_PX) as i32;
+    let ty = js::floor(y / TILE_PX) as i32;
+    if tx < 0 || ty < 0 || tx >= field.width || ty >= field.height {
+        return i32::MAX;
+    }
+    let d = field.dist[(ty * field.width + tx) as usize];
+    if d >= UNREACHED { i32::MAX } else { d }
 }
 
 /// `wrapAngle(a)` (`planner.ts:492-496`): while-loop wrap into `[-pi, pi]`, not a single `rem`

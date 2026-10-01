@@ -1,0 +1,42 @@
+# E-007 idle baseline (D-059), (seed 1): a do-nothing focal player on the same arenas, opponents and seeds as the
+# E-007 rows. A hybrid row only means something next to what `idle` wins there (on chillblock5-ruler the scripted
+# bot freezes itself in about 74% of 1v1 games), and the headline is the CREDITED win rate (our own block).
+#   ddnet-ai arena run --config configs/arena/e007-idle.toml --out ~/aiddnet/data/runs/E-007/idle --threads 1
+name = "E-007 idle baseline (seed 1)"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: idle vs scripted"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: idle vs scripted"
+arena = "clb-right"
+players = [{ brain = "idle" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler: idle vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "idle" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left: idle vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "1v2: idle vs 2 scripted"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v3: idle vs 3 scripted"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v5: idle vs 5 scripted"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted", count = 5 }]

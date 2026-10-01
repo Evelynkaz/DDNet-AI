@@ -425,6 +425,19 @@ impl Arena {
     /// placed given the first two, the whole placement is redrawn (for two players that never
     /// happens, so their stream is the harness's).
     pub fn spawn_tiles(&self, seed: u64, players: usize) -> Result<Vec<(i32, i32)>, EnvError> {
+        self.spawn_tiles_crowd(seed, players, None, None)
+    }
+
+    /// [`Arena::spawn_tiles`] where the tees from slot `crowd_from` on need not be near the focal
+    /// player (see `Rules::crowd_from`): only `crowd_spacing` (default `min_tiles`) from every tee already
+    /// placed.
+    pub fn spawn_tiles_crowd(
+        &self,
+        seed: u64,
+        players: usize,
+        crowd_from: Option<usize>,
+        crowd_spacing: Option<f64>,
+    ) -> Result<Vec<(i32, i32)>, EnvError> {
         let mut rng = Rng::new(seed.wrapping_mul(2_654_435_761) as u32);
         let n = self.slots.len();
         let pick = |rng: &mut Rng| self.slots[js::floor(rng.next_float() * n as f64) as usize];
@@ -474,8 +487,19 @@ impl Arena {
                 return Err(EnvError::new(format!("arena {}: could not place two tees", self.name)));
             }
             while out.len() < players {
-                let fits =
-                    |c: (i32, i32)| self.within(out[0], c) && out[1..].iter().all(|&t| dist(t, c) >= self.min_tiles);
+                let crowd = crowd_from.is_some_and(|f| out.len() >= f);
+                let gap = if crowd {
+                    crowd_spacing.unwrap_or(self.min_tiles)
+                } else {
+                    self.min_tiles
+                };
+                let fits = |c: (i32, i32)| {
+                    if crowd {
+                        out.iter().all(|&t| dist(t, c) >= gap)
+                    } else {
+                        self.within(out[0], c) && out[1..].iter().all(|&t| dist(t, c) >= gap)
+                    }
+                };
                 let mut next = None;
                 for _ in 0..10_000 {
                     let c = pick(&mut rng);
@@ -565,6 +589,34 @@ mod tests {
         }
         let all: HashSet<_> = (0..50u64).map(|s| arena.spawn_tiles(s, 2).unwrap()).collect();
         assert!(all.len() > 20, "different seeds must give different spawns");
+    }
+
+    #[test]
+    fn crowd_tees_spawn_anywhere_at_the_crowd_spacing_and_the_plain_rule_is_unchanged() {
+        let def = ArenaDef::parse(PIT).unwrap();
+        let arena = Arena::build(&def, Path::new("/nonexistent")).unwrap();
+        for seed in 0..300u64 {
+            // Without a crowd the stream is exactly the old one.
+            assert_eq!(
+                arena.spawn_tiles_crowd(seed, 4, None, Some(1.0)).unwrap(),
+                arena.spawn_tiles(seed, 4).unwrap()
+            );
+            // Twelve tees on 36 standing cells, one tile apart: slots 2.. are anywhere, all distinct.
+            let s = arena.spawn_tiles_crowd(seed, 12, Some(2), Some(1.0)).unwrap();
+            assert_eq!(s.len(), 12);
+            assert_eq!(
+                s,
+                arena.spawn_tiles_crowd(seed, 12, Some(2), Some(1.0)).unwrap(),
+                "deterministic"
+            );
+            let set: HashSet<_> = s.iter().collect();
+            assert_eq!(set.len(), 12, "seed {seed}: two tees on one tile: {s:?}");
+            // The first two tees still follow the harness rule.
+            let d = (s[0].0 - s[1].0).abs();
+            assert!((4..=20).contains(&d), "seed {seed}: first two {d} apart");
+        }
+        // At the default spacing (3 tiles) twelve tees do not fit this arena: an error, not a hang.
+        assert!(arena.spawn_tiles_crowd(1, 12, Some(2), None).is_err());
     }
 
     #[test]

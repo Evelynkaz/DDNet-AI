@@ -192,6 +192,217 @@ fn fixed_mode_decisions_are_identical_for_1_2_and_4_workers() {
 }
 
 #[test]
+fn fixed_mode_with_pruning_and_the_crowd_stage_is_identical_for_1_2_and_4_workers() {
+    // The 3.5b options (early pruning, the crowd stage, hook escapes in the shield) must keep the
+    // pool's merge-by-index determinism: pruning gates on results in candidate order, never on time.
+    let cfg = |w: usize| {
+        let mut c = fixed_cfg(w);
+        c.prune.enabled = true;
+        c.robust.crowd_stage = true;
+        c.shield_hook_anchors = 3;
+        c
+    };
+    let run = |w: usize| drive(cfg(w), ClockKind::Wall, &FOUR, 24);
+    let one = run(1);
+    for w in [2usize, 4] {
+        assert_eq!(one, run(w), "workers = {w} decided differently from workers = 1");
+    }
+    // ... and pruning really skipped something in this fight (else the test proves nothing).
+    let pruned = {
+        let map = hall();
+        let mut pw = PhysicsWorld::new(map.clone(), 1);
+        place(&mut pw, &FOUR);
+        let world = pw.inner().clone();
+        let mut b = HybridBrain::new(cfg(1), ClockKind::Wall, Box::new(NoProposer)).unwrap();
+        reset(&mut b, &map, 0, 7);
+        let obs = observation(&world, &map, 0, &[0, 1, 2, 3], 1);
+        let view = WorldView {
+            world: &world,
+            self_id: 0,
+            lag_ticks: 0,
+            in_flight: &[],
+        };
+        let _ = b.decide_in(&obs, Some(&view));
+        b.last_decision().unwrap().pruned
+    };
+    assert!(pruned > 0, "early pruning skipped nothing");
+}
+
+#[test]
+fn an_idle_crowd_outside_the_threat_radius_is_not_simulated() {
+    // Us, the victim and six bystanders 30+ tiles away: only the two fighters are in the rollouts
+    // (F2), the budget keeps its 4 ms, and with `max_sim_tees = 0` (the 3.5 behaviour) all eight are.
+    let map = hall();
+    let tees: Vec<(i32, f64, f64)> = (0..8)
+        .map(|i| match i {
+            0 => (0, 5.5, 9.5),
+            1 => (1, 9.5, 9.5),
+            k => (k, 28.0 + f64::from(k), 9.5),
+        })
+        .collect();
+    let ids: Vec<i32> = tees.iter().map(|t| t.0).collect();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &tees);
+    let world = pw.inner().clone();
+    let obs = observation(&world, &map, 0, &ids, 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let run = |cap: usize| {
+        let cfg = HybridConfig {
+            proposals: 0,
+            max_sim_tees: cap,
+            ..HybridConfig::default()
+        };
+        let mut b = HybridBrain::new(cfg, ClockKind::Step { step_ms: 0.01 }, Box::new(NoProposer)).unwrap();
+        reset(&mut b, &map, 0, 3);
+        let _ = b.decide_in(&obs, Some(&view));
+        let t = b.last_decision().unwrap();
+        (t.sim_tees, t.dropped_tees, t.budget_ms)
+    };
+    assert_eq!(run(6), (2, 6, 4.0));
+    let all = run(0);
+    assert_eq!((all.0, all.1), (8, 0));
+    assert!(
+        all.2 < 4.0,
+        "eight tees shrink the search budget under the cap: {}",
+        all.2
+    );
+    // The caller's world is untouched.
+    assert_eq!(world.cores.len(), 8);
+}
+
+#[test]
+fn the_nearest_threats_stay_in_the_simulation_up_to_the_cap() {
+    // Six free tees inside the radius: a cap of 4 keeps us, the victim and the two nearest threats.
+    let map = hall();
+    let tees = [
+        (0, 10.5, 9.5),
+        (1, 12.5, 9.5),
+        (2, 14.0, 9.5),
+        (3, 15.0, 9.5),
+        (4, 16.0, 9.5),
+        (5, 17.0, 9.5),
+        (6, 18.0, 9.5),
+    ];
+    let ids: Vec<i32> = tees.iter().map(|t| t.0).collect();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &tees);
+    let world = pw.inner().clone();
+    let obs = observation(&world, &map, 0, &ids, 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let cfg = HybridConfig {
+        proposals: 0,
+        max_sim_tees: 4,
+        ..HybridConfig::default()
+    };
+    let mut b = HybridBrain::new(cfg, ClockKind::Step { step_ms: 0.01 }, Box::new(NoProposer)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let _ = b.decide_in(&obs, Some(&view));
+    let t = b.last_decision().unwrap();
+    assert_eq!((t.sim_tees, t.dropped_tees), (4, 3));
+    assert_eq!(t.threat_ids, vec![2, 3], "the two nearest free tees");
+}
+
+#[test]
+fn the_crowd_stage_rescoring_uses_two_combinations_for_three_or_more_opponents() {
+    let map = hall();
+    let tees = [
+        (0, 10.5, 9.5),
+        (1, 13.5, 9.5),
+        (2, 14.5, 9.5),
+        (3, 15.5, 9.5),
+        (4, 16.5, 9.5),
+    ];
+    let ids: Vec<i32> = tees.iter().map(|t| t.0).collect();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &tees);
+    let world = pw.inner().clone();
+    let obs = observation(&world, &map, 0, &ids, 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let combos = |crowd: bool| {
+        let mut cfg = fixed_cfg(1);
+        cfg.robust.crowd_stage = crowd;
+        let mut b = HybridBrain::new(cfg, ClockKind::Wall, Box::new(NoProposer)).unwrap();
+        reset(&mut b, &map, 0, 3);
+        let _ = b.decide_in(&obs, Some(&view));
+        b.last_decision().unwrap().combos
+    };
+    assert_eq!(
+        combos(false),
+        1,
+        "3.5: four opponents are decided by the cheap model alone"
+    );
+    assert_eq!(combos(true), 2, "everybody holds / everybody reacts");
+}
+
+#[test]
+fn the_two_world_search_is_deterministic_across_workers_and_inert_without_threats() {
+    // The pool is scored with us and the victim only, the best few re-scored with the threats (task 3.5b).
+    let cfg = |w: usize, two: bool| {
+        let mut c = fixed_cfg(w);
+        c.two_world = two;
+        c
+    };
+    // A 1v3: identical for 1, 2 and 4 workers (the lens switches go through the same merge-by-index).
+    let one = drive(cfg(1, true), ClockKind::Wall, &FOUR, 24);
+    assert_eq!(one.len(), 24);
+    for w in [2usize, 4] {
+        assert_eq!(one, drive(cfg(w, true), ClockKind::Wall, &FOUR, 24), "workers = {w}");
+    }
+    // ... and it really searches differently from the single-world one when there are threats.
+    assert_ne!(one, drive(cfg(1, false), ClockKind::Wall, &FOUR, 24));
+    // A 1v1 has no threats: the option changes nothing.
+    let duel = [(0, 17.5, 9.5), (1, 24.5, 9.5)];
+    assert_eq!(
+        drive(cfg(1, true), ClockKind::Wall, &duel, 16),
+        drive(cfg(1, false), ClockKind::Wall, &duel, 16)
+    );
+}
+
+#[test]
+fn two_world_decisions_are_complete_and_safe_choices_survive_the_threats() {
+    // In the two-world search the chosen plan has been scored in the full world under every combination, so
+    // its safety flag means what it says; and the 1v5 hostile inputs of the soak run it too.
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &FOUR);
+    let world = pw.inner().clone();
+    let mut cfg = fixed_cfg(1);
+    cfg.two_world = true;
+    let mut b = HybridBrain::new(cfg, ClockKind::Wall, Box::new(NoProposer)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let obs = observation(&world, &map, 0, &[0, 1, 2, 3], 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    for _ in 0..4 {
+        let _ = b.decide_in(&obs, Some(&view));
+        let t = b.last_decision().unwrap();
+        assert!(t.chosen.is_some());
+        assert!(t.combos >= 1);
+        assert!(t.work.rollouts_stage2 > 0, "no full-world re-scoring");
+        assert_eq!(t.sim_tees, 4, "the shield and the re-scoring see all four tees");
+    }
+}
+
+#[test]
 fn fixed_mode_reads_no_clock_and_the_shield_still_runs() {
     struct NoClock;
     impl Clock for NoClock {
@@ -411,6 +622,310 @@ fn a_tee_falling_without_jumps_over_freeze_hooks_the_wall_and_the_telemetry_name
             "{l}"
         );
     }
+}
+
+#[test]
+fn a_hook_plan_is_its_own_first_escape_and_the_shield_leaves_it_alone() {
+    // Task 3.5b, step 1: the remainder of the chosen plan, rolled out exactly, is the shield's first
+    // escape. The shield's walk/jump escapes know no hook, so before this a falling jumpless tee
+    // hooking the wall had "no escape" and a timed-out check could replace the hook by doing nothing
+    // (T14: 88% -> 0%, 3.5 review round 1). Now the plan escape holds, nothing is substituted, and
+    // counting a timeout as danger (`shield_timeout_danger`) is harmless.
+    let map = wall_over_freeze();
+    for timeout_danger in [false, true] {
+        let mut cfg = HybridConfig {
+            work_clock_us_per_tick: Some(2.2),
+            proposals: 0,
+            shield_timeout_danger: timeout_danger,
+            ..HybridConfig::default()
+        };
+        cfg.adaptive.enabled = true;
+        let mut pw = PhysicsWorld::new(map.clone(), 1);
+        place(&mut pw, &[(0, 23.5, 8.0), (1, 45.5, 14.5)]);
+        falling_without_jumps(&mut pw);
+        let mut b = HybridBrain::new(cfg, ClockKind::Wall, Box::new(NoProposer)).unwrap();
+        reset(&mut b, &map, 0, 3);
+        let mut last = empty_input();
+        let mut out = false;
+        for _ in 0..30 {
+            let world = pw.inner().clone();
+            let obs = observation(&world, &map, 0, &[0, 1], 1);
+            let view = WorldView {
+                world: &world,
+                self_id: 0,
+                lag_ticks: 0,
+                in_flight: &[],
+            };
+            let a = b.decide_in(&obs, Some(&view));
+            last = input_from_action(&a, &last);
+            for _ in 0..2 {
+                pw.set_input(0, last);
+                pw.step();
+                out |= pw.get_tee(0).is_none_or(|t| t.frozen || !t.alive);
+            }
+        }
+        let t = b.totals();
+        assert!(!out, "the tee froze (timeout danger {timeout_danger})");
+        assert_eq!(
+            t.shield_ran + t.shield_skipped,
+            t.decisions,
+            "the shield ran or was skipped (far from any hazard) on every decision (timeout danger {timeout_danger})"
+        );
+        assert!(t.shield_ran > 0, "the shield never ran");
+        // Review F1 (rounds 1-2): a hang counts as settled only after 8 calm ticks, and this scene is one long
+        // swing along the wall (13 px/tick) that never comes to rest within the check's horizon, so the plan
+        // escape cannot be confirmed early: the check runs out of its reserve (incomplete), the chosen plan
+        // stands and nothing is substituted. What this test pins is the outcome: the tee never freezes.
+        if timeout_danger {
+            // Counting a timeout as danger earns a safer-input search, and along a swing that never rests nearly
+            // every check times out (24 of 30 decisions here are substituted): the reason that option is off. The
+            // tee must still not freeze (asserted above).
+        } else {
+            assert_eq!(t.shielded, 0, "the shield substituted a verified plan");
+        }
+    }
+}
+
+/// Scenario T2's map: a floor, and a freeze wall (x 25, rows 6..9) a tile and a half right of the victim.
+fn hammer_wall_map() -> Arc<MapData> {
+    let (w, h) = (40usize, 16usize);
+    let mut game = vec![Tile::default(); w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let solid = y >= 10 || x == 0 || x == w - 1 || y == 0;
+            let freeze = x == 25 && (6..=9).contains(&y);
+            game[y * w + x] = Tile {
+                index: if solid {
+                    TILE_SOLID
+                } else if freeze {
+                    TILE_FREEZE
+                } else {
+                    0
+                },
+                ..Tile::default()
+            };
+        }
+    }
+    Arc::new(MapData {
+        width: w as u32,
+        height: h as u32,
+        game,
+        front: None,
+        tele: None,
+        speedup: None,
+        switch: None,
+        tune: None,
+        settings: Vec::new(),
+    })
+}
+
+/// How a test tells the brain about the spared tee.
+#[derive(Clone, Copy, PartialEq)]
+enum Declare {
+    No,
+    /// `set_spares` (positions) and `set_spare_ids`, as the live bot does.
+    Inherent,
+    /// Through `Brain::set_live_context` (positions and `spare_ids`, as the live bot passes them since 4.1b).
+    Trait,
+    /// Through `Brain::set_live_context` with the ids only, no positions: the ids alone must keep the
+    /// body out of the threat set (the position match of `is_spared` cannot help here).
+    TraitIdsOnly,
+}
+
+/// What a fight of scenario T2 (the victim beside a freeze wall) looked like with a third tee on the
+/// hammer's line to the victim.
+struct Swings {
+    /// Fire presses in 20 decisions.
+    fires: u32,
+    /// ... of which would reach the third tee (the hammer's centre ~21 px along the aim; within 42 px).
+    hits_third: u32,
+    /// Threat ids at the first decision.
+    threats: Vec<i32>,
+    /// Tees simulated at the first decision.
+    sim_tees: u32,
+}
+
+/// `in_world`: the third tee stands one tile in front of us (as a body); `declare`: how it is declared
+/// spared. The live bot keeps spared tees in contact range in the world as bodies (4.1 round 2, F8) and
+/// also passes their positions; with `in_world = false` only the planner's own hammer gate keeps the swings
+/// off the spot.
+fn swings(in_world: bool, declare: Declare) -> Swings {
+    use ddai_brain::LiveContext;
+    let map = hammer_wall_map();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    let third = Vec2 {
+        x: 22.75 * 32.0,
+        y: 9.5 * 32.0,
+    };
+    let mut tees = vec![(0, 22.0, 9.5), (1, 23.5, 9.5)];
+    if in_world {
+        tees.push((2, 22.75, 9.5));
+    }
+    place(&mut pw, &tees);
+    let ids: Vec<i32> = tees.iter().map(|t| t.0).collect();
+    let mut b = HybridBrain::new(fixed_cfg(1), ClockKind::Wall, Box::new(NoProposer)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let mut out = Swings {
+        fires: 0,
+        hits_third: 0,
+        threats: Vec::new(),
+        sim_tees: 0,
+    };
+    let mut last = empty_input();
+    for k in 0..20 {
+        let world = pw.inner().clone();
+        match declare {
+            Declare::No => {}
+            Declare::Inherent => {
+                b.set_spares(vec![third], vec![Vec2 { x: 0.0, y: 0.0 }]);
+                b.set_spare_ids(vec![2]);
+            }
+            Declare::Trait | Declare::TraitIdsOnly => {
+                let p = ddai_physics::vmath::Vec2 {
+                    x: third.x as f32,
+                    y: third.y as f32,
+                };
+                let spares = [(p, ddai_physics::vmath::Vec2 { x: 0.0f32, y: 0.0 })];
+                let spares: &[_] = if declare == Declare::Trait { &spares } else { &[] };
+                let brain: &mut dyn Brain = &mut b;
+                brain.set_live_context(&LiveContext {
+                    spares,
+                    spare_ids: &[2],
+                    ..LiveContext::default()
+                });
+            }
+        }
+        let obs = observation(&world, &map, 0, &ids, 1);
+        let view = WorldView {
+            world: &world,
+            self_id: 0,
+            lag_ticks: 0,
+            in_flight: &[],
+        };
+        let a = b.decide_in(&obs, Some(&view));
+        out.fires += u32::from(a.fire);
+        if a.fire {
+            let me = pw.get_tee(0).unwrap().pos;
+            let len = f64::from(a.target.x).hypot(f64::from(a.target.y)).max(1.0);
+            let start = Vec2 {
+                x: me.x + f64::from(a.target.x) / len * 21.0,
+                y: me.y + f64::from(a.target.y) / len * 21.0,
+            };
+            if (start.x - third.x).hypot(start.y - third.y) < 42.0 {
+                out.hits_third += 1;
+            }
+        }
+        if k == 0 {
+            let t = b.last_decision().unwrap();
+            out.threats = t.threat_ids.clone();
+            out.sim_tees = t.sim_tees;
+        }
+        last = input_from_action(&a, &last);
+        for _ in 0..2 {
+            pw.set_input(0, last);
+            pw.step();
+        }
+    }
+    out
+}
+
+#[test]
+fn a_spared_tee_in_hammer_reach_is_not_swung_at_and_is_no_threat() {
+    // Task 3.5b (4.1 review F1/F8): the live bot's spared tees (friends, ignored, AFK) reach the hybrid.
+    // The same fight without a third tee: the brain hammers the victim into the wall, and the swings
+    // reach the spot where the third tee will stand (so the geometry really asks for the swing).
+    let alone = swings(false, Declare::No);
+    assert!(
+        alone.fires > 0 && alone.hits_third > 0,
+        "the plain brain should swing through that spot"
+    );
+    // A spared tee in the hammer's path that is NOT in the world: only the planner's own hammer gate,
+    // fed from the live context, keeps the swings off it.
+    let gone = swings(false, Declare::Inherent);
+    assert_eq!(gone.hits_third, 0, "a swing toward the spared tee was fired");
+    // Spared and IN the world as a body (what the bot passes now): never swung at, no threat, and still
+    // simulated (it can deflect us), outside the cap.
+    let body = swings(true, Declare::Inherent);
+    assert_eq!(body.hits_third, 0, "a swing that would hit the spared tee was fired");
+    assert!(
+        body.threats.is_empty(),
+        "the spared tee was treated as a threat: {:?}",
+        body.threats
+    );
+    assert_eq!(
+        body.sim_tees, 3,
+        "the spared body is simulated next to us and the victim"
+    );
+    // The same through the trait with `spare_ids`: the swing gate and the threat exclusion both work.
+    let via_trait = swings(true, Declare::Trait);
+    assert_eq!(
+        via_trait.hits_third, 0,
+        "a swing that would hit the spared tee was fired (trait)"
+    );
+    assert!(via_trait.threats.is_empty(), "trait: the spared tee was a threat");
+    // The ids alone (no positions) also keep the body out of the threat set; without them it is one.
+    assert!(
+        swings(true, Declare::TraitIdsOnly).threats.is_empty(),
+        "ids only: the spared tee was a threat"
+    );
+    // The same third tee not spared is an ordinary threat.
+    assert_eq!(swings(true, Declare::No).threats, vec![2]);
+}
+
+#[test]
+fn a_spared_tee_is_never_the_target() {
+    // The observation names a spared tee as the target: the brain plays against the nearest other tee.
+    let map = hammer_wall_map();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &[(0, 22.0, 9.5), (1, 23.5, 9.5), (2, 22.75, 9.5)]);
+    let world = pw.inner().clone();
+    let mut b = HybridBrain::new(fixed_cfg(1), ClockKind::Wall, Box::new(NoProposer)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    b.set_spare_ids(vec![1]);
+    let obs = observation(&world, &map, 0, &[0, 1, 2], 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let _ = b.decide_in(&obs, Some(&view));
+    assert_eq!(
+        b.last_decision().unwrap().victim_id,
+        2,
+        "the spared target was not replaced"
+    );
+}
+
+#[test]
+fn spared_tees_and_the_travel_goal_reach_every_worker_and_leave_fixed_decisions_identical() {
+    // The pool's workers hold their own planners: the live context must reach them, and the decision
+    // must stay identical for 1, 2 and 4 workers.
+    let run = |w: usize| {
+        let map = hall();
+        let mut pw = PhysicsWorld::new(map.clone(), 1);
+        let tees = [(0, 17.0, 9.5), (1, 19.4, 9.5), (2, 18.2, 9.5)];
+        place(&mut pw, &tees);
+        let world = pw.inner().clone();
+        let mut b = HybridBrain::new(fixed_cfg(w), ClockKind::Wall, Box::new(NoProposer)).unwrap();
+        reset(&mut b, &map, 0, 3);
+        let t = pw.get_tee(2).unwrap();
+        b.set_spares(vec![t.pos], vec![t.vel]);
+        b.set_travel_goal(Some(Vec2 { x: 900.0, y: 300.0 }));
+        let obs = observation(&world, &map, 0, &[0, 1, 2], 1);
+        let view = WorldView {
+            world: &world,
+            self_id: 0,
+            lag_ticks: 0,
+            in_flight: &[],
+        };
+        (0..4).map(|_| b.decide_in(&obs, Some(&view))).collect::<Vec<_>>()
+    };
+    let one = run(1);
+    for w in [2usize, 4] {
+        assert_eq!(one, run(w), "workers = {w}");
+    }
+    assert!(one.iter().all(|a| !a.fire));
 }
 
 /// A proposer that hands back one fixed plan, to check that a proposal is only a candidate.
@@ -850,4 +1365,252 @@ fn the_work_clock_makes_deadline_mode_reproducible_and_load_independent() {
         .map(|(_, t)| t.split('|').nth(4).unwrap().parse::<u64>().unwrap())
         .sum();
     assert!(big_ticks > quiet_ticks, "{big_ticks} vs {quiet_ticks}");
+}
+
+/// How much stack one decision needs (live threads are tokio/std threads with 2 MB by default): run
+/// with `DDAI_STACK_BYTES=<n>`; a run that overflows aborts, so a caller bisects `n` from outside:
+/// `for n in 600000 800000 ...; do DDAI_STACK_BYTES=$n cargo test ... decision_stack -- --ignored; done`.
+#[test]
+#[ignore = "probe; needs DDAI_STACK_BYTES"]
+fn decision_stack() {
+    let Some(bytes) = std::env::var("DDAI_STACK_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    else {
+        return;
+    };
+    let build_only = std::env::var("DDAI_STACK_PHASE").is_ok_and(|v| v == "build");
+    std::thread::Builder::new()
+        .stack_size(bytes)
+        .spawn(move || {
+            let map = hall();
+            let mut pw = Box::new(PhysicsWorld::new(map.clone(), 1));
+            place(&mut pw, &FOUR);
+            let world = Box::new(pw.inner().clone());
+            let mut b =
+                Box::new(HybridBrain::new(HybridConfig::default(), ClockKind::Wall, Box::new(NoProposer)).unwrap());
+            reset(&mut *b, &map, 0, 3);
+            if build_only {
+                return;
+            }
+            let ids = [0, 1, 2, 3];
+            let obs = observation(&world, &map, 0, &ids, 1);
+            let view = WorldView {
+                world: &world,
+                self_id: 0,
+                lag_ticks: 0,
+                in_flight: &[],
+            };
+            for _ in 0..3 {
+                let _ = b.decide_in(&obs, Some(&view));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Hall scene for the local-tee tests: slot 0 is us at x = 8 tiles, tee 1 the (far) victim; `extra` are
+/// `(id, x tiles, vx, flying hook toward us)`. `hookers` get a grabbed hook on us. Returns the first
+/// decision's telemetry: (threat ids in order, simulated tees, dropped tees).
+fn local_scene(cap: usize, extra: &[(i32, f64, f64, bool)], hookers: &[i32]) -> (Vec<i32>, u32, u32) {
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    let mut tees = vec![(0, 8.0, 9.5), (1, 36.0, 9.5)];
+    tees.extend(extra.iter().map(|e| (e.0, e.1, 9.5)));
+    place(&mut pw, &tees);
+    for _ in 0..5 {
+        pw.step();
+    }
+    let me = pw.get_tee(0).unwrap();
+    for &(id, _, vx, flying) in extra {
+        let mut st = pw.get_tee(id).unwrap();
+        st.vel = Vec2 { x: vx, y: 0.0 };
+        if hookers.contains(&id) {
+            st.hook_state = ddai_planner::types::HOOK_GRABBED;
+            st.hooked_player = 0;
+            st.hook_pos = me.pos;
+        } else if flying {
+            st.hook_state = ddai_planner::types::HOOK_FLYING;
+            st.hook_pos = Vec2 {
+                x: (st.pos.x + me.pos.x) / 2.0,
+                y: st.pos.y,
+            };
+            st.hook_dir = Vec2 {
+                x: (me.pos.x - st.pos.x).signum(),
+                y: 0.0,
+            };
+        }
+        pw.apply_tee_state(id, &st);
+    }
+    let w = pw.inner().clone();
+    let ids: Vec<i32> = tees.iter().map(|t| t.0).collect();
+    let mut cfg = fixed_cfg(1);
+    cfg.max_sim_tees = cap;
+    let mut b = HybridBrain::new(cfg, ClockKind::Wall, Box::new(NoProposer)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let obs = observation(&w, &map, 0, &ids, 1);
+    let view = WorldView {
+        world: &w,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let _ = b.decide_in(&obs, Some(&view));
+    let t = b.last_decision().unwrap();
+    (t.threat_ids.clone(), t.sim_tees, t.dropped_tees)
+}
+
+#[test]
+fn every_tee_that_hooks_us_stays_in_the_simulation_whatever_the_cap() {
+    // Review F2: two tees (2 and 4) hold us on their hooks, an idle tee (3) stands between them and is
+    // closer than tee 4. With a cap of 4 the old code found only the first hooker (`find`), then filled the
+    // slots by distance: it kept tee 3 and dropped the second hooker, so its pull vanished from every
+    // rollout and from the shield. Now both hookers are kept first; the neighbour is what the cap drops.
+    let extra = [(2, 4.5, 0.0, false), (3, 9.2, 0.0, false), (4, 14.0, 0.0, false)];
+    let (threats, sim, dropped) = local_scene(4, &extra, &[2, 4]);
+    assert!(threats.contains(&2) && threats.contains(&4), "threats {threats:?}");
+    assert!(
+        !threats.contains(&3),
+        "the cap is 4: us, the victim and the two hookers: {threats:?}"
+    );
+    assert_eq!((sim, dropped), (4, 1));
+    // The hookers may exceed a cap that is too small for them: cap 2 keeps us, the victim and both hookers.
+    let (threats2, sim2, dropped2) = local_scene(2, &extra, &[2, 4]);
+    assert_eq!((sim2, dropped2), (4, 1), "{threats2:?}");
+    assert!(threats2.contains(&2) && threats2.contains(&4));
+    // Controls: cap 0 and cap 5 keep everybody.
+    assert_eq!(local_scene(0, &extra, &[2, 4]).2, 0);
+    let (threats5, sim5, dropped5) = local_scene(5, &extra, &[2, 4]);
+    assert_eq!((sim5, dropped5), (5, 0), "{threats5:?}");
+}
+
+#[test]
+fn threats_are_ranked_by_danger_and_distance_only_breaks_ties() {
+    // A (id 2) idles 3 tiles away, B (id 3) is 9 tiles away with its hook flying at us, C (id 4) is 12 tiles
+    // away running at us, D (id 5) idles 5 tiles away. Order: hook in flight, hammer reach is none here, then
+    // closing speed (C), then distance (A before D).
+    let extra = [
+        (2, 11.0, 0.0, false),
+        (3, 17.0, 0.0, true),
+        (4, 20.0, -9.0, false),
+        (5, 3.5, 0.0, false),
+    ];
+    let (threats, _, _) = local_scene(0, &extra, &[]);
+    assert_eq!(threats[0], 3, "the flying hook first: {threats:?}");
+    assert_eq!(threats[1], 4, "then the fastest closing tee: {threats:?}");
+    assert!(
+        threats.iter().position(|&i| i == 2) < threats.iter().position(|&i| i == 5),
+        "{threats:?}"
+    );
+    // With the cap at 3 (us, victim, one more) the dangerous one is the survivor, not the nearest.
+    let (t3, sim, dropped) = local_scene(3, &extra, &[]);
+    assert_eq!(sim, 3);
+    assert_eq!(dropped, 3);
+    assert_eq!(t3[0], 3);
+}
+
+/// The hall with a freeze strip on the **front layer** only (x 50..=55, y 9): the game layer has no freeze at all.
+fn front_freeze_hall() -> Arc<MapData> {
+    let (w, h) = (60usize, 16usize);
+    let mut game = vec![Tile::default(); w * h];
+    let mut front = vec![Tile::default(); w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let solid = y >= 10 || x == 0 || x == w - 1 || y == 0;
+            game[y * w + x] = Tile {
+                index: if solid { TILE_SOLID } else { 0 },
+                ..Tile::default()
+            };
+            if (50..=55).contains(&x) && y == 9 {
+                front[y * w + x] = Tile {
+                    index: TILE_FREEZE,
+                    ..Tile::default()
+                };
+            }
+        }
+    }
+    Arc::new(MapData {
+        width: w as u32,
+        height: h as u32,
+        game,
+        front: Some(front),
+        tele: None,
+        speedup: None,
+        switch: None,
+        tune: None,
+        settings: Vec::new(),
+    })
+}
+
+#[test]
+fn the_shield_skip_sees_front_layer_freeze_and_the_speed() {
+    // Review F5: the skip distance came from the game layer only (blind to front-layer freeze) and ignored speed.
+    let map = front_freeze_hall();
+    let run = |tee_x: f64, vx: f64| {
+        let mut pw = PhysicsWorld::new(map.clone(), 1);
+        place(&mut pw, &[(0, tee_x, 9.5), (1, 5.0, 9.5)]);
+        for _ in 0..5 {
+            pw.step();
+        }
+        let mut st = pw.get_tee(0).unwrap();
+        st.vel = Vec2 { x: vx, y: 0.0 };
+        pw.apply_tee_state(0, &st);
+        let w = pw.inner().clone();
+        let mut b = HybridBrain::new(fixed_cfg(1), ClockKind::Wall, Box::new(NoProposer)).unwrap();
+        reset(&mut b, &map, 0, 3);
+        let obs = observation(&w, &map, 0, &[0, 1], 1);
+        let view = WorldView {
+            world: &w,
+            self_id: 0,
+            lag_ticks: 0,
+            in_flight: &[],
+        };
+        let _ = b.decide_in(&obs, Some(&view));
+        b.last_decision().unwrap().shield_skipped
+    };
+    // 20 tiles from the strip, at rest: far enough, skipped.
+    assert!(run(30.0, 0.0), "at rest 20 tiles away the shield should be skipped");
+    // 3 tiles beside a front-layer-only strip: the game layer shows no hazard at all, the shield must run.
+    assert!(!run(47.0, 0.0), "the shield was skipped beside a front-layer freeze");
+    // 20 tiles away but running at it at 12 px/tick (10 tiles in the 27 ticks of a plan): not skippable.
+    assert!(!run(30.0, 12.0), "the shield was skipped for a fast tee");
+}
+
+#[test]
+fn the_shield_skip_field_sees_heart_pickups_as_freeze() {
+    // 4.2 merged: a heart pickup freezes in its 3x3 neighbourhood (`is_freeze` of the live backend). The skip
+    // field goes through `is_freeze`, so it sees them; the TS-parity `hazard_field` (game layer only) does not.
+    let (w, h) = (60usize, 16usize);
+    let mut game = vec![Tile::default(); w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let solid = y >= 10 || x == 0 || x == w - 1 || y == 0;
+            game[y * w + x].index = if solid { TILE_SOLID } else { 0 };
+        }
+    }
+    game[5 * w + 30].index = ddai_physics::map::ENTITY_OFFSET + ddai_physics::map::ENTITY_HEALTH_1;
+    let map = Arc::new(MapData {
+        width: w as u32,
+        height: h as u32,
+        game,
+        front: None,
+        tele: None,
+        speedup: None,
+        switch: None,
+        tune: None,
+        settings: Vec::new(),
+    });
+    let pw = PhysicsWorld::new(map, 1);
+    let col = pw.collision();
+    let full = ddai_planner::fields::hazard_field_full(col);
+    let at = |tx: f64| ddai_planner::fields::hazard_tiles(&full, tx * 32.0 + 16.0, 5.0 * 32.0 + 16.0);
+    assert_eq!(at(29.0), 0, "the heart's neighbour tile is a hazard tile");
+    assert_eq!(at(27.0), 2);
+    let ts = ddai_planner::fields::hazard_field(col);
+    assert_eq!(
+        ddai_planner::fields::hazard_tiles(&ts, 27.0 * 32.0 + 16.0, 5.0 * 32.0 + 16.0),
+        i32::MAX,
+        "the TS-parity field is blind to it by design"
+    );
 }

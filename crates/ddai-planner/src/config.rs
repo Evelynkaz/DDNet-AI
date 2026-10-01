@@ -228,6 +228,10 @@ pub struct PlannerConfig {
     /// a pit is an anchor, but a 27-tick rollout sees only its ballistic end, so without a bonus
     /// an approach plan that merely survives scores as well as the safe hang.
     pub jumpless_anchor_bonus: f64,
+    /// Task 3.5b (hybrid only, `0` in every TS preset): the cost of ending a rollout in the air with no
+    /// jumps left -- landing refills them, hanging or swinging forever does not (T13: a swing that never
+    /// comes down scores as well as a safe landing).
+    pub jumpless_air_cost: f64,
 }
 
 impl Default for PlannerConfig {
@@ -320,6 +324,7 @@ impl Default for PlannerConfig {
             hook_polish: true,
             enemy_landing_bonus: 0.0,
             jumpless_anchor_bonus: 0.0,
+            jumpless_air_cost: 0.0,
         }
     }
 }

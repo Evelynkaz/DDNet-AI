@@ -1,0 +1,43 @@
+# E-007, part 1b: technique scenarios T1-T18 with the four shield variants (see e007-shield.toml), hybrid
+# adaptive on the work clock, and hybrid-fixed (fixed work, shield always complete) for reference. 50 trials.
+#   ddnet-ai arena scenarios --config configs/arena/scenarios-e007-shield.toml --out ~/aiddnet/data/runs/E-007/shield-scenarios
+name = "scenarios E-007 shield"
+seed = 1
+trials = 50
+
+[[brain]]
+label = "adaptive 3.5"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 }
+
+[[brain]]
+label = "adaptive plan"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 }
+
+[[brain]]
+label = "adaptive plan+hooks"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 }
+
+[[brain]]
+label = "adaptive plan+hooks+timeout"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { shield_plan_escape = true, shield_hook_anchors = 3, shield_timeout_danger = true }
+
+[[brain]]
+label = "fixed plan+hooks"
+brain = "hybrid"
+mode = "fixed"

@@ -1,0 +1,46 @@
+# E-007 part 8: fine early plan steps (`front_steps` / `front_step`): the first steps last 1-2 ticks instead of 3, the
+# rest stretch to keep the 27-tick horizon (a hook duel is decided tick by tick, T15b). Scenarios T1-T18, hybrid 4 ms
+# (work clock, adaptive on), 200 trials.
+#   ddnet-ai arena scenarios --config configs/arena/scenarios-e007-front.toml --out ~/aiddnet/data/runs/E-007/front-scenarios
+name = "scenarios E-007 front steps"
+seed = 1
+trials = 200
+
+[[brain]]
+label = "base"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+
+[[brain]]
+label = "front 2 x 1 tick"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { front_steps = 2.0, front_step = 1.0 }
+
+[[brain]]
+label = "front 3 x 1 tick"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { front_steps = 3.0, front_step = 1.0 }
+
+[[brain]]
+label = "front 3 x 2 ticks"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { front_steps = 3.0, front_step = 2.0 }
+
+[[brain]]
+label = "front 2 x 1 + dynamic"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { front_steps = 2.0, front_step = 1.0, stage2_dynamic = true }

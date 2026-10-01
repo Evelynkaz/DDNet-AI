@@ -1,0 +1,58 @@
+# E-007 (task 3.5b), part 4b: how many tees to simulate in 1vN (`max_sim_tees`: us, the victim, whoever hooks us and
+# the nearest threats) and the crowd stage, in 1v2/1v3/1v5 on clb-left, 200 games each, work clock, adaptive
+# off. Part 4 (e007-1vn.toml) showed fewer simulated tees means more candidates, more attacks and fewer
+# timeouts; this grid looks for the point before safety (self-freezes) is lost.
+#   ddnet-ai arena run --config configs/arena/e007-1vn2.toml --out ~/aiddnet/data/runs/E-007/1vn2 --threads 4
+name = "E-007 1vN grid"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "1v2 cap 6 (default)"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6 } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v3 cap 3"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 3 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 cap 3 + crowd stage"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 3, crowd_stage = true } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v5 cap 3"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 3 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 cap 3 + crowd stage"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 3, crowd_stage = true } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 cap 5"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 5 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 cap 5 + crowd stage"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 5, crowd_stage = true } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 cap 4 + crowd stage + top 3"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, crowd_top_m = 3 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 cap 4 + crowd stage, lambda 0.25"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, lambda = 0.25 } }, { brain = "scripted", count = 5 }]

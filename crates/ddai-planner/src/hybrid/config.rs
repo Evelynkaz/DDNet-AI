@@ -9,7 +9,8 @@ use crate::config::{PlannerConfig, preset_normal};
 /// * `enemy_landing_bonus`: the victim's ballistic landing in a hazard is worth something even
 ///   when it happens after the rollout horizon (throws and drags);
 /// * `landing_cost`: the same forecast for ourselves (`landingCost`, an existing TS term);
-/// * `jumpless_anchor_bonus`: hanging on a wall hook while jumpless over a hazard (T14).
+/// * `jumpless_anchor_bonus`: hanging on a wall hook while jumpless over a hazard (T14);
+/// * `jumpless_air_cost`: ending a rollout in the air with no jump left (T13: a swing that never comes down).
 pub fn hybrid_planner_preset() -> PlannerConfig {
     hybrid_terms(preset_normal())
 }
@@ -20,6 +21,7 @@ pub fn hybrid_terms(base: PlannerConfig) -> PlannerConfig {
         enemy_landing_bonus: 3.0,
         landing_cost: 2.0,
         jumpless_anchor_bonus: 0.1,
+        jumpless_air_cost: 0.5,
         ..base
     }
 }
@@ -74,6 +76,12 @@ pub struct RobustConfig {
     /// idle counts less as a threat; measured: T5 36% -> 72%, T10 94% -> 100%, arena strength vs the
     /// planner unchanged, E-003). Without it only the expectation is weighted by the beliefs.
     pub belief_lambda: bool,
+    /// A cheap robust stage for crowds (task 3.5b): with more than `max_relevant` opponents able to
+    /// act, the best `crowd_top_m` candidates are re-scored under the two extremes only ("everybody
+    /// holds" is the stage-1 score, "everybody reacts" the one extra rollout), instead of deciding by
+    /// the cheap model alone. `false` = the 3.5 behaviour.
+    pub crowd_stage: bool,
+    pub crowd_top_m: usize,
 }
 
 impl Default for RobustConfig {
@@ -86,6 +94,8 @@ impl Default for RobustConfig {
             max_combos: 4,
             max_relevant: 2,
             belief_lambda: true,
+            crowd_stage: true,
+            crowd_top_m: 2,
         }
     }
 }
@@ -104,6 +114,31 @@ impl Default for AdaptiveConfig {
         AdaptiveConfig {
             enabled: true,
             max_total_ms: 15.0,
+        }
+    }
+}
+
+/// Early pruning (task 3.5b): a cheap short-horizon pre-score decides which of the book plans, throw
+/// lines and CEM samples earn a full rollout. Techniques, the warm plan and proposals are never pruned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PruneConfig {
+    pub enabled: bool,
+    /// Plan steps of the pre-score rollout (a step is 3 ticks; the full plan has 9).
+    pub steps: usize,
+    /// Share of the pre-scored candidates that go on to a full rollout (by pre-score, among those
+    /// seen so far in the decision).
+    pub keep: f64,
+    /// The first this many pre-scored candidates always go on (there is no distribution yet).
+    pub warmup: usize,
+}
+
+impl Default for PruneConfig {
+    fn default() -> Self {
+        PruneConfig {
+            enabled: false,
+            steps: 3,
+            keep: 0.5,
+            warmup: 4,
         }
     }
 }
@@ -140,12 +175,46 @@ pub struct HybridConfig {
     pub decision_ticks: i32,
     pub robust: RobustConfig,
     pub adaptive: AdaptiveConfig,
+    pub prune: PruneConfig,
     /// Share of the deadline budget reserved for the robust re-scoring (stage 2).
     pub stage2_fraction: f64,
+    /// Commitment bonus of the warm plan in the final choice (task 3.5b): `0` = none. A fresh plan that waits
+    /// one step before it acts ties with the warm plan that already acts and wins the tie-break under some
+    /// replies, decision after decision.
+    pub warm_bonus: f64,
+    /// The bonus goes only to a warm plan whose first step fires (a swing that has begun is finished).
+    pub warm_fire_only: bool,
+    /// Two-world search (task 3.5b): the pool is scored in a reduced world (us and the victim only) and
+    /// only the best few are re-scored in the full world with the threats and their modelled replies, so
+    /// the 1vN model keeps the tempo of the 1v1 model and the defence of the threat model.
+    pub two_world: bool,
+    /// Stage 1 keeps the time stage 2 does not need (task 3.5b): its end moves later when the estimated
+    /// cost of stage 2 is below its share, never earlier.
+    pub stage2_dynamic: bool,
+    /// ... only when at least this many opponents can act on us (the crowd stage's case; a duel's hook timing
+    /// (T15a 98% -> 82%) and T18 (67% -> 47%) lose by it, E-007).
+    pub stage2_dynamic_min_relevant: usize,
     /// Cap of a decision that is not extended (search + shield, ms): the search budget is
     /// `min(budget_ms, cap - shield reserve)`. `None` = the budget alone (the extension of D-042
     /// may still go up to `adaptive.max_total_ms` when danger is confirmed).
     pub decision_cap_ms: Option<f64>,
+    /// Tees the rollouts simulate at most (task 3.5b, F2): us, the victim, whoever hooks us, then the
+    /// nearest threats and the nearest frozen body; every other tee is dropped from the decision
+    /// world, so a crowd costs like a fight. `0` = every tee (the 3.5 behaviour).
+    pub max_sim_tees: usize,
+    /// Shield (task 3.5b): skipped when the nearest freeze or death tile is at least this many tiles
+    /// away along the tee's own path (`0` = never skip). A tee 14 tiles from any hazard cannot reach
+    /// one within the shield's horizon, so the check would only cost time.
+    pub shield_skip_tiles: u32,
+    /// Shield (task 3.5b): the remainder of the chosen plan, rolled out exactly, is the shield's first
+    /// escape (so a hook plan is not judged "no escape" by an escape model that only walks and jumps).
+    pub shield_plan_escape: bool,
+    /// Shield (task 3.5b): hook escapes aimed at up to this many anchors (walls, ceilings), each with
+    /// and without a jump, tried after the standard escapes. `0` = none.
+    pub shield_hook_anchors: usize,
+    /// Shield (task 3.5b): a timed-out `escapeExists` counts as danger, so that `saferInput` gets the
+    /// extension budget (needs `adaptive.enabled`). Off, only a confirmed "no escape" does.
+    pub shield_timeout_danger: bool,
     /// Time the shield may use after the search, per tee in the world (ms); the search itself
     /// keeps its own budget. The shield gives up (`shield_incomplete`) when it is spent, except
     /// that a confirmed danger lets it run on up to the adaptive cap (D-042).
@@ -183,8 +252,19 @@ impl Default for HybridConfig {
             decision_ticks: 2,
             robust: RobustConfig::default(),
             adaptive: AdaptiveConfig::default(),
+            prune: PruneConfig::default(),
             stage2_fraction: 0.35,
+            stage2_dynamic: true,
+            stage2_dynamic_min_relevant: 3,
+            two_world: false,
+            warm_bonus: 0.3,
+            warm_fire_only: false,
             decision_cap_ms: Some(5.0),
+            max_sim_tees: 4,
+            shield_skip_tiles: 14,
+            shield_plan_escape: true,
+            shield_hook_anchors: 3,
+            shield_timeout_danger: false,
             shield_reserve_ms_per_tee: 0.25,
             work_clock_us_per_tick: None,
             count_work: true,
@@ -235,6 +315,15 @@ impl HybridConfig {
         }
         if !positive(self.adaptive.max_total_ms) || self.threat_radius_px.is_some_and(|r| !positive(r)) {
             return Err("hybrid: adaptive.max_total_ms and threat_radius_px must be finite and positive".into());
+        }
+        if self.shield_hook_anchors > 8 {
+            return Err("hybrid: shield_hook_anchors above 8".into());
+        }
+        if self.prune.steps == 0
+            || !(self.prune.keep > 0.0 && self.prune.keep <= 1.0)
+            || self.prune.steps >= self.planner.steps.max(1) as usize
+        {
+            return Err("hybrid: prune.steps in 1..plan steps, prune.keep in (0, 1]".into());
         }
         if self.anchors > 36 {
             return Err("hybrid: anchors above the ray count".into());

@@ -1,0 +1,11 @@
+# E-007 part 11: the commitment bonus (`warm_bonus`) of the warm plan, 1v1 against the fixed planner on clb-left,
+# 400 games, seed 500, hybrid 4 ms on the work clock, adaptive off.
+#   ddnet-ai arena run --config configs/arena/e007-warm.toml --out ~/aiddnet/data/runs/E-007/warm-a --threads 4
+name = "E-007 warm bonus seed 500"
+base_seed = 500
+games = 400
+
+[[condition]]
+name = "1v1 warm bonus 0.3"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3 } }, { brain = "planner", mode = "fixed" }]

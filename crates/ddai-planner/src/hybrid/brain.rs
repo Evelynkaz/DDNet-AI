@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ddai_brain::{Action, Brain, Observation, ResetContext, WorldView};
+use ddai_brain::{Action, Brain, LiveContext, Observation, ResetContext, WorldView};
 use ddai_physics::map::MapData;
 
 use crate::brains::{ClockKind, PlannerStats, action_from_input, enemy_input_from_tee, target_of};
@@ -22,6 +22,10 @@ use crate::physics_adapter::{PhysicsWorld, from_ddnet_input};
 use crate::plan_world::PlanWorld;
 use crate::types::{PlayerInput, empty_input};
 
+fn dist_f32(a: ddai_physics::vmath::Vec2<f32>, b: ddai_physics::vmath::Vec2<f32>) -> f64 {
+    f64::from(a.x - b.x).hypot(f64::from(a.y - b.y))
+}
+
 /// Sums over a brain's decisions since its last reset (the arena JSONL carries this).
 #[derive(Debug, Clone, Default)]
 pub struct Totals {
@@ -32,6 +36,10 @@ pub struct Totals {
     pub danger_flagged: u64,
     pub shielded: u64,
     pub shield_incomplete: u64,
+    /// Decisions the shield checked, and those whose first escape (the plan remainder) held.
+    pub shield_ran: u64,
+    pub shield_plan_ok: u64,
+    pub shield_skipped: u64,
     pub out_of_time: u64,
     /// Decisions whose chosen plan still ended with us out under some modelled response.
     pub unsafe_choices: u64,
@@ -53,6 +61,9 @@ impl Totals {
         self.danger_flagged += u64::from(t.danger.flagged());
         self.shielded += u64::from(t.shielded);
         self.shield_incomplete += u64::from(t.shield_incomplete);
+        self.shield_ran += u64::from(t.shield_ran);
+        self.shield_plan_ok += u64::from(t.shield_plan_ok);
+        self.shield_skipped += u64::from(t.shield_skipped);
         self.out_of_time += u64::from(t.out_of_time);
         self.unsafe_choices += u64::from(t.unsafe_choice);
         self.with_threats += u64::from(!t.threat_ids.is_empty());
@@ -84,7 +95,7 @@ impl Totals {
             .join(",");
         let w = &self.work;
         format!(
-            "{{\"decisions\":{},\"extended\":{},\"danger_flagged\":{},\"shielded\":{},\"shield_incomplete\":{},\
+            "{{\"decisions\":{},\"extended\":{},\"danger_flagged\":{},\"shielded\":{},\"shield_incomplete\":{},\"shield_ran\":{},\"shield_plan_ok\":{},\"shield_skipped\":{},\
 \"out_of_time\":{},\"unsafe_choices\":{},\"with_threats\":{},\"generated\":{{{}}},\"evaluated\":{{{}}},\"chosen\":{{{}}},\
 \"techniques\":{{{}}},\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{},\
 \"rollouts_stage1\":{},\"rollouts_stage2\":{},\"rollouts_extension\":{}}}}}",
@@ -93,6 +104,9 @@ impl Totals {
             self.danger_flagged,
             self.shielded,
             self.shield_incomplete,
+            self.shield_ran,
+            self.shield_plan_ok,
+            self.shield_skipped,
             self.out_of_time,
             self.unsafe_choices,
             self.with_threats,
@@ -149,6 +163,12 @@ pub struct HybridBrain {
     /// A `reset` that the search (built lazily, once the map is known) has not seen yet.
     pending_reset: Option<ResetContext>,
     last_reset: Option<ResetContext>,
+    /// The live bot's spared tees and travel goal (task 3.5b), handed to the search before every
+    /// decision; they hold until replaced.
+    spares: Vec<crate::vmath::Vec2>,
+    spare_vels: Vec<crate::vmath::Vec2>,
+    spare_ids: Vec<i32>,
+    travel_goal: Option<crate::vmath::Vec2>,
 }
 
 impl HybridBrain {
@@ -199,6 +219,10 @@ impl HybridBrain {
             name,
             pending_reset: None,
             last_reset: None,
+            spares: Vec::new(),
+            spare_vels: Vec::new(),
+            spare_ids: Vec::new(),
+            travel_goal: None,
         })
     }
 
@@ -207,6 +231,45 @@ impl HybridBrain {
         let mut cfg = HybridConfig::fixed();
         cfg.proposals = 0;
         HybridBrain::new(cfg, ClockKind::Wall, Box::new(NoProposer)).expect("valid")
+    }
+
+    /// Tees the rope and the hammer must spare (the live bot's friends, ignored, out-of-game and AFK
+    /// players, `bot.ts:3009-3018`): positions and velocities in pixels (per tick), as the planner's
+    /// `set_spare_bystanders` takes them. A spared tee is never a threat or a victim, a candidate
+    /// whose rope would catch one is refused and a hammer swing that would hit one is not fired.
+    /// They hold until replaced; the arena never sets them. (`ddai_brain::Brain::set_live_context`
+    /// delegates here.)
+    pub fn set_spares(&mut self, positions: Vec<crate::vmath::Vec2>, velocities: Vec<crate::vmath::Vec2>) {
+        self.spares = positions;
+        self.spare_vels = velocities;
+    }
+
+    /// Client ids of the spared tees (4.1b: `LiveContext.spare_ids`). They stay in the world as bodies
+    /// (tee-tee collision can still deflect us into freeze) but are never a threat, a victim, a target
+    /// or a hook target; the swing and hook gates use the positions of [`HybridBrain::set_spares`].
+    pub fn set_spare_ids(&mut self, ids: Vec<i32>) {
+        self.spare_ids = ids;
+    }
+
+    /// The tee to play against: the observation's target unless it is spared, else the nearest tee that
+    /// is not (`None` when there is none).
+    fn target_id(&self, obs: &Observation) -> Option<i32> {
+        let t = target_of(obs)?;
+        if !self.spare_ids.contains(&t.id) {
+            return Some(t.id);
+        }
+        let me = obs.self_state.pos;
+        obs.others
+            .iter()
+            .filter(|c| c.id != obs.self_state.id && !self.spare_ids.contains(&c.id))
+            .min_by(|a, b| dist_f32(a.pos, me).total_cmp(&dist_f32(b.pos, me)))
+            .map(|c| c.id)
+    }
+
+    /// An intermediate point to head for when the target is far or behind a wall (`None` = the
+    /// target itself); the planner's `set_travel_goal`.
+    pub fn set_travel_goal(&mut self, goal: Option<crate::vmath::Vec2>) {
+        self.travel_goal = goal;
     }
 
     pub fn totals(&self) -> &Totals {
@@ -261,6 +324,7 @@ impl HybridBrain {
         obs: &Observation,
     ) -> Action {
         let search = self.search.as_mut().expect("search built");
+        search.set_live(&self.spares, &self.spare_vels, &self.spare_ids, self.travel_goal);
         let world = search.world_mut();
         let (Some(me), Some(target)) = (world.get_tee(self_id), world.get_tee(target_id)) else {
             return action_from_input(&self.prev);
@@ -318,10 +382,14 @@ impl Brain for HybridBrain {
         }
         self.pending_reset = Some(ctx.clone());
         self.last_reset = Some(ctx.clone());
+        self.spares.clear();
+        self.spare_vels.clear();
+        self.spare_ids.clear();
+        self.travel_goal = None;
     }
 
     fn decide(&mut self, obs: &Observation) -> Action {
-        let Some(target) = target_of(obs).map(|c| c.id) else {
+        let Some(target) = self.target_id(obs) else {
             self.prev = empty_input();
             return Action::neutral();
         };
@@ -342,7 +410,7 @@ impl Brain for HybridBrain {
         let Some(view) = view else {
             return self.decide(obs);
         };
-        let Some(target) = target_of(obs).map(|c| c.id) else {
+        let Some(target) = self.target_id(obs) else {
             self.prev = empty_input();
             return Action::neutral();
         };
@@ -350,6 +418,23 @@ impl Brain for HybridBrain {
         self.apply_pending_reset();
         self.search.as_mut().expect("built").world_mut().sync_from(view.world);
         self.plan(view.self_id, target, view.in_flight, obs)
+    }
+
+    fn set_live_context(&mut self, ctx: &LiveContext<'_>) {
+        let to64 = |v: &ddai_physics::vmath::Vec2<f32>| crate::vmath::Vec2 {
+            x: f64::from(v.x),
+            y: f64::from(v.y),
+        };
+        // In place: no allocation per decision once the buffers have grown.
+        self.spares.clear();
+        self.spares.extend(ctx.spares.iter().map(|(p, _)| to64(p)));
+        self.spare_vels.clear();
+        self.spare_vels.extend(ctx.spares.iter().map(|(_, v)| to64(v)));
+        // 4.1b (F8): the spared tees stay in the world as bodies; their ids leave the threat, victim,
+        // target and hook-target sets (no allocation once the buffer has grown).
+        self.spare_ids.clear();
+        self.spare_ids.extend_from_slice(ctx.spare_ids);
+        self.set_travel_goal(ctx.travel_goal.as_ref().map(to64));
     }
 
     fn name(&self) -> &str {

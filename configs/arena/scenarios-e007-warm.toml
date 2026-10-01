@@ -1,0 +1,52 @@
+# E-007 part 10: commitment bonus for the warm plan (`warm_bonus`) against procrastination (a plan that waits one step
+# before it acts is re-generated every decision and ties with the warm plan that already acts: T18 5% -> 95%), with the
+# cost of ending airborne without jumps (`jumpless_air_cost`). Scenarios T1-T18, hybrid 4 ms (work clock, adaptive on), 200 trials.
+#   ddnet-ai arena scenarios --config configs/arena/scenarios-e007-warm.toml --out ~/aiddnet/data/runs/E-007/warm-scenarios
+name = "scenarios E-007 warm bonus"
+seed = 1
+trials = 200
+
+[[brain]]
+label = "planner-fixed"
+brain = "planner"
+mode = "fixed"
+
+[[brain]]
+label = "warm 0, air 0.5"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5 }
+
+[[brain]]
+label = "warm 0.5, air 0.5"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.5 }
+
+[[brain]]
+label = "warm 0.7, air 0.5"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.7 }
+
+[[brain]]
+label = "warm 1.0, air 0.5"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5, warm_bonus = 1.0 }
+
+[[brain]]
+label = "warm 0.7, air 1"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 1.0, warm_bonus = 0.7 }

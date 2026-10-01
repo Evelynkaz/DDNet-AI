@@ -1,0 +1,51 @@
+# E-007 idle baseline (D-059), (crowds, seed 900): a do-nothing focal player on the same arenas, opponents and seeds as the
+# E-007 rows. A hybrid row only means something next to what `idle` wins there (on chillblock5-ruler the scripted
+# bot freezes itself in about 74% of 1v1 games), and the headline is the CREDITED win rate (our own block).
+#   ddnet-ai arena run --config configs/arena/e007-idle-crowd.toml --out ~/aiddnet/data/runs/E-007/idle-crowd --threads 1
+name = "E-007 idle baseline (crowds, seed 900)"
+base_seed = 900
+games = 200
+
+[rules]
+crowd_from = 2
+crowd_spacing = 1.0
+
+[[condition]]
+name = "8 tees idle bystanders: idle"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "8 tees scripted crowd: idle"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted", count = 7 }]
+
+[[condition]]
+name = "10 tees idle bystanders: idle"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted" }, { brain = "idle", count = 8 }]
+
+[[condition]]
+name = "10 tees scripted crowd: idle"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted", count = 9 }]
+
+[[condition]]
+name = "12 tees idle bystanders: idle"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted" }, { brain = "idle", count = 10 }]
+
+[[condition]]
+name = "12 tees scripted crowd: idle"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted", count = 11 }]
+
+[[condition]]
+name = "15 tees idle bystanders: idle"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted" }, { brain = "idle", count = 13 }]
+
+[[condition]]
+name = "15 tees scripted crowd: idle"
+arena = "clb-left"
+players = [{ brain = "idle" }, { brain = "scripted", count = 14 }]

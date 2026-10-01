@@ -1,0 +1,37 @@
+# E-007 part 6: a cost for ending a rollout in the air with no jumps left (`jumpless_air_cost`), against T13's
+# endless swing: scenarios T1-T18, hybrid 4 ms (work clock, adaptive on), 200 trials.
+#   ddnet-ai arena scenarios --config configs/arena/scenarios-e007-air.toml --out ~/aiddnet/data/runs/E-007/air-scenarios
+name = "scenarios E-007 air cost"
+seed = 1
+trials = 200
+
+[[brain]]
+label = "air cost 0 (base)"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+
+[[brain]]
+label = "air cost 0.5"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5 }
+
+[[brain]]
+label = "air cost 1"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 1.0 }
+
+[[brain]]
+label = "air cost 2"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 2.0 }

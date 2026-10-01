@@ -113,6 +113,10 @@ fn worker_scoring_is_allocation_free_in_steady_state() {
         unfreeze: Arc::new(unfreeze_field(pw.collision())),
         frozen_bystanders: vec![],
         frozen_bystander_vels: vec![],
+        // A spared tee and a travel goal, as the live bot passes them (they must not cost allocations either).
+        spares: vec![Vec2 { x: 400.0, y: 300.0 }],
+        spare_vels: vec![Vec2 { x: 0.0, y: 0.0 }],
+        travel_goal: Some(Vec2 { x: 900.0, y: 300.0 }),
         threats: Some(ThreatSet {
             ids: vec![2, 3],
             inputs: vec![empty_input(), empty_input()],

@@ -87,6 +87,12 @@ pub trait PlanWorld {
     /// (cadence bookkeeping, `heldTicks`, `warmShift`).
     fn tick(&self) -> i64;
 
+    /// Gravity (px/tick^2) acting on tee `id` (the tuning zone it stands in). Only the hybrid shield's hang rule reads
+    /// it (how long a free-fall apex lasts); the TS-parity backend never does, so the default is the stock value.
+    fn gravity(&self, _id: i32) -> f64 {
+        0.5
+    }
+
     fn get_tee(&self, id: i32) -> Option<TeeState>;
     /// Fills `out` in place and returns whether `id` exists (`world.readTee`) — avoids allocating
     /// a fresh `TeeState` on the hot per-tick score path.

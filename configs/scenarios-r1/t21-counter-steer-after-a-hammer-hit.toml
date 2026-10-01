@@ -1,0 +1,38 @@
+# T21 -- instant counter-steer after a hammer hit from the side (block-techniques-r1.md T21, the
+# mirror of T2: here the subject is the one thrown).
+#
+# A (the subject) stands 1.5 tiles left of a freeze wall; B, beside it, hammers A toward the wall at
+# tick 2. Doing nothing carries A ~86 px into the wall (air friction 0.95); holding the direction
+# against the blow from the first tick after it stops the drift in ~18 px. Success: A is never out.
+id = "T21"
+name = "Counter-steer after a hammer hit"
+source = "block-techniques-r1.md T21; W-move, CH-hammer"
+description = "Hammered toward a freeze wall from the side: steer against the blow at once."
+horizon = 60
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 40
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 38, y1 = 13, tile = "solid" },
+    { x0 = 25, y0 = 6, x1 = 25, y1 = 9, tile = "freeze" },
+]
+
+[[tee]]
+pos = [23.5, 9.5]
+jitter = [0.25, 0.0]
+
+[[tee]]
+pos = [22.0, 9.5]
+script = [{ from = 2, fire = true, weapon = 0, aim = [100, 0] }, { from = 3, weapon = 0, aim = [100, 0] }]
+
+[success]
+kind = "not_out"
+tee = 0
+
+[[reference]]
+from = 0
+direction = -1

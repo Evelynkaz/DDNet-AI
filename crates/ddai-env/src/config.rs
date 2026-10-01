@@ -60,6 +60,15 @@ pub struct Rules {
     /// uncredited opponent is recorded and the game continues).
     #[serde(default)]
     pub credit_required: Option<bool>,
+    /// Crowds (task 3.5b): tees from this slot on spawn anywhere on the arena's standing cells, at
+    /// least `min_tiles` from every tee already placed, instead of within `max_tiles` of the focal
+    /// player. `None` = every tee spawns near the focal player (the 1vN rule of E-002).
+    #[serde(default)]
+    pub crowd_from: Option<usize>,
+    /// Crowds: the least distance in tiles between two crowd tees (default `min_tiles`, 3; a dense
+    /// hub of 12-15 tees does not fit an E-002 box at that spacing).
+    #[serde(default)]
+    pub crowd_spacing: Option<f64>,
 }
 
 impl Default for Rules {
@@ -70,6 +79,8 @@ impl Default for Rules {
             decide_every: d_decide_every(),
             credit_ticks: d_credit_ticks(),
             credit_required: None,
+            crowd_from: None,
+            crowd_spacing: None,
         }
     }
 }
@@ -99,6 +110,10 @@ pub struct RulesOverride {
     pub credit_ticks: Option<i32>,
     #[serde(default)]
     pub credit_required: Option<bool>,
+    #[serde(default)]
+    pub crowd_from: Option<usize>,
+    #[serde(default)]
+    pub crowd_spacing: Option<f64>,
 }
 
 impl RulesOverride {
@@ -110,6 +125,8 @@ impl RulesOverride {
             decide_every: self.decide_every.unwrap_or(base.decide_every),
             credit_ticks: self.credit_ticks.unwrap_or(base.credit_ticks),
             credit_required: self.credit_required.or(base.credit_required),
+            crowd_from: self.crowd_from.or(base.crowd_from),
+            crowd_spacing: self.crowd_spacing.or(base.crowd_spacing),
         }
     }
 }
@@ -215,6 +232,35 @@ pub struct HybridSpec {
     /// Shield time after the search, ms per tee in the world (default 0.25).
     #[serde(default)]
     pub shield_reserve_ms_per_tee: Option<f64>,
+    /// The cheap robust stage for crowds (default false) and how many candidates it re-scores.
+    #[serde(default)]
+    pub crowd_stage: Option<bool>,
+    #[serde(default)]
+    pub crowd_top_m: Option<usize>,
+    /// Early pruning by a short-horizon pre-score (default false), its steps, kept share and warm-up.
+    #[serde(default)]
+    pub prune: Option<bool>,
+    #[serde(default)]
+    pub prune_steps: Option<usize>,
+    #[serde(default)]
+    pub prune_keep: Option<f64>,
+    #[serde(default)]
+    pub prune_warmup: Option<usize>,
+    /// Tees the rollouts simulate at most (default 6; 0 = all).
+    #[serde(default)]
+    pub max_sim_tees: Option<usize>,
+    /// Shield skipped when no hazard is this many tiles away (default 14; 0 = never).
+    #[serde(default)]
+    pub shield_skip_tiles: Option<u32>,
+    /// Shield: the remainder of the chosen plan is its first escape (default true).
+    #[serde(default)]
+    pub shield_plan_escape: Option<bool>,
+    /// Shield: hook escapes at this many anchors (default 3; 0 = none).
+    #[serde(default)]
+    pub shield_hook_anchors: Option<usize>,
+    /// Shield: a timed-out escape check counts as danger (default false).
+    #[serde(default)]
+    pub shield_timeout_danger: Option<bool>,
     /// Whether hooking an extra threat passes the hook gate (default true).
     #[serde(default)]
     pub hook_threats: Option<bool>,
@@ -244,6 +290,34 @@ pub struct HybridSpec {
     pub max_total_ms: Option<f64>,
     #[serde(default)]
     pub stage2_fraction: Option<f64>,
+    /// Fine early plan steps: the first `front_steps` steps last `front_step` ticks (< `plan_step`), the rest
+    /// share the remaining ticks of the horizon (the planner's `frontSteps`/`frontStep`).
+    #[serde(default)]
+    pub front_steps: Option<f64>,
+    #[serde(default)]
+    pub front_step: Option<f64>,
+    /// Plan steps and ticks per step of the search (default 9 x 3 = 27 ticks ahead): a shorter horizon
+    /// makes every rollout cheaper.
+    #[serde(default)]
+    pub plan_steps: Option<i32>,
+    #[serde(default)]
+    pub plan_step_ticks: Option<i32>,
+    /// Commitment bonus of the warm plan in the final choice (default 0).
+    #[serde(default)]
+    pub warm_bonus: Option<f64>,
+    /// The warm bonus goes only to a warm plan that fires now (default false).
+    #[serde(default)]
+    pub warm_fire_only: Option<bool>,
+    /// Two-world search: pool scored with us and the victim only, the best few re-scored with the threats
+    /// (default false).
+    #[serde(default)]
+    pub two_world: Option<bool>,
+    /// Stage 1 keeps the time stage 2 does not need (default false).
+    #[serde(default)]
+    pub stage2_dynamic: Option<bool>,
+    /// ... only with at least this many opponents able to act (default 3).
+    #[serde(default)]
+    pub stage2_dynamic_min_relevant: Option<usize>,
     #[serde(default)]
     pub anchors: Option<usize>,
     #[serde(default)]
@@ -268,6 +342,9 @@ pub struct HybridSpec {
     /// Bonus for hanging on a wall hook while jumpless over a hazard (default 0.1).
     #[serde(default)]
     pub jumpless_anchor_bonus: Option<f64>,
+    /// Cost of ending a rollout airborne with no jumps left (hybrid only; default 0).
+    #[serde(default)]
+    pub jumpless_air_cost: Option<f64>,
 }
 
 impl HybridSpec {
@@ -339,6 +416,39 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         if let Some(v) = h.decision_cap_ms {
             cfg.decision_cap_ms = if v > 0.0 { Some(v) } else { None };
         }
+        if let Some(v) = h.crowd_stage {
+            cfg.robust.crowd_stage = v;
+        }
+        if let Some(v) = h.crowd_top_m {
+            cfg.robust.crowd_top_m = v;
+        }
+        if let Some(v) = h.prune {
+            cfg.prune.enabled = v;
+        }
+        if let Some(v) = h.prune_steps {
+            cfg.prune.steps = v;
+        }
+        if let Some(v) = h.prune_keep {
+            cfg.prune.keep = v;
+        }
+        if let Some(v) = h.prune_warmup {
+            cfg.prune.warmup = v;
+        }
+        if let Some(v) = h.max_sim_tees {
+            cfg.max_sim_tees = v;
+        }
+        if let Some(v) = h.shield_skip_tiles {
+            cfg.shield_skip_tiles = v;
+        }
+        if let Some(v) = h.shield_plan_escape {
+            cfg.shield_plan_escape = v;
+        }
+        if let Some(v) = h.shield_hook_anchors {
+            cfg.shield_hook_anchors = v;
+        }
+        if let Some(v) = h.shield_timeout_danger {
+            cfg.shield_timeout_danger = v;
+        }
         if let Some(v) = h.shield_reserve_ms_per_tee {
             cfg.shield_reserve_ms_per_tee = v;
         }
@@ -374,6 +484,33 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         if let Some(v) = h.max_total_ms {
             cfg.adaptive.max_total_ms = v;
         }
+        if let Some(v) = h.front_steps {
+            cfg.planner.front_steps = v;
+        }
+        if let Some(v) = h.front_step {
+            cfg.planner.front_step = v;
+        }
+        if let Some(v) = h.plan_steps {
+            cfg.planner.steps = v;
+        }
+        if let Some(v) = h.plan_step_ticks {
+            cfg.planner.plan_step = v;
+        }
+        if let Some(v) = h.warm_fire_only {
+            cfg.warm_fire_only = v;
+        }
+        if let Some(v) = h.warm_bonus {
+            cfg.warm_bonus = v;
+        }
+        if let Some(v) = h.two_world {
+            cfg.two_world = v;
+        }
+        if let Some(v) = h.stage2_dynamic_min_relevant {
+            cfg.stage2_dynamic_min_relevant = v;
+        }
+        if let Some(v) = h.stage2_dynamic {
+            cfg.stage2_dynamic = v;
+        }
         if let Some(v) = h.stage2_fraction {
             cfg.stage2_fraction = v;
         }
@@ -391,6 +528,9 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         }
         if let Some(v) = h.landing_cost {
             cfg.planner.landing_cost = v;
+        }
+        if let Some(v) = h.jumpless_air_cost {
+            cfg.planner.jumpless_air_cost = v;
         }
         if let Some(v) = h.jumpless_anchor_bonus {
             cfg.planner.jumpless_anchor_bonus = v;

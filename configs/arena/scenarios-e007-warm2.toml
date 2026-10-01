@@ -1,0 +1,37 @@
+# E-007 part 10b: scenarios T1-T18 with the fire-only warm bonus (200 trials, hybrid 4 ms, work clock, adaptive on, air cost 0.5).
+#   ddnet-ai arena scenarios --config configs/arena/scenarios-e007-warm2.toml --out ~/aiddnet/data/runs/E-007/warm2-scenarios
+name = "scenarios E-007 fire-only warm bonus"
+seed = 1
+trials = 200
+
+[[brain]]
+label = "no bonus (air 0.5)"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5 }
+
+[[brain]]
+label = "fire-only 0.7 (air 0.5)"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.7, warm_fire_only = true }
+
+[[brain]]
+label = "fire-only 1.5 (air 0.5)"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5, warm_bonus = 1.5, warm_fire_only = true }
+
+[[brain]]
+label = "fire-only 0.7 (air 1)"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 1.0, warm_bonus = 0.7, warm_fire_only = true }

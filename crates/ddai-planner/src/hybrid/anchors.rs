@@ -197,6 +197,44 @@ impl AnchorCache {
     }
 }
 
+/// The shield's anchor-aimed hook escapes (task 3.5b): up to `max_anchors` of `anchors` -- walls first
+/// (a sideways hook), then ceilings (a hook that hauls us up), nearest first -- each with and without
+/// a jump. The input walks towards a wall anchor (no direction for a ceiling), holds the hook and aims
+/// at the anchor point relative to the tee, as the ordinary escapes aim (a vector of length 300).
+pub fn hook_escapes(anchors: &[Anchor], me: Vec2, max_anchors: usize) -> Vec<crate::types::PlayerInput> {
+    let mut walls: Vec<&Anchor> = anchors.iter().filter(|a| a.kind == AnchorKind::Wall).collect();
+    let mut ceilings: Vec<&Anchor> = anchors.iter().filter(|a| a.kind == AnchorKind::Ceiling).collect();
+    walls.sort_by(|a, b| a.dist.total_cmp(&b.dist));
+    ceilings.sort_by(|a, b| a.dist.total_cmp(&b.dist));
+    let take_walls = walls.len().min(max_anchors.saturating_sub(1).max(1));
+    let picked: Vec<&Anchor> = walls
+        .into_iter()
+        .take(take_walls)
+        .chain(ceilings)
+        .take(max_anchors)
+        .collect();
+    let mut out = Vec::with_capacity(2 * picked.len());
+    for a in picked {
+        let (dx, dy) = (a.point.x - me.x, a.point.y - me.y);
+        let len = js::max(1.0, js::sqrt(dx * dx + dy * dy));
+        let dir = if a.kind == AnchorKind::Wall {
+            if dx > 0.0 { 1 } else { -1 }
+        } else {
+            0
+        };
+        for jump in [0, 1] {
+            let mut e = crate::types::empty_input();
+            e.direction = dir;
+            e.jump = jump;
+            e.hook = 1;
+            e.target_x = js::round(dx / len * 300.0);
+            e.target_y = js::round(dy / len * 300.0);
+            out.push(e);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

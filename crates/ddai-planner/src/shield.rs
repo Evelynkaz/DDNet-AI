@@ -25,6 +25,22 @@ use std::collections::HashMap;
 const HALF: f64 = PHYSICAL_SIZE / 2.0;
 const ESCAPE_TICKS: i32 = 36;
 const SETTLE_TICKS: i32 = 90;
+/// Speed (px/tick) under which a tee hanging on its hook is at rest.
+const HANG_SPEED: f64 = 1.5;
+
+/// Calm ticks a hang from our own tile hook needs before it counts as settled (task 3.5b, review F1): hooked to a
+/// tile, speed at most [`HANG_SPEED`], not frozen, for this many ticks in a row. A tee still swinging (even one
+/// that is merely grabbed at the moment) is in transit and may swing into freeze: the settle loop keeps running.
+/// Within ~42 px of the anchor the hook does not pull, so a tee rising through that zone falls freely and passes
+/// through speeds in `[-HANG_SPEED, HANG_SPEED]` for up to `2 * HANG_SPEED / gravity` ticks at the top of its arc
+/// (7 at stock gravity); the run has to be longer than that: `ceil(2 * HANG_SPEED / gravity) + 2` (8 at stock
+/// gravity 0.5; round 2, F1). A world with no gravity never settles early (the loop just runs on).
+fn hang_calm_ticks(gravity: f64) -> i32 {
+    if gravity <= 1e-3 {
+        return SETTLE_TICKS;
+    }
+    ((2.0 * HANG_SPEED / gravity).ceil() as i32 + 2).min(SETTLE_TICKS)
+}
 const MAX_TURN_RAD: f64 = 1.5;
 
 /// Review round 2, F12: how often (in ticks) a bounded rollout re-reads the clock -- "per escape
@@ -183,6 +199,46 @@ pub fn escape_exists_buffered<W: PlanWorld>(
     deadline: Option<(&dyn Clock, f64)>,
     bufs: &mut ShieldBuffers<W>,
 ) -> Bounded<bool> {
+    escape_exists_ext(
+        world,
+        self_id,
+        input,
+        hold_ticks,
+        others,
+        deadline,
+        bufs,
+        &mut ShieldOpts::default(),
+    )
+}
+
+/// Task 3.5b extras of the hybrid shield (the TS-parity and plain production callers use none).
+#[derive(Default)]
+pub struct ShieldOpts<'a> {
+    /// Tried before anything else, from the decision state: does the remainder of the chosen plan,
+    /// rolled out exactly, leave the tee safe? `Done(true)` ends the check with "an escape exists".
+    /// Anything else falls through to the ordinary escapes (a timeout here is not a verdict).
+    pub first: Option<&'a mut dyn FnMut() -> Bounded<bool>>,
+    /// Escape inputs tried after the standard ones: hooks aimed at anchors (walls, ceilings).
+    pub extras: &'a [PlayerInput],
+}
+
+/// [`escape_exists_buffered`] with the hybrid's extras (see [`ShieldOpts`]).
+#[allow(clippy::too_many_arguments)]
+pub fn escape_exists_ext<W: PlanWorld>(
+    world: &mut W,
+    self_id: i32,
+    input: &PlayerInput,
+    hold_ticks: i32,
+    others: &HashMap<i32, PlayerInput>,
+    deadline: Option<(&dyn Clock, f64)>,
+    bufs: &mut ShieldBuffers<W>,
+    opts: &mut ShieldOpts<'_>,
+) -> Bounded<bool> {
+    if let Some(first) = opts.first.as_mut()
+        && first() == Bounded::Done(true)
+    {
+        return Bounded::Done(true);
+    }
     save_into(world, &mut bufs.start);
     let result = escape_exists_inner(
         world,
@@ -192,11 +248,13 @@ pub fn escape_exists_buffered<W: PlanWorld>(
         others,
         deadline,
         &mut bufs.after_hold,
+        opts.extras,
     );
     world.restore_state(bufs.start.as_ref().expect("just saved"));
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn escape_exists_inner<W: PlanWorld>(
     world: &mut W,
     self_id: i32,
@@ -205,6 +263,7 @@ fn escape_exists_inner<W: PlanWorld>(
     others: &HashMap<i32, PlayerInput>,
     deadline: Option<(&dyn Clock, f64)>,
     after_hold_slot: &mut Option<W::SavedState>,
+    extras: &[PlayerInput],
 ) -> Bounded<bool> {
     crate::prof::inc_escape();
     for t in 0..hold_ticks {
@@ -222,6 +281,29 @@ fn escape_exists_inner<W: PlanWorld>(
             return Bounded::Done(false);
         }
     }
+    escape_tail(world, self_id, input, others, deadline, after_hold_slot, &[], extras)
+}
+
+/// The escape phase of `escapeExists`, from the world's current state (the state after the hold,
+/// or -- task 3.5b -- after the rest of a plan): snapshots it, then tries each escape input in turn
+/// (`lead`, then `escapes()`, then `extras`: hook escapes the hybrid aims at anchors) for `ESCAPE_TICKS` and
+/// lets the tee settle; `lead` inputs go before the standard ones. `input` supplies the aim and the jump-press tick the escapes are derived from.
+/// With `extras` empty this is exactly the TS algorithm's second half (the TS-parity callers).
+#[allow(clippy::too_many_arguments)]
+pub fn escape_tail<W: PlanWorld>(
+    world: &mut W,
+    self_id: i32,
+    input: &PlayerInput,
+    others: &HashMap<i32, PlayerInput>,
+    deadline: Option<(&dyn Clock, f64)>,
+    after_hold_slot: &mut Option<W::SavedState>,
+    lead: &[PlayerInput],
+    extras: &[PlayerInput],
+) -> Bounded<bool> {
+    // The hybrid's extra escapes (task 3.5b) also know that a tee hanging from a hook on a tile is
+    // settled; the TS-parity callers (no lead, no extras) keep the TS rule: standing, or alive at
+    // the end of the settle ticks.
+    let hang_ok = !lead.is_empty() || !extras.is_empty();
     save_into(world, after_hold_slot);
     let Some(me) = world.get_tee(self_id) else {
         return Bounded::Done(false);
@@ -247,7 +329,12 @@ fn escape_exists_inner<W: PlanWorld>(
     // `safer_input`'s own loop (below) always keeps it for its different reason (its result is the
     // *specific* first alternative that passes, so reordering there would change behavior, not
     // just speed).
-    for esc in escapes(me.vel.x, input.target_x, input.target_y) {
+    for esc in lead
+        .iter()
+        .copied()
+        .chain(escapes(me.vel.x, input.target_x, input.target_y))
+        .chain(extras.iter().copied())
+    {
         // Checked once per candidate unconditionally (not stride-gated): no point starting a
         // ~126-tick rollout we already know there's no time left for.
         if let Some((clock, deadline_ms)) = deadline
@@ -285,7 +372,7 @@ fn escape_exists_inner<W: PlanWorld>(
             return Bounded::TimedOut;
         }
         if ok {
-            match settles_safe(world, self_id, &esc, others, deadline) {
+            match settles_safe(world, self_id, &esc, others, deadline, hang_ok) {
                 Bounded::Done(true) => return Bounded::Done(true),
                 Bounded::Done(false) => {}
                 Bounded::TimedOut => return Bounded::TimedOut,
@@ -301,6 +388,7 @@ fn settles_safe<W: PlanWorld>(
     esc: &PlayerInput,
     others: &HashMap<i32, PlayerInput>,
     deadline: Option<(&dyn Clock, f64)>,
+    hang_ok: bool,
 ) -> Bounded<bool> {
     let coast = PlayerInput {
         hook: esc.hook,
@@ -308,6 +396,8 @@ fn settles_safe<W: PlanWorld>(
         target_y: esc.target_y,
         ..empty_input()
     };
+    let mut calm = 0;
+    let calm_needed = hang_calm_ticks(world.gravity(self_id));
     for t in 0..SETTLE_TICKS {
         if deadline_hit(deadline, t) {
             return Bounded::TimedOut;
@@ -320,6 +410,21 @@ fn settles_safe<W: PlanWorld>(
         }
         if standing(world.collision(), me.pos.x, me.pos.y, me.vel.y) {
             return Bounded::Done(true);
+        }
+        // Hanging from our own hook on a tile (and still holding it) and at rest for a few ticks in a
+        // row: settled, the rope keeps us up. (Tile hooks never time out; the risk is the swing before
+        // the rest, so a grabbed hook alone proves nothing.)
+        if hang_ok && coast.hook != 0 && me.hook_state == crate::types::HOOK_GRABBED && me.hooked_player < 0 {
+            if me.vel.x.hypot(me.vel.y) <= HANG_SPEED {
+                calm += 1;
+                if calm >= calm_needed {
+                    return Bounded::Done(true);
+                }
+            } else {
+                calm = 0;
+            }
+        } else {
+            calm = 0;
         }
         world.set_input(self_id, coast);
         apply_others(world, others);
@@ -388,6 +493,24 @@ pub fn safer_input_buffered<W: PlanWorld>(
     deadline: Option<(&dyn Clock, f64)>,
     bufs: &mut ShieldBuffers<W>,
 ) -> Bounded<Option<PlayerInput>> {
+    safer_input_ext(world, self_id, input, hold_ticks, others, sent_aim, deadline, bufs, &[])
+}
+
+/// [`safer_input_buffered`] whose escape checks also try `extras` (hook escapes at anchors). The
+/// alternatives it offers are still only the standard ones: an anchor hook is an *escape* the tee can
+/// make after the held input, not a replacement for the held input.
+#[allow(clippy::too_many_arguments)]
+pub fn safer_input_ext<W: PlanWorld>(
+    world: &mut W,
+    self_id: i32,
+    input: &PlayerInput,
+    hold_ticks: i32,
+    others: &HashMap<i32, PlayerInput>,
+    sent_aim: Option<&PlayerInput>,
+    deadline: Option<(&dyn Clock, f64)>,
+    bufs: &mut ShieldBuffers<W>,
+    extras: &[PlayerInput],
+) -> Bounded<Option<PlayerInput>> {
     let Some(me) = world.get_tee(self_id) else {
         return Bounded::Done(None);
     };
@@ -418,7 +541,16 @@ pub fn safer_input_buffered<W: PlanWorld>(
             target_y: js::round(js::sin(a) * 300.0),
             ..*input
         };
-        match escape_exists_buffered(world, self_id, &cand, hold_ticks, others, deadline, bufs) {
+        match escape_exists_ext(
+            world,
+            self_id,
+            &cand,
+            hold_ticks,
+            others,
+            deadline,
+            bufs,
+            &mut ShieldOpts { first: None, extras },
+        ) {
             Bounded::Done(true) => return Bounded::Done(Some(cand)),
             Bounded::Done(false) => {}
             Bounded::TimedOut => return Bounded::TimedOut,
@@ -430,6 +562,18 @@ pub fn safer_input_buffered<W: PlanWorld>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hang_needs_more_calm_ticks_than_a_free_fall_apex_lasts() {
+        // Stock gravity 0.5: the apex of an arc is calm (|v| <= 1.5) for 2 * 1.5 / 0.5 = 6 (up to 7) ticks.
+        assert_eq!(hang_calm_ticks(0.5), 8);
+        // Weaker gravity lengthens the apex, so the requirement grows; no gravity never settles early.
+        assert_eq!(hang_calm_ticks(0.25), 14);
+        assert_eq!(hang_calm_ticks(0.0), SETTLE_TICKS);
+        assert_eq!(hang_calm_ticks(0.001), SETTLE_TICKS);
+        // Stronger gravity shortens it but never below the +2 margin.
+        assert_eq!(hang_calm_ticks(5.0), 3);
+    }
 
     #[test]
     fn escapes_without_braking_gives_3_options() {

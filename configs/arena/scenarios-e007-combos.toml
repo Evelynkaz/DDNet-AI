@@ -1,0 +1,71 @@
+# E-007 part 6b: technique scenarios T1-T18 with the T1b leapfrog technique in the pool, the cost of ending a rollout
+# in the air without jumps (`jumpless_air_cost`) and the speed options, hybrid 4 ms (work clock, adaptive on), 200 trials.
+#   ddnet-ai arena scenarios --config configs/arena/scenarios-e007-combos.toml --out ~/aiddnet/data/runs/E-007/combos-scenarios
+name = "scenarios E-007 combos"
+seed = 1
+trials = 200
+
+[[brain]]
+label = "planner-fixed"
+brain = "planner"
+mode = "fixed"
+
+[[brain]]
+label = "hybrid-fixed"
+brain = "hybrid"
+mode = "fixed"
+
+[[brain]]
+label = "base (T1b, air 0)"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+
+[[brain]]
+label = "air 1"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 1.0 }
+
+[[brain]]
+label = "air 0.5"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5 }
+
+[[brain]]
+label = "air 1 + dynamic stage 2"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 1.0, stage2_dynamic = true }
+
+[[brain]]
+label = "air 0.5 + dynamic stage 2"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5, stage2_dynamic = true }
+
+[[brain]]
+label = "air 1 + dynamic + prune"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 1.0, stage2_dynamic = true, prune = true }
+
+[[brain]]
+label = "air 0.5 + dynamic + two-world"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { jumpless_air_cost = 0.5, stage2_dynamic = true, two_world = true }

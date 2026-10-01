@@ -1,0 +1,50 @@
+# T29 -- jump before a freeze ahead when running at speed (block-techniques-r1.md T29; DDNet++
+# AvoidFreeze: "jump over freeze when flying into it from the side").
+#
+# A runs right at vx 6 toward a two-tile freeze gap in the floor, ten tiles before it. Walking in is
+# a freeze; a jump at the right moment clears it. Success: A never out and is past the gap (x >= 32 tiles, any height) at
+# tick 70 (the far side of the gap). The reference jumps at tick 14.
+id = "T29"
+name = "Jump before the freeze ahead"
+source = "block-techniques-r1.md T29; W-edge"
+description = "Running at speed toward a two-tile freeze gap in the floor: jump over it."
+horizon = 70
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 30, y0 = 10, x1 = 31, y1 = 10, tile = "freeze" },
+]
+
+[[tee]]
+pos = [20.5, 9.5]
+jitter = [0.5, 0.0]
+vel = [6.0, 0.0]
+
+[[tee]]
+pos = [55.5, 9.5]
+
+[success]
+kind = "all"
+of = [
+    { kind = "not_out", tee = 0 },
+    { kind = "in_box", tee = 0, tick = 70, x0 = 32.0, y0 = 0.0, x1 = 59.0, y1 = 10.0 },
+]
+
+[[reference]]
+from = 0
+direction = 1
+
+[[reference]]
+from = 14
+direction = 1
+jump = true
+
+[[reference]]
+from = 16
+direction = 1

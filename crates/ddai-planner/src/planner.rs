@@ -477,6 +477,12 @@ pub struct Planner<W: PlanWorld> {
     predicted: Vec<PlayerInput>,
 
     pub(crate) track_rollout: bool,
+    /// Task 3.5b (hybrid shield): `evaluate_impl` leaves the world in its end-of-plan state instead of
+    /// restoring the snapshot, so the caller can continue from there. `false` everywhere else.
+    pub(crate) keep_final: bool,
+    /// The input of the last plan step of the most recent `evaluate_impl` (what the tee would keep
+    /// doing if the plan went on): the shield's plan-remainder escape continues with it.
+    pub(crate) last_input: PlayerInput,
     track_gap: bool,
     rollout_min_gap: f64,
     pub(crate) react_this_pass: bool,
@@ -569,6 +575,8 @@ impl<W: PlanWorld> Planner<W> {
             seed_offset,
             predicted: Vec::new(),
             track_rollout: false,
+            keep_final: false,
+            last_input: crate::types::empty_input(),
             track_gap: false,
             rollout_min_gap: EDGE_GAP_PX,
             react_this_pass: false,
@@ -695,6 +703,12 @@ impl<W: PlanWorld> Planner<W> {
     pub fn set_spare_bystanders(&mut self, tees: Vec<Vec2>, vels: Vec<Vec2>) {
         self.spares = tees;
         self.spare_vels = vels;
+    }
+
+    /// Task 3.5b: the hybrid workers copy the live spared tees in place (no allocation once the
+    /// buffers have grown).
+    pub(crate) fn spares_mut(&mut self) -> (&mut Vec<Vec2>, &mut Vec<Vec2>) {
+        (&mut self.spares, &mut self.spare_vels)
     }
 
     pub fn set_band(&mut self, band: Option<(f64, f64, f64, f64)>) {
@@ -3100,6 +3114,19 @@ impl<W: PlanWorld> Planner<W> {
         {
             score -= self.cfg.landing_cost * flight_ends_in_hazard(world.collision(), me_end.pos, me_end.vel);
         }
+        if self.cfg.jumpless_air_cost > 0.0
+            && let Some(me_end) = world.get_tee(self_id)
+            && me_end.alive
+            && !me_end.frozen
+            && me_end.jumps_left == 0
+        {
+            let col = world.collision();
+            let on_ground = col.is_solid(me_end.pos.x - 13.0, me_end.pos.y + 16.0)
+                || col.is_solid(me_end.pos.x + 13.0, me_end.pos.y + 16.0);
+            if !on_ground {
+                score -= self.cfg.jumpless_air_cost;
+            }
+        }
         if self.cfg.enemy_landing_bonus > 0.0
             && let Some(en_end) = world.get_tee(enemy_id)
             && en_end.alive
@@ -3150,7 +3177,10 @@ impl<W: PlanWorld> Planner<W> {
             self.rollout_enemy_sealed =
                 en_end.is_some_and(|e| !e.alive || (e.frozen && rests_in_freeze(world.collision(), e.pos, e.vel) > 0));
         }
-        world.restore_state(self.saved.as_ref().unwrap());
+        self.last_input = input;
+        if !self.keep_final {
+            world.restore_state(self.saved.as_ref().unwrap());
+        }
         self.events_buf = events;
         if let Some(log) = self.candidate_log.as_mut() {
             log.push((plan.to_vec(), score));

@@ -457,6 +457,15 @@ impl PlanWorld for PhysicsWorld {
     /// observe a live core (`step`/`apply_tee_state`/`add_tee`, via the private
     /// [`PhysicsWorld::snapshot_live`] + [`PhysicsWorld::refresh_cache`]), not by this method --
     /// `get_tee` takes `&self` (matching the trait) and never needs interior mutability for that.
+    fn gravity(&self, id: i32) -> f64 {
+        if !(0..MAX_CLIENTS as i32).contains(&id) {
+            return 0.5;
+        }
+        self.world.cores.slot_of(id as u8).map_or(0.5, |slot| {
+            f64::from(self.world.cores.core_at(slot).tuning.gravity::<f32>())
+        })
+    }
+
     fn get_tee(&self, id: i32) -> Option<TeeState> {
         if !(0..MAX_CLIENTS as i32).contains(&id) || !self.present[id as usize] {
             return None;

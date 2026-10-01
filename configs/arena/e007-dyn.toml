@@ -1,0 +1,51 @@
+# E-007 (task 3.5b), part 2b: stage 1 keeps the time stage 2 does not need (`stage2_dynamic`), alone and with
+# early pruning; hybrid 4 ms (work clock, adaptive on) against the fixed planner, 400 games per arena.
+#   ddnet-ai arena run --config configs/arena/e007-dyn.toml --out ~/aiddnet/data/runs/E-007/dyn --threads 4
+name = "E-007 dynamic stage 2"
+base_seed = 500
+games = 400
+
+[[condition]]
+name = "clb-left: base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: dynamic stage 2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: dynamic stage 2 + prune 3/0.5"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: base"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: dynamic stage 2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: dynamic stage 2 + prune 3/0.5"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: base"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: dynamic stage 2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: dynamic stage 2 + prune 3/0.5"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]

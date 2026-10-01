@@ -1,0 +1,39 @@
+# T22 -- brake anchor to the floor when thrown up toward a freeze ceiling (block-techniques-r1.md T22).
+#
+# A has been thrown upward (vy -11) under a freeze ceiling 2.5 tiles above, nobody below: the T10
+# answer (hook the opponent below) does not exist, the floor is the anchor. Rising alone reaches the
+# ceiling (121 px of rise at 0.5 px/tick^2); a hook straight down brakes it (R1 §1, ~43 px).
+# Success: A is never out for the horizon.
+id = "T22"
+name = "Brake anchor to the floor against a ceiling"
+source = "block-techniques-r1.md T22; GC-wallhook"
+description = "Thrown upward under a freeze ceiling with no opponent below: hook the floor and brake."
+horizon = 80
+trials = 20
+
+[map]
+kind = "synthetic"
+width = 60
+height = 16
+border = true
+rects = [
+    { x0 = 1, y0 = 10, x1 = 58, y1 = 13, tile = "solid" },
+    { x0 = 20, y0 = 3, x1 = 40, y1 = 4, tile = "freeze" },
+]
+
+[[tee]]
+pos = [30.5, 8.0]
+jitter = [0.4, 0.0]
+vel = [0.0, -11.0]
+
+[[tee]]
+pos = [50.5, 9.5]
+
+[success]
+kind = "not_out"
+tee = 0
+
+[[reference]]
+from = 0
+hook = true
+aim = [0, 100]

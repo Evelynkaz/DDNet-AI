@@ -1,0 +1,98 @@
+# E-007 (task 3.5b), part 7: the two-world search in 1vN. The pool (book, techniques, throws, CEM) is scored in a
+# reduced world with us and the victim only (cheap: the tempo of the 1v1 model); the best few, and up to two
+# defensive techniques when danger is flagged, are re-scored in the full world with the threats and their
+# modelled replies (the safety of the threat model). 1v2/1v3/1v5 on clb-left, 200 games, work clock, adaptive off.
+#   ddnet-ai arena run --config configs/arena/e007-2w.toml --out ~/aiddnet/data/runs/E-007/2w --threads 4
+name = "E-007 two-world"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "1v2 cap 4 + crowd stage (reference)"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 1v1 model (reference)"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 two-world cap 6"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6 } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 two-world cap 4"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 4 } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 two-world cap 6 + crowd stage"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6, crowd_stage = true } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 two-world cap 6 + dynamic stage 2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6, stage2_dynamic = true } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v3 cap 4 + crowd stage (reference)"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 1v1 model (reference)"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 two-world cap 6"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 two-world cap 4"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 4 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 two-world cap 6 + crowd stage"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6, crowd_stage = true } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 two-world cap 6 + dynamic stage 2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6, stage2_dynamic = true } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v5 cap 4 + crowd stage (reference)"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 1v1 model (reference)"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 two-world cap 6"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 two-world cap 4"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 4 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 two-world cap 6 + crowd stage"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6, crowd_stage = true } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 two-world cap 6 + dynamic stage 2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, two_world = true, max_sim_tees = 6, stage2_dynamic = true } }, { brain = "scripted", count = 5 }]

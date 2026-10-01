@@ -764,46 +764,48 @@ fn crowd_with_spared() -> (Vec<TeeSpec>, Relations) {
 
 #[test]
 fn spared_tees_within_contact_range_are_bodies_counted_apart_from_the_local_others() {
-    support::big_stack(|| {
-        // Review F8 (task 4.1b): the planner honours `spare_ids`, so it gets the nearest three spared
-        // tees within 200 px as physical bodies, in addition to the target and its five nearest others.
-        let (tees, rel) = crowd_with_spared();
-        let (mut bot, mut sc, (log, ..)) = setup(tees, rel);
-        sc.player_mut(4).ex_flags = explayerflagflag::AFK;
-        let active: Vec<i32> = (1..=12).filter(|&i| i != 4).collect();
-        run_active(&mut bot, &mut sc, &active, 8);
-        let seen = log.borrow();
-        let last = seen.last().unwrap();
-        assert_eq!(last.target, Some(1));
-        let world: Vec<i32> = last.world_ids.iter().copied().filter(|&i| i != 0).collect();
-        // Target + the 5 nearest opponents (p6..p10) + the 3 nearest spared (p2, p3, p4).
-        for id in [1, 6, 7, 8, 9, 10] {
-            assert!(world.contains(&id), "{id} in {world:?}");
-        }
-        assert!(
-            !world.contains(&11),
-            "only five opponents besides the target: {world:?}"
-        );
-        for id in [2, 3, 4] {
-            assert!(world.contains(&id), "spared body {id} in {world:?}");
-        }
-        assert!(!world.contains(&5), "at most three spared bodies: {world:?}");
-        assert!(!world.contains(&12), "beyond contact range: {world:?}");
-        assert_eq!(world.len(), 1 + 5 + 3);
-        // The brain is told who is spared (every spared tee in hook reach + 64 px, not just the bodies).
-        let mut ids = last.spare_ids.clone();
-        ids.sort_unstable();
-        assert_eq!(ids, vec![2, 3, 4, 5], "ids; p12 is 500 px away");
-        assert_eq!(last.spares.len(), 4, "and their positions stay for the geometric gates");
-    });
+    for kind in [BrainKind::Planner, BrainKind::Hybrid] {
+        support::big_stack(move || {
+            // Review F8 (task 4.1b): the planner and (task 3.5b) the hybrid honour `spare_ids`, so it gets the nearest three spared
+            // tees within 200 px as physical bodies, in addition to the target and its five nearest others.
+            let (tees, rel) = crowd_with_spared();
+            let (mut bot, mut sc, (log, ..)) = setup_on(room(&[]), tees, rel, kind);
+            sc.player_mut(4).ex_flags = explayerflagflag::AFK;
+            let active: Vec<i32> = (1..=12).filter(|&i| i != 4).collect();
+            run_active(&mut bot, &mut sc, &active, 8);
+            let seen = log.borrow();
+            let last = seen.last().unwrap();
+            assert_eq!(last.target, Some(1));
+            let world: Vec<i32> = last.world_ids.iter().copied().filter(|&i| i != 0).collect();
+            // Target + the 5 nearest opponents (p6..p10) + the 3 nearest spared (p2, p3, p4).
+            for id in [1, 6, 7, 8, 9, 10] {
+                assert!(world.contains(&id), "{id} in {world:?}");
+            }
+            assert!(
+                !world.contains(&11),
+                "only five opponents besides the target: {world:?}"
+            );
+            for id in [2, 3, 4] {
+                assert!(world.contains(&id), "spared body {id} in {world:?}");
+            }
+            assert!(!world.contains(&5), "at most three spared bodies: {world:?}");
+            assert!(!world.contains(&12), "beyond contact range: {world:?}");
+            assert_eq!(world.len(), 1 + 5 + 3);
+            // The brain is told who is spared (every spared tee in hook reach + 64 px, not just the bodies).
+            let mut ids = last.spare_ids.clone();
+            ids.sort_unstable();
+            assert_eq!(ids, vec![2, 3, 4, 5], "ids; p12 is 500 px away");
+            assert_eq!(last.spares.len(), 4, "and their positions stay for the geometric gates");
+        });
+    }
 }
 
 #[test]
 fn a_brain_that_does_not_honour_spare_ids_gets_no_spared_bodies_unless_roped_to_us() {
     support::big_stack(|| {
-        // The hybrid (until task 3.5b) would read a body as an opponent: round-1 behaviour stays.
+        // A brain that ignores `spare_ids` (the idle brain here) would read a body as an opponent: round-1 behaviour stays.
         let (tees, rel) = crowd_with_spared();
-        let (mut bot, mut sc, (log, ..)) = setup_on(room(&[]), tees, rel, BrainKind::Hybrid);
+        let (mut bot, mut sc, (log, ..)) = setup_on(room(&[]), tees, rel, BrainKind::Idle);
         sc.player_mut(4).ex_flags = explayerflagflag::AFK;
         sc.tee_mut(5).hooked_player = 0; // p5 (a friend) is roped to us: kept
         let active: Vec<i32> = (1..=12).filter(|&i| i != 4).collect();
@@ -855,7 +857,7 @@ fn a_spared_body_between_us_and_a_freeze_edge_is_simulated_so_the_brain_does_not
             (last.self_x, last.self_frozen, last.world_ids.contains(&2))
         };
         let (with_x, with_frozen, has_body) = predicted(BrainKind::Planner);
-        let (without_x, without_frozen, no_body) = predicted(BrainKind::Hybrid);
+        let (without_x, without_frozen, no_body) = predicted(BrainKind::Idle);
         println!(
             "predicted: with the body x={with_x} frozen={with_frozen}; without x={without_x} frozen={without_frozen}"
         );

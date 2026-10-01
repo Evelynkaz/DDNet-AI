@@ -4,7 +4,7 @@
 //! * `hostile_and_edge_inputs_never_panic`: an empty world, no opponent, a dead target, a target
 //!   that is not in the world, a frozen self, a dead self, 12 tees, tees at the map corners and
 //!   outside it, huge velocities, input lag, every worker count.
-//! * `soak_*`: a varied stream of scenes (2-8 tees, random positions, velocities, freezes,
+//! * `soak_*`: a varied stream of scenes (2-15 tees, random positions, velocities, freezes,
 //!   deaths, respawns, resets) decided in a row by one brain; live heap (`allocation_counter`)
 //!   after the warm-up stays flat, and the work per decision stays under its bound.
 //!   The short soak runs in every `cargo test`; `soak_ten_thousand_decisions` (`--ignored`) is the
@@ -132,10 +132,39 @@ fn hostile_and_edge_inputs_never_panic() {
     on_big_stack(hostile_inputs);
 }
 
+/// The configurations the hostile inputs run under: fixed work with 1 and 3 workers, fixed work with
+/// every 3.5b option on and the tightest local-tee cap, and a wall-clock deadline with the options of
+/// the speed work (dynamic stage 2, pruning) and the timeout-as-danger shield.
+fn hostile_configs() -> Vec<HybridConfig> {
+    let options = |mut c: HybridConfig| {
+        c.prune.enabled = true;
+        c.robust.crowd_stage = true;
+        c.shield_timeout_danger = true;
+        c.shield_hook_anchors = 8;
+        c.two_world = true;
+        c
+    };
+    vec![
+        fixed(1),
+        fixed(3),
+        options(HybridConfig {
+            max_sim_tees: 1,
+            ..fixed(1)
+        }),
+        options(HybridConfig {
+            mode: HybridMode::Deadline { budget_ms: 3.0 },
+            stage2_dynamic: true,
+            max_sim_tees: 3,
+            proposals: 0,
+            ..HybridConfig::default()
+        }),
+    ]
+}
+
 fn hostile_inputs() {
     let map = hall();
-    for workers in [1usize, 3] {
-        let mut b = brain(fixed(workers));
+    for cfg in hostile_configs() {
+        let mut b = brain(cfg);
         reset(&mut b, &map, 1);
 
         // A world with only us, and an observation with no opponent.
@@ -152,6 +181,42 @@ fn hostile_inputs() {
         assert!(valid(&b.decide_in(&o, Some(&view))));
         assert!(valid(&b.decide(&o)));
         assert!(valid(&b.decide_in(&o, None)));
+
+        // Hostile live context: NaN and absurd spared positions, spared ids that are us, missing or negative,
+        // a NaN travel goal; every tee spared (nothing to play against); then cleared again.
+        b.set_spares(
+            vec![
+                Vec2 { x: f64::NAN, y: 1.0 },
+                Vec2 { x: 1e30, y: -1e30 },
+                Vec2 { x: 100.0, y: 400.0 },
+            ],
+            vec![Vec2 {
+                x: f64::INFINITY,
+                y: 0.0,
+            }],
+        );
+        b.set_spare_ids(vec![0, 1, 99, -5]);
+        b.set_travel_goal(Some(Vec2 {
+            x: f64::NAN,
+            y: f64::NAN,
+        }));
+        assert!(valid(&b.decide_in(&o, Some(&view))));
+        let mut pwl = PhysicsWorld::new(map.clone(), 1);
+        pwl.add_tee(0, Vec2 { x: 100.0, y: 400.0 });
+        pwl.add_tee(1, Vec2 { x: 300.0, y: 400.0 });
+        let wl = pwl.inner().clone();
+        let ol = obs_for(&wl, &map, 0, &[0, 1], Some(1)).unwrap();
+        let viewl = WorldView {
+            world: &wl,
+            self_id: 0,
+            lag_ticks: 0,
+            in_flight: &[],
+        };
+        assert!(valid(&b.decide_in(&ol, Some(&viewl))), "the only other tee is spared");
+        b.set_spares(Vec::new(), Vec::new());
+        b.set_spare_ids(Vec::new());
+        b.set_travel_goal(None);
+        assert!(valid(&b.decide_in(&ol, Some(&viewl))));
 
         // The observation names a target that is not in the world.
         let mut pw = PhysicsWorld::new(map.clone(), 1);
@@ -248,7 +313,8 @@ fn hostile_inputs() {
 
 /// One scene of the soak: `n` tees at random standing spots with random states.
 fn random_scene(rng: &mut Rng, map: &Arc<MapData>) -> (PhysicsWorld, Vec<i32>) {
-    let n = 2 + (rng.next_float() * 7.0) as usize;
+    // 2 to 15 tees: from a duel to a hub crowd (the local-tee selection keeps the cost of a crowd low).
+    let n = 2 + (rng.next_float() * 14.0) as usize;
     let mut pw = PhysicsWorld::new(map.clone(), 1 + (rng.next_float() * 1000.0) as u64);
     let mut ids = Vec::new();
     for i in 0..n {
@@ -326,9 +392,10 @@ fn soak(b: &mut HybridBrain, map: &Arc<MapData>, rng: &mut Rng, decisions: usize
             assert!(valid(&a));
             done += 1;
             if let Some(t) = b.last_decision() {
-                // Work in tee-ticks (a tick costs in proportion to the tees in the world).
-                let tee_ticks = t.work.total_ticks() * ids.len() as u64;
-                let search_ticks = (t.work.total_ticks() - t.work.proposal) * ids.len() as u64;
+                // Work in tee-ticks (a tick costs in proportion to the tees simulated: the local ones).
+                let sim = u64::from(t.sim_tees.max(1));
+                let tee_ticks = t.work.total_ticks() * sim;
+                let search_ticks = (t.work.total_ticks() - t.work.proposal) * sim;
                 max_search = max_search.max(search_ticks);
                 if tee_ticks > max_ticks {
                     max_ticks = tee_ticks;
@@ -371,10 +438,10 @@ fn soak_cfg() -> HybridConfig {
     }
 }
 
-fn run_soak(total: usize) {
+fn run_soak(total: usize, cfg: HybridConfig) {
     let map = hall();
     let mut rng = Rng::new(20260929);
-    let mut b = HybridBrain::new(soak_cfg(), ClockKind::Wall, Box::new(ScriptedProposer::new())).expect("config");
+    let mut b = HybridBrain::new(cfg, ClockKind::Wall, Box::new(ScriptedProposer::new())).expect("config");
     reset(&mut b, &map, 1);
     // Warm-up: caches (anchor tiles, buffers, hash maps) reach their working size.
     let warm = total / 3;
@@ -414,13 +481,35 @@ fn run_soak(total: usize) {
     assert!(t.extended <= t.danger_flagged);
 }
 
+/// The deadline soak with the speed and shield options of 3.5b on: early pruning, dynamic stage 2, the
+/// crowd stage, the shield counting a timeout as danger.
+fn soak_cfg_options() -> HybridConfig {
+    let mut c = soak_cfg();
+    c.prune.enabled = true;
+    c.stage2_dynamic = true;
+    c.robust.crowd_stage = true;
+    c.shield_timeout_danger = true;
+    c.two_world = true;
+    c
+}
+
 #[test]
 fn soak_a_thousand_decisions_in_varied_scenes() {
-    on_big_stack(|| run_soak(1_200));
+    on_big_stack(|| run_soak(1_200, soak_cfg()));
+}
+
+#[test]
+fn soak_with_the_options_of_3_5b() {
+    on_big_stack(|| run_soak(1_200, soak_cfg_options()));
 }
 
 #[test]
 #[ignore = "10 000 decisions: about a minute in release"]
 fn soak_ten_thousand_decisions() {
-    on_big_stack(|| run_soak(10_000));
+    // `DDAI_SOAK_TOTAL` runs a longer session (the growth must stay flat, not scale with the length).
+    let total = std::env::var("DDAI_SOAK_TOTAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000);
+    on_big_stack(move || run_soak(total, soak_cfg()));
 }

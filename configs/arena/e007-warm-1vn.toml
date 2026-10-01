@@ -1,0 +1,25 @@
+# E-007 part 11b: the fire-only warm bonus in 1vN (seed 1, 200 games, work clock, adaptive off, cap 4 + crowd stage).
+#   ddnet-ai arena run --config configs/arena/e007-warm-1vn.toml --out ~/aiddnet/data/runs/E-007/warm-1vn --threads 4
+name = "E-007 warm bonus 1vN"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "1v3 warm bonus 0"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.0 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 fire-only warm bonus 0.7"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.7, warm_fire_only = true } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v5 warm bonus 0"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.0 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 fire-only warm bonus 0.7"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.7, warm_fire_only = true } }, { brain = "scripted", count = 5 }]

@@ -204,7 +204,8 @@ fn run(map: &Arc<MapData>, cfg: &HybridConfig, proposer: Box<dyn Proposer>, tees
                     let t = hybrid.last_decision().expect("telemetry");
                     row.wall.push(wall);
                     row.ticks.push(t.work.total_ticks() as f64);
-                    row.tee_ticks.push((t.work.total_ticks() * tees as u64) as f64);
+                    row.tee_ticks
+                        .push((t.work.total_ticks() * u64::from(t.sim_tees.max(1))) as f64);
                     row.cands.push(f64::from(t.evaluated.iter().sum::<u32>()));
                     row.fly_ms.push(t.proposal_ms);
                     row.search_ms.push(t.search_ms);
@@ -388,24 +389,31 @@ fn speed_report() {
         "| tees | decision cap ms | shield reserve ms/tee | adaptive | work ms p50 / p90 / p99 / max | candidates p50 | shield incomplete | search extended |\n|---|---|---|---|---|---|---|---|"
     );
     for tees in [2usize, 4, 6] {
-        for (cap, reserve, adaptive) in [
-            (None, 0.5, false),
-            (Some(5.0), 0.5, false),
-            (Some(5.0), 0.25, false),
-            (Some(5.0), 0.15, false),
-            // The default: the extension also serves a shield check that timed out (review round 1, F1).
-            (Some(5.0), 0.25, true),
+        for (cap, reserve, adaptive, timeout_danger) in [
+            (None, 0.5, false, false),
+            (Some(5.0), 0.5, false, false),
+            (Some(5.0), 0.25, false, false),
+            (Some(5.0), 0.15, false, false),
+            // The default: the extension serves a confirmed danger only.
+            (Some(5.0), 0.25, true, false),
+            // ... and also a shield check that timed out (task 3.5b).
+            (Some(5.0), 0.25, true, true),
         ] {
             let mut cfg = deadline(4.0, 1, adaptive, 0);
             cfg.work_clock_us_per_tick = Some(2.2);
             cfg.decision_cap_ms = cap;
             cfg.shield_reserve_ms_per_tee = reserve;
+            cfg.shield_timeout_danger = timeout_danger;
             let mut r = run(&map, &cfg, Box::new(NoProposer), tees, n * 2);
             let ms = |v: &mut Vec<f64>, p: f64| pct(v, p) * 2.2 / 1000.0;
             println!(
                 "| {tees} | {} | {reserve} | {} | {:.2} / {:.2} / {:.2} / {:.2} | {:.0} | {:.1}% | {:.1}% |",
                 cap.map_or("none".to_string(), |c| format!("{c}")),
-                if adaptive { "on" } else { "off" },
+                match (adaptive, timeout_danger) {
+                    (false, _) => "off",
+                    (true, false) => "on",
+                    (true, true) => "on + timeout danger",
+                },
                 ms(&mut r.tee_ticks, 50.0),
                 ms(&mut r.tee_ticks, 90.0),
                 ms(&mut r.tee_ticks, 99.0),

@@ -67,11 +67,10 @@ impl BrainKind {
     /// review F8). A brain that does not would read a body as an opponent, which is worse than not
     /// simulating it, so for those the bot keeps the round-1 behaviour (spared tees out of the world).
     ///
-    /// **Task 3.5b: `HybridBrain::set_live_context` must filter `spare_ids` out of its threat,
-    /// victim and hook-target sets; then add `BrainKind::Hybrid` here** (one line) and the hybrid
-    /// gets the bodies too. Until then the hybrid is left out on purpose.
+    /// The hybrid does (task 3.5b: `HybridBrain::set_live_context` keeps the ids out of its threat,
+    /// victim, target and hook-target sets).
     pub fn honours_spare_ids(self) -> bool {
-        matches!(self, BrainKind::Planner)
+        matches!(self, BrainKind::Planner | BrainKind::Hybrid)
     }
 }
 

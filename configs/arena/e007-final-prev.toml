@@ -1,0 +1,37 @@
+# E-007 final matrix, the 3.5-like reference rows: the same binary with every 3.5b option switched off
+# (all tees in the rollouts, no crowd stage, no commitment bonus, no air cost, no dynamic stage 2, the shield without plan escape,
+# hook anchors and skipping). The new techniques T1b/T29/T42 cannot be switched off separately and stay in.
+#   ddnet-ai arena run --config configs/arena/e007-final-prev.toml --out ~/aiddnet/data/runs/E-007/final/prev --threads 3
+name = "E-007 final: 3.5-like reference, 1vN, crowds and scripted"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: hybrid 3.5-like 4 ms vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: hybrid 3.5-like 4 ms vs scripted"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 3.5-like 4 ms vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted" }]
+
+[[condition]]
+name = "1v2 hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v3 hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v5 hybrid 3.5-like 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "scripted", count = 5 }]

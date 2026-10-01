@@ -1,0 +1,66 @@
+# E-007 final matrix (task 3.5b): the final defaults on the work clock (hybrid = {} is the default config), credited win
+# rate (D-059) with an idle baseline on the same arenas and seeds (e007-idle*.toml).
+#   ddnet-ai arena run --config configs/arena/e007-final-threat.toml --out ~/aiddnet/data/runs/E-007/final/threat --threads 4
+name = "E-007 final: 1vN"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "1v2 hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 hybrid 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { threat_model = false } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 hybrid fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v2 planner fixed"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "1v3 hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 hybrid 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { threat_model = false } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 hybrid fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v3 planner fixed"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v5 hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 hybrid 1v1 model"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { threat_model = false } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 hybrid fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "1v5 planner fixed"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted", count = 5 }]

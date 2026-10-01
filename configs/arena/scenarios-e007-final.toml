@@ -1,0 +1,41 @@
+# E-007 final (task 3.5b): technique scenarios T1-T18 at 200 trials, the final defaults. The hybrid rows run on the
+# work clock (load-independent); `planner-4ms` runs on the wall clock of a loaded VM and is only a reference.
+#   ddnet-ai arena scenarios --config configs/arena/scenarios-e007-final.toml --out ~/aiddnet/data/runs/E-007/final/scenarios
+name = "scenarios E-007 final"
+seed = 1
+trials = 200
+
+[[brain]]
+label = "idle"
+brain = "idle"
+
+[[brain]]
+label = "planner-fixed"
+brain = "planner"
+mode = "fixed"
+
+[[brain]]
+label = "planner-4ms-wall"
+brain = "planner"
+mode = "deadline"
+budget_ms = 4.0
+
+[[brain]]
+label = "hybrid-fixed"
+brain = "hybrid"
+mode = "fixed"
+
+[[brain]]
+label = "hybrid-4ms"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { adaptive = false }
+
+[[brain]]
+label = "hybrid-default"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0

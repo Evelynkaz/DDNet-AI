@@ -135,7 +135,7 @@ pub fn play_game(
         return Err(EnvError::new("too many players"));
     }
     let credit_required = rules.credit_required.unwrap_or(n > 2);
-    let mut spawn = arena.spawn_tiles(seed, n)?;
+    let mut spawn = arena.spawn_tiles_crowd(seed, n, rules.crowd_from, rules.crowd_spacing)?;
     if layout.swap {
         spawn.swap(0, 1);
     }
