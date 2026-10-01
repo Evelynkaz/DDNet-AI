@@ -434,3 +434,8 @@ Ubuntu-origin'ы остаются как есть. Проверено живьё
   SCCACHE_CACHE_SIZE=20G cargo build`. Кэшируются в основном зависимости (для крейтов воркспейса в dev-профиле
   cargo использует инкрементальную сборку, а её sccache не кэширует).
 - Статистика: `sccache --show-stats`, остановить сервер: `sccache --stop-server`.
+
+## Пакеты, поставленные 2026-10-01
+
+- `git-lfs` 3.4.1 (`sudo apt-get install -y git-lfs`). Нужен, чтобы скачивать LFS-архивы демок ChillerDragon по
+  D-057 в `~/aiddnet/data/demos/chillerdragon/`.
