@@ -1,0 +1,4 @@
+# Paths (bash globs, `*` also matches `/`) that tools/ci/no-weights.sh lets through even though they match a rule.
+# One per line; say why in a comment above it. Empty on purpose: as of task 2.4d nothing tracked needs an exception
+# (the largest tracked file is under 1.5 MB, and test fixtures under crates/**/tests/fixtures/ are exempt from the
+# extension rule already).

@@ -267,6 +267,8 @@ pub struct LiveWorld {
     seed: u64,
     /// The pre-2.4c reconstruction: `prev_pos` snapped to the current position. Only for A/B measurements.
     snap_prev_pos: bool,
+    /// The pre-2.4d reconstruction: `last_refill_jumps` never set. Only for A/B measurements.
+    skip_refill_jumps: bool,
 }
 
 impl LiveWorld {
@@ -309,6 +311,7 @@ impl LiveWorld {
             walk_scratch: Vec::with_capacity(64),
             seed,
             snap_prev_pos: false,
+            skip_refill_jumps: false,
         }
     }
 
@@ -577,6 +580,8 @@ impl LiveWorld {
             .filter(|c| c.alive && previous_tick > 0 && previous_tick < tick)
             .zip(world.cores.get(id as u8).map(|c| (c.pos, c.deep_frozen)))
             .map(|(c, (pos, deep))| (c.freeze_time, deep, c.prev_pos, pos));
+        // The previous snapshot's speed, to tell a teleport from a tick of movement in the `last_refill_jumps` derivation.
+        let prev_speed = world.cores.get(id as u8).map(|c| ddai_physics::vmath::length(c.vel));
         let mut character = world.characters[id as usize].unwrap_or_default();
         // A character with no `CNetObj_Character` in the snapshot isn't reconstructed at all
         // (handled by `on_snapshot`'s `remove_character` pass instead) — so being here at all
@@ -660,6 +665,46 @@ impl LiveWorld {
                 _ => false,
             };
         }
+
+        // `m_LastRefillJumps` (`character.cpp:1772-1781`): `HandleTiles` sets it when the tee is on a refill-jumps tile
+        // (game or front layer) and clears it on any handled tile that is not one, so it is `true` at a snapshot if
+        // the **last** tile handled in this tick's anti-skip walk is one (when the walk is empty, the tile at its end,
+        // `character.cpp:2345`). A wrong value makes `HandleTiles` reset `jumped`/`jumped_total` on every predicted tick
+        // the tee stays on the tile, not only on entering it.
+        //
+        // This tick's walk is `m_PrevPos` -> `m_Pos` as they were when the tick began, i.e. `P(T-2)` -> `P(T-1)` *before*
+        // any teleport the tick's `HandleTiles` did (`character.cpp:2334`; the reconstructed `prev_pos` is `m_PrevPos`
+        // *after* it, so it must not be the walk's end when a teleport happened).
+        // - Previous snapshot 1 tick old: exactly its own `prev_pos` -> `pos`, teleports included.
+        // - 2 ticks old: its `pos` (`P(T-2)`) -> this `prev_pos` (`P(T-1)`); a teleport in either tick breaks that
+        //   (a tele-in tile on the walk, or a walk longer than one tick of movement), and then the answer is `false`,
+        //   as before 2.4d.
+        // - Older or none: the tile under `prev_pos` stands in for the walk's last tile (differs only when the walk
+        //   ends on a tile that is not handled, e.g. a refill tile followed by plain air within one tick; and, rarely,
+        //   when the tee teleported).
+        character.last_refill_jumps = if self.skip_refill_jumps {
+            false
+        } else {
+            let collision = world.collision.as_ref();
+            match previous {
+                Some((_, _, prev_prev_pos, prev_pos)) if tick - previous_tick == 1 => {
+                    refill_after_walk(collision, Some(prev_prev_pos), prev_pos, false, &mut self.walk_scratch)
+                }
+                Some((_, _, _, prev_pos)) if tick - previous_tick == 2 => {
+                    let one_tick =
+                        prev_speed.unwrap_or(0.0).max(ddai_physics::vmath::length(core.vel)) + ONE_TICK_SLACK;
+                    ddai_physics::vmath::distance(prev_pos, character.prev_pos) <= one_tick
+                        && refill_after_walk(
+                            collision,
+                            Some(prev_pos),
+                            character.prev_pos,
+                            true,
+                            &mut self.walk_scratch,
+                        )
+                }
+                _ => refill_after_walk(collision, None, character.prev_pos, false, &mut self.walk_scratch),
+            }
+        };
 
         // Review round 1, finding F2 (confirmed live): a fresh reconstruction never gets to
         // "already >1 inputs old" the way a real, continuously-ticking character always is, so
@@ -979,6 +1024,13 @@ impl LiveWorld {
         self.snap_prev_pos = snap;
     }
 
+    /// A/B switch (task 2.4d): `true` brings back the pre-2.4d reconstruction, where `last_refill_jumps` stayed
+    /// `false` ([`LiveWorld::set_snap_prev_pos`] is independent). Default `false`. Not part of the stable API.
+    #[doc(hidden)]
+    pub fn set_skip_refill_jumps(&mut self, skip: bool) {
+        self.skip_refill_jumps = skip;
+    }
+
     /// The map this `LiveWorld` was built from ([`ddai_brain::Observation::map`] shares this same
     /// allocation — see [`LiveWorld::build_observation`]).
     pub fn map(&self) -> &Arc<MapData> {
@@ -989,6 +1041,43 @@ impl LiveWorld {
     pub fn seed(&self) -> u64 {
         self.seed
     }
+}
+
+/// Slack (in units, 32 per tile) on top of the tee's speed when deciding whether a reconstructed one-tick walk is
+/// longer than a tick of movement can be, i.e. spans a teleport: velocity changes by a few units per tick, a hammer or
+/// an explosion by up to about ten.
+const ONE_TICK_SLACK: f32 = 16.0;
+
+/// `m_LastRefillJumps` after one tick's `HandleTiles` calls (`character.cpp:1772-1781`): the anti-skip walk
+/// `from` -> `to` handles its tiles in order (each one sets the flag when it is a refill-jumps tile in the game or
+/// front layer and clears it otherwise), so the flag is whether the last handled tile is one; an empty walk handles
+/// the tile at `to` instead (`character.cpp:2345`). `from == None` (walk start unknown) means the empty case.
+/// `tele_guard`: answer `false` when the walk crosses a tele-in tile, because a walk reconstructed from snapshots may
+/// then span the teleport.
+fn refill_after_walk(
+    collision: &ddai_physics::collision::Collision<f32>,
+    from: Option<ddai_physics::vmath::Vec2<f32>>,
+    to: ddai_physics::vmath::Vec2<f32>,
+    tele_guard: bool,
+    scratch: &mut Vec<i32>,
+) -> bool {
+    scratch.clear();
+    if let Some(from) = from {
+        collision.get_map_indices_into(from, to, 0, scratch);
+    }
+    if tele_guard
+        && scratch.iter().any(|&i| {
+            collision.is_teleport(i) != 0
+                || collision.is_evil_teleport(i) != 0
+                || collision.is_check_teleport(i)
+                || collision.is_check_evil_teleport(i)
+        })
+    {
+        return false;
+    }
+    let last = scratch.last().copied().unwrap_or_else(|| collision.get_map_index(to));
+    let refill = i32::from(ddai_physics::map::TILE_REFILL_JUMPS);
+    collision.get_tile_index(last) == refill || collision.get_front_tile_index(last) == refill
 }
 
 /// Review round 3, finding F1 (reopened MAJOR): reconstructs every weapon slot's `ammo` for one

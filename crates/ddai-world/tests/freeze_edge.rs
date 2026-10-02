@@ -5,6 +5,10 @@
 //! anti-skip walk (`m_PrevPos` -> `m_Pos`) handles the tiles decides whether the tee is frozen for the next
 //! tick, so `m_PrevPos` has to be reconstructed, not snapped to the current position. The legacy
 //! reconstruction (`set_snap_prev_pos(true)`) is the negative control: it must diverge where the new one is exact.
+//!
+//! Task 2.4d adds a second field with refill-jumps tiles (game and front layer): `m_LastRefillJumps` is rebuilt from
+//! the anti-skip walk, and the pre-2.4d reconstruction (`set_skip_refill_jumps(true)`, flag always `false`) is the
+//! negative control there.
 
 use std::sync::Arc;
 
@@ -13,7 +17,9 @@ use ddai_net::generated::objects;
 use ddai_net::tuning::DEFAULT_TUNE_PARAMS;
 use ddai_net::view::CharacterView;
 use ddai_physics::core::{self, CharacterCore, NetCharacterCore, PlayerInput, TeamsCore, WorldCore};
-use ddai_physics::map::{MapData, TILE_FREEZE, TILE_SOLID, TILE_UNFREEZE, Tile};
+use ddai_physics::map::{
+    MapData, TILE_FREEZE, TILE_REFILL_JUMPS, TILE_SOLID, TILE_TELEIN, TILE_TELEOUT, TILE_UNFREEZE, TeleTile, Tile,
+};
 use ddai_physics::vmath::Vec2;
 use ddai_physics::world::{self, Player, TickInput, World};
 use ddai_world::{LiveWorld, SnapshotInput};
@@ -225,9 +231,8 @@ impl InputGen {
     }
 }
 
-/// A 70 x 30 room whose middle band (rows 12..=17) is a checkerboard of freeze and unfreeze columns, so a tee
-/// walking, jumping and falling through it crosses freeze / unfreeze edges all the time.
-fn field() -> Arc<MapData> {
+/// A 70 x 30 solid-walled room, the starting point of both fields.
+fn room() -> (u32, u32, Vec<Tile>) {
     let (w, h) = (70u32, 30u32);
     let mut game = vec![Tile::default(); (w * h) as usize];
     for x in 0..w {
@@ -238,21 +243,78 @@ fn field() -> Arc<MapData> {
         game[(y * w) as usize].index = TILE_SOLID;
         game[(y * w + w - 1) as usize].index = TILE_SOLID;
     }
-    for y in 8..=24u32 {
-        for x in 6..64u32 {
-            game[(y * w + x) as usize].index = if (x + y) % 2 == 0 { TILE_FREEZE } else { TILE_UNFREEZE };
-        }
-    }
+    (w, h, game)
+}
+
+fn map_of(w: u32, h: u32, game: Vec<Tile>, front: Option<Vec<Tile>>) -> Arc<MapData> {
     Arc::new(MapData {
         width: w,
         height: h,
         game,
-        front: None,
+        front,
         tele: None,
         speedup: None,
         switch: None,
         tune: None,
         settings: Vec::new(),
+    })
+}
+
+/// A 70 x 30 room whose middle band (rows 8..=24) is a checkerboard of freeze and unfreeze columns, so a tee
+/// walking, jumping and falling through it crosses freeze / unfreeze edges all the time.
+fn field() -> Arc<MapData> {
+    let (w, h, mut game) = room();
+    for y in 8..=24u32 {
+        for x in 6..64u32 {
+            game[(y * w + x) as usize].index = if (x + y) % 2 == 0 { TILE_FREEZE } else { TILE_UNFREEZE };
+        }
+    }
+    map_of(w, h, game, None)
+}
+
+/// The same room with refill-jumps tiles instead: a game-layer checkerboard in rows 22..=28 (the floor the tee
+/// stands and walks on, and the air above it) and a front-layer stripe pattern in rows 14..=21, so the tee jumps
+/// through, stands on and leaves refill tiles of both layers, one-tick walks that end in plain air included.
+fn refill_field() -> Arc<MapData> {
+    let (w, h, mut game) = room();
+    let mut front = vec![Tile::default(); (w * h) as usize];
+    for y in 22..=28u32 {
+        for x in 6..64u32 {
+            if (x + y) % 2 == 0 {
+                game[(y * w + x) as usize].index = TILE_REFILL_JUMPS;
+            }
+        }
+    }
+    for y in 14..=21u32 {
+        for x in 6..64u32 {
+            if (x / 2 + y) % 2 == 0 {
+                front[(y * w + x) as usize].index = TILE_REFILL_JUMPS;
+            }
+        }
+    }
+    map_of(w, h, game, Some(front))
+}
+
+/// [`refill_field`] plus a column of tele-ins at x = 14 (rows 14..=28) whose tele-out is the refill tile at (10, 24):
+/// a teleport lands the tee on a refill tile, so a walk reconstructed up to the post-teleport `m_PrevPos` would end
+/// on refill although the server's last handled tile (the tele-in) is not.
+fn refill_tele_field() -> Arc<MapData> {
+    let base = refill_field();
+    let (w, h) = (base.width, base.height);
+    let mut tele = vec![TeleTile::default(); (w * h) as usize];
+    for y in 14..=28u32 {
+        tele[(y * w + 14) as usize] = TeleTile {
+            number: 1,
+            kind: TILE_TELEIN,
+        };
+    }
+    tele[(24 * w + 10) as usize] = TeleTile {
+        number: 1,
+        kind: TILE_TELEOUT,
+    };
+    Arc::new(MapData {
+        tele: Some(tele),
+        ..(*base).clone()
     })
 }
 
@@ -268,13 +330,26 @@ struct Score {
     flt_true: u32,
     flt_hit: u32,
     flt_false_pos: u32,
+    /// Snapshots where the true `m_LastRefillJumps` was set.
+    refill_true: u32,
+    /// Snapshots where the reconstructed flag was set and the true one was not.
+    refill_false_pos: u32,
+    /// Ticks on which the true tee moved more than 3 tiles (a teleport).
+    teleports: u32,
     field_mismatch: std::collections::BTreeMap<&'static str, u32>,
 }
 
 /// Runs the fake server for `ticks`, snapshots every second tick, and scores the 2-tick prediction (with the true
 /// inputs) against the true state, with the chosen reconstruction.
-fn run(seed: u64, snap_prev_pos: bool, ticks: i32) -> Score {
-    let map = field();
+/// `snapshot_every`: the cadence of the snapshots handed to `LiveWorld` (2 is the server's own).
+fn run_on(
+    map: Arc<MapData>,
+    seed: u64,
+    snap_prev_pos: bool,
+    skip_refill_jumps: bool,
+    snapshot_every: i32,
+    ticks: i32,
+) -> Score {
     let mut world: World<f32> = World::from_map(&map, seed);
     world.init(std::iter::empty::<&str>()).unwrap();
     const OWN: i32 = 0;
@@ -284,6 +359,7 @@ fn run(seed: u64, snap_prev_pos: bool, ticks: i32) -> Score {
     let mut reckoning = ServerReckoning::new(*world.cores.get(OWN as u8).unwrap());
     let mut live = LiveWorld::new(Arc::clone(&map), OWN, seed);
     live.set_snap_prev_pos(snap_prev_pos);
+    live.set_skip_refill_jumps(skip_refill_jumps);
     let mut rng = InputGen(seed ^ 0xC0FFEE);
     let inputs: Vec<(i32, PlayerInput)> = (1..=ticks + 4).map(|t| (t, rng.input(t))).collect();
     let mut score = Score::default();
@@ -291,6 +367,7 @@ fn run(seed: u64, snap_prev_pos: bool, ticks: i32) -> Score {
         let mut input = inputs[(tick - 1) as usize].1;
         // Steer into the band now and then so the edges are crossed often.
         input.hook = 0;
+        let pos_before = world.cores.get(OWN as u8).map(|c| c.pos);
         world.step(&[TickInput {
             id: OWN as u8,
             input,
@@ -300,8 +377,11 @@ fn run(seed: u64, snap_prev_pos: bool, ticks: i32) -> Score {
             // Died (death tiles are not in this map, but a freeze-kill rule might): start over.
             break;
         };
+        if let Some(before) = pos_before {
+            score.teleports += u32::from(ddai_physics::vmath::distance(before, core.pos) > 96.0);
+        }
         reckoning.advance(core, &collision, world.tick);
-        if tick % 2 == 0 {
+        if tick % snapshot_every == 0 {
             let (net_core, tick_field) = reckoning.wire_core_and_tick();
             let character = world.characters[OWN as usize].unwrap();
             let cv = to_character_view(OWN, net_core, tick_field, core, &character, tick);
@@ -357,6 +437,8 @@ fn run(seed: u64, snap_prev_pos: bool, ticks: i32) -> Score {
                 prev_pos
             );
             let got_flt = live.base_world().characters[OWN as usize].unwrap().frozen_last_tick;
+            score.refill_true += u32::from(character.last_refill_jumps);
+            score.refill_false_pos += u32::from(!character.last_refill_jumps && got.last_refill_jumps);
             score.flt_true += u32::from(character.frozen_last_tick);
             score.flt_hit += u32::from(character.frozen_last_tick && got_flt);
             score.flt_false_pos += u32::from(!character.frozen_last_tick && got_flt);
@@ -375,7 +457,7 @@ fn run(seed: u64, snap_prev_pos: bool, ticks: i32) -> Score {
             }
             let predicted = live.predict(tick + 2, &next_inputs);
             if let (Some(p), Some(t)) = (predicted.cores.get(OWN as u8), truth.cores.get(OWN as u8)) {
-                let same = p.write() == t.write();
+                let same = p.write() == t.write() && p.jumped_total == t.jumped_total;
                 score.steps += 1;
                 score.exact += u32::from(same);
                 let frozen_after = truth.characters[OWN as usize].is_some_and(|c| c.freeze_time > 0);
@@ -390,9 +472,19 @@ fn run(seed: u64, snap_prev_pos: bool, ticks: i32) -> Score {
 }
 
 fn total(snap: bool, seeds: std::ops::RangeInclusive<u64>) -> Score {
+    total_on(field, snap, false, 2, seeds)
+}
+
+fn total_on(
+    map: fn() -> Arc<MapData>,
+    snap: bool,
+    skip_refill: bool,
+    snapshot_every: i32,
+    seeds: std::ops::RangeInclusive<u64>,
+) -> Score {
     let mut total = Score::default();
     for seed in seeds {
-        let s = run(seed, snap, 4000);
+        let s = run_on(map(), seed, snap, skip_refill, snapshot_every, 4000);
         total.steps += s.steps;
         total.exact += s.exact;
         total.edge_steps += s.edge_steps;
@@ -402,6 +494,9 @@ fn total(snap: bool, seeds: std::ops::RangeInclusive<u64>) -> Score {
         total.flt_true += s.flt_true;
         total.flt_hit += s.flt_hit;
         total.flt_false_pos += s.flt_false_pos;
+        total.refill_true += s.refill_true;
+        total.refill_false_pos += s.refill_false_pos;
+        total.teleports += s.teleports;
         for (k, v) in s.field_mismatch {
             *total.field_mismatch.entry(k).or_default() += v;
         }
@@ -495,5 +590,88 @@ fn the_physics_relevant_character_fields_are_reconstructed_exactly() {
             "{exact} must be reconstructed exactly: {:?}",
             t.field_mismatch
         );
+    }
+}
+
+/// Task 2.4d: `m_LastRefillJumps`. A tee that stays on a refill tile must not get `jumped` / `jumped_total` reset on
+/// every predicted tick, only on the tick it enters (`character.cpp:1772-1781`).
+#[test]
+fn m_last_refill_jumps_is_reconstructed_exactly_and_the_unset_flag_diverges() {
+    let new = total_on(refill_field, false, false, 2, 1..=8);
+    let unset = total_on(refill_field, false, true, 2, 1..=8);
+    let legacy = total_on(refill_field, true, true, 2, 1..=8);
+    eprintln!("new: {new:?}\nunset: {unset:?}\nlegacy: {legacy:?}");
+    assert!(
+        new.refill_true > 1000,
+        "the tee must spend many snapshots on refill tiles: {new:?}"
+    );
+    // The flag itself is exact on every snapshot, and so is every 2-tick prediction (`jumped` / `jumped_total`
+    // included) ...
+    assert_eq!(new.field_mismatch.get("last_refill_jumps"), None, "{new:?}");
+    assert_eq!(new.exact, new.steps, "{new:?}");
+    // ... where the flag left `false` (negative control) is wrong whenever the tee stands on a refill tile, and the
+    // predictions that jump there diverge. The legacy `m_PrevPos` snap on top is no better.
+    assert!(
+        unset.field_mismatch.get("last_refill_jumps").copied().unwrap_or(0) >= new.refill_true,
+        "{unset:?}"
+    );
+    assert!(
+        unset.exact < unset.steps,
+        "the unset flag must diverge somewhere: {unset:?}"
+    );
+    assert!(legacy.exact < legacy.steps, "{legacy:?}");
+}
+
+/// The flag is rebuilt from the previous snapshot's position when that is 1 or 2 ticks old; with a longer gap the tile
+/// under `m_PrevPos` stands in. That fallback is not exact (a walk that ends on an unhandled air tile), but it is
+/// closer than leaving the flag `false`. The few misses at the shorter gaps come from the `m_PrevPos` itself being
+/// off by a pixel on a collision tick (see `m_prev_pos_is_reconstructed_exactly_unless_the_tee_hit_something`).
+#[test]
+fn m_last_refill_jumps_survives_other_snapshot_cadences() {
+    let wrong = |s: &Score| s.field_mismatch.get("last_refill_jumps").copied().unwrap_or(0);
+    for every in [1, 3] {
+        let new = total_on(refill_field, false, false, every, 1..=8);
+        let unset = total_on(refill_field, false, true, every, 1..=8);
+        eprintln!("every {every}: {new:?}\nunset: {unset:?}");
+        assert!(new.refill_true > 1000, "{new:?}");
+        assert!(wrong(&unset) >= new.refill_true, "{unset:?}");
+        if every == 1 {
+            // Walk known exactly: only a missing previous snapshot or a misplaced `m_PrevPos` can get the flag wrong.
+            let prev_pos_misses = new.prev_pos_total - new.prev_pos_exact;
+            assert!(wrong(&new) <= prev_pos_misses, "{new:?}");
+        } else {
+            // The fallback is rough (measured: wrong in about a quarter of the true-flag snapshots here), but better
+            // than the unset flag, which is wrong in all of them.
+            assert!(wrong(&new) * 2 < new.refill_true, "{new:?}");
+        }
+        let floor = if every == 1 { 0.999 } else { 0.99 };
+        assert!(f64::from(new.exact) >= floor * f64::from(new.steps), "{new:?}");
+        assert!(new.exact > unset.exact, "{new:?} vs {unset:?}");
+    }
+}
+
+/// Task 2.4d review F1: a teleport during the walk. The server handles the tele-in tile last, so the flag is `false`;
+/// a walk reconstructed up to the (post-teleport) `m_PrevPos` ends on the tele-out's refill tile and said `true`.
+/// With the previous snapshot's own `pos` as the walk's end (1-tick gap) and the `false` fallback (2-tick gap) there
+/// is no wrong `true`, and the predictions stay at least as good as with the flag left unset.
+#[test]
+fn m_last_refill_jumps_is_never_wrongly_set_by_a_teleport() {
+    for every in [1, 2] {
+        let new = total_on(refill_tele_field, false, false, every, 1..=8);
+        let unset = total_on(refill_tele_field, false, true, every, 1..=8);
+        eprintln!("every {every}: {new:?}\nunset: {unset:?}");
+        assert!(
+            new.teleports >= 20,
+            "the tee must teleport onto the refill tile: {new:?}"
+        );
+        assert!(new.refill_true > 500, "{new:?}");
+        assert_eq!(new.refill_false_pos, 0, "{new:?}");
+        assert!(new.exact >= unset.exact, "{new:?} vs {unset:?}");
+        if every == 1 {
+            // Walk known exactly, teleports included: only a missing previous snapshot or a misplaced `m_PrevPos` can
+            // get the flag wrong.
+            let wrong = new.field_mismatch.get("last_refill_jumps").copied().unwrap_or(0);
+            assert!(wrong <= new.prev_pos_total - new.prev_pos_exact, "{new:?}");
+        }
     }
 }

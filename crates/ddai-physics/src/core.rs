@@ -1361,9 +1361,7 @@ pub fn tick<R: Real, const CAP: usize>(
                 let other_solo = world.cores[slot].solo;
                 let other_is_super = world.cores[slot].is_super;
                 if !(me.is_super || other_is_super)
-                    && ((self_id as i32 != -1 && !teams.can_collide(other_id as i32, self_id as i32))
-                        || other_solo
-                        || me.solo)
+                    && ((me.id != -1 && !teams.can_collide(other_id as i32, me.id)) || other_solo || me.solo)
                 {
                     continue;
                 }
@@ -1413,7 +1411,7 @@ pub fn tick<R: Real, const CAP: usize>(
                 Some(slot) => {
                     let other_pos = world.cores[slot].pos;
                     let other_id = world.cores[slot].id;
-                    if self_id as i32 != -1 && teams.can_keep_hook(self_id as i32, other_id) {
+                    if me.id != -1 && teams.can_keep_hook(me.id, other_id) {
                         me.hook_pos = other_pos;
                     } else {
                         set_hooked_player(world, &mut me, self_id, -1);
@@ -1458,16 +1456,15 @@ pub fn tick<R: Real, const CAP: usize>(
     }
 
     if do_deferred_tick {
-        tick_deferred_body(world, self_slot, self_id, teams, &mut me);
+        tick_deferred_body(world, self_slot, teams, &mut me);
     }
     world.cores[self_slot] = me;
 }
 
 /// `CCharacterCore::TickDeferred()`.
 pub fn tick_deferred<R: Real, const CAP: usize>(world: &mut WorldCore<R, CAP>, self_slot: usize, teams: &TeamsCore) {
-    let self_id = world.ids[self_slot];
     let mut me = world.cores[self_slot];
-    tick_deferred_body(world, self_slot, self_id, teams, &mut me);
+    tick_deferred_body(world, self_slot, teams, &mut me);
     world.cores[self_slot] = me;
 }
 
@@ -1482,7 +1479,6 @@ pub fn tick_deferred<R: Real, const CAP: usize>(world: &mut WorldCore<R, CAP>, s
 fn tick_deferred_body<R: Real, const CAP: usize>(
     world: &mut WorldCore<R, CAP>,
     self_slot: usize,
-    self_id: u8,
     teams: &TeamsCore,
     me: &mut CharacterCore<R>,
 ) {
@@ -1496,7 +1492,7 @@ fn tick_deferred_body<R: Real, const CAP: usize>(
         let other_solo = world.cores[slot].solo;
         let other_collision_disabled = world.cores[slot].collision_disabled;
 
-        if self_id as i32 != -1 && !teams.can_collide(self_id as i32, other_id as i32) {
+        if me.id != -1 && !teams.can_collide(me.id, other_id as i32) {
             continue;
         }
         if !(me.is_super || other_is_super) && (me.solo || other_solo) {
@@ -1582,7 +1578,6 @@ pub fn move_character<R: Real, const CAP: usize>(
     collision: &Collision<R>,
     teams: &TeamsCore,
 ) {
-    let self_id = world.ids[self_slot];
     let mut me = world.cores[self_slot];
 
     let ramp_value = velocity_ramp(
@@ -1650,7 +1645,7 @@ pub fn move_character<R: Real, const CAP: usize>(
                         && (me.solo
                             || other_solo
                             || other_collision_disabled
-                            || (self_id as i32 != -1 && !teams.can_collide(self_id as i32, other_id as i32)))
+                            || (me.id != -1 && !teams.can_collide(me.id, other_id as i32)))
                     {
                         continue;
                     }
@@ -1822,6 +1817,56 @@ mod tests {
         assert!(!teams.can_collide(0, 1));
         assert!(!teams.can_keep_hook(0, 1));
         assert!(!teams.same_team(0, 1));
+    }
+
+    /// `CCharacterCore::Tick` (`gamecore.cpp:416`) keeps a player hook only `if(pCharCore && m_Id != -1
+    /// && m_pTeams->CanKeepHook(m_Id, pCharCore->m_Id))`: `m_Id` is the core's own field. A core
+    /// registered through `WorldCore` never has `m_Id == -1`, so only a caller poking `id` through
+    /// `get_mut` can reach the release branch; this pins that the check reads the field.
+    #[test]
+    fn grabbed_player_hook_is_released_only_when_own_id_is_minus_one() {
+        let air = map::Tile {
+            index: 0,
+            flags: 0,
+            skip: 0,
+            reserved: 0,
+        };
+        let collision = Collision::<f32>::new(&map::MapData {
+            width: 8,
+            height: 8,
+            game: vec![air; 64],
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        });
+        let teams = TeamsCore::new();
+        let build = |own_id: i32| {
+            let mut a = CharacterCore::<f32>::default();
+            a.reset();
+            let mut b = CharacterCore::<f32>::default();
+            b.reset();
+            b.pos = Vec2::new(64.0, 0.0);
+            let mut world: WorldCore<f32, 2> = WorldCore::from_characters(&[(0, a), (1, b)]);
+            let me = world.get_mut(0).unwrap();
+            me.set_hooked_player_self_only(1);
+            me.hook_state = HOOK_GRABBED;
+            me.hook_pos = Vec2::new(64.0, 0.0);
+            me.input.hook = 1;
+            me.id = own_id;
+            world
+        };
+        let mut kept = build(0);
+        tick(&mut kept, 0, &collision, &teams, true, true);
+        assert_eq!(kept.core_at(0).hook_state, HOOK_GRABBED);
+        assert_eq!(kept.core_at(0).hooked_player(), 1);
+
+        let mut released = build(-1);
+        tick(&mut released, 0, &collision, &teams, true, true);
+        assert_eq!(released.core_at(0).hook_state, HOOK_RETRACTED);
+        assert_eq!(released.core_at(0).hooked_player(), -1);
     }
 
     #[test]
