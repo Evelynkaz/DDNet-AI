@@ -441,6 +441,17 @@ impl Brain for HybridBrain {
         &self.name
     }
 
+    fn last_plan(&self) -> Option<ddai_brain::PlanTelemetry> {
+        let t = self.last.as_ref()?;
+        Some(ddai_brain::PlanTelemetry {
+            searched: t.evaluated.iter().any(|&n| n > 0),
+            out_of_time: t.out_of_time,
+            shielded: t.shielded,
+            shield_incomplete: t.shield_incomplete,
+            candidates: t.evaluated.iter().sum(),
+        })
+    }
+
     fn telemetry(&self) -> Option<String> {
         let last = self
             .last

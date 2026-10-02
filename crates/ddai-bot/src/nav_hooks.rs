@@ -54,7 +54,9 @@ use ddai_planner::vmath::Vec2 as Vec2d;
 
 use crate::bot::Mode;
 use crate::consts::*;
-use crate::hooks::{HookContext, Hooks, MapIdent, NavStep, Navigator, Poll, Trek, WanderHint, WayBlock, WbFilter};
+use crate::hooks::{
+    HookContext, Hooks, MapIdent, NavClipState, NavStep, Navigator, Poll, Trek, WanderHint, WayBlock, WbFilter,
+};
 use crate::mapgrid::MapGrid;
 use crate::reach::{RouteFinder, Tile};
 use crate::tees::{HOOK_FLYING, Tee, dist};
@@ -127,6 +129,8 @@ pub enum NavCommand {
     Wb(WbMode),
     /// `!seek on|off`.
     Seek(bool),
+    /// `!strong on|off`: inside a wayblock hall the planner searches wider (`STRONG_WB`).
+    Strong(bool),
 }
 
 /// A snapshot of what the navigation is doing, for status lines and the web unit.
@@ -255,6 +259,11 @@ struct Core {
     travel_since: i64,
     dull_since: i64,
     kill_wanted: bool,
+    /// The last `crossing()` / `planned_freeze()` of the running walk, for the clip frame.
+    clip_crossing: bool,
+    clip_planned: bool,
+    /// A cross-fail note waiting for the bot (`Navigator::take_cross_fail`).
+    cross_fail: Option<String>,
     walks_ended: u32,
     last_walk: String,
     nav_kills: u32,
@@ -296,6 +305,9 @@ impl Core {
             travel_since: i64::MIN / 2,
             dull_since: -1,
             kill_wanted: false,
+            clip_crossing: false,
+            clip_planned: false,
+            cross_fail: None,
             walks_ended: 0,
             last_walk: String::new(),
             nav_kills: 0,
@@ -570,6 +582,14 @@ impl Core {
             NavCommand::Seek(on) => {
                 self.seek_enabled = on;
                 self.reply(format!("seek: {}", if on { "on" } else { "off" }));
+            }
+            NavCommand::Strong(on) => {
+                self.cfg.strong = on;
+                self.reply(if on {
+                    "strong mode: on (inside a wayblock hall the planner searches wider: more CPU)".to_string()
+                } else {
+                    "strong mode: off (the plain search)".to_string()
+                });
             }
         }
     }
@@ -1035,12 +1055,18 @@ impl Core {
             };
             nav.step(&mut nctx, &me, tick, &others, i64::from(ctx.lag_ticks))
         };
-        let guard = !(nav.crossing() || nav.planned_freeze());
+        let (crossing, planned) = (nav.crossing(), nav.planned_freeze());
+        let guard = !(crossing || planned);
         let notes = nav.take_notes();
         let kill = nav.take_kill();
         let done = nav.done();
+        self.clip_crossing = crossing;
+        self.clip_planned = planned;
         for n in notes {
             self.log(&format!("goto: {n}"));
+            if ddai_clip::store::is_cross_fail_note(&n) {
+                self.cross_fail = Some(n);
+            }
         }
         let action = action_from_input(&want);
         if kill {
@@ -1564,6 +1590,32 @@ impl Navigator for NavHook {
     }
     fn stop(&mut self) {
         self.0.borrow_mut().save_memory();
+    }
+    fn clip_state(&self, label: &mut String) -> NavClipState {
+        use std::fmt::Write;
+        label.clear();
+        let c = self.0.borrow();
+        let Some(n) = &c.nav else {
+            return NavClipState::default();
+        };
+        if let Some(f) = &c.follow {
+            let _ = write!(label, "follow c{}", f.id);
+        } else if let Some(g) = n.goal() {
+            label.push_str(&g.label);
+        } else {
+            label.push_str("walk");
+        }
+        NavClipState {
+            walking: true,
+            crossing: c.clip_crossing,
+            planned_freeze: c.clip_planned,
+        }
+    }
+    fn take_cross_fail(&mut self) -> Option<String> {
+        self.0.borrow_mut().cross_fail.take()
+    }
+    fn resend_knowledge(&mut self) {
+        self.0.borrow_mut().knowledge_due = true;
     }
 }
 

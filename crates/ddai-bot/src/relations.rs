@@ -180,6 +180,21 @@ impl Relations {
         }
     }
 
+    /// The lists a name leaves when it is put on `kind` (`!war` removes it from friend and ignore; ...).
+    pub fn exclusions(kind: ListKind) -> &'static [ListKind] {
+        match kind {
+            ListKind::War => &[ListKind::Friend, ListKind::Ignore],
+            ListKind::Friend | ListKind::Ignore => &[ListKind::War],
+            ListKind::ClanWar => &[ListKind::ClanFriend],
+            ListKind::ClanFriend => &[ListKind::ClanWar],
+        }
+    }
+
+    /// The entries of `kind` (folded keys), in order.
+    pub fn names(&self, kind: ListKind) -> Vec<&str> {
+        self.set(kind).iter().map(String::as_str).collect()
+    }
+
     /// Adds `raw` to `kind` with the old bot's exclusions (`!war` removes the name from friend and
     /// ignore; `!friend` and `!ignore` remove it from war; clan war and clan friend exclude each
     /// other — `orig-bot.md` §7.3). Returns false when the name folds to nothing.
@@ -188,13 +203,7 @@ impl Relations {
         if key.is_empty() {
             return false;
         }
-        let excluded: &[ListKind] = match kind {
-            ListKind::War => &[ListKind::Friend, ListKind::Ignore],
-            ListKind::Friend | ListKind::Ignore => &[ListKind::War],
-            ListKind::ClanWar => &[ListKind::ClanFriend],
-            ListKind::ClanFriend => &[ListKind::ClanWar],
-        };
-        for &other in excluded {
+        for &other in Relations::exclusions(kind) {
             self.set_mut(other).remove(&key);
         }
         self.set_mut(kind).insert(key);

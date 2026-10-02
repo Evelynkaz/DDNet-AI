@@ -35,6 +35,8 @@ toml = "1.1.6"
 # which the OS releases automatically on process exit/crash/SIGKILL (no stale-lock cleanup logic
 # needed, unlike a PID file).
 fd-lock = "4.0.4"
+# `server_list` (task 4.3): the read-only master-list JSON parser.
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3.14"

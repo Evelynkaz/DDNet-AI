@@ -92,6 +92,8 @@ fn config(name: &str, kind: BrainKind, seed: u64, bridge: Option<PathBuf>, durat
             ..ddai_bot::nav_hooks::NavConfig::default()
         },
         nav_handle: ddai_bot::nav_hooks::NavHandle::new(),
+        commands: None,
+        console_out: None,
     }
 }
 

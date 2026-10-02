@@ -116,6 +116,31 @@ pub trait Navigator {
     }
     /// The run ends: save what is kept on disk.
     fn stop(&mut self) {}
+    /// What the navigation is doing, for the clip's frame (task 4.3): the walk's label is written to
+    /// `label` (cleared first; empty when not walking).
+    fn clip_state(&self, label: &mut String) -> NavClipState {
+        label.clear();
+        NavClipState::default()
+    }
+    /// The brain was replaced (`!brain`): send it the map knowledge (dead zone, freeze memory) again with the
+    /// next poll.
+    fn resend_knowledge(&mut self) {}
+    /// A crossing the route needed failed (the TS `clipCrossFail` notes: "...; trying again from the
+    /// spawn", "no way through ..."): the note, once.
+    fn take_cross_fail(&mut self) -> Option<String> {
+        None
+    }
+}
+
+/// [`Navigator::clip_state`]'s answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NavClipState {
+    /// A goto / follow walk is running.
+    pub walking: bool,
+    /// A crossing swing is running (its input is not checked by the guard).
+    pub crossing: bool,
+    /// A planned freeze lies ahead on the route.
+    pub planned_freeze: bool,
 }
 
 /// The wayblock mode (Copy Love Box, task 4.2).

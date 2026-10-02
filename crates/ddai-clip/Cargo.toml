@@ -1,0 +1,29 @@
+[package]
+name = "ddai-clip"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Task 4.3: the live bot's clips — a 30 s ring of snapshot frames with the inputs actually sent, the clip format (postcard + zstd, versioned), incidents with real events, autoclip and pruning, and the offline bit-exact replay of a clip on ddai-world/ddai-physics."
+
+[lib]
+name = "ddai_clip"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ddai-net = { path = "../ddai-net" }
+ddai-physics = { path = "../ddai-physics" }
+ddai-world = { path = "../ddai-world" }
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2"
+zstd = "0.14.0"
+
+[dev-dependencies]
+allocation-counter = "0.8.1"
+tempfile = "3.14"

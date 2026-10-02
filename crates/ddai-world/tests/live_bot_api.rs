@@ -192,3 +192,47 @@ fn a_steady_state_snapshot_and_prediction_allocate_nothing() {
     });
     assert_eq!(info.count_total, 0, "{info:?}");
 }
+
+// ---- task 4.3: carrying our own tee through a clip replay --------------------------------------------
+
+#[test]
+fn own_state_exported_after_a_prediction_and_imported_after_a_snapshot_resumes_the_same_trajectory() {
+    // Snapshot at 500, free-run our tee to 506 on a held input; then a "new snapshot" that knows nothing
+    // of where we got to (the other tee moved, ours is stale) and our imported state: predicting on to
+    // 510 must equal predicting 500 -> 510 straight through.
+    let inputs: Vec<(i32, PlayerInput)> = (501..=510).map(|t| (t, run_right())).collect();
+    let chars = [tee(0, 1000), tee(1, 2000)];
+    let mut straight = LiveWorld::new(room(), 0, 1);
+    straight.on_snapshot(SnapshotInput::new(500, &chars, DEFAULT_TUNE_PARAMS));
+    let want = *straight.predict(510, &inputs).cores.get(0).unwrap();
+
+    let mut live = LiveWorld::new(room(), 0, 1);
+    live.on_snapshot(SnapshotInput::new(500, &chars, DEFAULT_TUNE_PARAMS));
+    let _ = live.predict(506, &inputs[..6]);
+    let own = live.export_own_predicted().expect("our tee is there");
+    // The next snapshot (tick 506) says we are back at the start: it is overruled by the import.
+    let stale = [tee(0, 1000), tee(1, 2050)];
+    let mut resumed = LiveWorld::new(room(), 0, 1);
+    resumed.on_snapshot(SnapshotInput::new(500, &chars, DEFAULT_TUNE_PARAMS));
+    resumed.on_snapshot(SnapshotInput::new(506, &stale, DEFAULT_TUNE_PARAMS));
+    assert!(resumed.import_own(&own));
+    let got = *resumed.predict(510, &inputs[6..]).cores.get(0).unwrap();
+    assert_eq!(
+        got.write(),
+        want.write(),
+        "our tee carried over the snapshot equals the straight run"
+    );
+    assert_eq!(got.pos, want.pos);
+}
+
+#[test]
+fn import_own_refuses_when_our_tee_is_not_in_the_world_and_export_finds_none_then() {
+    let chars = [tee(0, 1000)];
+    let mut live = LiveWorld::new(room(), 0, 1);
+    live.on_snapshot(SnapshotInput::new(500, &chars, DEFAULT_TUNE_PARAMS));
+    let own = live.export_own(live.base_world()).expect("ours");
+    // A snapshot without us (a death): nothing to import into, nothing to export.
+    live.on_snapshot(SnapshotInput::new(502, &[tee(1, 2000)], DEFAULT_TUNE_PARAMS));
+    assert!(!live.import_own(&own));
+    assert!(live.export_own(live.base_world()).is_none());
+}

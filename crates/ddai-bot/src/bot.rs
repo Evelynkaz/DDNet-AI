@@ -44,11 +44,13 @@
 //! Everything above is allocation-free per snapshot once warm, except the planner's own helpers
 //! (seal check for frozen candidates, guard, veto) and the brain itself — `tests` measure it.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ddai_brain::{Action, Brain, IVec2, LiveContext, Observation, ResetContext, WorldView};
 use ddai_client::LiveWorldSnapshot;
+use ddai_clip::format::{BotRec, ClipEvent, KillWhy};
 use ddai_net::generated::objects::PlayerInput as NetInput;
 use ddai_physics::core::{MAX_CLIENTS, PlayerInput as PhysInput, WEAPON_HAMMER};
 use ddai_physics::map::MapData;
@@ -58,12 +60,14 @@ use ddai_planner::types::PlayerInput as PlannerInput;
 use ddai_world::{LiveWorld, SnapshotInput, player_input_from_net};
 
 use crate::activity::{ActivityClock, BlockEvent, BlockStats};
-use crate::brains::BrainKind;
+use crate::brains::{BrainKind, BrainOptions};
+use crate::clipper::{ClipConfig, Clipper, FrameInput};
 use crate::consts::*;
 use crate::hooks::{HookContext, Hooks, MapIdent, NavStep};
 use crate::input::InputEncoder;
 use crate::latency::{DecisionEstimator, LatencyStats};
 use crate::mapgrid::MapGrid;
+use crate::nav_hooks::NavHandle;
 use crate::planning::PlanScratch;
 use crate::players::{PlayerTable, Salt, Tag};
 use crate::relations::Relations;
@@ -72,6 +76,8 @@ use crate::target::{PickCtx, TargetPicker, is_spared};
 use crate::tees::{HOOK_IDLE, Tee, TeeSet, dist};
 use crate::unstick::{KillReason, Unstick, UnstickCtx, Verdict};
 use crate::wander::{Wander, WanderCtx, WanderEnv};
+
+mod apply;
 
 /// What the bot does (`mode`, §8.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +141,17 @@ pub struct BotConfig {
     /// happened to take (a ~10 ms pause on a loaded CI machine flips it). `None` (the default and every
     /// production path) measures as before. The latency statistics still record the real times.
     pub decision_time_override: Option<Duration>,
+    /// The clip recorder: where clips go, the autoclip (task 4.3).
+    pub clips: ClipConfig,
+    /// Where the console commands save the lists (`None`: they change only the running bot).
+    pub relations_path: Option<PathBuf>,
+    /// Where `!brain`, `!wb`, `!low` and `!strong` are remembered (`None`: not remembered).
+    pub settings_path: Option<PathBuf>,
+    /// `!low` / `!strong` as the run starts (the brain options and the navigation config carry the effect).
+    pub low: bool,
+    pub strong: bool,
+    /// Console replies name other players by their real nickname (`--console-names`); by default by tag.
+    pub console_names: bool,
 }
 
 impl Default for BotConfig {
@@ -152,6 +169,12 @@ impl Default for BotConfig {
             async_seal: false,
             estimate_quantile: DEFAULT_ESTIMATE_QUANTILE,
             decision_time_override: None,
+            clips: ClipConfig::default(),
+            relations_path: None,
+            settings_path: None,
+            low: false,
+            strong: false,
+            console_names: false,
         }
     }
 }
@@ -215,6 +238,13 @@ pub enum BotEvent {
     },
     RosterChanged {
         players: usize,
+    },
+    /// A clip reached the disk (task 4.3): an incident kind, `cross-fail`; no nicknames.
+    ClipSaved {
+        tick: i32,
+        kind: String,
+        severity: i32,
+        path: String,
     },
 }
 
@@ -295,6 +325,29 @@ pub struct Bot {
     wander: Wander,
     encoder: InputEncoder,
     sent: SentLog,
+    clipper: Clipper,
+    /// The navigation's walk label of this frame (a buffer reused by the clip recorder).
+    walk_label: String,
+    /// Why `Cl_Kill` is being requested by this decision (for the clip's `KillSent` event).
+    kill_why: Option<KillWhy>,
+
+    // the console commands (`Bot::command`, task 4.3)
+    /// The navigation's command channel (`goto`, `home`, `wb`, `strong`), once attached.
+    nav: Option<NavHandle>,
+    brain_opts: BrainOptions,
+    /// `!low` / `!strong`.
+    low: bool,
+    strong: bool,
+    /// `!spec`: we asked to go to the spectators and mean to stay there (no auto-join, no moderation stop).
+    wants_spectate: bool,
+    /// `!join` after `!spec`: until this tick (or until the server shows us in the game: a tee, or a team other
+    /// than -1) a spectator state is the operator's own doing still settling, not a moderation move.
+    join_grace_until: Option<i32>,
+    /// A `Cl_SetTeam` the next `on_snapshot` sends (`!spec` / `!join`).
+    pending_team: Option<i32>,
+    /// A `Cl_Kill` the next `on_snapshot` sends (`!kill`).
+    pending_kill: bool,
+    quit: bool,
 
     map: Option<Arc<MapData>>,
     /// Name and hash of the map being loaded (set by the runner before `on_map_loaded`).
@@ -350,6 +403,22 @@ impl Bot {
             wander: Wander::new(cfg.seed),
             encoder: InputEncoder::new(),
             sent: SentLog::new(),
+            clipper: {
+                let mut c = Clipper::new(cfg.clips.clone(), cfg.seed);
+                c.set_brain(brain.name());
+                c
+            },
+            walk_label: String::with_capacity(64),
+            kill_why: None,
+            nav: None,
+            brain_opts: BrainOptions::default(),
+            low: cfg.low,
+            strong: cfg.strong,
+            wants_spectate: false,
+            join_grace_until: None,
+            pending_team: None,
+            pending_kill: false,
+            quit: false,
             map: None,
             map_ident: MapIdent::default(),
             grid: None,
@@ -410,6 +479,38 @@ impl Bot {
         if mode != Mode::Fight && mode != Mode::Goto {
             self.picker.set_target(-1);
         }
+    }
+
+    /// Attaches the navigation's command channel (the runner does, with the handle the hooks were built on).
+    pub fn set_nav_handle(&mut self, handle: NavHandle) {
+        self.nav = Some(handle);
+    }
+
+    /// The knobs `!brain` builds the next brain with.
+    pub fn set_brain_options(&mut self, opts: BrainOptions) {
+        self.brain_opts = opts;
+    }
+
+    /// The operator asked to quit (`!quit`): the runner stops.
+    pub fn quit_requested(&self) -> bool {
+        self.quit
+    }
+
+    pub fn low(&self) -> bool {
+        self.low
+    }
+
+    pub fn strong(&self) -> bool {
+        self.strong
+    }
+
+    pub fn wants_spectate(&self) -> bool {
+        self.wants_spectate
+    }
+
+    /// Whether the grace after `!join` is still running.
+    pub fn join_grace_active(&self) -> bool {
+        self.join_grace_until.is_some()
     }
 
     pub fn stats(&self) -> BotStats {
@@ -479,6 +580,27 @@ impl Bot {
         self.picker.reach_searches()
     }
 
+    /// `!clip [note]`: saves the ring now as `manual-<tick>[-<note>]` in the clip directory.
+    pub fn save_clip(&mut self, note: &str) -> Result<crate::clipper::SavedClip, String> {
+        let own = self.players.own_id().ok_or("not in the game yet")?;
+        self.clipper.save_manual(note, own, &self.players, None)
+    }
+
+    /// Frames in the clip ring now.
+    pub fn clip_frames(&self) -> usize {
+        self.clipper.frames()
+    }
+
+    /// Waits for the clip worker to be idle and reports what it saved (tests, the end of a run).
+    pub fn flush_clips(&mut self) {
+        self.clipper.flush();
+        self.report_saved_clips();
+    }
+
+    pub fn clips(&self) -> &Clipper {
+        &self.clipper
+    }
+
     /// Drains the noteworthy events.
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, BotEvent> {
         self.events.drain(..)
@@ -508,6 +630,7 @@ impl Bot {
         self.live = None;
         self.obs = None;
         self.reset_world_state();
+        self.clipper.set_map(&self.map_ident.name, self.map_ident.sha256);
     }
 
     /// The name and hash of the map the next [`Bot::on_map_loaded`] brings (the wayblock is chosen by
@@ -530,12 +653,14 @@ impl Bot {
 
     /// The connection dropped (the driver may bring it back): in-flight knowledge is void.
     pub fn on_disconnected(&mut self) {
+        self.clipper.reset();
         self.sent.clear();
         self.was_alive = false;
         self.last_tick = -1;
     }
 
     fn reset_world_state(&mut self) {
+        self.clipper.reset();
         self.players.clear();
         self.clock.reset();
         self.picker.reset();
@@ -561,6 +686,8 @@ impl Bot {
     /// The run is over: the hooks save what they keep (the freeze memory).
     pub fn shutdown(&mut self) {
         self.hooks.navigator.stop();
+        self.clipper.finish();
+        self.report_saved_clips();
     }
 
     /// `SV_KILLMSG` (`onKill`, `bot.ts:2120`).
@@ -569,7 +696,8 @@ impl Bot {
     /// `player.cpp:266`), so no snapshot without our tee need ever arrive. The message is therefore
     /// what ends the life (`bot.ts:2131` sets `wasAlive = false` here too): the death is counted once
     /// and the next snapshot with our tee starts a new life (brain reset, `Respawned`).
-    pub fn on_kill_message(&mut self, victim: i32) {
+    pub fn on_kill_message(&mut self, killer: i32, victim: i32, weapon: i32) {
+        self.clipper.push_event(ClipEvent::Kill { killer, victim, weapon });
         self.clock.on_kill(victim, self.last_tick);
         self.hooks
             .navigator
@@ -612,7 +740,15 @@ impl Bot {
         };
         self.stats.snapshots += 1;
         let mut brain_time = Duration::ZERO;
-        let out = self.decide(snap, &mut brain_time);
+        let before = self.stats;
+        let mut out = self.decide(snap, &mut brain_time);
+        self.apply_pending(snap, &mut out);
+        if out.kill {
+            let why = self.kill_why.take().unwrap_or(KillWhy::Unstick);
+            self.clipper.push_event(ClipEvent::KillSent { why: why as u8 });
+        }
+        self.kill_why = None;
+        self.record_clip(snap, &out, &before, started.elapsed(), brain_time);
         if out.input.is_some() {
             self.stats.decisions += 1;
             let total = started.elapsed();
@@ -626,6 +762,104 @@ impl Bot {
                 .unwrap_or_else(|| self.estimator.estimate());
         }
         out
+    }
+
+    /// One frame of the clip ring for this snapshot (task 4.3), after the decision.
+    fn record_clip(
+        &mut self,
+        snap: &LiveWorldSnapshot,
+        out: &Output,
+        before: &BotStats,
+        total: Duration,
+        brain_time: Duration,
+    ) {
+        let (Some(_), Some(own_id)) = (&self.map, snap.own_id) else {
+            return;
+        };
+        if self.live.is_none() {
+            return;
+        }
+        let nav = self.hooks.navigator.clip_state(&mut self.walk_label);
+        let s = &self.stats;
+        let mut flags = 0u16;
+        let mut candidates = 0;
+        if s.brain_decisions > before.brain_decisions {
+            flags |= BotRec::BIT_BRAIN_DECIDED;
+            if let Some(p) = self.brain.last_plan() {
+                flags |= if p.searched { BotRec::BIT_SEARCHED } else { 0 }
+                    | if p.out_of_time { BotRec::BIT_OUT_OF_TIME } else { 0 }
+                    | if p.shielded { BotRec::BIT_SHIELDED } else { 0 }
+                    | if p.shield_incomplete {
+                        BotRec::BIT_SHIELD_INCOMPLETE
+                    } else {
+                        0
+                    };
+                candidates = p.candidates;
+            }
+        }
+        for (now, was, bit) in [
+            (s.wander_decisions, before.wander_decisions, BotRec::BIT_WANDER),
+            (s.guarded_inputs, before.guarded_inputs, BotRec::BIT_GUARDED),
+            (s.vetoed_hooks, before.vetoed_hooks, BotRec::BIT_VETOED_HOOK),
+            (s.vetoed_fires, before.vetoed_fires, BotRec::BIT_VETOED_FIRE),
+        ] {
+            if now > was {
+                flags |= bit;
+            }
+        }
+        if nav.crossing {
+            flags |= BotRec::BIT_CROSSING;
+        }
+        if nav.planned_freeze {
+            flags |= BotRec::BIT_PLANNED_FREEZE;
+        }
+        if self.hooks.wayblock.holding() {
+            flags |= BotRec::BIT_WB_HOLDING;
+        }
+        let blocks = self.clock.stats();
+        let bot = BotRec {
+            target: self.picker.target(),
+            brain: BrainKind::ALL
+                .iter()
+                .position(|k| *k == self.cfg.brain)
+                .map_or(255, |i| i as u8),
+            flags,
+            walk: 0,
+            total_us: u32::try_from(total.as_micros()).unwrap_or(u32::MAX),
+            brain_us: u32::try_from(brain_time.as_micros()).unwrap_or(u32::MAX),
+            candidates,
+            aimed_tick: out.tag.map_or(0, |t| t.expected_tick),
+            blocks: u16::try_from(blocks.blocks).unwrap_or(u16::MAX),
+            blocked_by: u16::try_from(blocks.blocked_by).unwrap_or(u16::MAX),
+        };
+        self.clipper.record(&FrameInput {
+            snap,
+            tees: &self.tees,
+            players: &self.players,
+            sent: &self.sent,
+            own_id,
+            bot,
+            walk_label: &self.walk_label,
+        });
+        if let Some(note) = self.hooks.navigator.take_cross_fail() {
+            self.clipper.cross_fail(&note, own_id, &self.players);
+        }
+        self.report_saved_clips();
+    }
+
+    /// Clips the automatic path saved since the last look become [`BotEvent::ClipSaved`]s.
+    fn report_saved_clips(&mut self) {
+        for c in self.clipper.take_saved() {
+            push_event(
+                &mut self.events,
+                BotEvent::ClipSaved {
+                    tick: c.tick,
+                    kind: c.kind,
+                    severity: c.severity,
+                    path: c.path.display().to_string(),
+                },
+            );
+        }
     }
 
     fn decide(&mut self, snap: &LiveWorldSnapshot, brain_time: &mut Duration) -> Output {
@@ -681,6 +915,9 @@ impl Bot {
             stats,
             events,
             status,
+            kill_why,
+            wants_spectate,
+            join_grace_until,
             ..
         } = self;
         let (Some(live), Some(plan), Some(obs), Some(grid)) =
@@ -735,7 +972,15 @@ impl Bot {
             let input = encoder.idle();
             stats.idle_decisions += 1;
             out.input = Some(input);
-            if *played_on_map && players.get(own_id).is_some_and(|s| s.team == -1) {
+            if players.get(own_id).is_some_and(|s| s.team != -1) {
+                *join_grace_until = None; // the server has us in the game again (dead or waiting to spawn)
+            }
+            if *wants_spectate {
+                // `!spec`: the operator put us there and means it (no auto-join, no moderation stop).
+            } else if join_grace_until.is_some_and(|until| tick <= until) {
+                // `!join` was typed and the server has not applied it yet: keep asking, do not stop.
+                out.set_team = join_request(cfg, players, join, events, tick, own_id);
+            } else if *played_on_map && players.get(own_id).is_some_and(|s| s.team == -1) {
                 // F3: a spectator after having played is a moderation signal. Stay put and stop.
                 if stop.is_none() {
                     *stop = Some(StopReason::MovedToSpectators);
@@ -748,6 +993,7 @@ impl Bot {
             return out;
         };
         *played_on_map = true;
+        *join_grace_until = None; // a tee: the join went through
 
         // 6. first frame of a life.
         if !*was_alive {
@@ -812,6 +1058,10 @@ impl Bot {
         });
         if let Verdict::Kill(reason) = verdict {
             out.kill = true;
+            *kill_why = Some(match reason {
+                KillReason::WayBlockLying => KillWhy::WayBlockLying,
+                KillReason::Overdue | KillReason::Stuck => KillWhy::Unstick,
+            });
             stats.self_kills += 1;
             hooks.navigator.kill_sent(tick, false);
             push_event(events, BotEvent::Killed { tick, reason });
@@ -834,6 +1084,7 @@ impl Bot {
                     hooks.navigator.kill_sent(tick, true);
                     stats.self_kills += 1;
                     out.kill = true;
+                    *kill_why = Some(KillWhy::Navigation);
                 }
                 navigated = Some(action);
             }
@@ -1013,6 +1264,7 @@ impl Bot {
                 hooks.navigator.kill_sent(tick, false);
                 stats.self_kills += 1;
                 out.kill = true;
+                *kill_why = Some(KillWhy::Trek);
             }
             let wb = hooks.wayblock.brain_hints(&hook_ctx!());
             brain.set_live_context(&LiveContext {
@@ -1088,6 +1340,7 @@ impl Bot {
             },
         );
         self.stats.ticks_resets += 1;
+        self.clipper.reset();
         self.clock.reset();
         self.picker.reset();
         self.unstick.reset_ticks();

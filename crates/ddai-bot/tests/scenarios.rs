@@ -1353,7 +1353,7 @@ fn our_own_kill_message_starts_a_new_life_even_though_no_snapshot_is_ever_withou
         let (mut bot, mut sc, (_, resets, _)) = setup(vec![tee(0, 1000), tee(1, 1100)], Relations::new());
         run_active(&mut bot, &mut sc, &[1], 4);
         assert_eq!(resets.borrow().len(), 1);
-        bot.on_kill_message(0);
+        bot.on_kill_message(-1, 0, -1);
         assert_eq!(bot.stats().deaths, 1, "counted once");
         sc.tee_mut(0).x = 1500; // the spawn point
         run_active(&mut bot, &mut sc, &[1], 3);
@@ -1367,11 +1367,11 @@ fn our_own_kill_message_starts_a_new_life_even_though_no_snapshot_is_ever_withou
         );
         assert_eq!(bot.stats().deaths, 1, "and still one death");
         // The same message again (a late duplicate) does not count a second death.
-        bot.on_kill_message(0);
-        bot.on_kill_message(0);
+        bot.on_kill_message(-1, 0, -1);
+        bot.on_kill_message(-1, 0, -1);
         assert_eq!(bot.stats().deaths, 2, "one per life");
         // Somebody else's death never touches us.
-        bot.on_kill_message(1);
+        bot.on_kill_message(-1, 1, -1);
         assert_eq!(bot.stats().deaths, 2);
     });
 }
@@ -1381,7 +1381,7 @@ fn a_death_seen_both_as_a_message_and_as_an_absent_snapshot_is_counted_once() {
     support::big_stack(|| {
         let (mut bot, mut sc, (_, resets, _)) = setup(vec![tee(0, 1000), tee(1, 1100)], Relations::new());
         run_active(&mut bot, &mut sc, &[1], 4);
-        bot.on_kill_message(0);
+        bot.on_kill_message(-1, 0, -1);
         let us = sc.tees.remove(0);
         run_active(&mut bot, &mut sc, &[1], 4);
         sc.tees.insert(0, us);

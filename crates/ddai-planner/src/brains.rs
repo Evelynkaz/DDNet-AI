@@ -614,6 +614,17 @@ impl Brain for PlannerBrain {
         &self.name
     }
 
+    fn last_plan(&self) -> Option<ddai_brain::PlanTelemetry> {
+        let i = &self.planner.last_info;
+        Some(ddai_brain::PlanTelemetry {
+            searched: i.searched,
+            out_of_time: i.out_of_time,
+            shielded: i.shielded,
+            shield_incomplete: i.shield_incomplete,
+            candidates: i.candidates.max(0) as u32,
+        })
+    }
+
     fn telemetry(&self) -> Option<String> {
         let s = self.stats;
         Some(format!(

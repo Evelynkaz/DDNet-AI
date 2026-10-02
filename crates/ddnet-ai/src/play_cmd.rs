@@ -58,12 +58,55 @@ impl Brain {
     }
 }
 
+/// `--server`: an address, or `auto` (the restricted pick, see [`PlayArgs::server`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerArg {
+    Auto,
+    Addr(SocketAddr),
+}
+
+impl std::str::FromStr for ServerArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let t = s.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("авто") {
+            return Ok(ServerArg::Auto);
+        }
+        t.parse()
+            .map(ServerArg::Addr)
+            .map_err(|e| format!("expected `auto` or ip:port: {e}"))
+    }
+}
+
+/// Resolves `--server`: an address as given, or the restricted auto-pick over the master list (read-only).
+fn resolve_server(arg: &ServerArg, name: &str) -> Result<SocketAddr, String> {
+    let ServerArg::Addr(addr) = arg else {
+        let path = ddai_client::live_servers::LiveServers::default_path();
+        let list = ddai_client::live_servers::LiveServers::load_or_empty(&path).map_err(|e| e.to_string())?;
+        let local: SocketAddr = ddai_client::server_list::LOCAL_SERVER
+            .parse()
+            .map_err(|_| "bad local address")?;
+        // The master list is asked for only when a ready allow-listed server exists to choose among.
+        let (pick, warning) =
+            ddai_client::server_list::pick_auto_fetching(local, name, &list, crate::servers_cmd::fetch_master);
+        if let Some(e) = warning {
+            eprintln!("server auto: the master list is not available ({e})");
+        }
+        eprintln!("server auto: {} ({})", pick.addr, pick.why);
+        return Ok(pick.addr);
+    };
+    Ok(*addr)
+}
+
 #[derive(Debug, Args)]
 pub struct PlayArgs {
-    /// Server to connect to (game port, e.g. `127.0.0.1:8303`) — per CLAUDE.md's live-play
-    /// policy this task only ever points this at 127.0.0.1.
+    /// Server to connect to (game port, e.g. `127.0.0.1:8303`), or `auto`: the most populated block server
+    /// **among the allow-listed ready ones** (`live-servers.toml`, `ready = true`, our nick pinned), else the
+    /// local server. `auto` never picks a public server (CLAUDE.md, D-043, D-051, D-052); an explicit
+    /// address still has to pass the same allow-list gate in the client.
     #[arg(long)]
-    pub server: SocketAddr,
+    pub server: ServerArg,
     /// Name to send in `Cl_StartInfo`.
     #[arg(long, default_value = "ddai-bot")]
     pub name: String,
@@ -317,7 +360,14 @@ pub fn run(args: PlayArgs) -> ExitCode {
     // own local multi-bot e2e tests, which run several distinctly-named bots against one address
     // at once). D-016: never more than one bot under the same identity on a server, from either
     // command.
-    let _server_lock = match single_instance::acquire(args.server, &args.name) {
+    let server = match resolve_server(&args.server, &args.name) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("--server: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let _server_lock = match single_instance::acquire(server, &args.name) {
         Ok(lock) => lock,
         Err(e) => {
             tracing::error!(error = %e, "refusing to start");
@@ -327,7 +377,7 @@ pub fn run(args: PlayArgs) -> ExitCode {
     };
 
     if args.brain.is_bot_brain() || args.bot {
-        return crate::bot_cmd::run(&args, &data_dir);
+        return crate::bot_cmd::run(&args, &data_dir, server);
     }
 
     let config = ClientConfig {
@@ -360,8 +410,8 @@ pub fn run(args: PlayArgs) -> ExitCode {
         }
     }
 
-    tracing::info!(server = %args.server, name = %args.name, brain = ?args.brain, duration = args.duration, "connecting");
-    let mut client = Client::connect(args.server, config);
+    tracing::info!(server = %server, name = %args.name, brain = ?args.brain, duration = args.duration, "connecting");
+    let mut client = Client::connect(server, config);
 
     let mut input_log = match &args.input_log {
         Some(path) => match File::create(path) {

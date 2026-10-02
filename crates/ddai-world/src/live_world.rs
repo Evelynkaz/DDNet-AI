@@ -214,6 +214,13 @@ impl<'a> SnapshotInput<'a> {
     }
 }
 
+/// Our own tee's complete state, see [`LiveWorld::export_own`] / [`LiveWorld::import_own`].
+#[derive(Clone, Copy)]
+pub struct OwnState {
+    core: core::CharacterCore<f32>,
+    character: world::Character<f32>,
+}
+
 /// The client-side reconstruction of the server's `World<f32>`, kept up to date from the
 /// snapshot stream ([`LiveWorld::on_snapshot`]) and steppable a few ticks into the future
 /// ([`LiveWorld::predict`]) to cover network + processing latency.
@@ -851,6 +858,42 @@ impl LiveWorld {
         self.predict_impl(to_tick, own_inputs_in_flight, Some(keep));
         fill_observation_from(&self.map, self.own_id, &self.scratch, target_id, obs);
         &self.scratch
+    }
+
+    /// [`LiveWorld::export_own`] from the world of the last [`LiveWorld::predict`] call.
+    pub fn export_own_predicted(&self) -> Option<OwnState> {
+        self.export_own(&self.scratch)
+    }
+
+    /// Our own tee's complete state in `world` (its core and its `Character`), if it is there — what a
+    /// clip replay carries from one prediction to the next (task 4.3, see [`LiveWorld::import_own`]).
+    pub fn export_own(&self, world: &World<f32>) -> Option<OwnState> {
+        let id = self.own_id;
+        let slot = world.cores.slot_of(u8::try_from(id).ok()?)?;
+        let character = world.characters.get(usize::try_from(id).ok()?).copied().flatten()?;
+        Some(OwnState {
+            core: *world.cores.core_at(slot),
+            character,
+        })
+    }
+
+    /// Overwrites our own tee in the **base** world with `state` (a clip replay's free-running own tee:
+    /// the other tees come from the recorded snapshot, ours from the physics). Returns false when our
+    /// tee is not in the base world (a death: nothing to replace).
+    pub fn import_own(&mut self, state: &OwnState) -> bool {
+        let id = self.own_id;
+        let (Ok(small), Ok(idx)) = (u8::try_from(id), usize::try_from(id)) else {
+            return false;
+        };
+        let Some(slot) = self.world.cores.slot_of(small) else {
+            return false;
+        };
+        if self.world.characters.get(idx).is_none_or(Option::is_none) {
+            return false;
+        }
+        *self.world.cores.core_at_mut(slot) = state.core;
+        self.world.characters[idx] = Some(state.character);
+        true
     }
 
     /// The map this `LiveWorld` was built from ([`ddai_brain::Observation::map`] shares this same

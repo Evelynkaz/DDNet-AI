@@ -960,6 +960,7 @@ dependencies = [
  "allocation-counter",
  "ddai-brain",
  "ddai-client",
+ "ddai-clip",
  "ddai-fly",
  "ddai-flyg",
  "ddai-map",
@@ -975,6 +976,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -994,11 +996,27 @@ dependencies = [
  "ddai-net",
  "fd-lock",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "ddai-clip"
+version = "0.1.0"
+dependencies = [
+ "allocation-counter",
+ "ddai-net",
+ "ddai-physics",
+ "ddai-world",
+ "postcard",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "zstd",
 ]
 
 [[package]]
@@ -1297,6 +1315,7 @@ dependencies = [
  "ddai-bot",
  "ddai-brain",
  "ddai-client",
+ "ddai-clip",
  "ddai-dataset",
  "ddai-demo",
  "ddai-env",
@@ -1310,6 +1329,7 @@ dependencies = [
  "ddai-trace",
  "ddai-train",
  "ddai-web",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

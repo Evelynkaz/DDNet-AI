@@ -109,6 +109,59 @@ const DEFAULTS: [i32; NUM_TUNE_PARAMS] = [
 ];
 
 impl TuneParams {
+    /// The 47 values in wire (`tuning.h`) order — task 4.3 (clips) stores them like this.
+    pub const fn to_array(&self) -> [i32; NUM_TUNE_PARAMS] {
+        [
+            self.ground_control_speed,
+            self.ground_control_accel,
+            self.ground_friction,
+            self.ground_jump_impulse,
+            self.air_jump_impulse,
+            self.air_control_speed,
+            self.air_control_accel,
+            self.air_friction,
+            self.hook_length,
+            self.hook_fire_speed,
+            self.hook_drag_accel,
+            self.hook_drag_speed,
+            self.gravity,
+            self.velramp_start,
+            self.velramp_range,
+            self.velramp_curvature,
+            self.gun_curvature,
+            self.gun_speed,
+            self.gun_lifetime,
+            self.shotgun_curvature,
+            self.shotgun_speed,
+            self.shotgun_speeddiff,
+            self.shotgun_lifetime,
+            self.grenade_curvature,
+            self.grenade_speed,
+            self.grenade_lifetime,
+            self.laser_reach,
+            self.laser_bounce_delay,
+            self.laser_bounce_num,
+            self.laser_bounce_cost,
+            self.laser_damage,
+            self.player_collision,
+            self.player_hooking,
+            self.jetpack_strength,
+            self.shotgun_strength,
+            self.explosion_strength,
+            self.hammer_strength,
+            self.hook_duration,
+            self.hammer_fire_delay,
+            self.gun_fire_delay,
+            self.shotgun_fire_delay,
+            self.grenade_fire_delay,
+            self.laser_fire_delay,
+            self.ninja_fire_delay,
+            self.hammer_hit_fire_delay,
+            self.ground_elasticity_x,
+            self.ground_elasticity_y,
+        ]
+    }
+
     /// Returns a copy with [`TuneParams::received`] replaced — a small test/construction
     /// convenience, never used by [`decode_sv_tune_params`] itself.
     pub const fn with_received(self, received: usize) -> Self {
@@ -120,7 +173,8 @@ impl TuneParams {
 /// before any `Sv_TuneParams` message has been applied to it.
 pub const DEFAULT_TUNE_PARAMS: TuneParams = from_array(0, DEFAULTS);
 
-const fn from_array(received: usize, v: [i32; NUM_TUNE_PARAMS]) -> TuneParams {
+/// The inverse of [`TuneParams::to_array`] (task 4.3: clips store the tuning as 47 raw ints).
+pub const fn from_array(received: usize, v: [i32; NUM_TUNE_PARAMS]) -> TuneParams {
     TuneParams {
         received,
         ground_control_speed: v[0],
@@ -418,5 +472,17 @@ mod tests {
             let state = decode_teams_state(&mut unpacker);
             assert!(state.received <= 128);
         }
+    }
+
+    #[test]
+    fn to_array_and_from_array_round_trip_every_field() {
+        let mut v = DEFAULTS;
+        for (i, x) in v.iter_mut().enumerate() {
+            *x += i as i32 * 7 + 1;
+        }
+        let t = from_array(30, v);
+        assert_eq!(t.to_array(), v);
+        assert_eq!(t.received, 30);
+        assert_eq!(DEFAULT_TUNE_PARAMS.to_array(), DEFAULTS);
     }
 }

@@ -36,6 +36,7 @@ pub mod allowlist;
 pub mod driver;
 pub mod live_servers;
 pub mod map_cache;
+pub mod server_list;
 pub mod session;
 pub mod single_instance;
 pub mod smooth_time;

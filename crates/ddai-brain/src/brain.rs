@@ -114,6 +114,21 @@ pub struct FreezeMemoryData {
     pub events: i64,
 }
 
+/// What a brain says about its last decision, for the clip's `lastPlan` (task 4.3): small, `Copy`, no names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlanTelemetry {
+    /// A search ran (not a cached or trivial answer).
+    pub searched: bool,
+    /// The search ran out of its deadline.
+    pub out_of_time: bool,
+    /// The shield replaced the searched input.
+    pub shielded: bool,
+    /// The shield's own time reserve ran out before it could verify the answer.
+    pub shield_incomplete: bool,
+    /// Candidates scored.
+    pub candidates: u32,
+}
+
 /// The shared decision-maker interface (task 7.3, acceptance criterion 1). Every implementer is
 /// `&mut self` in [`Brain::decide`]: a brain is allowed to carry internal dynamical state across
 /// decisions (the fly's membrane potentials; a planner's warm-started search tree) — nothing here
@@ -166,6 +181,12 @@ pub trait Brain {
     /// different brains have very different telemetry shapes, and a caller that wants structure
     /// re-parses the string itself. `None` (the default) means this brain has nothing to report.
     fn telemetry(&self) -> Option<String> {
+        None
+    }
+
+    /// Task 4.3: the last decision's plan summary for the clip recorder. `None` (the default): this brain
+    /// has no plan to report. Must be cheap and allocation-free (it is read once per decision).
+    fn last_plan(&self) -> Option<PlanTelemetry> {
         None
     }
 }

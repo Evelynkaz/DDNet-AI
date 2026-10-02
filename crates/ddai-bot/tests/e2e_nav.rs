@@ -111,6 +111,8 @@ fn config_wb(
             ..NavConfig::default()
         },
         nav_handle: handle,
+        commands: None,
+        console_out: None,
     }
 }
 

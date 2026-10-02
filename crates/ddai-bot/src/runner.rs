@@ -32,6 +32,8 @@ use ddai_physics::map::MapData;
 use crate::bot::{Bot, BotConfig, BotEvent, BotStats, Output};
 use crate::brains::{BrainError, BrainOptions, make_brain};
 use crate::bridge::{Bridge, FrameChar, MapMessage, PlayerEntry, PlayersMessage, StatusMessage};
+use crate::command::CommandInbox;
+use crate::console::Printer;
 use crate::hooks::MapIdent;
 use crate::latency::{LatencyStats, Summary};
 use crate::nav_hooks::{NavConfig, NavHandle, nav_hooks};
@@ -111,6 +113,10 @@ pub struct RunnerConfig {
     pub nav: NavConfig,
     /// How commands (`--goto`, `--follow`, task 4.3's chat commands) reach the navigation.
     pub nav_handle: NavHandle,
+    /// The console / web commands waiting for the bot (task 4.3); `None`: no commands.
+    pub commands: Option<CommandInbox>,
+    /// Where the navigation's answers to console commands are printed (`None`: they go to the log).
+    pub console_out: Option<Printer>,
 }
 
 /// What a finished run reports.
@@ -198,6 +204,8 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         nav_hooks(cfg.nav.clone(), cfg.nav_handle.clone()),
         cfg.relations.clone(),
     );
+    bot.set_nav_handle(cfg.nav_handle.clone());
+    bot.set_brain_options(cfg.brain.clone());
     tracing::info!(server = %cfg.server, brain = bot.brain_name(), mode = bot.mode().name(), "starting the bot");
     let mut client = Client::connect(cfg.server, client_cfg);
 
@@ -264,6 +272,23 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
             }
         } else if let Some(b) = bridge.as_mut() {
             b.accept_pending();
+        }
+        // The operator's commands (and the navigation's answers to them), between two snapshots.
+        if let Some(inbox) = &cfg.commands {
+            while let Some(req) = inbox.try_next() {
+                let reply = bot.command(req.cmd);
+                let _ = req.reply.send(reply);
+            }
+        }
+        for line in cfg.nav_handle.drain_replies() {
+            match &cfg.console_out {
+                Some(print) => print(&line),
+                None => tracing::info!(target: "nav", "{line}"),
+            }
+        }
+        if bot.quit_requested() && !stop_now {
+            tracing::info!("quit requested from the console");
+            stop_now = true;
         }
         let mut events: Vec<BotEvent> = bot.drain_events().collect();
         for e in events.drain(..) {
@@ -408,7 +433,7 @@ fn handle_event(
                     tracing::error!(map = %loaded.name, "could not read the loaded map back from the cache: the bot will not act")
                 }
             },
-            SessionEvent::GameMessage(GameMsg::SvKillMsg(k)) => bot.on_kill_message(k.victim),
+            SessionEvent::GameMessage(GameMsg::SvKillMsg(k)) => bot.on_kill_message(k.killer, k.victim, k.weapon),
             SessionEvent::OutgoingGame { label, accepted } => count_outgoing(report, label, accepted),
             SessionEvent::InGame => {
                 tracing::info!("in game");
@@ -487,6 +512,12 @@ fn log_event(e: &BotEvent) {
         ),
         BotEvent::TickReset { from, to } => tracing::info!(from, to, "game tick went backwards"),
         BotEvent::RosterChanged { players } => tracing::debug!(players, "roster changed"),
+        BotEvent::ClipSaved {
+            tick,
+            kind,
+            severity,
+            path,
+        } => tracing::info!(tick, kind, severity, path, "clip saved"),
     }
 }
 

@@ -20,6 +20,8 @@ ddai-bot = { path = "../ddai-bot" }
 # Task 3.5: the arena brain factory names `Brain` and builds the hybrid brain with the fly proposer.
 ddai-brain = { path = "../ddai-brain" }
 ddai-client = { path = "../ddai-client" }
+# Task 4.3: `clip info|incidents|replay`.
+ddai-clip = { path = "../ddai-clip" }
 ddai-dataset = { path = "../ddai-dataset" }
 ddai-demo = { path = "../ddai-demo" }
 # Task 8.1: `arena` subcommand (the offline evaluation arena).
@@ -45,6 +47,9 @@ ddai-web = { path = "../ddai-web" }
 # Task 8.4a's `rec reconstruct --validate` deserializes `ddnet-ai play --input-log`'s JSON lines.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
+# `servers` / `--server auto` (task 4.3): the read-only master-list query. The same crate and feature as
+# `ddai-connectome` already uses (no new package in the tree).
+reqwest = { version = "0.13.5", features = ["blocking"] }
 # Task 8.2: `train` run/collect configs are TOML (same version as ddai-connectome/ddai-env).
 toml = "1.1.6"
 # `demo stats`/`demo info`: falls back to hashing the embedded map's own bytes when a pre-v6 demo

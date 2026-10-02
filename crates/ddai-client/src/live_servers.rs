@@ -26,6 +26,12 @@ pub struct LiveServerEntry {
     /// [`check`]; kept so the file stays self-documenting for the human editing it.
     #[serde(default)]
     pub purpose: String,
+    /// Task 4.3: the owner has said this server is ready for **live play** (the IP or the proxy is
+    /// whitelisted, D-052/D-053). `--server auto` ([`crate::server_list`]) considers only entries with
+    /// `ready = true`; [`check`] (an explicit `--server <addr>`, the recorder) ignores it, as before.
+    /// Missing means not ready.
+    #[serde(default)]
+    pub ready: bool,
 }
 
 /// The parsed file: a flat list of [`LiveServerEntry`].
@@ -91,6 +97,18 @@ impl LiveServers {
             .find(|e| resolve(&e.address).is_some_and(|resolved| resolved.contains(&addr)))
             .map(|e| e.nick.as_str())
     }
+
+    /// The entries `--server auto` may pick: the owner's `ready = true` ones.
+    pub fn ready_entries(&self) -> impl Iterator<Item = &LiveServerEntry> {
+        self.servers.iter().filter(|e| e.ready)
+    }
+
+    /// [`LiveServers::allowed_nick`] for a `ready` entry only.
+    pub fn ready_nick(&self, addr: SocketAddr) -> Option<&str> {
+        self.ready_entries()
+            .find(|e| resolve(&e.address).is_some_and(|resolved| resolved.contains(&addr)))
+            .map(|e| e.nick.as_str())
+    }
 }
 
 fn resolve(address: &str) -> Option<Vec<SocketAddr>> {
@@ -108,6 +126,10 @@ pub enum LiveServerCheckError {
     #[error("{addr} is not a loopback address and is not listed in live-servers.toml (D-027/D-038)")]
     NotAllowed { addr: SocketAddr },
     #[error(
+        "{addr} is listed in live-servers.toml, but without `ready = true`: the owner has not said this server may be connected to from here yet (D-052/D-053)"
+    )]
+    NotReady { addr: SocketAddr },
+    #[error(
         "{addr} is listed in live-servers.toml, but only under nick {expected:?} — refusing to connect as {requested:?}"
     )]
     WrongNick {
@@ -117,6 +139,11 @@ pub enum LiveServerCheckError {
     },
 }
 
+/// Task 4.3 (review F1): a non-loopback entry is also **refused unless it carries `ready = true`** — the
+/// owner's explicit "this server may be connected to from here now" (D-052: the VPS is banned on Swarfey
+/// until the IP or a proxy is whitelisted). This holds for every caller: `play`, `record`, `--server auto`
+/// and the client driver's own gate.
+///
 /// Task 8.4a acceptance criterion 5: `Ok(())` for any loopback address (this task's own local
 /// development never needs an entry in the file at all), or for a non-loopback address listed in
 /// `list` under exactly the nick `requested_nick` — every other non-loopback address, and every
@@ -126,15 +153,27 @@ pub fn check(addr: SocketAddr, requested_nick: &str, list: &LiveServers) -> Resu
     if is_loopback(addr) {
         return Ok(());
     }
-    match list.allowed_nick(addr) {
-        Some(nick) if nick == requested_nick => Ok(()),
-        Some(nick) => Err(LiveServerCheckError::WrongNick {
-            addr,
-            expected: nick.to_string(),
-            requested: requested_nick.to_string(),
-        }),
-        None => Err(LiveServerCheckError::NotAllowed { addr }),
+    let matching: Vec<&LiveServerEntry> = list
+        .servers
+        .iter()
+        .filter(|e| resolve(&e.address).is_some_and(|r| r.contains(&addr)))
+        .collect();
+    if matching.is_empty() {
+        return Err(LiveServerCheckError::NotAllowed { addr });
     }
+    // Only a ready entry counts; one that is merely listed is refused whatever the nick.
+    let ready: Vec<&&LiveServerEntry> = matching.iter().filter(|e| e.ready).collect();
+    if ready.is_empty() {
+        return Err(LiveServerCheckError::NotReady { addr });
+    }
+    if ready.iter().any(|e| e.nick == requested_nick) {
+        return Ok(());
+    }
+    Err(LiveServerCheckError::WrongNick {
+        addr,
+        expected: ready[0].nick.clone(),
+        requested: requested_nick.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -148,10 +187,60 @@ mod tests {
             address = "45.141.57.35:8308"
             nick = "Muha"
             purpose = "observer-recording"
+            ready = true
             "#,
             Path::new("<test>"),
         )
         .expect("valid test TOML")
+    }
+
+    /// The owner's real file today: Swarfey listed, no `ready`.
+    fn real_shaped_list() -> LiveServers {
+        LiveServers::parse(
+            r#"
+            [[server]]
+            address = "45.141.57.35:8308"
+            nick = "Muha"
+            purpose = "observer-recording"
+            "#,
+            Path::new("<test>"),
+        )
+        .expect("valid test TOML")
+    }
+
+    #[test]
+    fn a_listed_entry_without_ready_is_refused_naming_the_flag() {
+        let list = real_shaped_list();
+        let err = check("45.141.57.35:8308".parse().unwrap(), "Muha", &list).unwrap_err();
+        assert!(matches!(err, LiveServerCheckError::NotReady { .. }), "{err:?}");
+        assert!(err.to_string().contains("ready = true"), "{err}");
+        // Under any nick, and with `ready = false` written out.
+        assert!(check("45.141.57.35:8308".parse().unwrap(), "Other", &list).is_err());
+        let off = LiveServers::parse(
+            "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = false\n",
+            Path::new("<test>"),
+        )
+        .unwrap();
+        assert!(matches!(
+            check("45.141.57.35:8308".parse().unwrap(), "Muha", &off),
+            Err(LiveServerCheckError::NotReady { .. })
+        ));
+        // Loopback never needs an entry.
+        assert!(check("127.0.0.1:8303".parse().unwrap(), "Muha", &list).is_ok());
+    }
+
+    #[test]
+    fn a_ready_entry_is_found_even_when_a_not_ready_one_for_the_same_address_comes_first() {
+        let list = LiveServers::parse(
+            "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Old\"\n\n[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\n",
+            Path::new("<test>"),
+        )
+        .unwrap();
+        assert!(check("45.141.57.35:8308".parse().unwrap(), "Muha", &list).is_ok());
+        assert!(matches!(
+            check("45.141.57.35:8308".parse().unwrap(), "Old", &list),
+            Err(LiveServerCheckError::WrongNick { .. })
+        ));
     }
 
     #[test]
@@ -209,7 +298,19 @@ mod tests {
         assert_eq!(loaded.servers.len(), 1);
         assert_eq!(loaded.servers[0].address, "45.141.57.35:8308");
         assert_eq!(loaded.servers[0].nick, "Muha");
+        assert!(!loaded.servers[0].ready, "a file without `ready` means not ready");
+        // The owner's real file today has exactly this shape: Swarfey is listed and still refused.
+        let err = check("45.141.57.35:8308".parse().unwrap(), "Muha", &loaded).unwrap_err();
+        assert!(matches!(err, LiveServerCheckError::NotReady { .. }), "{err:?}");
+        // Once the owner adds `ready = true` it is allowed under that nick only.
+        std::fs::write(
+            &path,
+            "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\npurpose = \"observer-recording\"\nready = true\n",
+        )
+        .unwrap();
+        let loaded = LiveServers::load_or_empty(&path).expect("valid file");
         assert!(check("45.141.57.35:8308".parse().unwrap(), "Muha", &loaded).is_ok());
+        assert!(check("45.141.57.35:8308".parse().unwrap(), "Other", &loaded).is_err());
     }
 
     #[test]
@@ -233,6 +334,7 @@ mod tests {
             [[server]]
             address = "45.141.57.35:8308"
             nick = "Muha"
+            ready = true
             "#,
             Path::new("<test>"),
         )

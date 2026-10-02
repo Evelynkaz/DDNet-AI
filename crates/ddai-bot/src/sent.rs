@@ -33,7 +33,7 @@ struct Sent {
 pub struct SentLog {
     ring: Vec<Sent>,
     /// `(effective tick, input)` sorted by effective tick, rebuilt by [`SentLog::refresh`].
-    claims: Vec<(i32, PlayerInput)>,
+    claims: Vec<(i32, PlayerInput, bool)>,
 }
 
 impl Default for SentLog {
@@ -91,7 +91,7 @@ impl SentLog {
             // The first (earliest original tick) input to claim an effective tick keeps it.
             match self.claims.binary_search_by_key(&eff, |c| c.0) {
                 Ok(_) => {}
-                Err(at) => self.claims.insert(at, (eff, s.input)),
+                Err(at) => self.claims.insert(at, (eff, s.input, s.time_left.is_some())),
             }
         }
     }
@@ -101,11 +101,23 @@ impl SentLog {
         self.claims.iter().rev().find(|c| c.0 <= tick).map(|c| c.1)
     }
 
+    /// [`SentLog::effective_at`] plus whether the server's timing report for the input in force had
+    /// arrived (without it a late input would still be taken at the tick it was sent for; the clip records
+    /// the flag, task 4.3).
+    pub fn effective_with_timing(&self, tick: i32) -> Option<(PlayerInput, bool)> {
+        self.claims.iter().rev().find(|c| c.0 <= tick).map(|c| (c.1, c.2))
+    }
+
     /// Claims with `from < tick <= to`, appended to `out` (cleared first) — the `own_inputs_in_flight`
     /// of [`ddai_world::LiveWorld::predict`].
     pub fn in_flight(&self, from: i32, to: i32, out: &mut Vec<(i32, PlayerInput)>) {
         out.clear();
-        out.extend(self.claims.iter().filter(|c| c.0 > from && c.0 <= to).copied());
+        out.extend(
+            self.claims
+                .iter()
+                .filter(|c| c.0 > from && c.0 <= to)
+                .map(|c| (c.0, c.1)),
+        );
     }
 
     pub fn len(&self) -> usize {

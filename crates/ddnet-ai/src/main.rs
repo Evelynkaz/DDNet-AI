@@ -6,6 +6,7 @@
 
 mod arena_cmd;
 mod bot_cmd;
+mod clip_cmd;
 mod dataset_cmd;
 mod demo_cmd;
 mod fly_cmd;
@@ -13,6 +14,7 @@ mod map_cmd;
 mod play_cmd;
 mod rec_cmd;
 mod record_cmd;
+mod servers_cmd;
 mod trace_cmd;
 mod train_cmd;
 mod web_cmd;
@@ -52,13 +54,18 @@ enum Command {
     WebPasswd(web_cmd::WebPasswdArgs),
     /// Connects to a real DDNet 20.x server and plays with a trivial built-in brain (task 2.3;
     /// the real bot's brain is a later phase) — `--server 127.0.0.1:8303 --brain idle|circle`.
-    Play(play_cmd::PlayArgs),
+    Play(Box<play_cmd::PlayArgs>),
     /// Observer recorder (task 8.4a): connects as a pure spectator (never sends non-neutral input
     /// or chat) and records the session into rec v1 — `--server <addr> --name Muha --duration <s>
     /// --out ~/aiddnet/data/recordings/<date>/`.
     Record(record_cmd::RecordArgs),
     /// Offline rec v1 tooling (task 8.4a): `rec inspect|reconstruct|anonymize`.
     Rec(rec_cmd::RecArgs),
+    /// The bot's clips (task 4.3): `info`, `incidents`, and the offline bit-exact `replay`.
+    Clip(clip_cmd::ClipArgs),
+    /// Read-only look at the DDNet master list (task 4.3): the block servers, their players, and which of
+    /// them the bot may connect to. Opens no game connection.
+    Servers(servers_cmd::ServersArgs),
 }
 
 /// True in the opt-in **training-only build** (`tools/train-v3-build.sh`: `-C target-cpu=x86-64-v3`,
@@ -93,9 +100,11 @@ fn main() -> ExitCode {
         Some(Command::Dataset(args)) => dataset_cmd::run(args),
         Some(Command::Web(args)) => web_cmd::run_web(args),
         Some(Command::WebPasswd(args)) => web_cmd::run_web_passwd(args),
-        Some(Command::Play(args)) => play_cmd::run(args),
+        Some(Command::Play(args)) => play_cmd::run(*args),
         Some(Command::Record(args)) => record_cmd::run(args),
         Some(Command::Rec(args)) => rec_cmd::run(args),
+        Some(Command::Servers(args)) => servers_cmd::run(args),
+        Some(Command::Clip(args)) => clip_cmd::run(args),
     }
 }
 
@@ -686,11 +695,64 @@ mod tests {
     }
 
     #[test]
+    fn play_takes_auto_or_an_address_and_the_task_4_3_flags() {
+        use super::play_cmd::ServerArg;
+        let parse = |extra: &[&str]| {
+            let mut v = vec!["ddnet-ai", "play", "--bot"];
+            v.extend_from_slice(extra);
+            match Cli::try_parse_from(v).expect("play should parse").command {
+                Some(super::Command::Play(args)) => args,
+                other => panic!("expected Play, got {other:?}"),
+            }
+        };
+        assert_eq!(parse(&["--server", "auto"]).server, ServerArg::Auto);
+        assert_eq!(parse(&["--server", "AUTO"]).server, ServerArg::Auto);
+        assert_eq!(
+            parse(&["--server", "127.0.0.1:8303"]).server,
+            ServerArg::Addr("127.0.0.1:8303".parse().unwrap())
+        );
+        assert!(Cli::try_parse_from(["ddnet-ai", "play", "--server", "not-an-address"]).is_err());
+        let a = parse(&[
+            "--server",
+            "auto",
+            "--console",
+            "--clips-dir",
+            "/tmp/c",
+            "--no-autoclip",
+            "--settings",
+            "/tmp/s.toml",
+        ]);
+        assert!(a.bot_opts.console && !a.bot_opts.no_console && a.bot_opts.no_autoclip);
+        assert_eq!(a.bot_opts.clips_dir, Some(std::path::PathBuf::from("/tmp/c")));
+        assert_eq!(a.bot_opts.settings, Some(std::path::PathBuf::from("/tmp/s.toml")));
+        let a = parse(&["--server", "auto"]);
+        assert!(!a.bot_opts.console && !a.bot_opts.no_autoclip && a.bot_opts.clips_dir.is_none());
+        assert!(
+            Cli::try_parse_from(["ddnet-ai", "play", "--server", "auto", "--console", "--no-console"]).is_err(),
+            "the two console flags exclude each other"
+        );
+    }
+
+    #[test]
+    fn servers_is_a_read_only_listing_and_never_allowed_in_the_training_only_build() {
+        let cli =
+            Cli::try_parse_from(["ddnet-ai", "servers", "--block", "--limit", "5"]).expect("servers should parse");
+        match &cli.command {
+            Some(super::Command::Servers(args)) => assert!(args.block && args.limit == 5 && args.name == "Muha"),
+            other => panic!("expected Servers, got {other:?}"),
+        }
+        assert!(!allowed_in_train_only_build(&cli.command), "it goes online");
+    }
+
+    #[test]
     fn play_parses_with_defaults() {
         let cli = Cli::try_parse_from(["ddnet-ai", "play", "--server", "127.0.0.1:8303"]).expect("play should parse");
         match cli.command {
             Some(super::Command::Play(args)) => {
-                assert_eq!(args.server, "127.0.0.1:8303".parse().unwrap());
+                assert_eq!(
+                    args.server,
+                    super::play_cmd::ServerArg::Addr("127.0.0.1:8303".parse().unwrap())
+                );
                 assert_eq!(args.name, "ddai-bot");
                 assert!(matches!(args.brain, super::play_cmd::Brain::Idle));
                 assert_eq!(args.duration, 30);

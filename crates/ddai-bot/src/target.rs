@@ -117,6 +117,17 @@ impl TargetPicker {
         }
     }
 
+    /// `!target <nick>` / `!target -`: fight only this player (folded), or pick automatically again.
+    pub fn set_fixed(&mut self, name: Option<&str>) {
+        self.fixed_name = name.map(fold_name).filter(|n| !n.is_empty());
+        self.target = -1;
+    }
+
+    /// The fixed target's folded name, if one is set.
+    pub fn fixed(&self) -> Option<&str> {
+        self.fixed_name.as_deref()
+    }
+
     /// The current target id, -1 when none.
     pub fn target(&self) -> i32 {
         self.target

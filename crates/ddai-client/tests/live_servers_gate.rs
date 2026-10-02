@@ -86,6 +86,7 @@ fn connect_to_a_test_net_address_listed_under_a_different_nick_is_also_refused()
                 address: test_net_target.to_string(),
                 nick: "Muha".to_string(),
                 purpose: "test".to_string(),
+                ready: true,
             }],
         },
         ..ClientConfig::default()
@@ -107,6 +108,39 @@ fn connect_to_a_test_net_address_listed_under_a_different_nick_is_also_refused()
         "GaveUp reason should name the live-servers safety switch, got: {reason:?}"
     );
 
+    client.disconnect();
+    client.join();
+}
+
+/// Review F1 (task 4.3): a listed entry that the owner has not marked `ready = true` is refused by the client's
+/// own gate too — with the right nick, at a documentation-range (TEST-NET-3) address, so nothing real is
+/// ever contacted: the driver gives up before opening a socket.
+#[test]
+fn connect_to_a_listed_but_not_ready_test_net_address_is_refused_with_the_right_nick() {
+    let target: SocketAddr = "203.0.113.9:8303".parse().unwrap();
+    let config = ClientConfig {
+        name: "Muha".to_string(),
+        live_servers: LiveServers {
+            servers: vec![ddai_client::live_servers::LiveServerEntry {
+                address: target.to_string(),
+                nick: "Muha".to_string(),
+                purpose: "test".to_string(),
+                ready: false,
+            }],
+        },
+        ..ClientConfig::default()
+    };
+    let mut client = Client::connect(target, config);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut gave_up: Option<(String, GaveUpCategory)> = None;
+    while Instant::now() < deadline && gave_up.is_none() {
+        if let Some(ClientEvent::GaveUp { reason, category }) = client.recv_event(Duration::from_millis(100)) {
+            gave_up = Some((reason, category));
+        }
+    }
+    let (reason, category) = gave_up.expect("the gate must refuse");
+    assert!(reason.contains("ready = true"), "{reason}");
+    assert!(matches!(category, GaveUpCategory::LocalError), "{category:?}");
     client.disconnect();
     client.join();
 }

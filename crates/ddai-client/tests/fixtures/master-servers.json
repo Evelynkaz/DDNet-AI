@@ -1,0 +1,804 @@
+{
+ "communities": [],
+ "servers": [
+  {
+   "addresses": [
+    "tw-0.6+udp://45.141.57.35:8308",
+    "tw-0.7+udp://45.141.57.35:8308"
+   ],
+   "location": "eu:it",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "DDFightNet fng",
+    "name": "Block server A | Copy Love Box",
+    "map": {
+     "name": "Copy Love Box",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://45.141.57.35:8303"
+   ],
+   "location": "eu:it",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "DDFightNet fng",
+    "name": "Block server A | Blmap",
+    "map": {
+     "name": "BlmapPepe2023",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://46.174.54.240:8302"
+   ],
+   "location": "eu:ru",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "Block",
+    "name": "Block server B",
+    "map": {
+     "name": "Copy Love Box",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://45.141.57.22:8307"
+   ],
+   "location": "eu:it",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "Block",
+    "name": "Block server C",
+    "map": {
+     "name": "Copy Love Box",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://172.233.16.10:8203"
+   ],
+   "location": "sa:br",
+   "info": {
+    "max_clients": 44,
+    "max_players": 44,
+    "passworded": false,
+    "game_type": "Block",
+    "name": "Block server D",
+    "map": {
+     "name": "Blmap4",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://203.0.113.10:8303"
+   ],
+   "location": "eu:de",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": true,
+    "game_type": "Block",
+    "name": "Block server E (private)",
+    "map": {
+     "name": "Copy Love Box",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://203.0.113.11:8303"
+   ],
+   "location": "eu:de",
+   "info": {
+    "max_clients": 16,
+    "max_players": 16,
+    "passworded": false,
+    "game_type": "Block",
+    "name": "Block server F",
+    "map": {
+     "name": "Copy Love Box",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://203.0.113.20:8303"
+   ],
+   "location": "eu:de",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "CTF",
+    "name": "CTF server",
+    "map": {
+     "name": "ctf5",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://203.0.113.21:8303"
+   ],
+   "location": "eu:de",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "DDraceNetwork",
+    "name": "Race server",
+    "map": {
+     "name": "Kobra 3",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.7+udp://203.0.113.30:8303"
+   ],
+   "location": "eu:de",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "Block",
+    "name": "Block server G (0.7 only)",
+    "map": "Copy Love Box",
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": false
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://203.0.113.31:8303"
+   ],
+   "location": "eu:de",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "BW",
+    "name": "Server H",
+    "map": {
+     "name": "blmapV3ROYAL",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://203.0.113.32:8303"
+   ],
+   "location": "eu:de",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "Block",
+    "name": "Server I",
+    "map": {
+     "name": "Store",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://46.174.54.240:8302"
+   ],
+   "location": "eu:de",
+   "info": {
+    "max_clients": 64,
+    "max_players": 64,
+    "passworded": false,
+    "game_type": "Block",
+    "name": "Block server B again",
+    "map": {
+     "name": "Copy Love Box",
+     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+     "size": 1000
+    },
+    "version": "0.6, 20.0 test",
+    "client_score_kind": "time",
+    "requires_login": false,
+    "clients": [
+     {
+      "is_player": true
+     },
+     {
+      "is_player": true
+     }
+    ]
+   }
+  },
+  {
+   "addresses": [],
+   "location": "eu:de",
+   "info": {
+    "name": "no addresses",
+    "map": {
+     "name": "x"
+    },
+    "clients": []
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://999.1.1.1:8303",
+    "ftp://203.0.113.40:21",
+    "tw-0.6+udp://203.0.113.41:99999"
+   ],
+   "location": "eu:de",
+   "info": {
+    "name": "bad addresses",
+    "map": {
+     "name": "x"
+    },
+    "clients": []
+   }
+  },
+  {
+   "addresses": [
+    "tw-0.6+udp://203.0.113.50:8303"
+   ]
+  },
+  "not an object"
+ ]
+}

@@ -27,6 +27,6 @@ pub mod projectiles;
 pub mod reckoning;
 
 pub use live_world::{
-    LiveWorld, SnapshotInput, character_observation, correct_late_inputs, player_input_from_net, player_input_to_net,
-    retarget_late_inputs,
+    LiveWorld, OwnState, SnapshotInput, character_observation, correct_late_inputs, player_input_from_net,
+    player_input_to_net, retarget_late_inputs,
 };

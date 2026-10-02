@@ -94,6 +94,36 @@ pub struct BotOpts {
     /// `Cl_ShowDistance` half-extents `X,Y` (default 3000,2000 — D-007's replacement for /showall).
     #[arg(long, value_parser = parse_pair)]
     pub show_distance: Option<(i32, i32)>,
+    /// Read commands from stdin (`!help` lists them; a line without `!` or `?` goes nowhere — the bot never
+    /// writes in the game chat). On by default when stdin is a terminal.
+    #[arg(long)]
+    pub console: bool,
+    /// Console replies name other players by their real nickname. Default: by tag (`c<id>-<hash>`), so the nicknames
+    /// of others never reach a journal when the console runs under a unit.
+    #[arg(long)]
+    pub console_names: bool,
+    /// Never read stdin, even from a terminal.
+    #[arg(long, conflicts_with = "console")]
+    pub no_console: bool,
+    /// Where clips are written (default `<data-dir>/bot/clips`; never in git).
+    #[arg(long)]
+    pub clips_dir: Option<PathBuf>,
+    /// Do not save incident and cross-fail clips by themselves (`!clip` still works).
+    #[arg(long)]
+    pub no_autoclip: bool,
+    /// What `!brain`, `!wb`, `!low` and `!strong` remember (default `<data-dir>/bot/settings.toml`). The
+    /// command line wins over the file; a file that does not parse is renamed `.bad-<ts>` and ignored.
+    #[arg(long)]
+    pub settings: Option<PathBuf>,
+    /// Do not read or write a settings file.
+    #[arg(long, conflicts_with = "settings")]
+    pub no_settings: bool,
+}
+
+/// Whether `--flag` (or `--flag=value`) was typed on the command line, as opposed to being a default: a
+/// value in the settings file only fills what the command line left open.
+fn flag_given(flag: &str) -> bool {
+    std::env::args().any(|a| a == flag || a.strip_prefix(flag).is_some_and(|r| r.starts_with('=')))
 }
 
 fn parse_pair(s: &str) -> Result<(i32, i32), String> {
@@ -119,13 +149,34 @@ fn default_relations(data_dir: &Path) -> PathBuf {
 }
 
 /// Runs the bot; the process exit code is the runner's (0 ok, 3 kick/ban, 4 join failed).
-pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
+pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> ExitCode {
     let o = &args.bot_opts;
     let Some(mode) = Mode::parse(&o.mode) else {
         eprintln!("unknown --mode {:?} (fight|passive|hold|goto)", o.mode);
         return ExitCode::FAILURE;
     };
-    let relations_path = o.relations.clone().unwrap_or_else(|| default_relations(data_dir));
+    // The settings file (task 4.3): what `!brain`, `!wb`, `!low` and `!strong` remembered. The command line wins.
+    let settings_path = (!o.no_settings).then(|| {
+        o.settings
+            .clone()
+            .unwrap_or_else(|| data_dir.join("bot").join("settings.toml"))
+    });
+    let settings = match settings_path.as_deref().map(ddai_bot::settings::load) {
+        Some(ddai_bot::settings::Loaded::Ok(s)) => s,
+        Some(ddai_bot::settings::Loaded::Corrupt { moved_to, why }) => {
+            eprintln!(
+                "settings: ignored ({why}){}",
+                moved_to.map_or(String::new(), |p| format!("; the file is kept as {}", p.display()))
+            );
+            ddai_bot::settings::Settings::default()
+        }
+        None => ddai_bot::settings::Settings::default(),
+    };
+    let relations_path = o
+        .relations
+        .clone()
+        .or_else(|| settings.relations.clone())
+        .unwrap_or_else(|| default_relations(data_dir));
     let relations = match Relations::load(&relations_path) {
         Ok(r) => r,
         Err(e) => {
@@ -150,9 +201,25 @@ pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
     if let Some(sd) = o.show_distance {
         client.show_distance = sd;
     }
+    let kind = if flag_given("--brain") {
+        kind_of(args)
+    } else {
+        settings
+            .brain
+            .as_deref()
+            .and_then(BrainKind::parse)
+            .unwrap_or_else(|| kind_of(args))
+    };
+    let low = settings.low.unwrap_or(false);
+    let strong = o.strong || (!flag_given("--strong") && settings.strong.unwrap_or(false));
     let mut brain = BrainOptions {
         planner_budget_ms: o.planner_budget_ms,
         seed: args.seed,
+        planner_preset: if low {
+            ddai_planner::brains::PlannerPreset::Low
+        } else {
+            ddai_planner::brains::PlannerPreset::Normal
+        },
         ..BrainOptions::default()
     };
     if let Some(p) = &o.fly_flyg {
@@ -162,14 +229,33 @@ pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
         brain.fly_config = p.clone();
     }
     let bot = BotConfig {
-        brain: kind_of(args),
+        brain: kind,
         mode,
         fixed_target: o.target.clone(),
         seed: args.seed,
+        clips: ddai_bot::clipper::ClipConfig {
+            dir: Some(
+                o.clips_dir
+                    .clone()
+                    .unwrap_or_else(|| data_dir.join("bot").join("clips")),
+            ),
+            autoclip: !o.no_autoclip,
+            async_save: true,
+        },
+        relations_path: Some(relations_path.clone()),
+        settings_path: settings_path.clone(),
+        low,
+        strong,
+        console_names: o.console_names,
         ..BotConfig::default()
     };
-    let Some(wb_mode) = WbMode::parse(&o.wb) else {
-        eprintln!("unknown --wb {:?} (auto|left|right|off)", o.wb);
+    let wb_text = if flag_given("--wb") {
+        o.wb.clone()
+    } else {
+        settings.wb.clone().unwrap_or_else(|| o.wb.clone())
+    };
+    let Some(wb_mode) = WbMode::parse(&wb_text) else {
+        eprintln!("unknown --wb {wb_text:?} (auto|left|right|off)");
         return ExitCode::FAILURE;
     };
     let nav = NavConfig {
@@ -183,7 +269,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
             )
         },
         wb_mode,
-        strong: o.strong,
+        strong,
         seek: !o.no_seek,
         ..NavConfig::default()
     };
@@ -214,8 +300,30 @@ pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
                 .unwrap_or_else(|| data_dir.join("bot").join("live.sock")),
         )
     };
+    // The console (task 4.3): stdin lines become commands on the bus; nothing typed ever reaches the chat.
+    let console = o.console || (!o.no_console && ddai_bot::console::stdin_is_terminal());
+    let (commands, console_out) = if console {
+        let (sender, inbox) = ddai_bot::command::CommandBus::open();
+        let print = ddai_bot::console::stdout_printer();
+        match ddai_bot::console::spawn(
+            sender,
+            std::io::BufReader::new(std::io::stdin()),
+            std::sync::Arc::clone(&print),
+        ) {
+            Ok(_) => {
+                println!("console: type !help for the commands; a line without ! or ? is not sent anywhere");
+                (Some(inbox), Some(print))
+            }
+            Err(e) => {
+                eprintln!("could not start the console: {e}");
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
     let cfg = RunnerConfig {
-        server: args.server,
+        server,
         client,
         bot,
         brain,
@@ -228,6 +336,8 @@ pub fn run(args: &PlayArgs, data_dir: &Path) -> ExitCode {
         shutdown,
         nav,
         nav_handle,
+        commands,
+        console_out,
     };
     // A big stack: the planner's helpers copy whole worlds by value.
     let handle = std::thread::Builder::new()
