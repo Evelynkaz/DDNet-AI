@@ -13,7 +13,9 @@ use ddai_planner::brains::{ClockKind, ScriptedBrain, input_from_action};
 use ddai_planner::clock::{Clock, WallClock};
 use ddai_planner::hybrid::config::AdaptiveConfig;
 use ddai_planner::hybrid::search::{DecisionInput, HybridSearch};
-use ddai_planner::hybrid::{HybridBrain, HybridConfig, HybridMode, NoProposer, ProposeCtx, Proposer, ScriptedProposer};
+use ddai_planner::hybrid::{
+    HybridBrain, HybridConfig, HybridMode, NoProposer, ProposalOutcome, ProposeCtx, Proposer, ScriptedProposer,
+};
 use ddai_planner::physics_adapter::PhysicsWorld;
 use ddai_planner::plan_world::PlanWorld;
 use ddai_planner::planner::PlanStep;
@@ -1613,4 +1615,150 @@ fn the_shield_skip_field_sees_heart_pickups_as_freeze() {
         i32::MAX,
         "the TS-parity field is blind to it by design"
     );
+}
+
+/// A proposer with a (fake) visualisation stream, to check the hybrid brain's side of it: it keeps the
+/// outcome it was last told about and only has a frame after a `propose` call, like the fly's.
+struct Viz {
+    plan: Vec<PlanStep>,
+    fresh: bool,
+    told: Option<(u32, ProposalOutcome)>,
+    frame: Vec<u8>,
+}
+impl Proposer for Viz {
+    fn name(&self) -> &str {
+        "viz"
+    }
+    fn propose(&mut self, ctx: &ProposeCtx<'_>, out: &mut Vec<Vec<PlanStep>>) {
+        self.fresh = true;
+        let mut p = self.plan.clone();
+        p.resize(ctx.steps, *self.plan.last().unwrap());
+        out.push(p);
+    }
+    fn viz_meta(&self) -> Option<String> {
+        Some("{\"v\":1}".to_string())
+    }
+    fn viz_frame(&mut self, tick: u32, outcome: Option<ProposalOutcome>) -> Option<&[u8]> {
+        if !std::mem::take(&mut self.fresh) {
+            return None;
+        }
+        let o = outcome?;
+        self.told = Some((tick, o));
+        self.frame = vec![u8::from(o.chosen)];
+        Some(&self.frame)
+    }
+}
+
+#[test]
+fn the_hybrid_hands_the_proposers_stream_the_searchs_verdict_and_never_a_stale_one() {
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &[(0, 18.5, 9.5), (1, 30.5, 9.5)]);
+    let world = pw.inner().clone();
+    let walk_in = vec![
+        PlanStep {
+            dir: 1,
+            jump: 0,
+            hook: 0,
+            fire: 0,
+            aim: 0.0,
+        };
+        9
+    ];
+    let mut cfg = fixed_cfg(1);
+    cfg.proposals = 1;
+    let viz = Viz {
+        plan: walk_in,
+        fresh: false,
+        told: None,
+        frame: Vec::new(),
+    };
+    let mut b = HybridBrain::new(cfg, ClockKind::Wall, Box::new(viz)).unwrap();
+    assert_eq!(b.viz_meta().as_deref(), Some("{\"v\":1}"), "before the search exists");
+    reset(&mut b, &map, 0, 3);
+    assert!(b.viz_frame(0).is_none(), "nothing decided yet");
+    let obs = observation(&world, &map, 0, &[0, 1], 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    for i in 0..3u32 {
+        let _ = b.decide_in(&obs, Some(&view));
+        let chosen = matches!(
+            b.last_decision().unwrap().chosen,
+            Some(ddai_planner::hybrid::search::Source::Proposal)
+        );
+        let frame = b.viz_frame(100 + i).expect("a frame after a decision").to_vec();
+        assert_eq!(frame, [u8::from(chosen)]);
+        assert!(b.viz_frame(100 + i).is_none(), "one frame per decision");
+    }
+    assert_eq!(b.viz_meta().as_deref(), Some("{\"v\":1}"), "and once the search exists");
+    // A decision that never reached the proposer (no target) gives no frame, however stale `last` is.
+    let mut no_target = obs.clone();
+    no_target.target_id = None;
+    no_target.others.clear();
+    let _ = b.decide_in(&no_target, Some(&view));
+    assert!(b.viz_frame(200).is_none());
+}
+
+#[test]
+fn a_viewer_who_subscribes_after_unwatched_decisions_never_gets_an_older_decisions_frame() {
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &[(0, 18.5, 9.5), (1, 30.5, 9.5)]);
+    let world = pw.inner().clone();
+    let plan = vec![
+        PlanStep {
+            dir: 1,
+            jump: 0,
+            hook: 0,
+            fire: 0,
+            aim: 0.0,
+        };
+        9
+    ];
+    let mut cfg = fixed_cfg(1);
+    cfg.proposals = 1;
+    let viz = Viz {
+        plan,
+        fresh: false,
+        told: None,
+        frame: Vec::new(),
+    };
+    let mut b = HybridBrain::new(cfg, ClockKind::Wall, Box::new(viz)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let obs = observation(&world, &map, 0, &[0, 1], 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let mut no_target = obs.clone();
+    no_target.target_id = None;
+    no_target.others.clear();
+    // The proposer is consulted at decisions nobody watches (no frame is pulled) ...
+    for _ in 0..3 {
+        let _ = b.decide_in(&obs, Some(&view));
+    }
+    // ... then the viewer subscribes during a decision that never reached the proposer: no frame, however recent the
+    // proposer's last proposal and the search's last verdict are.
+    let _ = b.decide_in(&no_target, Some(&view));
+    assert!(
+        b.viz_frame(1).is_none(),
+        "an older decision's frame must not be stamped with this one"
+    );
+    // The next decision that does consult the proposer gives a frame again.
+    let _ = b.decide_in(&obs, Some(&view));
+    assert!(b.viz_frame(2).is_some());
+    assert!(b.viz_frame(2).is_none(), "once per decision");
+}
+
+#[test]
+fn a_hybrid_without_a_streaming_proposer_has_no_stream() {
+    let mut b = HybridBrain::fixed();
+    assert!(b.viz_meta().is_none());
+    assert!(b.viz_frame(0).is_none());
 }

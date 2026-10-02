@@ -623,6 +623,7 @@ impl Bot {
             Err(e) => return CommandReply::err(format!("brain: not switched: {e}")),
         };
         self.brain = brain;
+        self.brain_generation += 1;
         self.cfg.brain = kind;
         self.clipper.set_brain(self.brain.name());
         if let (Some(map), Some(own)) = (&self.map, self.players.own_id()) {

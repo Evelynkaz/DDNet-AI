@@ -26,7 +26,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use super::map_resolve::MapCache;
 use super::source::{FrameSource, GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus, SourceEvent};
@@ -69,6 +69,8 @@ pub enum HubEvent {
     ReplayStatus(ReplayStatus),
     /// Task 4.1: the live bot's status JSON (see [`SourceEvent::BotStatus`]).
     BotStatus(String),
+    /// Task 7.4: the layout of the fly's stream changed (`None`: no stream any more).
+    FlyMeta(Option<String>),
     Error(String),
 }
 
@@ -78,10 +80,40 @@ struct Latest {
     players: Vec<PlayerMeta>,
     /// Task 5.6: the newest `STATUS` JSON of the live bot and when it arrived (`GET /api/bot/status`).
     bot_status: Option<(Instant, String)>,
+    /// Task 7.4: the newest fly stream layout (a viewer that connects later is handed it).
+    fly_meta: Option<String>,
+}
+
+/// Capacity of the lossy fly-frame broadcast channel: ~5 s of frames at the bot's 12.5 Hz.
+const FLY_FRAME_BROADCAST_CAPACITY: usize = 64;
+
+/// Who watches the fly. The count and the demand flag change together, under one lock (an increment racing
+/// a decrement must not leave the flag false with a watcher present).
+struct FlyDemand {
+    watchers: Mutex<usize>,
+    tx: watch::Sender<bool>,
+}
+
+/// A browser connection's subscription to the fly stream: dropping it ends the demand.
+pub struct FlySubscription {
+    /// Pre-validated `DFLY` frames, lossy under load like the live ones.
+    pub rx: broadcast::Receiver<Arc<Vec<u8>>>,
+    demand: Arc<FlyDemand>,
+}
+
+impl Drop for FlySubscription {
+    fn drop(&mut self) {
+        let mut n = self.demand.watchers.lock().expect("fly demand mutex poisoned");
+        *n = n.saturating_sub(1);
+        let want = *n > 0;
+        self.demand.tx.send_if_modified(|v| std::mem::replace(v, want) != want);
+    }
 }
 
 pub struct LiveHub {
     live_tx: broadcast::Sender<Arc<Vec<u8>>>,
+    fly_tx: broadcast::Sender<Arc<Vec<u8>>>,
+    fly_demand: Arc<FlyDemand>,
     event_tx: broadcast::Sender<Arc<HubEvent>>,
     latest: Arc<Mutex<Latest>>,
     control_tx: mpsc::Sender<ReplayControl>,
@@ -101,19 +133,33 @@ impl LiveHub {
     /// constructs one run inside `#[tokio::main]`/`#[tokio::test]`). `map_cache` should be the
     /// same instance `source` itself was built with (see `crate::live::replay::ReplaySource::new`)
     /// so `GET /api/map/<sha256>` can serve scenes the source has already resolved.
-    pub fn start(source: Box<dyn FrameSource>, map_cache: Arc<MapCache>) -> Self {
+    pub fn start(mut source: Box<dyn FrameSource>, map_cache: Arc<MapCache>) -> Self {
         let (events_tx, events_rx) = mpsc::channel(SOURCE_EVENTS_CHANNEL_CAPACITY);
         let (control_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
+        let (demand_tx, demand_rx) = watch::channel(false);
+        source.attach_fly_demand(demand_rx);
         let source_task = source.spawn(events_tx, control_rx);
 
         let (live_tx, _) = broadcast::channel(LIVE_FRAME_BROADCAST_CAPACITY);
+        let (fly_tx, _) = broadcast::channel(FLY_FRAME_BROADCAST_CAPACITY);
         let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         let latest = Arc::new(Mutex::new(Latest::default()));
 
-        let pump_task = tokio::spawn(Self::pump(events_rx, live_tx.clone(), event_tx.clone(), latest.clone()));
+        let pump_task = tokio::spawn(Self::pump(
+            events_rx,
+            live_tx.clone(),
+            fly_tx.clone(),
+            event_tx.clone(),
+            latest.clone(),
+        ));
 
         LiveHub {
             live_tx,
+            fly_tx,
+            fly_demand: Arc::new(FlyDemand {
+                watchers: Mutex::new(0),
+                tx: demand_tx,
+            }),
             event_tx,
             latest,
             control_tx,
@@ -126,6 +172,7 @@ impl LiveHub {
     async fn pump(
         mut events_rx: mpsc::Receiver<SourceEvent>,
         live_tx: broadcast::Sender<Arc<Vec<u8>>>,
+        fly_tx: broadcast::Sender<Arc<Vec<u8>>>,
         event_tx: broadcast::Sender<Arc<HubEvent>>,
         latest: Arc<Mutex<Latest>>,
     ) {
@@ -162,11 +209,42 @@ impl LiveHub {
                     latest.lock().expect("live hub mutex poisoned").bot_status = Some((Instant::now(), json.clone()));
                     let _ = event_tx.send(Arc::new(HubEvent::BotStatus(json)));
                 }
+                SourceEvent::FlyMeta(meta) => {
+                    latest.lock().expect("live hub mutex poisoned").fly_meta = meta.clone();
+                    let _ = event_tx.send(Arc::new(HubEvent::FlyMeta(meta)));
+                }
+                SourceEvent::FlyFrame(bytes) => {
+                    let _ = fly_tx.send(Arc::new(bytes));
+                }
                 SourceEvent::Error(message) => {
                     let _ = event_tx.send(Arc::new(HubEvent::Error(message)));
                 }
             }
         }
+    }
+
+    /// Task 7.4: subscribes a browser connection to the fly stream. While at least one subscription lives, the source
+    /// is told that somebody watches (the bot then builds frames); dropping the last one tells it to stop.
+    pub fn subscribe_fly(&self) -> FlySubscription {
+        let mut n = self.fly_demand.watchers.lock().expect("fly demand mutex poisoned");
+        *n += 1;
+        // Subscribe to the frames before announcing the demand, so the first frame cannot be missed.
+        let rx = self.fly_tx.subscribe();
+        self.fly_demand.tx.send_if_modified(|v| !std::mem::replace(v, true));
+        FlySubscription {
+            rx,
+            demand: Arc::clone(&self.fly_demand),
+        }
+    }
+
+    /// The newest fly stream layout (`None` before the bot announced one, or when its brain has no stream).
+    pub fn latest_fly_meta(&self) -> Option<String> {
+        self.latest.lock().expect("live hub mutex poisoned").fly_meta.clone()
+    }
+
+    /// How many browser connections watch the fly now.
+    pub fn fly_watchers(&self) -> usize {
+        *self.fly_demand.watchers.lock().expect("fly demand mutex poisoned")
     }
 
     pub fn subscribe_live(&self) -> broadcast::Receiver<Arc<Vec<u8>>> {
@@ -364,6 +442,112 @@ mod tests {
         let mut events = hub.subscribe_events();
         let event = events.recv().await.expect("error event");
         assert!(matches!(&*event, HubEvent::Error(m) if m == "malformed trace"));
+    }
+
+    /// A source that keeps the demand receiver the hub hands it, and emits what the test pushes.
+    struct DemandSource {
+        demand: Option<watch::Receiver<bool>>,
+        seen: Arc<Mutex<Vec<bool>>>,
+        script: Vec<SourceEvent>,
+    }
+
+    impl FrameSource for DemandSource {
+        fn attach_fly_demand(&mut self, demand: watch::Receiver<bool>) {
+            self.demand = Some(demand);
+        }
+        fn spawn(
+            mut self: Box<Self>,
+            events_tx: mpsc::Sender<SourceEvent>,
+            mut control_rx: mpsc::Receiver<ReplayControl>,
+        ) -> tokio::task::JoinHandle<()> {
+            tokio::spawn(async move {
+                let mut demand = self.demand.take().expect("the hub attached the demand");
+                for e in std::mem::take(&mut self.script) {
+                    let _ = events_tx.send(e).await;
+                }
+                loop {
+                    tokio::select! {
+                        changed = demand.changed() => {
+                            if changed.is_err() { return; }
+                            self.seen.lock().unwrap().push(*demand.borrow_and_update());
+                        }
+                        c = control_rx.recv() => if c.is_none() { return; },
+                    }
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_source_is_told_while_somebody_watches_the_fly_and_only_then() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let source = DemandSource {
+            demand: None,
+            seen: Arc::clone(&seen),
+            script: vec![
+                SourceEvent::FlyMeta(Some(r#"{"v":1}"#.to_string())),
+                SourceEvent::FlyFrame(b"DFLY-frame".to_vec()),
+            ],
+        };
+        let hub = LiveHub::start(Box::new(source), Arc::new(MapCache::new()));
+        assert_eq!(hub.fly_watchers(), 0);
+        let settle = || tokio::time::sleep(Duration::from_millis(60));
+        settle().await;
+        assert!(seen.lock().unwrap().is_empty(), "no demand before anybody subscribes");
+        assert_eq!(
+            hub.latest_fly_meta().as_deref(),
+            Some(r#"{"v":1}"#),
+            "the layout is kept for late viewers"
+        );
+
+        let a = hub.subscribe_fly();
+        let b = hub.subscribe_fly();
+        settle().await;
+        assert_eq!(hub.fly_watchers(), 2);
+        assert_eq!(*seen.lock().unwrap(), [true], "one announcement for two watchers");
+        drop(a);
+        settle().await;
+        assert_eq!(*seen.lock().unwrap(), [true], "one left: still wanted");
+        drop(b);
+        settle().await;
+        assert_eq!(hub.fly_watchers(), 0);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [true, false],
+            "the last one leaving ends the demand"
+        );
+        let c = hub.subscribe_fly();
+        settle().await;
+        assert_eq!(*seen.lock().unwrap(), [true, false, true]);
+        drop(c);
+    }
+
+    #[tokio::test]
+    async fn fly_frames_reach_subscribers_lossily_and_a_layout_change_is_an_event() {
+        let frames = FLY_FRAME_BROADCAST_CAPACITY * 3;
+        let mut script: Vec<SourceEvent> = vec![SourceEvent::FlyMeta(Some(r#"{"v":1,"a":1}"#.to_string()))];
+        script.extend((0..frames).map(|i| SourceEvent::FlyFrame(vec![i as u8])));
+        script.push(SourceEvent::FlyMeta(None));
+        let source = DemandSource {
+            demand: None,
+            seen: Arc::new(Mutex::new(Vec::new())),
+            script,
+        };
+        let hub = LiveHub::start(Box::new(source), Arc::new(MapCache::new()));
+        let mut events = hub.subscribe_events();
+        let mut sub = hub.subscribe_fly();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // A subscriber that did not read falls behind and skips ahead instead of buffering everything.
+        assert!(matches!(
+            sub.rx.recv().await,
+            Err(broadcast::error::RecvError::Lagged(_))
+        ));
+        // The layout changes were events on the reliable channel, in order.
+        let first = events.recv().await.unwrap();
+        assert!(matches!(&*first, HubEvent::FlyMeta(Some(m)) if m.contains("\"a\":1")));
+        let second = events.recv().await.unwrap();
+        assert!(matches!(&*second, HubEvent::FlyMeta(None)));
+        assert_eq!(hub.latest_fly_meta(), None);
     }
 
     #[tokio::test]

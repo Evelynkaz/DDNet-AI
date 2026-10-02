@@ -235,6 +235,9 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     let mut next_log = Instant::now() + LOG_EVERY;
     let mut frame_chars: Vec<FrameChar> = Vec::with_capacity(128);
     let mut last_tick = 0;
+    // Task 7.4: the fly's visualisation stream. Its layout goes to the bridge at the start and after every brain switch;
+    // frames are asked of the brain only while the bridge has a subscriber.
+    let mut viz_generation = u64::MAX;
 
     let time_up = |started: Instant| cfg.duration.is_some_and(|d| started.elapsed() >= d);
     while !ended && !stop_now && !time_up(started) && !cfg.shutdown.load(Ordering::SeqCst) {
@@ -269,9 +272,20 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
             if let Some(b) = bridge.as_mut() {
                 b.accept_pending();
                 publish(b, &bot, &snap, &mut frame_chars);
+                if b.fly_wanted()
+                    && let Some(frame) = bot.viz_frame(u32::try_from(snap.tick.max(0)).unwrap_or(0))
+                {
+                    b.send_fly(frame);
+                }
             }
         } else if let Some(b) = bridge.as_mut() {
             b.accept_pending();
+        }
+        if let Some(b) = bridge.as_mut()
+            && viz_generation != bot.brain_generation()
+        {
+            viz_generation = bot.brain_generation();
+            b.set_fly_meta(bot.viz_meta().as_deref());
         }
         // The operator's commands (and the navigation's answers to them), between two snapshots.
         if let Some(inbox) = &cfg.commands {

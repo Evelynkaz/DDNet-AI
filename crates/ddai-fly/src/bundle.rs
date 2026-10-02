@@ -227,6 +227,25 @@ pub struct FlyBrainTemplate {
     rest: crate::state::FlyState,
     rest_converged: bool,
     pub meta: BundleMeta,
+    /// `(name, sha256)` of the bundle file this template was loaded from (`None` when built from
+    /// parts): what the web panel shows. Never a path.
+    identity: Option<(String, String)>,
+}
+
+/// A short display name for a bundle file: `<run>/<stem>` for a file under `<run>/checkpoints/` or
+/// `<run>/rounds/` (`e008-p1-fly-base-s1/final`), else the file stem. Never the full path.
+pub fn bundle_display_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map_or_else(|| "bundle".to_string(), |s| s.to_string_lossy().into_owned());
+    let dir = path.parent();
+    let in_run_dir = dir
+        .and_then(Path::file_name)
+        .is_some_and(|d| d == "checkpoints" || d == "rounds");
+    match dir.and_then(Path::parent).and_then(Path::file_name) {
+        Some(run) if in_run_dir => format!("{}/{stem}", run.to_string_lossy()),
+        _ => stem,
+    }
 }
 
 impl FlyBrainTemplate {
@@ -270,6 +289,7 @@ impl FlyBrainTemplate {
             rest,
             rest_converged,
             meta: bundle.meta,
+            identity: None,
         })
     }
 
@@ -277,12 +297,15 @@ impl FlyBrainTemplate {
     /// bundle was written with.
     pub fn load(bundle_path: &Path, flyg_override: Option<&Path>) -> Result<Self, BundleError> {
         let bundle = load_bundle(bundle_path)?;
+        let identity = (bundle_display_name(bundle_path), sha256_hex_of_file(bundle_path)?);
         let flyg_path: PathBuf = flyg_override
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from(&bundle.flyg_path_hint));
         let sha = sha256_hex_of_file(&flyg_path)?;
         let flyg = ddai_flyg::load(&flyg_path).map_err(err(&format!("loading {}", flyg_path.display())))?;
-        Self::from_parts(bundle, flyg, &sha)
+        let mut template = Self::from_parts(bundle, flyg, &sha)?;
+        template.identity = Some(identity);
+        Ok(template)
     }
 
     pub fn model(&self) -> &FlyModel {
@@ -314,6 +337,9 @@ impl FlyBrainTemplate {
         );
         brain.adopt_rest(&self.rest, self.rest_converged);
         brain.set_thresholds(self.thresholds);
+        if let Some((name, sha256)) = &self.identity {
+            brain.set_identity(name.clone(), sha256.clone());
+        }
         brain
     }
 

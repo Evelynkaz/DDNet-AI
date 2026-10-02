@@ -15,6 +15,13 @@
 //! | 3 | `PLAYERS` | JSON `{"own":id,"list":[{"id","name","team"}]}` |
 //! | 4 | `FRAME` | a `DWLF` v1 live frame, byte for byte the web's binary `live` message (`docs/formats.md` §15.3) |
 //! | 5 | `STATUS` | JSON, at most ~5 Hz: target, mode, brain, counters, latency percentiles, brain telemetry, and (5.6) connection, server, identity, wayblock, kill cooldown |
+//! | 6 | `FLYMETA` | (7.4) JSON, the layout of the fly's visualisation stream (`docs/formats.md` §27.2); empty: the brain has none. Only to a client subscribed to the fly stream |
+//! | 7 | `FLY` | (7.4) one binary `DFLY` v1 frame (`docs/formats.md` §27.1), decimated by the brain. Only to a client subscribed to the fly stream |
+//!
+//! **What a client may say (7.4).** The bridge is still read-only in effect: there is no control path. The one
+//! thing the bot reads from a client is a subscription, `u32 LE len | u8 kind 1 | u8 mask` (bit 0: the fly stream),
+//! so that the fly's frames are built only while somebody watches (`Bridge::fly_wanted`). Anything else a client
+//! writes is read and discarded; a message longer than [`MAX_CLIENT_MESSAGE`] drops the client.
 //!
 //! **Names.** `PLAYERS.name` is the salted-hash tag (`c12-9f3a01bc`) unless the bot was started with
 //! `--web-names`; real nicknames never leave the process otherwise (D-040, `CLAUDE.md`).
@@ -38,7 +45,20 @@ pub mod kind {
     pub const PLAYERS: u8 = 3;
     pub const FRAME: u8 = 4;
     pub const STATUS: u8 = 5;
+    pub const FLYMETA: u8 = 6;
+    pub const FLY: u8 = 7;
 }
+
+/// What a client may send: `kind`s of its messages.
+pub mod client_kind {
+    /// Payload: one byte, a bit mask of the streams the client wants (bit 0: the fly's).
+    pub const SUBSCRIBE: u8 = 1;
+}
+
+/// Bit of the `SUBSCRIBE` mask for the fly stream.
+pub const SUBSCRIBE_FLY: u8 = 1;
+/// Longest client message (kind + payload) the bot reads; a longer one drops the client.
+pub const MAX_CLIENT_MESSAGE: usize = 16;
 
 /// Protocol version in `HELLO`.
 pub const VERSION: u8 = 1;
@@ -221,6 +241,10 @@ pub fn bind_private_socket(path: &Path) -> io::Result<UnixListener> {
 struct Client {
     stream: UnixStream,
     pending: Vec<u8>,
+    /// Bytes read from the client not yet forming a whole message.
+    inbox: Vec<u8>,
+    /// Subscribed to the fly stream.
+    fly: bool,
 }
 
 /// The publisher.
@@ -230,6 +254,8 @@ pub struct Bridge {
     clients: Vec<Client>,
     map_msg: Option<Vec<u8>>,
     players_msg: Option<Vec<u8>>,
+    /// The `FLYMETA` message (an empty payload when the brain has no stream), sent to a client when it subscribes.
+    fly_meta_msg: Option<Vec<u8>>,
     scratch: Vec<u8>,
     frame_buf: Vec<u8>,
     /// Clients dropped for being too slow (telemetry).
@@ -255,6 +281,7 @@ impl Bridge {
             clients: Vec::new(),
             map_msg: None,
             players_msg: None,
+            fly_meta_msg: None,
             scratch: Vec::with_capacity(8192),
             frame_buf: Vec::with_capacity(8192),
             dropped: 0,
@@ -284,6 +311,8 @@ impl Bridge {
                     let mut client = Client {
                         stream,
                         pending: Vec::new(),
+                        inbox: Vec::new(),
+                        fly: false,
                     };
                     let mut hello = MAGIC_HELLO.to_vec();
                     hello.push(VERSION);
@@ -302,6 +331,68 @@ impl Bridge {
                 Err(_) => break,
             }
         }
+        self.poll_clients();
+    }
+
+    /// Whether some client is subscribed to the fly stream: the brain builds frames only then.
+    pub fn fly_wanted(&self) -> bool {
+        self.clients.iter().any(|c| c.fly)
+    }
+
+    /// Reads (non-blocking, bounded) what the clients said: subscriptions. A subscriber gets the current `FLYMETA` at once.
+    fn poll_clients(&mut self) {
+        let meta = self.fly_meta_msg.as_deref();
+        let mut dropped = 0;
+        self.clients.retain_mut(|c| {
+            let keep = read_client(c, meta);
+            if !keep {
+                dropped += 1;
+            }
+            keep
+        });
+        self.dropped += dropped;
+    }
+
+    /// The fly stream's description changed (a brain switch, or the first one): a client subscribed to the stream is told
+    /// now, one that subscribes later when it does. `None`: the brain has no stream.
+    pub fn set_fly_meta(&mut self, meta: Option<&str>) {
+        let msg = message(kind::FLYMETA, meta.map_or(&[][..], str::as_bytes));
+        self.fly_meta_msg = Some(msg.clone());
+        self.broadcast_fly(&msg);
+    }
+
+    /// One `FLY` frame to the subscribed clients (a few Hz, decimated by the brain).
+    pub fn send_fly(&mut self, frame: &[u8]) {
+        if !self.fly_wanted() || frame.len() + 1 > MAX_MESSAGE {
+            return;
+        }
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        scratch.extend_from_slice(&((frame.len() + 1) as u32).to_le_bytes());
+        scratch.push(kind::FLY);
+        scratch.extend_from_slice(frame);
+        self.broadcast_fly(&scratch);
+        self.scratch = scratch;
+    }
+
+    fn broadcast_fly(&mut self, msg: &[u8]) {
+        let mut dropped = 0;
+        self.clients.retain_mut(|c| {
+            if !c.fly {
+                return true;
+            }
+            if c.pending.len() + msg.len() > MAX_PENDING {
+                dropped += 1;
+                return false;
+            }
+            c.pending.extend_from_slice(msg);
+            let keep = flush(c);
+            if !keep {
+                dropped += 1;
+            }
+            keep
+        });
+        self.dropped += dropped;
     }
 
     fn broadcast(&mut self, msg: &[u8]) {
@@ -368,6 +459,67 @@ impl Bridge {
 }
 
 const MAGIC_HELLO: &[u8; 4] = b"DDBL";
+
+/// Reads at most this many chunks of a client per poll (a client that writes without pause cannot hold the decision thread).
+const MAX_READS_PER_POLL: usize = 64;
+
+/// Reads what `c` has sent so far and applies its subscriptions, message by message as they arrive (a burst of small
+/// subscriptions between two polls is fine; only a *partial* message is kept between reads, and it is at most
+/// `4 + MAX_CLIENT_MESSAGE` bytes). `false` when the client is gone, misbehaves, or its queue is past [`MAX_PENDING`]:
+/// the cap is checked for every client on every poll and before every append here, not only when the bot sends something.
+fn read_client(c: &mut Client, fly_meta: Option<&[u8]>) -> bool {
+    use std::io::Read;
+    if c.pending.len() > MAX_PENDING {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    for _ in 0..MAX_READS_PER_POLL {
+        match c.stream.read(&mut buf) {
+            Ok(0) => return false,
+            Ok(n) => {
+                c.inbox.extend_from_slice(&buf[..n]);
+                if !apply_messages(c, fly_meta) || c.inbox.len() > 4 + MAX_CLIENT_MESSAGE {
+                    return false;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        }
+    }
+    flush(c) && c.pending.len() <= MAX_PENDING
+}
+
+/// Applies every whole message in `c.inbox`; `false` for a malformed one or a queue that would pass [`MAX_PENDING`].
+fn apply_messages(c: &mut Client, fly_meta: Option<&[u8]>) -> bool {
+    while c.inbox.len() >= 4 {
+        let len = u32::from_le_bytes([c.inbox[0], c.inbox[1], c.inbox[2], c.inbox[3]]) as usize;
+        if len == 0 || len > MAX_CLIENT_MESSAGE {
+            return false;
+        }
+        if c.inbox.len() < 4 + len {
+            break;
+        }
+        let kind = c.inbox[4];
+        let payload_is_one_byte = len == 2;
+        let mask = c.inbox.get(5).copied().unwrap_or(0);
+        c.inbox.drain(..4 + len);
+        if kind == client_kind::SUBSCRIBE && payload_is_one_byte {
+            let want = mask & SUBSCRIBE_FLY != 0;
+            if want && !c.fly {
+                // A new subscriber learns the layout before its first frame.
+                if let Some(meta) = fly_meta {
+                    if c.pending.len() + meta.len() > MAX_PENDING {
+                        return false;
+                    }
+                    c.pending.extend_from_slice(meta);
+                }
+            }
+            c.fly = want;
+        }
+    }
+    true
+}
 
 impl Drop for Bridge {
     fn drop(&mut self) {
@@ -557,6 +709,175 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "never blocks");
         assert_eq!(bridge.clients(), 0, "dropped once its buffer passed the cap");
         assert_eq!(bridge.dropped_clients(), 1);
+    }
+
+    fn write_client(c: &mut UnixStream, kind: u8, payload: &[u8]) {
+        use std::io::Write as _;
+        let mut m = ((payload.len() + 1) as u32).to_le_bytes().to_vec();
+        m.push(kind);
+        m.extend_from_slice(payload);
+        c.write_all(&m).unwrap();
+    }
+
+    fn connect(bridge: &mut Bridge, path: &Path) -> UnixStream {
+        let mut client = UnixStream::connect(path).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        bridge.accept_pending();
+        let (k, _) = read_message(&mut client);
+        assert_eq!(k, kind::HELLO);
+        client
+    }
+
+    fn settle(bridge: &mut Bridge) {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        bridge.accept_pending();
+    }
+
+    #[test]
+    fn the_fly_stream_goes_only_to_subscribers_and_only_while_there_is_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        bridge.set_fly_meta(Some("{\"v\":1}"));
+        let mut watcher = connect(&mut bridge, &path);
+        let mut other = connect(&mut bridge, &path);
+        assert!(!bridge.fly_wanted(), "nobody subscribed yet");
+        // Nothing is queued without a subscriber.
+        bridge.send_fly(b"DFLYxx");
+        assert!(bridge.clients.iter().all(|c| c.pending.is_empty()));
+
+        write_client(&mut watcher, client_kind::SUBSCRIBE, &[SUBSCRIBE_FLY]);
+        settle(&mut bridge);
+        assert!(bridge.fly_wanted());
+        // The subscriber is told the layout first, then gets frames; the other client gets neither.
+        let (k, p) = read_message(&mut watcher);
+        assert_eq!((k, p.as_slice()), (kind::FLYMETA, &b"{\"v\":1}"[..]));
+        bridge.send_fly(b"DFLYframe");
+        let (k, p) = read_message(&mut watcher);
+        assert_eq!((k, p.as_slice()), (kind::FLY, &b"DFLYframe"[..]));
+        // The other client has received nothing since its HELLO.
+        other
+            .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+            .unwrap();
+        let mut one = [0u8; 1];
+        let e = std::io::Read::read(&mut other, &mut one).unwrap_err();
+        assert!(
+            matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut),
+            "{e:?}"
+        );
+
+        // A brain switch re-sends the layout to subscribers (an empty one: no stream).
+        bridge.set_fly_meta(None);
+        let (k, p) = read_message(&mut watcher);
+        assert_eq!((k, p.len()), (kind::FLYMETA, 0));
+
+        // Unsubscribing stops the frames and `fly_wanted`.
+        write_client(&mut watcher, client_kind::SUBSCRIBE, &[0]);
+        settle(&mut bridge);
+        assert!(!bridge.fly_wanted());
+        bridge.send_fly(b"DFLYlate");
+        assert!(bridge.clients.iter().all(|c| c.pending.is_empty()));
+    }
+
+    #[test]
+    fn a_closed_subscriber_stops_the_demand_and_other_client_messages_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        let mut c = connect(&mut bridge, &path);
+        // An unknown kind, a short subscribe and a subscribe with a wrong payload size change nothing.
+        write_client(&mut c, 99, &[1, 2, 3]);
+        write_client(&mut c, client_kind::SUBSCRIBE, &[]);
+        write_client(&mut c, client_kind::SUBSCRIBE, &[1, 1]);
+        settle(&mut bridge);
+        assert_eq!(bridge.clients(), 1);
+        assert!(!bridge.fly_wanted());
+        write_client(&mut c, client_kind::SUBSCRIBE, &[0xFF]);
+        settle(&mut bridge);
+        assert!(bridge.fly_wanted());
+        drop(c);
+        settle(&mut bridge);
+        assert_eq!(bridge.clients(), 0, "a closed client is noticed on the read");
+        assert!(!bridge.fly_wanted());
+    }
+
+    #[test]
+    fn a_client_that_sends_an_oversized_message_or_floods_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        let mut c = connect(&mut bridge, &path);
+        use std::io::Write as _;
+        c.write_all(&(1000u32).to_le_bytes()).unwrap();
+        c.write_all(&[1; 8]).unwrap();
+        settle(&mut bridge);
+        assert_eq!(bridge.clients(), 0, "a message longer than the cap");
+        let mut c = connect(&mut bridge, &path);
+        c.write_all(&[0u8; 4096]).unwrap();
+        settle(&mut bridge);
+        assert_eq!(bridge.clients(), 0, "a zero length is not a message");
+    }
+
+    #[test]
+    fn a_client_that_toggles_its_subscription_and_never_reads_is_dropped_not_grown_without_bound() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        // A layout as big as a real one (~5 KB): every re-subscription queues a copy for a client that does not read.
+        bridge.set_fly_meta(Some(&format!("{{\"v\":1,\"pad\":\"{}\"}}", "x".repeat(5000))));
+        let mut c = connect(&mut bridge, &path);
+        let toggle: Vec<u8> = [[2u8, 0, 0, 0, 1, 1], [2, 0, 0, 0, 1, 0]].concat();
+        let mut polls = 0;
+        // 6 KB of toggles per round; with a 5 KB copy per subscription this passes MAX_PENDING (512 KiB) plus what the
+        // socket buffers hold in a few hundred rounds at the very most.
+        while bridge.clients() == 1 && polls < 2000 {
+            let mut round = Vec::new();
+            for _ in 0..4 {
+                round.extend_from_slice(&toggle);
+            }
+            if c.write_all(&round).is_err() {
+                break;
+            }
+            bridge.accept_pending();
+            polls += 1;
+            // Whatever it asked for, the queue never passed the cap while the client was still there.
+            assert!(bridge.clients.iter().all(|k| k.pending.len() <= MAX_PENDING));
+        }
+        assert_eq!(bridge.clients(), 0, "dropped after {polls} polls");
+        assert_eq!(bridge.dropped_clients(), 1);
+        assert!(polls < 2000);
+    }
+
+    #[test]
+    fn a_burst_of_small_subscriptions_between_two_polls_is_not_a_violation() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        bridge.set_fly_meta(Some("{\"v\":1}"));
+        let mut c = connect(&mut bridge, &path);
+        // 40 messages of 6 bytes (240 bytes, well past the old 80-byte inbox limit), ending subscribed.
+        let mut burst = Vec::new();
+        for i in 0..40 {
+            burst.extend_from_slice(&[2, 0, 0, 0, 1, u8::from(i % 2 == 1)]);
+        }
+        c.write_all(&burst).unwrap();
+        settle(&mut bridge);
+        assert_eq!(bridge.clients(), 1, "a legitimate burst keeps the client");
+        assert!(bridge.fly_wanted());
+        // A message split across two writes is put together.
+        write_client(&mut c, client_kind::SUBSCRIBE, &[0]);
+        settle(&mut bridge);
+        assert!(!bridge.fly_wanted());
+        c.write_all(&[2, 0, 0]).unwrap();
+        settle(&mut bridge);
+        c.write_all(&[0, 1, 1]).unwrap();
+        settle(&mut bridge);
+        assert!(bridge.fly_wanted(), "the two halves made one subscription");
     }
 
     #[test]

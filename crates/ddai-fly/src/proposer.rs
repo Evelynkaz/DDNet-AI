@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use ddai_brain::{Brain, ResetContext};
-use ddai_planner::hybrid::{ActionDistribution, ProposeCtx, Proposer, plans_from_distribution};
+use ddai_planner::hybrid::{ActionDistribution, ProposalOutcome, ProposeCtx, Proposer, plans_from_distribution};
 use ddai_planner::planner::PlanStep;
 
 use crate::brain::{FlyBrain, FlyBrainConfig};
@@ -76,6 +76,14 @@ impl Proposer for FlyProposer {
         };
         let rng = &mut self.rng;
         plans_from_distribution(&dist, ctx.steps, ctx.k, &mut || f64::from(rng.next_f32_unit()), out);
+    }
+
+    fn viz_meta(&self) -> Option<String> {
+        Some(self.brain.viz_meta_json("proposer"))
+    }
+
+    fn viz_frame(&mut self, tick: u32, outcome: Option<ProposalOutcome>) -> Option<&[u8]> {
+        self.brain.viz_frame_with(tick, outcome)
     }
 }
 

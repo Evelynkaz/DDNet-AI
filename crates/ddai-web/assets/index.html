@@ -215,6 +215,110 @@
       </section>
     </section>
 
+    <!-- Task 7.4: the fly's panel (owner only): what the connectome brain does while it plays. Outside `.shell` like the
+         bot tab. Everything dynamic is set with `textContent`; the drawings are canvases (the CSP forbids inline styles). -->
+    <section id="fly-view" class="fly-view" hidden>
+      <h1>Муха</h1>
+
+      <section class="card" aria-labelledby="fly-head-title">
+        <h2 id="fly-head-title">Состояние</h2>
+        <p class="bot-conn"><span id="fly-dot" class="dot dot-off" aria-hidden="true"></span> <span id="fly-state">загрузка…</span></p>
+        <dl class="kv">
+          <dt>Мозг</dt><dd id="fly-brain">—</dd>
+          <dt>Веса (имя)</dt><dd id="fly-bundle">—</dd>
+          <dt>Веса (sha256)</dt><dd id="fly-hash">—</dd>
+          <dt>Тик / кадры</dt><dd><span id="fly-tick">—</span> · <span id="fly-rate">—</span></dd>
+          <dt>Решение мухи</dt><dd id="fly-latency">—</dd>
+        </dl>
+        <div class="cmd-row">
+          <label class="cmd-label" for="fly-hz">Частота кадров на этом устройстве</label>
+          <select id="fly-hz" aria-label="Частота кадров">
+            <option value="12">12 кадров/с</option>
+            <option value="6">6 кадров/с (телефон)</option>
+            <option value="3">3 кадра/с (экономно)</option>
+          </select>
+        </div>
+      </section>
+
+      <p id="fly-empty" class="card hint" hidden>
+        Данных нет. Муху показывают два источника: живой бот с мозгом <code>fly</code> или <code>hybrid</code> и ключом
+        <code>--fly-bundle</code>, и офлайн-просмотр <code>ddnet-ai fly watch --bundle … --arena …</code> (сайт тогда запускают с
+        <code>--bot-socket</code> на его сокет).
+      </p>
+
+      <div id="fly-content" hidden>
+        <section class="card" id="fly-proposer" aria-labelledby="fly-prop-title" hidden>
+          <h2 id="fly-prop-title">Муха предлагает, точный поиск решает</h2>
+          <dl class="kv">
+            <dt>Предложение мухи сыграно</dt><dd id="fly-prop-share">—</dd>
+            <dt>В этом решении</dt><dd id="fly-prop-now">—</dd>
+          </dl>
+        </section>
+
+        <section class="card" aria-labelledby="fly-eye-title">
+          <h2 id="fly-eye-title">Глаз</h2>
+          <p class="hint">Луч — направление от тии (вверх — против гравитации), кольцо — дальность (ближе к центру — ближе к тии). Цвет клетки — самый сильный из включённых каналов, яркость — его величина. Белая линия — куда муха целится.</p>
+          <div class="plot"><canvas id="fly-eye" role="img" aria-label="Полярный график глаза мухи: каналы по лучам и дальности"></canvas></div>
+          <div id="fly-eye-legend" class="legend-row" role="group" aria-label="Каналы глаза"></div>
+          <p id="fly-scalars" class="hint">—</p>
+        </section>
+
+        <section class="card" aria-labelledby="fly-act-title">
+          <h2 id="fly-act-title">Действие</h2>
+          <p class="hint">Что решила муха (не обязательно то, что сыграно, если она только предлагает).</p>
+          <div class="act-grid">
+            <div class="prob-row"><span class="prob-label">влево</span><progress id="fly-p-left" max="100" value="0" aria-label="Вероятность: влево"></progress><span id="fly-pv-left" class="prob-val">—</span></div>
+            <div class="prob-row"><span class="prob-label">стоп</span><progress id="fly-p-stop" max="100" value="0" aria-label="Вероятность: стоп"></progress><span id="fly-pv-stop" class="prob-val">—</span></div>
+            <div class="prob-row"><span class="prob-label">вправо</span><progress id="fly-p-right" max="100" value="0" aria-label="Вероятность: вправо"></progress><span id="fly-pv-right" class="prob-val">—</span></div>
+          </div>
+          <div class="pill-row">
+            <span class="pill dir">направление: <strong id="fly-dir">—</strong></span>
+            <span id="fly-act-jump" class="pill">прыжок <strong id="fly-act-jump-s">—</strong> <small id="fly-act-jump-p"></small></span>
+            <span id="fly-act-hook" class="pill">хук <strong id="fly-act-hook-s">—</strong> <small id="fly-act-hook-p"></small></span>
+            <span id="fly-act-fire" class="pill">огонь <strong id="fly-act-fire-s">—</strong> <small id="fly-act-fire-p"></small></span>
+            <span class="pill">прицел <strong id="fly-aim">—</strong></span>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="fly-groups-title">
+          <h2 id="fly-groups-title">Активность групп нейронов</h2>
+          <p class="hint">Строка — группа типов (глаз, тело, центральный мозг по нейропилю, выходы). По горизонтали — последние <span id="fly-window">20</span> с, справа — частота сейчас.</p>
+          <div id="fly-fam-legend" class="legend-row"></div>
+          <div class="plot rel"><canvas id="fly-groups" role="img" aria-label="Тепловые полосы активности групп нейронов за последние секунды"></canvas><div id="fly-tip" class="tip" role="status" hidden></div></div>
+        </section>
+
+        <section class="card" aria-labelledby="fly-dn-title">
+          <h2 id="fly-dn-title">Выходы DN</h2>
+          <p class="hint">Средняя z-оценка DN каждой головы действия (относительно покоя; полоса — до ±4σ). Нижняя полоса — все DN по порядку выходов: синий — ниже покоя, красный — выше.</p>
+          <div class="plot"><canvas id="fly-dn" role="img" aria-label="Столбики выходов DN по головам действий"></canvas></div>
+        </section>
+
+        <section class="card" aria-labelledby="fly-ts-title">
+          <h2 id="fly-ts-title">Динамика</h2>
+          <h3 class="ts-title">Средняя частота по семействам</h3>
+          <div class="plot"><canvas id="fly-ts-fam" role="img" aria-label="Средняя частота нейронов по семействам во времени"></canvas></div>
+          <div id="fly-fam-ts-legend" class="legend-row"></div>
+          <h3 class="ts-title">Вероятности прыжка, хука и огня</h3>
+          <div class="plot"><canvas id="fly-ts-act" role="img" aria-label="Вероятности прыжка, хука и огня во времени"></canvas></div>
+          <div id="fly-act-ts-legend" class="legend-row"></div>
+          <h3 class="ts-title">Время решения мухи, мкс</h3>
+          <div class="plot"><canvas id="fly-ts-lat" role="img" aria-label="Время решения мухи во времени"></canvas></div>
+          <div id="fly-ts-share-box" hidden>
+            <h3 class="ts-title">Доля решений, где сыграно предложение мухи</h3>
+            <div class="plot"><canvas id="fly-ts-share" role="img" aria-label="Доля сыгранных предложений мухи во времени"></canvas></div>
+          </div>
+        </section>
+
+        <details id="fly-table" class="card">
+          <summary>Таблица (то же, текстом)</summary>
+          <table class="fly-table">
+            <thead><tr><th>Семейство</th><th>Группа</th><th class="num">Нейронов</th><th class="num">Частота</th></tr></thead>
+            <tbody id="fly-table-body"></tbody>
+          </table>
+        </details>
+      </div>
+    </section>
+
     <!-- Always `position: fixed` (see app.css) — must stay clickable, and above `#game-view`,
          at every viewport width (review round 1, finding F4: a previous version switched this to
          `position: static` on wide screens, which let the fixed, full-viewport `#game-view`
@@ -223,8 +327,10 @@
       <button id="tab-status" type="button" class="active">Статус</button>
       <button id="tab-game" type="button">Игра</button>
       <button id="tab-bot" type="button">Бот</button>
+      <button id="tab-fly" type="button">Муха</button>
     </nav>
 
+    <script src="/fly.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

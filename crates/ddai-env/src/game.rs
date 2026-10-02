@@ -127,6 +127,21 @@ pub fn play_game(
     layout: Layout,
     players: Vec<PlayerSetup>,
 ) -> Result<GameReport, EnvError> {
+    play_game_observed(arena, rules, seed, layout, players, &mut |_, _| true)
+}
+
+/// [`play_game`] with an observer called after every world tick with the players (so it can read a brain's
+/// visualisation frame, `ddai_brain::Brain::viz_frame`) and the tick just played. It must not change what the
+/// brains decide; it returns `false` to stop the game early (reported as a timeout `T`). The task 7.4 watch mode
+/// paces the game to real time in here. With the no-op observer of [`play_game`] the game is exactly as before.
+pub fn play_game_observed(
+    arena: &Arena,
+    rules: &Rules,
+    seed: u64,
+    layout: Layout,
+    players: Vec<PlayerSetup>,
+    observe: &mut dyn FnMut(&mut [PlayerSetup], i32) -> bool,
+) -> Result<GameReport, EnvError> {
     let n = players.len();
     if n < 2 {
         return Err(EnvError::new("a game needs at least two players"));
@@ -178,6 +193,9 @@ pub fn play_game(
     for _ in 0..limit {
         let events = sim.step(&default_target);
         let now = sim.tick();
+        if !observe(&mut sim.players, now) {
+            break;
+        }
         for e in events {
             if let WorldEvent::HammerHit { from, to } = e
                 && (0..n as i32).contains(&from)

@@ -22,6 +22,8 @@
   var gameViewEl = document.getElementById("game-view");
   var tabBotButton = document.getElementById("tab-bot");
   var botViewEl = document.getElementById("bot-view");
+  var tabFlyButton = document.getElementById("tab-fly");
+  var flyViewEl = document.getElementById("fly-view");
 
   var csrfToken = null;
   var socket = null;
@@ -37,7 +39,9 @@
     tabbar.hidden = true;
     gameViewEl.hidden = true;
     botViewEl.hidden = true;
+    flyViewEl.hidden = true;
     BotPanel.onHidden();
+    FlyPanel.onHidden();
     setConnected(false);
   }
 
@@ -47,6 +51,8 @@
     statusView.hidden = name !== "status";
     gameViewEl.hidden = name !== "game";
     botViewEl.hidden = name !== "bot";
+    flyViewEl.hidden = name !== "fly";
+    tabFlyButton.classList.toggle("active", name === "fly");
     tabStatusButton.classList.toggle("active", name === "status");
     tabGameButton.classList.toggle("active", name === "game");
     tabBotButton.classList.toggle("active", name === "bot");
@@ -58,11 +64,16 @@
     } else {
       BotPanel.onHidden();
     }
+    if (name === "fly") {
+      FlyPanel.onShown();
+    } else {
+      FlyPanel.onHidden();
+    }
   }
 
   function showAuthenticated() {
     tabbar.hidden = false;
-    showTab(currentTab === "game" || currentTab === "bot" ? currentTab : "status");
+    showTab(currentTab === "game" || currentTab === "bot" || currentTab === "fly" ? currentTab : "status");
   }
 
   function setConnected(on) {
@@ -70,6 +81,7 @@
     connDot.classList.toggle("dot-off", !on);
     wsStateEl.textContent = on ? "подключено" : "не подключено";
     GameView.onConnectionChanged(on);
+    FlyPanel.onConnectionChanged(on);
   }
 
   function pad2(value) {
@@ -141,7 +153,13 @@
     });
     socket.addEventListener("message", function (event) {
       if (event.data instanceof ArrayBuffer) {
-        GameView.onLiveFrame(event.data);
+        // Binary messages: `DFLY` (the fly's frame, task 7.4) or the live map's `DWLF`.
+        var head = new Uint8Array(event.data, 0, Math.min(4, event.data.byteLength));
+        if (head.length === 4 && head[0] === 0x44 && head[1] === 0x46) {
+          FlyPanel.onFrame(event.data);
+        } else {
+          GameView.onLiveFrame(event.data);
+        }
         return;
       }
       var msg;
@@ -177,6 +195,9 @@
           break;
         case "bot":
           GameView.onBotStatus(msg.status);
+          break;
+        case "fly_meta":
+          FlyPanel.onMeta(msg.meta);
           break;
         case "live_error":
           GameView.onLiveError(msg.message);
@@ -308,6 +329,10 @@
   tabBotButton.addEventListener("click", function () {
     showTab("bot");
   });
+  tabFlyButton.addEventListener("click", function () {
+    showTab("fly");
+  });
+  FlyPanel.attach(sendJson);
 
   // -----------------------------------------------------------------------------------------
   // Task 5.2a: the live map view.

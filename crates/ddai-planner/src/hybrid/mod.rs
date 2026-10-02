@@ -34,7 +34,9 @@ pub mod work;
 
 pub use brain::HybridBrain;
 pub use config::{HybridConfig, HybridMode, RobustMode, hybrid_planner_preset, hybrid_terms};
-pub use proposer::{ActionDistribution, NoProposer, ProposeCtx, Proposer, ScriptedProposer, plans_from_distribution};
+pub use proposer::{
+    ActionDistribution, NoProposer, ProposalOutcome, ProposeCtx, Proposer, ScriptedProposer, plans_from_distribution,
+};
 pub use search::{DecisionTelemetry, WorkCounters};
 pub use techniques::Tech;
 

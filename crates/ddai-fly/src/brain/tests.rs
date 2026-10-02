@@ -202,7 +202,7 @@ fn tiny_map() -> ddai_physics::map::MapData {
     }
 }
 
-fn make_brain(seed: u64, selection: ActionSelection) -> FlyBrain {
+pub(crate) fn make_brain(seed: u64, selection: ActionSelection) -> FlyBrain {
     let flyg = tiny_brain_flyg();
     let config = FlyConfig::default();
     let params = FlyParams::init_default(&flyg, &config, 1);
@@ -240,7 +240,7 @@ fn make_brain(seed: u64, selection: ActionSelection) -> FlyBrain {
     )
 }
 
-fn sample_observation(opp_x: f32) -> Observation {
+pub(crate) fn sample_observation(opp_x: f32) -> Observation {
     let mut me = CharacterObservation::at_rest(0);
     me.pos = ddai_physics::vmath::Vec2::new(300.0, 300.0);
     let mut opp = CharacterObservation::at_rest(1);
@@ -371,4 +371,135 @@ fn thresholds_decide_each_binary_head_under_argmax() {
     assert!(below.jump && below.hook && below.fire);
     let (above, _) = probe(at(d.jump_prob + eps, d.hook_prob + eps, d.fire_prob + eps));
     assert!(!above.jump && !above.hook && !above.fire);
+}
+
+// ---- task 7.4: the visualisation stream ------------------------------------------------------------
+
+#[test]
+fn a_frame_round_trips_within_one_quantisation_step() {
+    let mut brain = make_brain(1, ActionSelection::Argmax);
+    brain.set_viz_every(1);
+    for i in 0..3 {
+        let _ = brain.decide(&sample_observation(300.0 + 10.0 * i as f32));
+    }
+    let obs = sample_observation(330.0);
+    let action = brain.decide(&obs);
+    let outcome = ddai_planner::hybrid::ProposalOutcome {
+        chosen: true,
+        chosen_total: 7,
+        decisions_total: 9,
+    };
+    let bytes = brain.viz_frame_with(1234, Some(outcome)).expect("a frame").to_vec();
+    let layout = brain.viz_layout().clone();
+    assert_eq!(bytes.len(), layout.frame_len());
+    let f = crate::viz::decode_frame(&bytes, layout.rate_max(), layout.z_clip()).unwrap();
+    assert_eq!((f.tick, f.seq), (1234, 4));
+    assert_eq!(i32::from(f.direction), action.direction);
+    assert_eq!(f.flags & crate::viz::flag::JUMP != 0, action.jump);
+    assert_eq!(f.flags & crate::viz::flag::HOOK != 0, action.hook);
+    assert_eq!(f.flags & crate::viz::flag::FIRE != 0, action.fire);
+    assert_ne!(f.flags & crate::viz::flag::CHOSEN_VALID, 0);
+    assert_ne!(f.flags & crate::viz::flag::CHOSEN, 0);
+    assert_eq!((f.chosen_total, f.decisions_total), (7, 9));
+    let decoded = brain.last_decoded().unwrap();
+    assert!((f.aim_angle - decoded.aim_angle).abs() < 1.0 / crate::viz::AIM_SCALE);
+    // Group rates: against the layout's own aggregation of the brain's last per-type means.
+    for (g, &got) in f.groups.iter().enumerate() {
+        let want = layout.group_rate(g, &brain.last_per_type_mean_rate);
+        assert!(
+            (got - want).abs() <= layout.rate_max() / 255.0 / 2.0 + 1e-5,
+            "group {g}: {got} vs {want}"
+        );
+    }
+    // DN z-scores.
+    let z = brain.calib.z(&brain.last_dn_rates, layout.z_clip());
+    for (i, (&got, &want)) in f.dn_z.iter().zip(&z).enumerate() {
+        assert!(
+            (got - want).abs() <= layout.z_clip() / 127.0 / 2.0 + 1e-5,
+            "dn {i}: {got} vs {want}"
+        );
+    }
+    // The eye: every channel and cell.
+    for (ci, ch) in crate::viz::EYE_CHANNELS.iter().enumerate() {
+        let grid = brain.last_ray_features().spatial(*ch);
+        assert_eq!(f.eye[ci].len(), grid.len());
+        for (i, (&got, &want)) in f.eye[ci].iter().zip(grid).enumerate() {
+            assert!(
+                (got - want.clamp(0.0, 1.0)).abs() <= 0.5 / 255.0 + 1e-6,
+                "{ch:?}[{i}]: {got} vs {want}"
+            );
+        }
+    }
+    // Logits: the heads are true logits, the direction ones log-probabilities.
+    let sig = |x: f32| 1.0 / (1.0 + (-x).exp());
+    assert!((sig(f.logits[3]) - decoded.jump_prob).abs() < 0.07);
+    assert!((f.logits[0].exp() - decoded.direction_probs[0]).abs() < 0.07);
+    assert_eq!(f.rays, 48);
+    assert_eq!(f.bins, 4);
+}
+
+#[test]
+fn pulling_frames_never_changes_a_decision() {
+    // Two identical flies see the same observations; one is watched every decision, with a made-up
+    // proposer verdict. Every action, rate and decoded probability must agree bit for bit.
+    let mut watched = make_brain(5, ActionSelection::Sampled);
+    let mut plain = make_brain(5, ActionSelection::Sampled);
+    let ctx = ddai_brain::ResetContext {
+        map: sample_observation(0.0).map,
+        self_id: 0,
+        seed: 9,
+    };
+    watched.reset(&ctx);
+    plain.reset(&ctx);
+    watched.set_viz_every(1);
+    for i in 0..60 {
+        let obs = sample_observation(200.0 + 7.0 * i as f32);
+        let a = watched.decide(&obs);
+        let b = plain.decide(&obs);
+        assert_eq!(a, b, "decision {i}");
+        let outcome = ddai_planner::hybrid::ProposalOutcome {
+            chosen: i % 3 == 0,
+            chosen_total: i,
+            decisions_total: i + 1,
+        };
+        assert!(watched.viz_frame_with(i, Some(outcome)).is_some());
+        assert_eq!(
+            watched.last_dn_rates.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            plain.last_dn_rates.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "dn rates {i}"
+        );
+        let (x, y) = (watched.last_decoded().unwrap(), plain.last_decoded().unwrap());
+        assert_eq!(x.direction_probs.map(f32::to_bits), y.direction_probs.map(f32::to_bits));
+        assert_eq!(x.aim_angle.to_bits(), y.aim_angle.to_bits());
+        assert_eq!(
+            watched.state.v().iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            plain.state.v().iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "membrane state {i}"
+        );
+    }
+}
+
+#[test]
+fn a_reset_restarts_the_frames_decision_number_and_owes_no_frame() {
+    let mut brain = make_brain(1, ActionSelection::Argmax);
+    brain.set_viz_every(1);
+    for i in 0..3 {
+        let _ = brain.decide(&sample_observation(300.0 + i as f32));
+    }
+    let f = crate::viz::decode_frame(brain.viz_frame_with(1, None).unwrap(), 10.0, 10.0).unwrap();
+    assert_eq!(f.seq, 3);
+    // Decisions nobody watched pile up; a reset ends the episode: no frame of the old one, numbering from 1.
+    let _ = brain.decide(&sample_observation(310.0));
+    brain.reset(&ddai_brain::ResetContext {
+        map: sample_observation(0.0).map,
+        self_id: 0,
+        seed: 2,
+    });
+    assert!(
+        brain.viz_frame_with(2, None).is_none(),
+        "nothing decided since the reset"
+    );
+    let _ = brain.decide(&sample_observation(320.0));
+    let f = crate::viz::decode_frame(brain.viz_frame_with(3, None).unwrap(), 10.0, 10.0).unwrap();
+    assert_eq!((f.seq, f.tick), (1, 3));
 }

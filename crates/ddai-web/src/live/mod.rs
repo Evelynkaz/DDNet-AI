@@ -5,6 +5,7 @@
 //! for the architecture.
 
 pub mod bot_source;
+pub mod fly;
 pub mod frame;
 pub mod hub;
 pub mod map_resolve;

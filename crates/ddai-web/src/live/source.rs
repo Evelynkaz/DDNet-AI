@@ -108,6 +108,11 @@ pub enum SourceEvent {
     /// object — only the bot-socket source produces it (`docs/formats.md` §21, `STATUS`). Opaque to
     /// the hub: forwarded to browsers as the `bot` WS message.
     BotStatus(String),
+    /// Task 7.4: the layout of the fly's visualisation stream (one JSON object, `docs/formats.md` §27.2), or `None`
+    /// when the bot's brain has none (or the bot is gone). Validated by the source.
+    FlyMeta(Option<String>),
+    /// Task 7.4: one `DFLY` frame (`docs/formats.md` §27.1), already checked by [`crate::live::fly::validate_frame`].
+    FlyFrame(Vec<u8>),
     /// Something went wrong that the source can recover from (acceptance criterion 2: "parsing
     /// is bounded, and a malformed trace gives an error event, not a panic") — reported to the
     /// client, never a panic or a silently-dropped frame stream.
@@ -158,6 +163,13 @@ pub trait FrameSource: Send + 'static {
         events_tx: mpsc::Sender<SourceEvent>,
         control_rx: mpsc::Receiver<ReplayControl>,
     ) -> tokio::task::JoinHandle<()>;
+
+    /// Task 7.4: whether some browser watches the fly (`true`) or none does. Called once by the hub before
+    /// [`FrameSource::spawn`]; a source that has a fly stream (the bot's) tells the bot when the value changes, so the
+    /// fly builds frames only while someone looks. The default ignores it (a replay has no fly).
+    fn attach_fly_demand(&mut self, demand: tokio::sync::watch::Receiver<bool>) {
+        let _ = demand;
+    }
 }
 
 #[cfg(test)]

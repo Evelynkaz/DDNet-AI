@@ -283,3 +283,59 @@ fn decide_allocates_nothing() {
         "FlyBrain::decide must not deallocate either: {info:?} over 100 calls"
     );
 }
+
+/// Task 7.4: with a viewer attached, `decide` plus the pull of a frame (every decision, nothing
+/// dropped) still allocates nothing: the frame is built into a buffer sized in `FlyBrain::new`.
+/// (With no viewer nothing is called at all, which `decide_allocates_nothing` above covers.)
+#[test]
+fn decide_and_viz_frame_allocate_nothing() {
+    let mut brain = make_brain();
+    brain.set_viz_every(1);
+    let obs = sample_observation(400.0);
+    let _ = brain.decide(&obs);
+    let _ = brain.viz_frame_with(0, None);
+    let observations: Vec<Observation> = (0..100).map(|i| sample_observation(300.0 + i as f32)).collect();
+    let outcome = Some(ddai_planner::hybrid::ProposalOutcome {
+        chosen: true,
+        chosen_total: 1,
+        decisions_total: 2,
+    });
+
+    let mut frames = 0usize;
+    let info = measure(|| {
+        for (i, obs) in observations.iter().enumerate() {
+            let action = brain.decide(obs);
+            std::hint::black_box(action);
+            if let Some(f) = brain.viz_frame_with(i as u32, outcome) {
+                frames += 1;
+                std::hint::black_box(f);
+            }
+        }
+    });
+    assert_eq!(frames, 100, "every decision produced a frame");
+    assert_eq!(
+        info.count_total, 0,
+        "decide + viz_frame must not allocate: {info:?} over 100 calls"
+    );
+    assert_eq!(info.count_current, 0, "nor deallocate: {info:?}");
+}
+
+/// The trait-object path the bot uses (`Brain::viz_frame`), decimated: still nothing.
+#[test]
+fn the_brain_trait_viz_path_allocates_nothing() {
+    let mut brain: Box<dyn Brain> = Box::new(make_brain());
+    let observations: Vec<Observation> = (0..100).map(|i| sample_observation(300.0 + i as f32)).collect();
+    let _ = brain.decide(&observations[0]);
+    let _ = brain.viz_frame(0);
+    let mut frames = 0usize;
+    let info = measure(|| {
+        for (i, obs) in observations.iter().enumerate() {
+            std::hint::black_box(brain.decide(obs));
+            if brain.viz_frame(i as u32).is_some() {
+                frames += 1;
+            }
+        }
+    });
+    assert!(frames > 0 && frames < 100, "decimated: {frames}");
+    assert_eq!(info.count_total, 0, "{info:?}");
+}

@@ -53,6 +53,19 @@ pub struct ProposeCtx<'a> {
     pub k: usize,
 }
 
+/// What the exact search did with a proposer's plans in the decision just made (task 7.4): the viewer's
+/// "how often is the fly's proposal the one that is played". Counted by the hybrid brain itself since its
+/// last reset, so the numbers do not depend on anybody watching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProposalOutcome {
+    /// The plan the search played in this decision came from the proposer.
+    pub chosen: bool,
+    /// Decisions since the last reset whose played plan came from the proposer.
+    pub chosen_total: u32,
+    /// Decisions since the last reset.
+    pub decisions_total: u32,
+}
+
 /// A source of candidate plans. Implementations must be deterministic given their seed.
 pub trait Proposer {
     fn name(&self) -> &str;
@@ -64,6 +77,19 @@ pub trait Proposer {
     /// does not simulate reports `0`, its cost is then only wall time).
     fn work_ticks(&self) -> u64 {
         0
+    }
+    /// Task 7.4: the static description of the proposer's visualisation stream (see
+    /// [`ddai_brain::Brain::viz_meta`]); `None`: it has none (the default).
+    fn viz_meta(&self) -> Option<String> {
+        None
+    }
+    /// Task 7.4: the visualisation frame of the proposal made in the latest `propose` call, with what the
+    /// search did with it. Called only while somebody watches, once per decision, after the search has
+    /// decided; `None` when there is no stream or no new proposal since the last call. Must not change what
+    /// the next `propose` returns (the stream is read-only).
+    fn viz_frame(&mut self, tick: u32, outcome: Option<ProposalOutcome>) -> Option<&[u8]> {
+        let _ = (tick, outcome);
+        None
     }
 }
 

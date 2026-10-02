@@ -10,6 +10,7 @@ mod clip_cmd;
 mod dataset_cmd;
 mod demo_cmd;
 mod fly_cmd;
+mod fly_watch;
 mod map_cmd;
 mod play_cmd;
 mod rec_cmd;

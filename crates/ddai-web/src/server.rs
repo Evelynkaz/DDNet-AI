@@ -67,7 +67,8 @@ pub fn build_router(state: SharedState) -> Router {
     let assets = Router::new()
         .route("/", get(http::assets::page))
         .route("/app.css", get(http::assets::css))
-        .route("/app.js", get(http::assets::js));
+        .route("/app.js", get(http::assets::js))
+        .route("/fly.js", get(http::assets::fly_js));
 
     let app: Router<SharedState> = Router::new().merge(api_and_ws).merge(map_route).merge(assets);
     // Order matters (review finding F5): `tower::Layer::layer` wraps the *current* service, so

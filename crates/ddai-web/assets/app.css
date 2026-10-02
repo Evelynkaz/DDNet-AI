@@ -635,3 +635,278 @@ button.danger {
     flex-basis: 100%;
   }
 }
+
+/* ---------------------------------------------------------------------------------------------
+   Task 7.4: the «Муха» tab — the fly brain at work. One palette for the whole tab, as tokens: the four pipeline
+   families, the seven eye channels (a fixed order validated as a set against the dark surface), a diverging pair for
+   z-scores and a one-hue sequential ramp for rates. The site is dark; these values are the dark-mode steps.
+   --------------------------------------------------------------------------------------------- */
+
+.fly-view[hidden] {
+  display: none;
+}
+
+.fly-view {
+  --fly-panel: var(--panel);
+  --fly-bg: var(--bg);
+  --fly-text: var(--text);
+  --fly-muted: var(--muted);
+  --fly-grid: #2a3040;
+  /* Pipeline families: blue (eye), aqua (body), violet (centre), orange (outputs). */
+  --fly-fam-vpn: #3987e5;
+  --fly-fam-an: #199e70;
+  --fly-fam-central: #9085e9;
+  --fly-fam-dn: #d95926;
+  /* Eye channels, in the order of the legend: position, approach, hook, others, no-hook, walls, freeze/death. */
+  --fly-ch-0: #3987e5;
+  --fly-ch-1: #d95926;
+  --fly-ch-2: #199e70;
+  --fly-ch-3: #c98500;
+  --fly-ch-4: #d55181;
+  --fly-ch-5: #9085e9;
+  --fly-ch-6: #e66767;
+  /* Diverging (below / above rest) and the sequential ramp (rate: recedes at 0, lightest at the maximum). */
+  --fly-div-neg: #3987e5;
+  --fly-div-pos: #e66767;
+  --fly-div-mid: #383835;
+  --fly-ramp-0: #181c24;
+  --fly-ramp-1: #184f95;
+  --fly-ramp-2: #3987e5;
+  --fly-ramp-3: #9ec5f4;
+  --fly-ramp-4: #cde2fb;
+
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 16px 16px calc(80px + env(safe-area-inset-bottom, 0));
+}
+
+.fly-view h1 {
+  font-size: 1.3rem;
+  margin: 8px 0 16px;
+}
+
+.fly-view h2 {
+  font-size: 1.05rem;
+  margin: 0 0 12px;
+}
+
+.fly-view .ts-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 14px 0 4px;
+}
+
+.fly-view select {
+  background: var(--bg);
+  border: 1px solid #2a3040;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 1rem;
+  min-height: 44px;
+}
+
+.fly-view code {
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.85em;
+}
+
+.fly-view .plot {
+  width: 100%;
+}
+
+.fly-view .plot.rel {
+  position: relative;
+}
+
+.fly-view canvas {
+  display: block;
+  max-width: 100%;
+}
+
+.fly-view .tip {
+  position: absolute;
+  z-index: 5;
+  background: var(--bg);
+  border: 1px solid #2a3040;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  pointer-events: none;
+  max-width: 260px;
+}
+
+.fly-view .tip[hidden] {
+  display: none;
+}
+
+.legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.swatch.line {
+  width: 16px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.swatch.fam-vpn { background: var(--fly-fam-vpn); }
+.swatch.fam-an { background: var(--fly-fam-an); }
+.swatch.fam-central { background: var(--fly-fam-central); }
+.swatch.fam-dn { background: var(--fly-fam-dn); }
+.swatch.ch-0 { background: var(--fly-ch-0); }
+.swatch.ch-1 { background: var(--fly-ch-1); }
+.swatch.ch-2 { background: var(--fly-ch-2); }
+.swatch.ch-3 { background: var(--fly-ch-3); }
+.swatch.ch-4 { background: var(--fly-ch-4); }
+.swatch.ch-5 { background: var(--fly-ch-5); }
+.swatch.ch-6 { background: var(--fly-ch-6); }
+
+/* A channel switch: on = included in the polar plot. Text stays in text ink; the swatch carries the hue. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 18px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid #2a3040;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.chip[aria-pressed="true"] {
+  background: #222a3b;
+  color: var(--text);
+  border-color: #3a4560;
+}
+
+.chip[aria-pressed="false"] .swatch {
+  opacity: 0.35;
+}
+
+.act-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.prob-row {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr) 3rem;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9rem;
+}
+
+.prob-label {
+  color: var(--muted);
+}
+
+.prob-val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.fly-view progress {
+  width: 100%;
+  height: 10px;
+  appearance: none;
+  border: none;
+  border-radius: 5px;
+  background: #222a3b;
+  overflow: hidden;
+}
+
+.fly-view progress::-webkit-progress-bar {
+  background: #222a3b;
+  border-radius: 5px;
+}
+
+.fly-view progress::-webkit-progress-value {
+  background: var(--fly-fam-vpn);
+  border-radius: 5px;
+}
+
+.fly-view progress::-moz-progress-bar {
+  background: var(--fly-fam-vpn);
+  border-radius: 5px;
+}
+
+.pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pill {
+  padding: 6px 12px;
+  border-radius: 16px;
+  border: 1px solid #2a3040;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.pill strong {
+  color: var(--text);
+}
+
+/* A held key: filled and marked with a tick, so it never rests on colour alone. */
+.pill.on {
+  background: #28324a;
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.pill.on strong::before {
+  content: "✓ ";
+}
+
+.fly-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-top: 10px;
+}
+
+.fly-table th,
+.fly-table td {
+  text-align: left;
+  padding: 4px 6px;
+  border-top: 1px solid #232a38;
+}
+
+.fly-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#fly-table summary {
+  cursor: pointer;
+  font-weight: 600;
+}

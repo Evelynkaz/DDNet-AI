@@ -17,6 +17,7 @@ use crate::encoder::{EncoderModel, EncoderParams, RayGridFeatures, compute_propr
 use crate::model::FlyModel;
 use crate::rng::SplitMix64;
 use crate::state::FlyState;
+use crate::viz::{DEFAULT_EVERY, FrameInputs, VizAction, VizEmitter, VizLayout, encode_frame};
 
 /// How [`FlyBrain::decide`] turns head probabilities into a discrete [`Action`] (task spec:
 /// "argmax or sampled, configurable").
@@ -161,6 +162,17 @@ pub struct FlyBrain {
     /// game from one template, so warming up per game would repeat identical work).
     rest_adopted: bool,
     name: String,
+    /// Task 7.4: the visualisation stream. `decide` only leaves its state behind (`last_*`, the
+    /// decision counter and the chosen action); a frame is built by [`FlyBrain::viz_frame_with`] when a
+    /// driver asks for one, so with nobody watching nothing here ever runs.
+    viz_layout: VizLayout,
+    viz: VizEmitter,
+    viz_z: Vec<f32>,
+    decision_count: u64,
+    viz_seen: u64,
+    last_action: Option<Action>,
+    /// `(name, sha256)` of the bundle this fly was loaded from, shown by the viewer.
+    identity: Option<(String, String)>,
 }
 
 impl FlyBrain {
@@ -187,6 +199,16 @@ impl FlyBrain {
         let decoder_scratch = DecoderScratch::new(&decoder);
         let role_of_type = role_of_type(model.flyg());
         let name = format!("fly-{}n-{}e", model.num_neurons(), model.flyg().edges.num_edges());
+        let grid = encoder.ray_grid_config();
+        let viz_layout = VizLayout::build(
+            &model,
+            grid.num_directions,
+            grid.num_distance_bins,
+            grid.max_range_tiles,
+            decoder.config().z_clip,
+        );
+        let viz = VizEmitter::new(viz_layout.frame_len(), DEFAULT_EVERY);
+        let viz_z = vec![0.0; num_outputs];
         FlyBrain {
             model,
             state,
@@ -209,7 +231,81 @@ impl FlyBrain {
             last_warmup_converged: false,
             rest_adopted: false,
             name,
+            viz_layout,
+            viz,
+            viz_z,
+            decision_count: 0,
+            viz_seen: 0,
+            last_action: None,
+            identity: None,
         }
+    }
+
+    /// Names the bundle this fly came from (name and sha256 only), for the viewer.
+    pub fn set_identity(&mut self, name: String, sha256: String) {
+        self.identity = Some((name, sha256));
+    }
+
+    pub fn identity(&self) -> Option<(&str, &str)> {
+        self.identity.as_ref().map(|(n, h)| (n.as_str(), h.as_str()))
+    }
+
+    pub fn viz_layout(&self) -> &VizLayout {
+        &self.viz_layout
+    }
+
+    /// Frames are built for every `every`-th decision a driver asks about (default 2).
+    pub fn set_viz_every(&mut self, every: u32) {
+        self.viz.set_every(every);
+    }
+
+    /// The description of the stream (`docs/formats.md` §27.2); `role` is `"fly"` or `"proposer"`.
+    pub fn viz_meta_json(&self, role: &str) -> String {
+        self.viz_layout
+            .meta_json(&self.name, role, self.identity(), self.viz.every())
+    }
+
+    /// The frame of the latest decision, if there is a new one since the last call and it is not
+    /// dropped by the decimation. Allocation-free; reads what `decide` left behind and writes only
+    /// the emitter's buffer, so it cannot change any later decision. `outcome` is the hybrid search's
+    /// verdict on this decision's proposal (`None` when the fly plays alone).
+    pub fn viz_frame_with(
+        &mut self,
+        tick: u32,
+        outcome: Option<ddai_planner::hybrid::ProposalOutcome>,
+    ) -> Option<&[u8]> {
+        if self.decision_count == self.viz_seen {
+            return None;
+        }
+        self.viz_seen = self.decision_count;
+        if !self.viz.due() {
+            return None;
+        }
+        let (decoded, action) = (self.last_decoded?, self.last_action?);
+        self.calib
+            .z_into(&self.last_dn_rates, self.decoder.config().z_clip, &mut self.viz_z);
+        let inputs = FrameInputs {
+            seq: self.decision_count as u32,
+            tick,
+            latency_us: u32::try_from(self.last_latency.as_micros()).unwrap_or(u32::MAX),
+            per_type_mean_rate: &self.last_per_type_mean_rate,
+            dn_z: &self.viz_z,
+            eye: &self.ray_features,
+            action: VizAction {
+                direction: action.direction,
+                jump: action.jump,
+                hook: action.hook,
+                fire: action.fire,
+                aim_angle: decoded.aim_angle,
+                direction_probs: decoded.direction_probs,
+                jump_prob: decoded.jump_prob,
+                hook_prob: decoded.hook_prob,
+                fire_prob: decoded.fire_prob,
+            },
+            outcome,
+        };
+        encode_frame(&self.viz_layout, &inputs, self.viz.buf_mut());
+        Some(self.viz.frame())
     }
 
     /// Sets the decision thresholds of the jump/hook/fire heads (argmax selection only; default
@@ -350,6 +446,10 @@ impl ddai_brain::Brain for FlyBrain {
             self.last_warmup_converged = self.state.warm_up(&self.model).converged;
         }
         self.last_decoded = None;
+        self.last_action = None;
+        // A new episode: the frame's decision number restarts with it (`docs/formats.md` §27.1), and no frame is owed.
+        self.decision_count = 0;
+        self.viz_seen = 0;
     }
 
     fn decide(&mut self, obs: &Observation) -> Action {
@@ -385,14 +485,17 @@ impl ddai_brain::Brain for FlyBrain {
         self.last_decoded = Some(decoded);
         self.last_latency = start.elapsed();
 
-        Action {
+        let action = Action {
             direction,
             jump,
             hook,
             fire,
             target,
             wanted_weapon: None,
-        }
+        };
+        self.last_action = Some(action);
+        self.decision_count += 1;
+        action
     }
 
     fn name(&self) -> &str {
@@ -403,7 +506,15 @@ impl ddai_brain::Brain for FlyBrain {
         let decoded = self.last_decoded?;
         Some(self.build_telemetry(decoded).to_json())
     }
+
+    fn viz_meta(&self) -> Option<String> {
+        Some(self.viz_meta_json("fly"))
+    }
+
+    fn viz_frame(&mut self, tick: u32) -> Option<&[u8]> {
+        self.viz_frame_with(tick, None)
+    }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

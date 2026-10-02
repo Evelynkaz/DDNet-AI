@@ -89,6 +89,10 @@ pub enum FlyCommand {
         #[arg(long, value_enum, default_value_t = BackendArg::PerSeq)]
         backend: BackendArg,
     },
+    /// Task 7.4: plays offline arena games with a trained fly and serves its visualisation stream on a bridge socket,
+    /// for the web's «Муха» tab (`ddnet-ai web --bot-socket <the same socket>`): the owner watches the connectome brain
+    /// work without a game server.
+    Watch(crate::fly_watch::WatchArgs),
     /// Task 7.3, acceptance criterion 9: the encoder + fly + decoder learning demo — synthetic
     /// observations (a random spawn on a real block map, an opponent at a random relative
     /// position/velocity) and a scripted teacher (direction/jump/hook), trained with
@@ -129,6 +133,7 @@ pub enum FlyCommand {
 
 pub fn run(args: FlyArgs) -> ExitCode {
     match args.command {
+        FlyCommand::Watch(watch) => crate::fly_watch::run(watch),
         FlyCommand::Bench {
             flyg,
             substeps,

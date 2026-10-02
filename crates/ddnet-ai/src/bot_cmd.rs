@@ -56,6 +56,10 @@ pub struct BotOpts {
     /// `--brain fly`: the brain config (`configs/fly/S-brain.toml`).
     #[arg(long)]
     pub fly_config: Option<PathBuf>,
+    /// A trained fly bundle (task 7.4): `--brain fly` plays with its weights, `--brain hybrid` gets the fly as proposer
+    /// (`hybrid:fly`). The web's «Муха» tab shows the fly's activity while the bot plays with either.
+    #[arg(long)]
+    pub fly_bundle: Option<PathBuf>,
     /// A **fixed** `cl_prediction_margin` in ms. Without it the margin is adaptive (task 4.1b, D-063):
     /// it starts at 10 and follows the `INPUTTIMING` feedback between 3 and 20 ms (rolling p1 of
     /// `time_left` kept at about 2 ms: lowered by 1 ms at a time, only when p1 is at least 4 ms and no
@@ -261,6 +265,9 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
     };
     if let Some(p) = &o.fly_flyg {
         brain.fly_flyg = p.clone();
+    }
+    if let Some(p) = &o.fly_bundle {
+        brain.fly_bundle = Some(p.clone());
     }
     if let Some(p) = &o.fly_config {
         brain.fly_config = p.clone();

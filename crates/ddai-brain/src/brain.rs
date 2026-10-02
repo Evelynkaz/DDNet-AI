@@ -189,6 +189,24 @@ pub trait Brain {
     fn last_plan(&self) -> Option<PlanTelemetry> {
         None
     }
+
+    /// Task 7.4: the static description (one JSON object, `docs/formats.md` §27) of this brain's
+    /// binary visualisation stream: the layout a viewer needs to read the frames of
+    /// [`Brain::viz_frame`]. `None` (the default): this brain has no stream (only the fly and the
+    /// hybrid with a fly proposer have one). Allocates; call it when a viewer connects, not per decision.
+    fn viz_meta(&self) -> Option<String> {
+        None
+    }
+
+    /// Task 7.4: the visualisation frame of the latest decision, encoded into a buffer the brain owns
+    /// (no allocation). The driver calls this after a decision **only while somebody watches**, so a
+    /// brain whose stream nobody reads does no work for it at all and its decisions cannot depend on
+    /// it. `tick` is the game tick of the decision (stored in the frame). `None`: no stream, no new
+    /// decision since the last call, or this decision was dropped by the brain's own decimation.
+    fn viz_frame(&mut self, tick: u32) -> Option<&[u8]> {
+        let _ = tick;
+        None
+    }
 }
 
 #[cfg(test)]

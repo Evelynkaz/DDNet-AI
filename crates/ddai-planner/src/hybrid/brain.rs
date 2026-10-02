@@ -16,7 +16,7 @@ use ddai_physics::map::MapData;
 use crate::brains::{ClockKind, PlannerStats, action_from_input, enemy_input_from_tee, target_of};
 use crate::clock::{Clock, StepClock, WallClock};
 use crate::hybrid::config::{HybridConfig, HybridMode};
-use crate::hybrid::proposer::{NoProposer, Proposer};
+use crate::hybrid::proposer::{NoProposer, ProposalOutcome, Proposer};
 use crate::hybrid::search::{DecisionInput, DecisionTelemetry, HybridSearch, SOURCE_KINDS, Source, WorkCounters};
 use crate::physics_adapter::{PhysicsWorld, from_ddnet_input};
 use crate::plan_world::PlanWorld;
@@ -169,6 +169,10 @@ pub struct HybridBrain {
     spare_vels: Vec<crate::vmath::Vec2>,
     spare_ids: Vec<i32>,
     travel_goal: Option<crate::vmath::Vec2>,
+    /// Task 7.4: the decision just made went through the search with a proposer, so the proposer's frame is of *this*
+    /// decision. Cleared at the start of every decision (watched or not), set only when the proposer was consulted: a
+    /// viewer that subscribes later never gets an older decision's frame labelled with the current verdict.
+    viz_fresh: bool,
 }
 
 impl HybridBrain {
@@ -223,6 +227,7 @@ impl HybridBrain {
             spare_vels: Vec::new(),
             spare_ids: Vec::new(),
             travel_goal: None,
+            viz_fresh: false,
         })
     }
 
@@ -365,6 +370,7 @@ impl HybridBrain {
         self.stats.shielded += u64::from(tel.shielded);
         self.stats.shield_incomplete += u64::from(tel.shield_incomplete);
         self.stats.candidates += u64::from(tel.evaluated.iter().sum::<u32>());
+        self.viz_fresh = self.cfg.proposals > 0;
         self.last = Some(tel);
         self.prev = out;
         action_from_input(&out)
@@ -389,6 +395,7 @@ impl Brain for HybridBrain {
     }
 
     fn decide(&mut self, obs: &Observation) -> Action {
+        self.viz_fresh = false;
         let Some(target) = self.target_id(obs) else {
             self.prev = empty_input();
             return Action::neutral();
@@ -407,6 +414,7 @@ impl Brain for HybridBrain {
     }
 
     fn decide_in(&mut self, obs: &Observation, view: Option<&WorldView<'_>>) -> Action {
+        self.viz_fresh = false;
         let Some(view) = view else {
             return self.decide(obs);
         };
@@ -450,6 +458,31 @@ impl Brain for HybridBrain {
             shield_incomplete: t.shield_incomplete,
             candidates: t.evaluated.iter().sum(),
         })
+    }
+
+    fn viz_meta(&self) -> Option<String> {
+        match (self.search.as_ref(), self.proposer.as_ref()) {
+            (Some(search), _) => search.proposer().viz_meta(),
+            (None, Some(proposer)) => proposer.viz_meta(),
+            (None, None) => None,
+        }
+    }
+
+    fn viz_frame(&mut self, tick: u32) -> Option<&[u8]> {
+        if !std::mem::take(&mut self.viz_fresh) {
+            return None;
+        }
+        // The search's verdict on the decision just made; the proposer decides whether it has a fresh frame.
+        let outcome = self.last.as_ref().map(|t| ProposalOutcome {
+            chosen: matches!(t.chosen, Some(Source::Proposal)),
+            chosen_total: u32::try_from(self.totals.chosen[Source::Proposal.kind()]).unwrap_or(u32::MAX),
+            decisions_total: u32::try_from(self.totals.decisions).unwrap_or(u32::MAX),
+        });
+        match (self.search.as_mut(), self.proposer.as_mut()) {
+            (Some(search), _) => search.proposer_mut().viz_frame(tick, outcome),
+            (None, Some(proposer)) => proposer.viz_frame(tick, outcome),
+            (None, None) => None,
+        }
     }
 
     fn telemetry(&self) -> Option<String> {

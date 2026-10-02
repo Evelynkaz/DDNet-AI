@@ -39,6 +39,7 @@ pub mod recorder;
 pub mod rng;
 pub mod state;
 pub mod train;
+pub mod viz;
 pub mod world_model;
 
 pub mod brain;

@@ -48,6 +48,8 @@ toml = "1.1.6"
 
 [dev-dependencies]
 tempfile = "3.14"
+# Task 7.4: the viz tests parse the stream's meta JSON.
+serde_json = "1"
 # Per-thread allocation counting for `tests/no_alloc.rs`/`no_alloc_brain.rs` — see `ddai-physics`'s
 # Cargo.toml (task 1.10b review R2).
 allocation-counter = "0.8.1"

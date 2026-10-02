@@ -337,6 +337,12 @@ pub struct Bot {
     /// The navigation's command channel (`goto`, `home`, `wb`, `strong`), once attached.
     nav: Option<NavHandle>,
     brain_opts: BrainOptions,
+    /// Counts brain replacements (`!brain`), so the driver can re-announce the brain's visualisation stream.
+    brain_generation: u64,
+    /// The brain decided on the latest snapshot (and its frame has not been asked for yet): only then is there a frame
+    /// of *this* decision. A snapshot the bot answered without the brain (no target, a hook, a hold) has none, however
+    /// recent the brain's last decision was.
+    viz_fresh: bool,
     /// `!low` / `!strong`.
     low: bool,
     strong: bool,
@@ -416,6 +422,8 @@ impl Bot {
             kill_why: None,
             nav: None,
             brain_opts: BrainOptions::default(),
+            brain_generation: 0,
+            viz_fresh: false,
             low: cfg.low,
             strong: cfg.strong,
             wants_spectate: false,
@@ -570,6 +578,25 @@ impl Bot {
     /// The brain's telemetry JSON (allocates; call at a few Hz, not per decision).
     pub fn brain_telemetry(&self) -> Option<String> {
         self.brain.telemetry()
+    }
+
+    /// Task 7.4: the layout of the brain's visualisation stream (`None`: it has none). Allocates.
+    pub fn viz_meta(&self) -> Option<String> {
+        self.brain.viz_meta()
+    }
+
+    /// Task 7.4: the visualisation frame of the latest decision. The driver calls it after a snapshot **only while a
+    /// viewer is subscribed**; with nobody watching the brain does nothing for its stream.
+    pub fn viz_frame(&mut self, tick: u32) -> Option<&[u8]> {
+        if !std::mem::take(&mut self.viz_fresh) {
+            return None;
+        }
+        self.brain.viz_frame(tick)
+    }
+
+    /// How many times the brain has been replaced since the start; changes when the stream's layout may have.
+    pub fn brain_generation(&self) -> u64 {
+        self.brain_generation
     }
 
     pub fn status(&self) -> &Status {
@@ -771,6 +798,7 @@ impl Bot {
         let mut brain_time = Duration::ZERO;
         let before = self.stats;
         let mut out = self.decide(snap, &mut brain_time);
+        self.viz_fresh = self.stats.brain_decisions > before.brain_decisions;
         self.apply_pending(snap, &mut out);
         if out.kill {
             let why = self.kill_why.take().unwrap_or(KillWhy::Unstick);

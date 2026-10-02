@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 use tokio::time::{interval, interval_at};
 
 use crate::auth::session::SessionId;
-use crate::live::hub::HubEvent;
+use crate::live::hub::{FlySubscription, HubEvent};
 use crate::live::source::{GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus};
 use crate::session_guard::{current_session, request_is_same_origin};
 use crate::state::SharedState;
@@ -151,6 +151,12 @@ enum ServerMessage {
     Bot {
         status: serde_json::Value,
     },
+    /// Task 7.4: the layout of the fly's visualisation stream (`docs/formats.md` §27.2); `null`: none (the bot's brain
+    /// has no stream, or the bot is not there). Sent to a connection that subscribed with `{"type":"fly","hz":N}`, when it
+    /// does and whenever the layout changes; the frames follow as binary messages starting with `DFLY`.
+    FlyMeta {
+        meta: serde_json::Value,
+    },
     /// A live-source problem (acceptance criterion 2: "a malformed trace gives an error event,
     /// not a panic") — reported to the client, distinct from any HTTP-level error.
     LiveError {
@@ -172,10 +178,18 @@ fn hub_event_to_server_message(event: &HubEvent) -> ServerMessage {
         HubEvent::BotStatus(json) => ServerMessage::Bot {
             status: serde_json::from_str(json).unwrap_or(serde_json::Value::Null),
         },
+        HubEvent::FlyMeta(meta) => ServerMessage::FlyMeta {
+            meta: fly_meta_value(meta.as_deref()),
+        },
         HubEvent::Error(message) => ServerMessage::LiveError {
             message: message.clone(),
         },
     }
+}
+
+fn fly_meta_value(meta: Option<&str>) -> serde_json::Value {
+    meta.and_then(|m| serde_json::from_str(m).ok())
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// A client `replay{...}` command's JSON shape (acceptance criterion 2: "WS messages
@@ -215,6 +229,11 @@ enum ClientMessage {
         live: f32,
     },
     Replay(ReplayCommand),
+    /// Task 7.4: `{"type":"fly","hz":8}` watches the fly's stream at up to `hz` frames per second (clamped to
+    /// `config.max_fly_hz`); `hz <= 0` stops. The source is told that somebody watches while at least one connection does.
+    Fly {
+        hz: f32,
+    },
 }
 
 fn unix_time_secs() -> u64 {
@@ -324,6 +343,11 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
 
+    // Task 7.4: this connection's subscription to the fly stream and its own frame-rate cap.
+    let mut fly_sub: Option<FlySubscription> = None;
+    let mut fly_hz: f32 = 0.0;
+    let mut fly_next_due = Instant::now();
+
     let mut status_ticker = interval(STATUS_INTERVAL);
     // `interval()`'s first tick fires immediately, which is what we want for `status_ticker`
     // (the client gets a status right after `hello`, without waiting a full second) but not for
@@ -419,6 +443,36 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
                     Err(broadcast::error::RecvError::Closed) => {} // hub shut down; nothing to do
                 }
             }
+            // Task 7.4: the fly's binary frames (`DFLY`), lossy and throttled per connection like `live`.
+            fly_bytes = async {
+                match fly_sub.as_mut() {
+                    Some(sub) => sub.rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match fly_bytes {
+                    Ok(bytes) => {
+                        // An average-rate limiter, not a minimum gap: a source at 12.5 Hz asked for 12 must not lose
+                        // every other frame to gaps of 80 ms against 83 ms. The schedule advances by one period per
+                        // frame sent (and restarts from now after a pause), so the long-run rate is the requested one.
+                        let period = Duration::try_from_secs_f32((1.0 / fly_hz.max(MIN_LIVE_HZ)).max(0.0))
+                            .unwrap_or(Duration::from_millis(100));
+                        let now = Instant::now();
+                        if now >= fly_next_due {
+                            fly_next_due = if now.duration_since(fly_next_due) > period {
+                                now + period
+                            } else {
+                                fly_next_due + period
+                            };
+                            if socket.send(Message::Binary(Bytes::from((*bytes).clone()))).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {} // skip ahead, like `live`
+                    Err(broadcast::error::RecvError::Closed) => fly_sub = None,
+                }
+            }
             event = async {
                 match event_rx.as_mut() {
                     Some(rx) => rx.recv().await,
@@ -427,6 +481,10 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
             } => {
                 match event {
                     Ok(event) => {
+                        // The layout of the fly's stream is for the connections that watch it.
+                        if matches!(&*event, HubEvent::FlyMeta(_)) && fly_sub.is_none() {
+                            continue;
+                        }
                         let message = hub_event_to_server_message(&event);
                         if send_json(&mut socket, &message).await.is_err() {
                             break;
@@ -463,6 +521,27 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
                                 } else {
                                     0.0
                                 };
+                            }
+                            Ok(ClientMessage::Fly { hz }) => {
+                                // Same rule as `sub{live}`: NaN and anything <= 0 stop; a positive rate is clamped.
+                                if hz > 0.0 {
+                                    fly_hz = hz.clamp(MIN_LIVE_HZ, state.config.max_fly_hz);
+                                    if fly_sub.is_none() {
+                                        // Subscribed (the source is told) before the layout is read, so a layout
+                                        // announced in between reaches this connection through the event channel.
+                                        fly_sub = state.live_hub.as_ref().map(|hub| hub.subscribe_fly());
+                                        let meta = state.live_hub.as_ref().and_then(|hub| hub.latest_fly_meta());
+                                        let message = ServerMessage::FlyMeta {
+                                            meta: fly_meta_value(meta.as_deref()),
+                                        };
+                                        if send_json(&mut socket, &message).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    fly_hz = 0.0;
+                                    fly_sub = None;
+                                }
                             }
                             Ok(ClientMessage::Replay(command)) => {
                                 // Acceptance criterion 2: "allowed only for authenticated

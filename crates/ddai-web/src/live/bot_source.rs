@@ -2,8 +2,10 @@
 //! process's Unix socket (`ddai_bot::bridge`), reads its messages — never writes — and turns them
 //! into [`SourceEvent`]s for the hub, so the "Игра" page shows the real game instead of replays.
 //!
-//! **Read-only.** The bot never reads from the socket and this source never writes to it; the web
-//! control path is a later task. The `replay{...}` commands of the page are drained and ignored.
+//! **Read-only, with one exception (task 7.4).** The web control path is a separate socket; this one carries nothing
+//! but the bot's output, and the only thing this source ever writes to it is a **subscription**
+//! (`u32 LE len | u8 1 | u8 mask`, bit 0: the fly stream) so that the bot builds the fly's frames only while a browser
+//! watches them (`docs/formats.md` §21.2, §27). The `replay{...}` commands of the page are drained and ignored.
 //!
 //! **Trust.** The socket is a `0600` file in a `0700` directory of the same user, but the bytes are
 //! still parsed defensively: message length capped at [`MAX_MESSAGE`], unknown kinds skipped, a bad
@@ -24,9 +26,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::net::unix::OwnedReadHalf;
+use tokio::sync::{mpsc, watch};
 
 use super::map_resolve::{self, MapCache};
 use super::source::{
@@ -44,7 +47,15 @@ mod kind {
     pub const PLAYERS: u8 = 3;
     pub const FRAME: u8 = 4;
     pub const STATUS: u8 = 5;
+    pub const FLYMETA: u8 = 6;
+    pub const FLY: u8 = 7;
 }
+
+/// What this source says to the bot: a subscription (`ddai_bot::bridge::client_kind::SUBSCRIBE`).
+const SUBSCRIBE: u8 = 1;
+const SUBSCRIBE_FLY: u8 = 1;
+/// A write of a few bytes to the bot must not hang the source.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 struct MapMsg {
@@ -73,6 +84,8 @@ pub struct BotSource {
     socket: PathBuf,
     search_dirs: Vec<PathBuf>,
     map_cache: Arc<MapCache>,
+    /// Whether a browser watches the fly (set by the hub).
+    fly_demand: Option<watch::Receiver<bool>>,
 }
 
 impl BotSource {
@@ -81,11 +94,46 @@ impl BotSource {
             socket,
             search_dirs,
             map_cache,
+            fly_demand: None,
         }
     }
 }
 
+/// Per-connection bookkeeping of the fly stream.
+#[derive(Default)]
+struct FlyState {
+    /// A layout was passed on (so the page is told when it ends).
+    meta_told: bool,
+    /// A bad frame or layout was reported (one report per connection, not one per frame).
+    bad_told: bool,
+}
+
+/// One message of the bot: its body (kind byte and payload), the read half handed back for the next one.
+/// A future of its own, polled across `select!` rounds, so a message that is half read is never lost to another branch.
+async fn read_message(mut rd: OwnedReadHalf) -> (OwnedReadHalf, std::io::Result<Vec<u8>>) {
+    let mut len_buf = [0u8; 4];
+    let result = async {
+        rd.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len == 0 || len > MAX_MESSAGE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("message length {len} is out of range"),
+            ));
+        }
+        let mut body = vec![0u8; len];
+        rd.read_exact(&mut body).await?;
+        Ok(body)
+    }
+    .await;
+    (rd, result)
+}
+
 impl FrameSource for BotSource {
+    fn attach_fly_demand(&mut self, demand: watch::Receiver<bool>) {
+        self.fly_demand = Some(demand);
+    }
+
     fn spawn(
         self: Box<Self>,
         events_tx: mpsc::Sender<SourceEvent>,
@@ -167,44 +215,74 @@ impl BotSource {
 
     async fn session(
         &self,
-        mut stream: UnixStream,
+        stream: UnixStream,
         events_tx: &mpsc::Sender<SourceEvent>,
         control_rx: &mut mpsc::Receiver<ReplayControl>,
     ) -> End {
+        let mut fly = FlyState::default();
+        let end = self.session_inner(stream, events_tx, control_rx, &mut fly).await;
+        // The stream ended with the connection: a page showing it is told there is none.
+        if fly.meta_told && events_tx.send(SourceEvent::FlyMeta(None)).await.is_err() {
+            return End::HubClosed;
+        }
+        end
+    }
+
+    async fn session_inner(
+        &self,
+        stream: UnixStream,
+        events_tx: &mpsc::Sender<SourceEvent>,
+        control_rx: &mut mpsc::Receiver<ReplayControl>,
+        fly: &mut FlyState,
+    ) -> End {
         let mut prev: HashMap<u8, CharacterState> = HashMap::new();
-        let mut len_buf = [0u8; 4];
+        let (rd, mut wr) = stream.into_split();
+        let mut reader = Box::pin(read_message(rd));
+        let mut demand = self.fly_demand.clone();
+        // Whoever already watches (a page open before the bot started, or a reconnect) is announced at once.
+        if let Some(d) = demand.as_mut() {
+            let want = *d.borrow_and_update();
+            if want && let Err(e) = write_subscription(&mut wr, true).await {
+                return End::Lost(e);
+            }
+        }
         loop {
-            // One message: length, then body — racing the read against the page's commands.
-            let read = async {
-                stream.read_exact(&mut len_buf).await?;
-                let len = u32::from_le_bytes(len_buf) as usize;
-                if len == 0 || len > MAX_MESSAGE {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("message length {len} is out of range"),
-                    ));
+            // One message: the bot's next, raced against the page's commands and the demand for the fly.
+            tokio::select! {
+                (rd, result) = &mut reader => {
+                    let body = match result {
+                        Ok(b) => b,
+                        Err(e) => return End::Lost(e.to_string()),
+                    };
+                    reader = Box::pin(read_message(rd));
+                    let (kind, payload) = (body[0], &body[1..]);
+                    match self.handle(kind, payload, &mut prev, events_tx, fly).await {
+                        Ok(()) => {}
+                        Err(End::HubClosed) => return End::HubClosed,
+                        Err(End::Lost(why)) => return End::Lost(why),
+                    }
                 }
-                let mut body = vec![0u8; len];
-                stream.read_exact(&mut body).await?;
-                Ok(body)
-            };
-            let body = tokio::select! {
-                r = read => match r {
-                    Ok(b) => b,
-                    Err(e) => return End::Lost(e.to_string()),
-                },
                 cmd = control_rx.recv() => {
                     if cmd.is_none() {
                         return End::HubClosed;
                     }
-                    continue; // read-only: commands are ignored
+                    // read-only: commands are ignored
                 }
-            };
-            let (kind, payload) = (body[0], &body[1..]);
-            match self.handle(kind, payload, &mut prev, events_tx).await {
-                Ok(()) => {}
-                Err(End::HubClosed) => return End::HubClosed,
-                Err(End::Lost(why)) => return End::Lost(why),
+                changed = async {
+                    match demand.as_mut() {
+                        Some(d) => d.changed().await.is_ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed {
+                        let want = *demand.as_mut().expect("it just changed").borrow_and_update();
+                        if let Err(e) = write_subscription(&mut wr, want).await {
+                            return End::Lost(e);
+                        }
+                    } else {
+                        demand = None; // the hub is going away; nothing more will change
+                    }
+                }
             }
         }
     }
@@ -215,6 +293,7 @@ impl BotSource {
         payload: &[u8],
         prev: &mut HashMap<u8, CharacterState>,
         events_tx: &mpsc::Sender<SourceEvent>,
+        fly: &mut FlyState,
     ) -> Result<(), End> {
         let send = |e: SourceEvent| async move { events_tx.send(e).await.map_err(|_| End::HubClosed) };
         match kind {
@@ -297,9 +376,43 @@ impl BotSource {
                     send(SourceEvent::BotStatus(text)).await?;
                 }
             }
+            kind::FLYMETA => match super::fly::validate_meta(payload) {
+                Ok(meta) => {
+                    fly.meta_told = meta.is_some();
+                    send(SourceEvent::FlyMeta(meta)).await?;
+                }
+                Err(e) => report_bad_fly(fly, &send, e).await?,
+            },
+            kind::FLY => match super::fly::validate_frame(payload) {
+                Ok(()) => send(SourceEvent::FlyFrame(payload.to_vec())).await?,
+                Err(e) => report_bad_fly(fly, &send, e).await?,
+            },
             _ => {} // forward-compatible: an unknown kind is skipped
         }
         Ok(())
+    }
+}
+
+/// Tells the page once per connection that the bot's fly stream is malformed (the frame itself is dropped).
+async fn report_bad_fly<F, Fut>(fly: &mut FlyState, send: &F, why: String) -> Result<(), End>
+where
+    F: Fn(SourceEvent) -> Fut,
+    Fut: std::future::Future<Output = Result<(), End>>,
+{
+    if fly.bad_told {
+        return Ok(());
+    }
+    fly.bad_told = true;
+    send(SourceEvent::Error(format!("the bot's fly stream is malformed: {why}"))).await
+}
+
+/// `u32 LE len | u8 SUBSCRIBE | u8 mask`.
+async fn write_subscription(wr: &mut tokio::net::unix::OwnedWriteHalf, fly: bool) -> Result<(), String> {
+    let msg = [2, 0, 0, 0, SUBSCRIBE, if fly { SUBSCRIBE_FLY } else { 0 }];
+    match tokio::time::timeout(WRITE_TIMEOUT, wr.write_all(&msg)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("the bot did not take a subscription in time".to_string()),
     }
 }
 

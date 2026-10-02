@@ -540,6 +540,15 @@ impl HybridSearch {
         self.proposer.name()
     }
 
+    /// The proposer, for the read-only visualisation stream (task 7.4).
+    pub fn proposer(&self) -> &dyn Proposer {
+        &*self.proposer
+    }
+
+    pub fn proposer_mut(&mut self) -> &mut dyn Proposer {
+        &mut *self.proposer
+    }
+
     pub fn workers(&self) -> usize {
         self.engine.workers()
     }

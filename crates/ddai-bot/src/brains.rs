@@ -4,7 +4,7 @@
 //! one match arm. `hybrid` is `ddai_planner::hybrid::HybridBrain` (task 3.5, D-041/D-055) with its
 //! default production configuration: 4 ms search budget, 5 ms decision cap, adaptive extension up to
 //! 15 ms in confirmed danger (D-042), the 1vN threat model, the technique library, one deciding thread,
-//! and no proposer (`NoProposer`: the fly is untrained, so nothing proposes yet). The bot talks to
+//! and no proposer (`NoProposer`: the fly is untrained, so nothing proposes yet; with `--fly-bundle` (7.4) a trained fly proposes, `hybrid:fly`). The bot talks to
 //! `dyn Brain` only (plus [`BrainKind::has_own_shield`], which says whether the bot must guard the
 //! brain's output); the hybrid sees the same local tees and exact predicted world as the planner.
 //!
@@ -16,8 +16,9 @@
 use std::path::PathBuf;
 
 use ddai_brain::{Brain, IdleBrain};
+use ddai_fly::proposer::FlyProposer;
 use ddai_planner::brains::{ClockKind, PlannerBrain, PlannerBrainConfig, PlannerMode, PlannerPreset, ScriptedBrain};
-use ddai_planner::hybrid::{HybridBrain, HybridConfig, NoProposer};
+use ddai_planner::hybrid::{HybridBrain, HybridConfig, NoProposer, Proposer};
 
 /// Which brain plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,10 @@ pub struct BrainOptions {
     /// `--brain fly`: the compiled graph, the brain config and the seed.
     pub fly_flyg: PathBuf,
     pub fly_config: PathBuf,
+    /// Task 7.4: a trained fly bundle (`--fly-bundle`). With it `--brain fly` plays with the trained weights and
+    /// `--brain hybrid` gets the fly as its proposer (`hybrid:fly`); without it the fly is untrained and the hybrid
+    /// has no proposer. The bundle names its own brain config; `.flyg` is `fly_flyg` (the hash must match).
+    pub fly_bundle: Option<PathBuf>,
     pub seed: u64,
 }
 
@@ -94,6 +99,7 @@ impl Default for BrainOptions {
             planner_preset: PlannerPreset::Normal,
             fly_flyg: home.join("aiddnet/data/connectome/compiled/fly-S-v1.flyg"),
             fly_config: PathBuf::from("configs/fly/S-brain.toml"),
+            fly_bundle: None,
             seed: 1,
         }
     }
@@ -110,10 +116,13 @@ pub enum BrainError {
 /// Builds the brain. Not `Send`: the planner holds `Rc`s, so build it on the thread that plays.
 pub fn make_brain(kind: BrainKind, opts: &BrainOptions) -> Result<Box<dyn Brain>, BrainError> {
     Ok(match kind {
-        BrainKind::Hybrid => Box::new(
-            HybridBrain::new(HybridConfig::default(), ClockKind::Wall, Box::new(NoProposer))
-                .map_err(BrainError::Hybrid)?,
-        ),
+        BrainKind::Hybrid => {
+            let proposer: Box<dyn Proposer> = match &opts.fly_bundle {
+                Some(_) => Box::new(FlyProposer::new(make_bundle_fly(opts)?, opts.seed)),
+                None => Box::new(NoProposer),
+            };
+            Box::new(HybridBrain::new(HybridConfig::default(), ClockKind::Wall, proposer).map_err(BrainError::Hybrid)?)
+        }
         BrainKind::Planner => Box::new(PlannerBrain::new(PlannerBrainConfig {
             preset: opts.planner_preset,
             mode: PlannerMode::Deadline {
@@ -127,8 +136,23 @@ pub fn make_brain(kind: BrainKind, opts: &BrainOptions) -> Result<Box<dyn Brain>
     })
 }
 
+/// A fly with the weights of `opts.fly_bundle` (which must be set); remembers the bundle's name and hash for the web panel.
+fn make_bundle_fly(opts: &BrainOptions) -> Result<ddai_fly::brain::FlyBrain, BrainError> {
+    use ddai_fly::brain::{ActionSelection, FlyBrainConfig};
+    let bundle = opts.fly_bundle.as_deref().expect("the caller checked");
+    let template = ddai_fly::bundle::FlyBrainTemplate::load(bundle, Some(&opts.fly_flyg))
+        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
+    Ok(template.instantiate(FlyBrainConfig {
+        action_selection: ActionSelection::Argmax,
+        seed: opts.seed,
+    }))
+}
+
 fn make_fly(opts: &BrainOptions) -> Result<ddai_fly::brain::FlyBrain, BrainError> {
     use ddai_fly::brain::{ActionSelection, FlyBrain, FlyBrainConfig};
+    if opts.fly_bundle.is_some() {
+        return make_bundle_fly(opts);
+    }
     use ddai_fly::decoder::{DecoderModel, DnCalibration};
     use ddai_fly::encoder::{EncoderModel, EncoderParams};
     use ddai_fly::{FlyConfig, FlyModel, FlyParams};
