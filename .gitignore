@@ -46,6 +46,16 @@ site/dist-preview/
 *.feather
 *.parquet
 *.ckpt
+# Trained models and training state (fly/MLP/GRU bundles, optimizer state, other weight formats): they never go to git,
+# they live in ~/aiddnet/data/runs (D-006/D-012).
+*.bundle
+*.safetensors
+*.npz
+*.pt
+*.pth
+*.onnx
+*.h5
+state.bin
 /traces/
 /datasets/
 /checkpoints/

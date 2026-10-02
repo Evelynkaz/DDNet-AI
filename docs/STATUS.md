@@ -55,7 +55,8 @@
 2. Разделы formats дописать в конец с перенумерацией.
 3. Пересобрать `Cargo.lock`.
 4. Проверки: fmt, clippy `-D warnings`, workspace tests, `cargo deny`.
-5. gitleaks, коммит, push, CI (`gh run watch`); затем удалить worktree.
+5. gitleaks и проверка, что среди добавленных файлов нет весов и больших бинарников (`*.bundle`, `*.flyg`,
+   `state.bin`, > 2 МБ); затем коммит, push, CI (`gh run watch`), удалить worktree.
 
 ## Сводка для владельца (2026-09-28, 08:30)
 
