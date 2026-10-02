@@ -21,6 +21,7 @@
 use ddai_net::generated::objects;
 use ddai_physics::collision::Collision;
 use ddai_physics::core::{self, CharacterCore, NetCharacterCore, NetDDNetCharacter, TeamsCore, WorldCore};
+use ddai_physics::vmath::Vec2;
 
 /// The client's own dead-reckoning evolve cap (`gameclient.cpp:1893-1908`'s `EvolvePrev`/
 /// `EvolveCur` guards: `PrevGameTick - Prev.m_Tick <= 3 * TickSpeed`) — 3 seconds at the standard
@@ -94,6 +95,18 @@ pub fn evolve_character_core(
     target_tick: i32,
     collision: &Collision<f32>,
 ) -> CharacterCore<f32> {
+    evolve_character_core_with_prev(net, target_tick, collision).0
+}
+
+/// [`evolve_character_core`] plus the position the **last evolved tick started from** — the server's
+/// `m_PrevPos` at the target tick (`character.cpp:854`: `m_PrevPos = m_Core.m_Pos` at the end of `Tick()`,
+/// before `Move()`), exact because the loop below has it. `None` when nothing was evolved (the core is
+/// already the state at `target_tick`): the caller then derives it with [`reconstruct_prev_pos`]. Task 2.4c.
+pub fn evolve_character_core_with_prev(
+    net: &objects::Character,
+    target_tick: i32,
+    collision: &Collision<f32>,
+) -> (CharacterCore<f32>, Option<Vec2<f32>>) {
     let mut me = CharacterCore::<f32>::default();
     me.init(); // `m_Id = -1`, matching `Init()` — never reassigned below (see this fn's BUILD REPORT note).
     me.read(&NetCharacterCore {
@@ -115,7 +128,7 @@ pub fn evolve_character_core(
     me.active_weapon = net.weapon;
 
     if net.tick == 0 || net.tick >= target_tick {
-        return me;
+        return (me, None);
     }
 
     // A single-slot isolated world, like the client's `Evolve`, whose `TempWorld` is empty apart
@@ -137,15 +150,73 @@ pub fn evolve_character_core(
 
     let start_tick = net.tick.max(target_tick.saturating_sub(MAX_EVOLVE_AGE_TICKS));
     let mut tick = start_tick;
+    let mut prev = None;
     while tick < target_tick {
         tick += 1;
         core::tick(&mut temp, 0, collision, &empty_teams, false, true);
+        prev = temp.get(key).map(|c| c.pos);
         core::move_character(&mut temp, 0, collision, &empty_teams);
         if let Some(c) = temp.get_mut(key) {
             core::quantize(c);
         }
     }
-    *temp.get(key).expect("single-slot world always keeps its one character")
+    (
+        *temp.get(key).expect("single-slot world always keeps its one character"),
+        prev,
+    )
+}
+
+/// The server's `m_PrevPos` for a character whose core is **fresh** at its snapshot tick (nothing was
+/// evolved): the integer position it started its last `Move()` from. `HandleTiles`' anti-skip walk
+/// (`GetMapIndices(m_PrevPos, m_Pos)`, `character.cpp:2334`) runs from it, so freeze / unfreeze / tele /
+/// kill tiles between the two positions are processed in path order — snapping it to the current position
+/// (the old behaviour) loses that walk and, at a freeze / unfreeze tile edge, changes which tile is handled
+/// last.
+///
+/// Derivation: `Move()` displaced the tee by its velocity (the x part ramped, `VelocityRamp`) and
+/// `Quantize()` rounded the result, so `prev = round(pos - displacement)`; the snapshot's quantised velocity
+/// may be off by 1/256 px, so the neighbours of that integer are tried too. A candidate is accepted only if
+/// moving it forward with the very physics (`move_box` + rounding) lands exactly on `pos` — the answer is then
+/// exact. Where nothing reproduces it (the tee hit a wall or a hook pulled it, so the velocity after the move
+/// is not the one it moved with), `pos` itself is returned: the old, conservative "no tile skipped" guess.
+pub fn reconstruct_prev_pos(core: &CharacterCore<f32>, collision: &Collision<f32>) -> Vec2<f32> {
+    let ramp = core::velocity_ramp(
+        ddai_physics::vmath::length(core.vel) * 50.0,
+        core.tuning.velramp_start::<f32>(),
+        core.tuning.velramp_range::<f32>(),
+        core.tuning.velramp_curvature::<f32>(),
+    );
+    let vel = Vec2::new(core.vel.x * ramp, core.vel.y);
+    let elasticity = Vec2::new(
+        core.tuning.ground_elasticity_x::<f32>(),
+        core.tuning.ground_elasticity_y::<f32>(),
+    );
+    let (gx, gy) = (
+        ddai_physics::vmath::round_to_int(core.pos.x - vel.x),
+        ddai_physics::vmath::round_to_int(core.pos.y - vel.y),
+    );
+    let mut best = None;
+    for (dx, dy) in [
+        (0, 0),
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1),
+        (-1, -1),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+    ] {
+        let cand = Vec2::new((gx + dx) as f32, (gy + dy) as f32);
+        let (new_pos, _, _) = collision.move_box(cand, vel, core::physical_size_vec2(), elasticity);
+        if ddai_physics::vmath::round_to_int(new_pos.x) as f32 == core.pos.x
+            && ddai_physics::vmath::round_to_int(new_pos.y) as f32 == core.pos.y
+        {
+            best = Some(cand);
+            break;
+        }
+    }
+    best.unwrap_or(core.pos)
 }
 
 #[cfg(test)]
@@ -370,5 +441,105 @@ mod tests {
             assert_eq!(core.active_weapon, weapon);
             assert_eq!(core.weapons[weapon as usize].ammo, 0, "weapon {weapon}");
         }
+    }
+
+    fn dist(a: Vec2<f32>, b: Vec2<f32>) -> f32 {
+        (a.x - b.x).hypot(a.y - b.y)
+    }
+
+    // ---- task 2.4c: m_PrevPos ----------------------------------------------------------------------
+
+    /// The core of a tee in free fall, moving, with `from` the position it starts a tick from.
+    fn flying(x: i32, y: i32, vx: i32, vy: i32) -> objects::Character {
+        objects::Character {
+            vel_x: vx,
+            vel_y: vy,
+            ..net_at(100, x, y)
+        }
+    }
+
+    /// One server tick (`Tick` + `Move` + `Quantize`) of `core`, returning the position it moved from.
+    fn one_tick(core: CharacterCore<f32>, collision: &Collision<f32>) -> (CharacterCore<f32>, Vec2<f32>) {
+        let mut temp: WorldCore<f32, 1> = WorldCore::from_characters(&[(0u8, core)]);
+        if let Some(c) = temp.get_mut(0) {
+            c.id = -1;
+        }
+        let teams = TeamsCore::new();
+        core::tick(&mut temp, 0, collision, &teams, false, true);
+        let from = temp.get(0).unwrap().pos;
+        core::move_character(&mut temp, 0, collision, &teams);
+        if let Some(c) = temp.get_mut(0) {
+            core::quantize(c);
+        }
+        (*temp.get(0).unwrap(), from)
+    }
+
+    #[test]
+    fn evolve_with_prev_returns_the_position_the_last_evolved_tick_started_from() {
+        let collision = Collision::<f32>::new(&flat_room());
+        let net = flying(100 * 32 / 10, 3 * 32, 600, -200);
+        let (core3, prev3) = evolve_character_core_with_prev(&net, 103, &collision);
+        let (core2, _) = evolve_character_core_with_prev(&net, 102, &collision);
+        assert_eq!(prev3, Some(core2.pos), "the tick into 103 started where 102 ended");
+        assert_ne!(core3.pos, core2.pos);
+        // Nothing evolved: no hint (the caller derives it).
+        assert_eq!(evolve_character_core_with_prev(&net, 100, &collision).1, None);
+        assert_eq!(
+            evolve_character_core(&net, 103, &collision).pos,
+            core3.pos,
+            "the plain function is the same evolution"
+        );
+    }
+
+    #[test]
+    fn reconstruct_prev_pos_inverts_a_free_flight_move_exactly() {
+        let collision = Collision::<f32>::new(&flat_room());
+        for (vx, vy) in [
+            (600, -200),
+            (-2560, 0),
+            (3000, 1500),
+            (-400, -2800),
+            (0, 900),
+            (1500, 3300),
+        ] {
+            let mut me = CharacterCore::<f32>::default();
+            me.init();
+            me.read(&NetCharacterCore {
+                x: 160,
+                y: 96,
+                vel_x: vx,
+                vel_y: vy,
+                angle: 0,
+                direction: 0,
+                jumped: 0,
+                hooked_player: -1,
+                hook_state: -1,
+                hook_tick: 0,
+                hook_x: 160,
+                hook_y: 96,
+                hook_dx: 0,
+                hook_dy: 0,
+            });
+            let (after, from) = one_tick(me, &collision);
+            let got = reconstruct_prev_pos(&after, &collision);
+            assert_eq!(
+                got, from,
+                "velocity ({vx},{vy})/256: from {from:?}, got {got:?} for {:?}",
+                after.pos
+            );
+        }
+    }
+
+    #[test]
+    fn reconstruct_prev_pos_falls_back_to_the_current_position_when_nothing_reproduces_the_move() {
+        let collision = Collision::<f32>::new(&flat_room());
+        // Resting on the floor with a velocity the move did not use (a wall / the floor stopped it): whatever is
+        // returned is within a pixel or two of the position, never a far-away value, and never panics.
+        let mut me = CharacterCore::<f32>::default();
+        me.init();
+        me.pos = Vec2::new(160.0, 8.0 * 32.0 - 14.0);
+        me.vel = Vec2::new(1.0, 0.0);
+        let got = reconstruct_prev_pos(&me, &collision);
+        assert!(dist(got, me.pos) <= 2.0, "{got:?} vs {:?}", me.pos);
     }
 }

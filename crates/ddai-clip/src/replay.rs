@@ -111,6 +111,8 @@ pub struct Divergence {
     pub cause: Cause,
     /// The recorded core was fresh (its tick is the frame's): `recorded` is then the server's own integer.
     pub fresh: bool,
+    /// Our freeze state changed in this step (a freeze or a thaw).
+    pub freeze_change: bool,
 }
 
 /// What a replay found.
@@ -163,6 +165,18 @@ impl Report {
     /// other tee, projectile, unrecorded tee or unconfirmed input timing is around ([`Cause::ServerCorrection`]).
     pub fn unexplained(&self) -> impl Iterator<Item = &Divergence> {
         self.divergences.iter().filter(|d| d.cause == Cause::ServerCorrection)
+    }
+
+    /// Our freeze-change steps by outcome: `exact`, or the cause name of the divergence.
+    pub fn freeze_breakdown(&self) -> std::collections::BTreeMap<&'static str, usize> {
+        let mut m = std::collections::BTreeMap::new();
+        if self.freeze_exact > 0 {
+            m.insert("exact", self.freeze_exact);
+        }
+        for d in self.divergences.iter().filter(|d| d.freeze_change) {
+            *m.entry(d.cause.name()).or_default() += 1;
+        }
+        m
     }
 
     /// The divergences by cause.
@@ -418,6 +432,12 @@ pub(crate) fn cause_of(map: &MapData, frames: &[Frame], i: usize, own_id: i32, r
 
 /// Replays `clip` on `map` in `mode`.
 pub fn replay(clip: &Clip, map: Arc<MapData>, mode: Mode) -> Report {
+    replay_with(clip, map, mode, false)
+}
+
+/// [`replay`] with the choice of reconstruction: `legacy_prev_pos` restores the pre-2.4c `m_PrevPos` snap in the
+/// `LiveWorld` (A/B measurements of task 2.4c only).
+pub fn replay_with(clip: &Clip, map: Arc<MapData>, mode: Mode, legacy_prev_pos: bool) -> Report {
     let own_id = clip.header.own_id;
     let mut report = Report {
         frames: clip.frames.len(),
@@ -427,6 +447,7 @@ pub fn replay(clip: &Clip, map: Arc<MapData>, mode: Mode) -> Report {
         return report;
     }
     let mut lw = LiveWorld::new(Arc::clone(&map), own_id, clip.header.world_seed);
+    lw.set_snap_prev_pos(legacy_prev_pos);
     // Our own tee carried from the previous prediction (free-run only).
     let mut carried: Option<OwnState> = None;
     feed(&mut lw, clip, &clip.frames[0]);
@@ -491,6 +512,7 @@ pub fn replay(clip: &Clip, map: Arc<MapData>, mode: Mode) -> Report {
                 fields: diffs.clone(),
                 cause,
                 fresh,
+                freeze_change,
             };
             let respawn = d.cause.is_by_design();
             if !respawn && report.first_divergence.is_none() {

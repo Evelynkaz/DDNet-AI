@@ -17,7 +17,7 @@ use ddai_physics::tuning::TuningParams;
 use ddai_physics::world::{self, Player, TickInput, World};
 
 use crate::projectiles::projectile_from_view;
-use crate::reckoning::{MAX_EVOLVE_AGE_TICKS, evolve_character_core, to_net_ddnet_character};
+use crate::reckoning::{MAX_EVOLVE_AGE_TICKS, evolve_character_core_with_prev, to_net_ddnet_character};
 
 /// `TILE_SWITCH{TIMEDOPEN,TIMEDCLOSE,OPEN,CLOSE}` (`ddai_physics::map`) re-exported here only so
 /// [`apply_switch_state`] doesn't need a second `use` for constants nothing else in this module
@@ -221,6 +221,17 @@ pub struct OwnState {
     character: world::Character<f32>,
 }
 
+/// What [`LiveWorld::upsert_character`] needs besides the snapshot's own character: where the last evolved tick
+/// started (`m_PrevPos`, when the core was evolved), the snapshot's tick and the previous one's, and the input to
+/// seed the tee with.
+#[derive(Clone, Copy)]
+struct Rebuild {
+    evolved_prev: Option<ddai_physics::vmath::Vec2<f32>>,
+    tick: i32,
+    previous_tick: i32,
+    seed_input: PlayerInput,
+}
+
 /// The client-side reconstruction of the server's `World<f32>`, kept up to date from the
 /// snapshot stream ([`LiveWorld::on_snapshot`]) and steppable a few ticks into the future
 /// ([`LiveWorld::predict`]) to cover network + processing latency.
@@ -251,7 +262,11 @@ pub struct LiveWorld {
     projectile_order: Vec<usize>,
     /// Reused by [`LiveWorld::rebuild_entity_order`]: `(StrongWeakId, id)` of every present character.
     entity_order_scratch: Vec<(i32, u8)>,
+    /// Reused by the `frozen_last_tick` derivation (`m_FrozenLastTick`): the tile indices of one anti-skip walk.
+    walk_scratch: Vec<i32>,
     seed: u64,
+    /// The pre-2.4c reconstruction: `prev_pos` snapped to the current position. Only for A/B measurements.
+    snap_prev_pos: bool,
 }
 
 impl LiveWorld {
@@ -291,7 +306,9 @@ impl LiveWorld {
             held_input: [None; MAX_CLIENTS],
             projectile_order: Vec::with_capacity(64),
             entity_order_scratch: Vec::with_capacity(MAX_CLIENTS),
+            walk_scratch: Vec::with_capacity(64),
             seed,
+            snap_prev_pos: false,
         }
     }
 
@@ -359,6 +376,7 @@ impl LiveWorld {
             own_input_at_tick,
             projectiles,
         } = input;
+        let previous_tick = self.world.tick;
         self.world.tick = tick;
         // Projectiles belong to one snapshot: rebuilt from `projectiles` at the end of this call.
         self.world.projectiles.clear();
@@ -389,7 +407,7 @@ impl LiveWorld {
                 continue; // Hostile/malformed id — never trust the network past a bounds check.
             }
             present[id as usize] = true;
-            let core = evolve_character_core(&cv.character, tick, &collision);
+            let (core, evolved_prev) = evolve_character_core_with_prev(&cv.character, tick, &collision);
             // Review round 3, finding F10: the *own* tee is seeded from the real applied input
             // when the caller can supply one, never from `derive_held_input`'s always-`fire: 0`
             // guess (see `upsert_character`'s own doc comment on why that guess, while a fine
@@ -415,7 +433,13 @@ impl LiveWorld {
             } else {
                 derive_held_input(&core, self.held_input[id as usize])
             };
-            self.upsert_character(id, core, &cv.character, cv.ddnet.as_ref(), tick, seed_input);
+            let rebuild = Rebuild {
+                evolved_prev,
+                tick,
+                previous_tick,
+                seed_input,
+            };
+            self.upsert_character(id, core, &cv.character, cv.ddnet.as_ref(), &rebuild);
             self.held_input[id as usize] = Some(seed_input);
             if id == self.own_id {
                 own_tune_zone_override = cv.ddnet.map(|d| d.tune_zone_override).unwrap_or(-1);
@@ -517,9 +541,14 @@ impl LiveWorld {
         mut core: core::CharacterCore<f32>,
         net: &objects::Character,
         ddnet: Option<&objects::DDNetCharacter>,
-        tick: i32,
-        seed_input: PlayerInput,
+        rebuild: &Rebuild,
     ) {
+        let Rebuild {
+            evolved_prev,
+            tick,
+            previous_tick,
+            seed_input,
+        } = *rebuild;
         // `evolve_character_core` leaves `core.id == -1` (matching the real client's `Evolve`
         // exactly — see that function's doc comment); the *world*, unlike that isolated one-slot
         // scratch space, does need the real id (every sibling-aware lookup — hook targets, the
@@ -540,7 +569,14 @@ impl LiveWorld {
         // known at all) the way round 1's fix originally tried to.
         reconstruct_weapon_ammo(&mut core, net);
 
+        let snap_prev_pos = self.snap_prev_pos;
         let world = &mut self.world;
+        // What the previous snapshot said of this tee (its freeze countdown, where it stood and where it stood a
+        // tick before), for the `frozen_last_tick` derivation below. Gone when the tee was not there.
+        let previous = world.characters[id as usize]
+            .filter(|c| c.alive && previous_tick > 0 && previous_tick < tick)
+            .zip(world.cores.get(id as u8).map(|c| (c.pos, c.deep_frozen)))
+            .map(|(c, (pos, deep))| (c.freeze_time, deep, c.prev_pos, pos));
         let mut character = world.characters[id as usize].unwrap_or_default();
         // A character with no `CNetObj_Character` in the snapshot isn't reconstructed at all
         // (handled by `on_snapshot`'s `remove_character` pass instead) — so being here at all
@@ -554,20 +590,21 @@ impl LiveWorld {
         // client id" the moment `LiveWorld::predict` stepped that far — see this crate's `BUILD
         // REPORT`).
         character.alive = true;
-        // `HandleTiles`' anti-skip loop (`ddrace_post_core_tick`, only reachable once `alive` is
-        // `true` — see the comment above) walks every tile between `prev_pos` and the current
-        // position looking for freeze/speedup/tele/kill tiles it must not let a fast-moving tee
-        // skip past. `prev_pos` is meant to be "one server tick ago"; a one-shot network
-        // reconstruction has no way to know that exactly, but leaving it at whatever stale value
-        // (or `Character::default()`'s `(0, 0)`, the map's own top-left corner) it last held is
-        // far worse: found live, against the local server, once `alive` started being set
-        // correctly above — a giant bogus "skip" line from `(0, 0)` all the way to the tee's real
-        // position, crossing unrelated tiles across the whole map and corrupting the very next
-        // predicted tick (see this crate's `BUILD REPORT`). Snapping it to the just-reconstructed
-        // current position instead is the conservative choice: "assume no tile was skipped since
-        // last tick" is the same assumption `evolve_character_core`'s own idealized
-        // (no-interaction) continuation already rests its correctness on.
-        character.prev_pos = core.pos;
+        // `HandleTiles`' anti-skip loop (`ddrace_post_core_tick`, only reachable once `alive` is `true` — see the
+        // comment above) walks every tile between `prev_pos` and the current position looking for
+        // freeze/speedup/tele/kill tiles it must not let a fast-moving tee skip past; `prev_pos` is the position
+        // one server tick ago (`m_PrevPos`, `character.cpp:854`). Leaving a stale value (`Character::default()`'s
+        // `(0, 0)`) is far worse (found live, task 2.4: a giant bogus "skip" line across the map), and the first
+        // fix, snapping it to the current position ("no tile skipped"), loses the walk where it matters most: at a
+        // freeze / unfreeze tile edge, where the order of the tiles handled last decides whether the tee is frozen
+        // or thawed for the next tick (task 2.4c, found by the 4.3 clip replay). Now it is the real thing: exact
+        // from the reckoning loop when the core was evolved, else derived from the velocity and verified by moving
+        // it forward ([`reconstruct_prev_pos`]), else the old snap. See the 2.4c section of `docs/formats.md`.
+        character.prev_pos = if snap_prev_pos {
+            core.pos
+        } else {
+            evolved_prev.unwrap_or_else(|| crate::reckoning::reconstruct_prev_pos(&core, world.collision.as_ref()))
+        };
         if let Some(d) = ddnet {
             character.strong_weak_id = d.strong_weak_id;
             character.tele_checkpoint = d.tele_checkpoint;
@@ -583,6 +620,45 @@ impl LiveWorld {
             };
         } else {
             character.freeze_time = 0;
+        }
+
+        // `m_FrozenLastTick` (`character.cpp:2395,2295,477`): set by `Unfreeze()` and cleared at the start of the
+        // next `DDRacePostCoreTick`, so at a snapshot it is `true` only if the tee was unfrozen **by a tile** during
+        // this very tick (the timer's `Unfreeze()` runs in `DDRaceTick`, before the clear). It lets a tee that
+        // holds fire shoot its first tick out of the freeze (`FullAuto`). Derived from the previous snapshot: the
+        // tee was frozen then, is not now, the timer had not run out (`m_FreezeEnd - 1` is the tick it ends on),
+        // and the anti-skip walk of this tick (`P(T-2)` -> `P(T-1)`) crossed an unfreeze tile. Needs the previous
+        // snapshot to be 1 or 2 ticks old; otherwise `false`. Remaining error: the tee thawed on the earlier tick
+        // of a two-tick gap (then it is `false`, and the walk test says `true` only if both ticks' walks overlap).
+        character.frozen_last_tick = false;
+        if let Some((prev_freeze, prev_deep, prev_prev_pos, prev_pos)) = previous
+            && !snap_prev_pos
+            && prev_freeze > 0
+            && !prev_deep
+            && character.freeze_time == 0
+            && !core.deep_frozen
+            && previous_tick + prev_freeze - 1 > tick
+        {
+            let collision = world.collision.as_ref();
+            let unfreeze_on_walk = |from, to, scratch: &mut Vec<i32>| {
+                collision.get_map_indices_into(from, to, 256, scratch);
+                scratch.iter().any(|&i| {
+                    collision.get_tile_index(i) == i32::from(ddai_physics::map::TILE_UNFREEZE)
+                        || collision.get_front_tile_index(i) == i32::from(ddai_physics::map::TILE_UNFREEZE)
+                })
+            };
+            character.frozen_last_tick = match tick - previous_tick {
+                // The snapshot before this tick: this tick's walk is `P(T-2)` -> `P(T-1)`.
+                1 => unfreeze_on_walk(prev_prev_pos, character.prev_pos, &mut self.walk_scratch),
+                // Two ticks: this tick's walk is `P(T-2)` -> `P(T-1)`, and the walk of the tick between
+                // (`P(T-3)` -> `P(T-2)`, the previous snapshot's `prev_pos` -> `pos`) would already have thawed it if it
+                // crossed an unfreeze tile, leaving nothing for this tick's `Unfreeze()` to do.
+                2 => {
+                    !unfreeze_on_walk(prev_prev_pos, prev_pos, &mut self.walk_scratch)
+                        && unfreeze_on_walk(prev_pos, character.prev_pos, &mut self.walk_scratch)
+                }
+                _ => false,
+            };
         }
 
         // Review round 1, finding F2 (confirmed live): a fresh reconstruction never gets to
@@ -894,6 +970,13 @@ impl LiveWorld {
         *self.world.cores.core_at_mut(slot) = state.core;
         self.world.characters[idx] = Some(state.character);
         true
+    }
+
+    /// **A/B measurements only.** `true` restores the pre-2.4c reconstruction of `m_PrevPos` (snapped to the
+    /// current position); the default (`false`) is the real one ([`crate::reckoning::reconstruct_prev_pos`]).
+    #[doc(hidden)]
+    pub fn set_snap_prev_pos(&mut self, snap: bool) {
+        self.snap_prev_pos = snap;
     }
 
     /// The map this `LiveWorld` was built from ([`ddai_brain::Observation::map`] shares this same

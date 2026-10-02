@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
-use ddai_clip::replay::{Mode, Report, replay};
+use ddai_clip::replay::{Mode, Report, replay_with};
 use ddai_clip::{Clip, find_incidents, summarise};
 
 #[derive(Debug, Args)]
@@ -45,6 +45,10 @@ pub enum ClipCmd {
         /// Print every divergent step, not only the first.
         #[arg(long)]
         all: bool,
+        /// A/B measurement of task 2.4c: rebuild the tees the way `LiveWorld` did before (`m_PrevPos` snapped to the
+        /// current position, no `m_FrozenLastTick`).
+        #[arg(long)]
+        legacy_prev_pos: bool,
     },
 }
 
@@ -66,7 +70,14 @@ pub fn run(args: ClipArgs) -> ExitCode {
             mode,
             map_cache,
             all,
-        } => replay_files(&files, &mode, &map_cache.unwrap_or_else(default_cache), all),
+            legacy_prev_pos,
+        } => replay_files(
+            &files,
+            &mode,
+            &map_cache.unwrap_or_else(default_cache),
+            all,
+            legacy_prev_pos,
+        ),
     };
     match result {
         Ok(code) => code,
@@ -171,7 +182,7 @@ fn incidents(file: &Path) -> Result<ExitCode, String> {
 
 fn print_report(name: &str, r: &Report, all: bool) {
     println!(
-        "{name}: {} frames, {} steps, {} bit-exact ({:.1}%), fresh-core steps {}/{} exact, nobody near {}/{} exact, freeze changes {}/{} exact (fresh {}/{}), {} skipped at deaths; not reproduced by cause {:?}",
+        "{name}: {} frames, {} steps, {} bit-exact ({:.1}%), fresh-core steps {}/{} exact, nobody near {}/{} exact, freeze changes {}/{} exact (fresh {}/{}; {:?}), {} skipped at deaths; not reproduced by cause {:?}",
         r.frames,
         r.steps,
         r.exact,
@@ -184,12 +195,13 @@ fn print_report(name: &str, r: &Report, all: bool) {
         r.freeze_steps,
         r.freeze_fresh_exact,
         r.freeze_fresh_steps,
+        r.freeze_breakdown(),
         r.skipped_deaths,
         r.by_cause()
     );
     let show = |d: &ddai_clip::replay::Divergence| {
         println!(
-            "  frame {} tick {}: {} reconstructed {} replayed {} (fields (name, reconstructed, replayed) {:?}), cause {:?}{}",
+            "  frame {} tick {}: {} reconstructed {} replayed {} (fields (name, reconstructed, replayed) {:?}), cause {:?}{}{}",
             d.frame,
             d.tick,
             d.field,
@@ -197,7 +209,8 @@ fn print_report(name: &str, r: &Report, all: bool) {
             d.replayed,
             d.fields,
             d.cause,
-            if d.fresh { ", fresh core" } else { "" }
+            if d.fresh { ", fresh core" } else { "" },
+            if d.freeze_change { ", FREEZE CHANGE" } else { "" }
         );
     };
     if all {
@@ -208,7 +221,7 @@ fn print_report(name: &str, r: &Report, all: bool) {
     }
 }
 
-fn replay_files(files: &[PathBuf], mode: &str, cache: &Path, all: bool) -> Result<ExitCode, String> {
+fn replay_files(files: &[PathBuf], mode: &str, cache: &Path, all: bool, legacy: bool) -> Result<ExitCode, String> {
     let mode = match mode {
         "resync" => Mode::Resync,
         "free" | "free-run" => Mode::FreeRun,
@@ -229,7 +242,7 @@ fn replay_files(files: &[PathBuf], mode: &str, cache: &Path, all: bool) -> Resul
         let map = ddai_map::load_map(&bytes)
             .map_err(|e| format!("{}: {e}", c.header.map_name))?
             .data;
-        let r = replay(&c, Arc::new(map), mode);
+        let r = replay_with(&c, Arc::new(map), mode, legacy);
         all_exact &= r.unexplained().next().is_none()
             && r.first_divergence
                 .as_ref()
