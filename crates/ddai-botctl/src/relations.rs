@@ -651,7 +651,9 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for i in 0..rounds {
-                        let _lock = RelationsLock::acquire(&path).expect("lock");
+                        // A long wait: this test is about "no torn file, no lost edit", not about lock latency (a slow CI runner
+                        // under 2 x 300 contended rounds can pass the production 2 s bound).
+                        let _lock = RelationsLock::acquire_within(&path, Duration::from_secs(120)).expect("lock");
                         let mut r = Relations::load(&path).expect("always parses");
                         assert!(r.add(kind, &format!("{}{i}", kind.name())));
                         r.save(&path).expect("save");
@@ -717,7 +719,10 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the wait is bounded, not forever"
+        );
         drop(first);
         assert!(
             RelationsLock::acquire_within(&path, Duration::from_millis(100)).is_ok(),

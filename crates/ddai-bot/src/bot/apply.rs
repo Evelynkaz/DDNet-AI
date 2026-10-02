@@ -50,6 +50,8 @@ const HELP: &str = "\
 /// How long a console list edit waits for the lists file's cross-process lock. It runs on the decision thread (D-042:
 /// p99 <= 5 ms), so the wait is a few milliseconds, not the web's 2 s: a taken lock is answered with "busy, try again".
 pub(super) const LISTS_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(15);
+// The bound itself is checked here, at compile time, so no test has to time a call on a loaded machine.
+const _: () = assert!(LISTS_LOCK_WAIT.as_millis() <= 20);
 
 /// How long after `!join` a spectator state is still read as the operator's own doing (15 s).
 pub(super) const JOIN_GRACE_TICKS: i32 = 750;

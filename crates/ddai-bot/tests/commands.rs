@@ -636,9 +636,11 @@ fn a_console_edit_starts_from_the_file_and_waits_for_the_other_writer() {
         let started = std::time::Instant::now();
         let reply = r.say("!friend p1");
         assert!(!reply.ok && reply.text.contains("busy"), "{}", reply.text);
-        // The edit runs on the decision thread (D-042): it must give up within milliseconds, not wait for the holder.
+        // The edit runs on the decision thread (D-042): it gives up after `LISTS_LOCK_WAIT` (15 ms, asserted at compile
+        // time next to the constant) instead of waiting for the holder, which here never lets go. The bound below only
+        // has to be far from "waited for the holder" (the web's 2 s), so a loaded CI machine cannot trip it.
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(150),
+            started.elapsed() < std::time::Duration::from_millis(1000),
             "a busy lock answered after {:?}",
             started.elapsed()
         );

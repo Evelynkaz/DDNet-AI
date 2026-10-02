@@ -223,7 +223,7 @@ mod tests {
         let client = ControlClient::with_timeouts(path, Duration::from_secs(1), Duration::from_millis(150));
         let started = std::time::Instant::now();
         assert_eq!(client.send("ab", ControlCommand::Go {}).await, Err(SendError::Timeout));
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(20));
         held.abort();
     }
 

@@ -926,11 +926,11 @@ async fn the_web_checks_that_the_bot_reloaded_the_same_lists() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_status_poll_does_not_keep_the_session_alive_but_a_real_action_does() {
     // 5.3 (review F2): a page left open must not extend the idle timeout. The page polls the status every 2 s.
-    let server = TestServer::start_with(|c| c.idle_timeout = Duration::from_millis(600)).await;
+    let server = TestServer::start_with(|c| c.idle_timeout = Duration::from_secs(2)).await;
     let l = login(&server);
     let started = std::time::Instant::now();
     let mut last = 200;
-    while started.elapsed() < Duration::from_millis(1500) {
+    while started.elapsed() < Duration::from_millis(3500) {
         last = get(&server, &l, "/api/bot/status").status;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -940,9 +940,9 @@ async fn the_status_poll_does_not_keep_the_session_alive_but_a_real_action_does(
     // A person's requests do refresh it (the relations list is loaded when the tab is opened).
     let l = login(&server);
     let started = std::time::Instant::now();
-    while started.elapsed() < Duration::from_millis(1500) {
+    while started.elapsed() < Duration::from_millis(3500) {
         assert_eq!(get(&server, &l, "/api/bot/relations").status, 200);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

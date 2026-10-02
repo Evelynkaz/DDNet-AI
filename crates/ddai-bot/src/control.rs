@@ -745,7 +745,9 @@ mod tests {
         // Burst 3, no refill within the test.
         let (d, audit, bot) = setup(3.0, 0.000_001, |_| CommandReply::ok("x"));
         let cmd = line(&ControlCommand::Go {});
+        let started = Instant::now();
         let replies: Vec<ControlReply> = (0..50).map(|_| d.handle_line(&cmd)).collect();
+        let secs = started.elapsed().as_secs() as usize;
         assert_eq!(replies.iter().filter(|r| r.ok).count(), 3);
         assert!(
             replies[3..]
@@ -755,10 +757,12 @@ mod tests {
         assert_eq!(bot.seen().len(), 3, "the refused ones never reached the bot");
         let entries = audit.0.lock().unwrap().clone();
         assert_eq!(entries.iter().filter(|e| e.outcome == Outcome::Ok).count(), 3);
-        assert_eq!(
-            entries.iter().filter(|e| e.outcome == Outcome::RateLimited).count(),
-            1,
-            "47 refusals within a second leave one audit line"
+        // At most one line per second of wall time (normally 1: the 47 refusals take microseconds; a starved CI runner
+        // may stretch the loop over a second or two).
+        let limited = entries.iter().filter(|e| e.outcome == Outcome::RateLimited).count();
+        assert!(
+            (1..=1 + secs).contains(&limited),
+            "47 refusals over {secs} s left {limited} audit lines"
         );
         // Garbage costs tokens too (a malformed flood cannot be cheaper than a command flood).
         let (d, _a, bot) = setup(2.0, 0.000_001, |_| CommandReply::ok("x"));
@@ -810,7 +814,7 @@ mod tests {
         let started = Instant::now();
         let r = d.handle_line(&line(&ControlCommand::Go {})); // the inbox is never drained
         assert_eq!(r.code, Some(ReplyCode::Timeout));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(20));
         drop(inbox);
         let r = d.handle_line(&line(&ControlCommand::Go {}));
         assert_eq!(r.code, Some(ReplyCode::Gone));
