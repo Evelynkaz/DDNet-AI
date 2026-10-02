@@ -65,6 +65,14 @@ pub struct WebArgs {
     /// (`<data-dir>/maps/cache`) is searched.
     #[arg(long = "bot-socket", conflicts_with = "replay")]
     pub(crate) bot_socket: Option<PathBuf>,
+    /// Task 5.6: the bot's control socket (`ddnet-ai play` serves `<data-dir>/bot/control.sock`, `docs/formats.md` §26),
+    /// where the owner's commands from the site go. The web only connects to it. Default `<data-dir>/bot/control.sock`.
+    #[arg(long = "control-socket")]
+    pub(crate) control_socket: Option<PathBuf>,
+    /// Task 5.6: the friend / war / ignore lists file the site edits. Default `<data-dir>/bot/relations.json`. Use the
+    /// same file as the bot (`ddnet-ai play --relations`).
+    #[arg(long = "relations")]
+    pub(crate) relations: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -141,6 +149,12 @@ pub fn run_web(args: WebArgs) -> ExitCode {
     config.cookie_secure = args.cookie_secure;
     config.replay_source = args.replay;
     config.map_search_dirs = args.maps_dir;
+    if let Some(socket) = args.control_socket {
+        config.control_socket = socket;
+    }
+    if let Some(path) = args.relations {
+        config.relations_path = path;
+    }
     if let Some(socket) = args.bot_socket {
         if config.map_search_dirs.is_empty() {
             config.map_search_dirs.push(config.data_dir.join("maps").join("cache"));

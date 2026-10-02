@@ -1,0 +1,24 @@
+[package]
+name = "ddai-botctl"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Task 5.6: what the live bot and the web unit share for the web control — the control-channel protocol (typed, no chat), the name folding of D-021 and the friend/war/ignore lists file. No I/O beyond reading and writing the lists file."
+
+[lib]
+name = "ddai_botctl"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3.14"

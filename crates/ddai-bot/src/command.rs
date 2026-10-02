@@ -96,6 +96,9 @@ pub enum BotCommand {
     Join,
     /// `!kill` / `!reset`.
     Kill,
+    /// Re-read the lists file (the web editor changed it): the lists in memory become the file's. Not a console
+    /// command (the console edits the lists itself); it comes from the web control channel (task 5.6).
+    ReloadRelations,
     Quit,
     /// A command the old bot had that this one deliberately does not (with the reason).
     Unsupported(&'static str),
@@ -292,6 +295,8 @@ pub struct CommandReply {
     pub ok: bool,
     /// The operator asked the bot to quit.
     pub quit: bool,
+    /// Structured detail for the web control (`ReloadRelations`: counts and a digest); `None` for everything else.
+    pub data: Option<serde_json::Value>,
 }
 
 impl CommandReply {
@@ -300,6 +305,7 @@ impl CommandReply {
             text: text.into(),
             ok: true,
             quit: false,
+            data: None,
         }
     }
 
@@ -308,6 +314,7 @@ impl CommandReply {
             text: text.into(),
             ok: false,
             quit: false,
+            data: None,
         }
     }
 }

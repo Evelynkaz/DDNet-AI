@@ -14,6 +14,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod control;
 pub mod headers;
 pub mod http;
 pub mod live;

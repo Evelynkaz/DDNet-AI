@@ -269,6 +269,8 @@ pub struct BotStats {
     pub ticks_resets: u64,
     /// Decisions whose prediction horizon was cut by the cap (a very long RTT; `PredictionClamped`).
     pub predict_clamped: u64,
+    /// Clips that reached the disk (automatic ones and `!clip`).
+    pub clips_saved: u64,
 }
 
 /// The state of the bot for telemetry / the web bridge.
@@ -348,6 +350,8 @@ pub struct Bot {
     /// A `Cl_Kill` the next `on_snapshot` sends (`!kill`).
     pending_kill: bool,
     quit: bool,
+    /// The session is in the game (`SessionEvent::InGame` seen, no disconnect since): for the web status.
+    connected: bool,
 
     map: Option<Arc<MapData>>,
     /// Name and hash of the map being loaded (set by the runner before `on_map_loaded`).
@@ -418,6 +422,7 @@ impl Bot {
             join_grace_until: None,
             pending_team: None,
             pending_kill: false,
+            connected: false,
             quit: false,
             map: None,
             map_ident: MapIdent::default(),
@@ -545,6 +550,11 @@ impl Bot {
         self.map.is_some()
     }
 
+    /// The name of the map being played (empty before the first one).
+    pub fn map_name(&self) -> &str {
+        &self.map_ident.name
+    }
+
     pub fn block_stats(&self) -> BlockStats {
         self.clock.stats()
     }
@@ -653,6 +663,7 @@ impl Bot {
 
     /// The connection dropped (the driver may bring it back): in-flight knowledge is void.
     pub fn on_disconnected(&mut self) {
+        self.connected = false;
         self.clipper.reset();
         self.sent.clear();
         self.was_alive = false;
@@ -671,6 +682,24 @@ impl Bot {
         self.last_tick = -1;
         // `join` is deliberately kept: its cap is per run.
         self.played_on_map = false;
+    }
+
+    /// `SessionEvent::InGame`: the session entered the game.
+    pub fn on_in_game(&mut self) {
+        self.connected = true;
+    }
+
+    /// Whether the session is in the game (the web status's "connected").
+    pub fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Ticks until `Cl_Kill` is allowed again (0: now, also before any snapshot).
+    pub fn kill_cooldown_ticks(&self) -> i32 {
+        if self.last_tick < 0 {
+            return 0;
+        }
+        (KILL_COOLDOWN_TICKS - (self.last_tick - self.unstick.last_kill_tick())).clamp(0, KILL_COOLDOWN_TICKS)
     }
 
     /// `SessionEvent::InputSent`.
@@ -850,6 +879,7 @@ impl Bot {
     /// Clips the automatic path saved since the last look become [`BotEvent::ClipSaved`]s.
     fn report_saved_clips(&mut self) {
         for c in self.clipper.take_saved() {
+            self.stats.clips_saved += 1;
             push_event(
                 &mut self.events,
                 BotEvent::ClipSaved {

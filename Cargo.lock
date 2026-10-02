@@ -958,6 +958,7 @@ name = "ddai-bot"
 version = "0.1.0"
 dependencies = [
  "allocation-counter",
+ "ddai-botctl",
  "ddai-brain",
  "ddai-client",
  "ddai-clip",
@@ -979,6 +980,16 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ddai-botctl"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -1271,6 +1282,7 @@ dependencies = [
  "axum-extra",
  "base64 0.23.1",
  "cookie",
+ "ddai-botctl",
  "ddai-map",
  "ddai-physics",
  "ddai-trace",
@@ -1290,6 +1302,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

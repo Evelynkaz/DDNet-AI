@@ -47,6 +47,10 @@ const HELP: &str = "\
 
   '?' works too. A line without ! or ? goes nowhere: this bot never writes in the game chat.";
 
+/// How long a console list edit waits for the lists file's cross-process lock. It runs on the decision thread (D-042:
+/// p99 <= 5 ms), so the wait is a few milliseconds, not the web's 2 s: a taken lock is answered with "busy, try again".
+pub(super) const LISTS_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(15);
+
 /// How long after `!join` a spectator state is still read as the operator's own doing (15 s).
 pub(super) const JOIN_GRACE_TICKS: i32 = 750;
 
@@ -146,12 +150,14 @@ impl Bot {
                 self.pending_kill = true;
                 CommandReply::ok("killing, respawning")
             }
+            BotCommand::ReloadRelations => self.reload_relations(),
             BotCommand::Quit => {
                 self.quit = true;
                 CommandReply {
                     text: "disconnecting".to_string(),
                     ok: true,
                     quit: true,
+                    data: None,
                 }
             }
         }
@@ -348,6 +354,17 @@ impl Bot {
     }
 
     fn list(&mut self, kind: ListKind, arg: ListArg) -> CommandReply {
+        // An edit is read-modify-write of the lists file, which the web editor writes too: take the cross-process
+        // lock for the whole of it and start from what the file holds now, so an edit made on the site a moment ago
+        // is neither lost nor torn (task 5.6 review F6). Showing a list needs neither.
+        let _lock = if matches!(arg, ListArg::Show) {
+            None
+        } else {
+            match self.lock_relations() {
+                Ok(lock) => lock,
+                Err(why) => return CommandReply::err(why),
+            }
+        };
         let label = match kind {
             ListKind::War => "war",
             ListKind::Friend => "friends",
@@ -439,6 +456,61 @@ impl Bot {
         }
     }
 
+    /// Replaces the lists with the file's (the web editor wrote it). A file that cannot be read or does not parse
+    /// leaves the running lists as they are: a corrupt file must not become "no friends" (`Relations::load`).
+    /// The reply holds counts and a digest only, never a name (`CommandReply::data`): the web compares the digest with
+    /// what it wrote, which tells it whether the bot reads the same file.
+    fn reload_relations(&mut self) -> CommandReply {
+        let Some(path) = &self.cfg.relations_path else {
+            return CommandReply::err("lists: no lists file is configured, nothing to reload");
+        };
+        match Relations::load(path) {
+            Ok(new) => {
+                if !self.relations.same_lists(&new) {
+                    self.relations.replace_with(new);
+                }
+                let counts: serde_json::Map<String, serde_json::Value> = ListKind::ALL
+                    .iter()
+                    .map(|&k| (k.name().to_string(), self.relations.len(k).into()))
+                    .collect();
+                let text = ListKind::ALL
+                    .iter()
+                    .map(|&k| format!("{} {}", k.name(), self.relations.len(k)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut reply = CommandReply::ok(format!("lists reloaded ({text})"));
+                reply.data = Some(serde_json::json!({"counts": counts, "digest": self.relations.digest()}));
+                reply
+            }
+            Err(e) => {
+                // `RelationsError`'s text names the file, the line and the column, never a serde message (which
+                // would quote a nickname): safe to log and to put in the reply.
+                tracing::warn!(error = %e, "the lists file was not reloaded; keeping the running lists");
+                CommandReply::err("lists: the file could not be read; keeping the running lists")
+            }
+        }
+    }
+
+    /// The cross-process lock of the lists file (`None`: no file is configured). Waits a bounded time; the lists are
+    /// then brought up to date with the file (an unreadable file keeps the running lists).
+    fn lock_relations(&mut self) -> Result<Option<ddai_botctl::relations::RelationsLock>, String> {
+        let Some(path) = self.cfg.relations_path.clone() else {
+            return Ok(None);
+        };
+        let lock = ddai_botctl::relations::RelationsLock::acquire_within(&path, LISTS_LOCK_WAIT).map_err(|e| {
+            format!(
+                "lists: the lists file is busy or cannot be locked ({}); try again in a moment",
+                e.kind()
+            )
+        })?;
+        if let Ok(file) = Relations::load(&path)
+            && !self.relations.same_lists(&file)
+        {
+            self.relations.replace_with(file);
+        }
+        Ok(Some(lock))
+    }
+
     fn save_relations(&self) -> std::io::Result<()> {
         match &self.cfg.relations_path {
             Some(path) => self.relations.save(path),
@@ -449,7 +521,10 @@ impl Bot {
     fn clip(&mut self, note: &str) -> CommandReply {
         let frames = self.clipper.frames();
         match self.save_clip(note) {
-            Ok(saved) => CommandReply::ok(format!("saved {} s to {}", frames / 25, saved.path.display())),
+            Ok(saved) => {
+                self.stats.clips_saved += 1;
+                CommandReply::ok(format!("saved {} s to {}", frames / 25, saved.path.display()))
+            }
             Err(e) => CommandReply::err(format!("no clip: {e}")),
         }
     }

@@ -309,7 +309,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         if now >= next_status {
             next_status = now + STATUS_EVERY;
             if let Some(b) = bridge.as_mut() {
-                b.send_status(&status_message(&bot, last_tick));
+                b.send_status(&status_message(&bot, last_tick, &cfg));
             }
         }
         if now >= next_log {
@@ -437,6 +437,7 @@ fn handle_event(
             SessionEvent::OutgoingGame { label, accepted } => count_outgoing(report, label, accepted),
             SessionEvent::InGame => {
                 tracing::info!("in game");
+                bot.on_in_game();
                 budget.on_in_game();
             }
             SessionEvent::Disconnected { reason, by_peer } => {
@@ -521,16 +522,17 @@ fn log_event(e: &BotEvent) {
     }
 }
 
-fn status_message(bot: &Bot, tick: i32) -> StatusMessage {
+fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
     let s = bot.status();
     let total = bot.latency().total.summary();
     let brain = bot.latency().brain.summary();
     let overhead = bot.latency().overhead.summary();
+    let nav = cfg.nav_handle.status();
     StatusMessage {
         tick,
         own: s.own_id,
         target: s.target_id,
-        mode: s.mode.name().to_string(),
+        mode: bot.mode().name().to_string(),
         brain: bot.brain_name().to_string(),
         alive: s.alive,
         frozen: s.frozen,
@@ -544,6 +546,18 @@ fn status_message(bot: &Bot, tick: i32) -> StatusMessage {
         brain_p99_us: brain.p99_us,
         overhead_p99_us: overhead.p99_us,
         telemetry: bot.brain_telemetry().and_then(|t| serde_json::from_str(&t).ok()),
+        connected: bot.is_connected(),
+        server: cfg.server.to_string(),
+        map: bot.map_name().to_string(),
+        name: cfg.client.name.clone(),
+        clan: cfg.client.clan.clone(),
+        skin: cfg.client.skin.clone(),
+        target_tag: (s.target_id >= 0).then(|| bot.tag_of(s.target_id).to_string()),
+        wb: nav.wb,
+        goto: if nav.walking { nav.progress } else { String::new() },
+        deaths: s.stats.deaths,
+        clips_saved: bot.stats().clips_saved,
+        kill_cooldown_ticks: bot.kill_cooldown_ticks(),
     }
 }
 

@@ -3,9 +3,10 @@
 //!
 //! The bot **listens** on a Unix socket (default `~/aiddnet/data/bot/live.sock`, mode `0600`, the
 //! directory `0700`); the web unit connects and only ever reads. The bot never reads from the
-//! socket: there is no control path (web control is a later task), and a client that writes is
-//! simply ignored. Messages are length-prefixed: `u32 LE len | u8 kind | payload` where `len` counts
-//! the kind byte and the payload (at most [`MAX_MESSAGE`]):
+//! socket: there is no control path here (the web control is a separate socket, `crate::control`,
+//! task 5.6), and a client that writes is simply ignored. Messages are length-prefixed:
+//! `u32 LE len | u8 kind | payload` where `len` counts the kind byte and the payload (at most
+//! [`MAX_MESSAGE`]):
 //!
 //! | kind | name | payload |
 //! |---|---|---|
@@ -13,7 +14,7 @@
 //! | 2 | `MAP` | JSON `{"name","sha256","w","h"}` (`sha256` hex of the `.map` file) |
 //! | 3 | `PLAYERS` | JSON `{"own":id,"list":[{"id","name","team"}]}` |
 //! | 4 | `FRAME` | a `DWLF` v1 live frame, byte for byte the web's binary `live` message (`docs/formats.md` §15.3) |
-//! | 5 | `STATUS` | JSON, at most ~5 Hz: target, mode, brain, counters, latency percentiles, brain telemetry |
+//! | 5 | `STATUS` | JSON, at most ~5 Hz: target, mode, brain, counters, latency percentiles, brain telemetry, and (5.6) connection, server, identity, wayblock, kill cooldown |
 //!
 //! **Names.** `PLAYERS.name` is the salted-hash tag (`c12-9f3a01bc`) unless the bot was started with
 //! `--web-names`; real nicknames never leave the process otherwise (D-040, `CLAUDE.md`).
@@ -161,6 +162,60 @@ pub struct StatusMessage {
     pub overhead_p99_us: u32,
     /// The brain's own telemetry, parsed JSON (or null).
     pub telemetry: Option<serde_json::Value>,
+    // Additive since task 5.6 (the web status panel).
+    /// The session is in the game.
+    pub connected: bool,
+    /// The game server's address, `ip:port`, and the map being played.
+    pub server: String,
+    pub map: String,
+    /// The bot's own nickname, clan and skin.
+    pub name: String,
+    pub clan: String,
+    pub skin: String,
+    /// The target's tag (`c<id>-<hash>`), never a nickname.
+    pub target_tag: Option<String>,
+    /// The wayblock line and the walk's progress (empty when none).
+    pub wb: String,
+    pub goto: String,
+    pub deaths: u64,
+    pub clips_saved: u64,
+    /// Ticks until `Cl_Kill` is allowed again, in server ticks (50 per second: the cooldown is 500 ticks = 10 s); 0: now.
+    pub kill_cooldown_ticks: i32,
+}
+
+/// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
+/// anything that is not a socket, and never steals a live bot's socket), with the directory `0700` and the socket
+/// `0600`. Shared by the live bridge and the control channel (`crate::control`), which live side by side.
+pub fn bind_private_socket(path: &Path) -> io::Result<UnixListener> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => {
+            use std::os::unix::fs::FileTypeExt;
+            if !m.file_type().is_socket() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{} exists and is not a socket", path.display()),
+                ));
+            }
+            // A live bot already listening there? Do not steal its socket.
+            if UnixStream::connect(path).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("another bot is already serving {}", path.display()),
+                ));
+            }
+            std::fs::remove_file(path)?;
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    // The socket file is created with the process umask; close the window in which it is looser than 0600.
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 struct Client {
@@ -190,36 +245,9 @@ fn message(kind: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 impl Bridge {
-    /// Binds `path`, replacing a stale socket file (but refusing to touch anything that is not a
-    /// socket), with the directory `0700` and the socket `0600`.
+    /// Binds `path` ([`bind_private_socket`]) and starts listening.
     pub fn bind(path: &Path) -> io::Result<Bridge> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-        match std::fs::symlink_metadata(path) {
-            Ok(m) => {
-                use std::os::unix::fs::FileTypeExt;
-                if !m.file_type().is_socket() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!("{} exists and is not a socket", path.display()),
-                    ));
-                }
-                // A live bot already listening there? Do not steal its socket.
-                if UnixStream::connect(path).is_ok() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AddrInUse,
-                        format!("another bot is already serving {}", path.display()),
-                    ));
-                }
-                std::fs::remove_file(path)?;
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        let listener = UnixListener::bind(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        let listener = bind_private_socket(path)?;
         listener.set_nonblocking(true)?;
         Ok(Bridge {
             listener,
@@ -490,12 +518,26 @@ mod tests {
             brain_p99_us: 800,
             overhead_p99_us: 100,
             telemetry: Some(serde_json::json!({"x": 1})),
+            connected: true,
+            server: "127.0.0.1:8303".into(),
+            map: "Copy Love Box".into(),
+            name: "bot".into(),
+            clan: "Neuroset".into(),
+            skin: "default".into(),
+            target_tag: Some("c3-deadbeef".into()),
+            wb: "WB: off".into(),
+            goto: String::new(),
+            deaths: 2,
+            clips_saved: 1,
+            kill_cooldown_ticks: 120,
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
         let v: serde_json::Value = serde_json::from_slice(&p).unwrap();
         assert_eq!(v["target"], 3);
         assert_eq!(v["telemetry"]["x"], 1);
+        assert_eq!(v["target_tag"], "c3-deadbeef");
+        assert_eq!(v["kill_cooldown_ticks"], 120);
     }
 
     #[test]

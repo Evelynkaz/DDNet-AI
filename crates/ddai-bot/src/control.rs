@@ -1,0 +1,978 @@
+//! The web control channel, bot side (task 5.6, D-070, `docs/formats.md` §26): a Unix socket next to the read-only
+//! live bridge (`crate::bridge`) over which the web unit asks the running bot for the same things the console can —
+//! through the same API (`BotCommand` on the `CommandBus`, `CommandReply` back).
+//!
+//! - **Private.** `control.sock` is created `0600` in a `0700` directory ([`crate::bridge::bind_private_socket`]); that
+//!   file mode is the access control (same user only), as for the bridge.
+//! - **Typed, closed, no chat.** A request is a `ddai_botctl::proto::ControlRequest`; its command is a closed enum of
+//!   what the web needs (mode, stop/go, wb, brain, kill, clip, goto x y, spec/join, reload the lists). [`to_bot_command`]
+//!   maps it onto a `BotCommand` with an exhaustive `match` (no wildcard), and `BotCommand` has no variant that
+//!   reaches the game chat (`crate::command`). Unknown commands and fields are refused when parsing; `quit`, `target`
+//!   by name and `say` do not exist in the protocol.
+//! - **Rate-limited.** One token bucket for the whole socket ([`RATE_BURST`], [`RATE_PER_SEC`]) counts every request line,
+//!   well-formed or not; an empty bucket answers `rate_limited` without bothering the bot. At most [`MAX_CONNECTIONS`]
+//!   connections are served at once.
+//! - **Audited, without names.** Every command that reaches the bot — and every refusal — becomes one line in the audit
+//!   log: unix milliseconds, the web session's opaque tag, the command's tag (`ControlCommand::tag`: a fixed shape, no
+//!   free text, no nickname) and the outcome. Nothing else is written: not the clip note, not the reply text (the
+//!   bot's replies may name players). The audit type ([`AuditEntry`]) has no field that could hold a name.
+//!
+//! The server runs on its own threads; the bot's thread only drains the `CommandBus` between snapshots, as for the
+//! console, so a slow or hostile client can never stall a decision.
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use ddai_botctl::proto::{
+    BrainArg, ControlCommand, ControlReply, ControlRequest, MAX_REQUEST_BYTES, ModeArg, ReplyCode, WbArg,
+};
+
+use crate::bot::Mode;
+use crate::brains::BrainKind;
+use crate::command::{BotCommand, BusError, CommandSender, GotoArg};
+use crate::nav_hooks::WbMode;
+
+/// File name of the socket inside the bot's directory.
+pub const SOCKET_NAME: &str = "control.sock";
+/// Commands in a burst before the bucket is empty.
+pub const RATE_BURST: f64 = 8.0;
+/// Commands per second the bucket refills with (a person at a keyboard).
+pub const RATE_PER_SEC: f64 = 2.0;
+/// Connections served at once; further ones are told `busy` and closed.
+pub const MAX_CONNECTIONS: usize = 4;
+/// A connection that sends nothing for this long is closed.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the bot has to answer a command (it answers between two snapshots).
+pub const ANSWER_TIMEOUT: Duration = crate::console::ANSWER_TIMEOUT;
+/// The audit file is moved to `<name>.1` once it passes this size.
+pub const AUDIT_MAX_BYTES: u64 = 8 << 20;
+
+/// What a control command asks of the bot, as the 4.3 console's own type. Exhaustive on purpose: a command added to the
+/// protocol must be given its meaning here.
+pub fn to_bot_command(cmd: &ControlCommand) -> BotCommand {
+    match cmd {
+        ControlCommand::Mode { mode } => BotCommand::Mode(Some(match mode {
+            ModeArg::Fight => Mode::Fight,
+            ModeArg::Passive => Mode::Passive,
+            ModeArg::Hold => Mode::Hold,
+        })),
+        ControlCommand::Stop {} => BotCommand::Stop,
+        ControlCommand::Go {} => BotCommand::Go,
+        ControlCommand::Wb { mode } => BotCommand::Wb(Some(match mode {
+            WbArg::Auto => WbMode::Auto,
+            WbArg::Left => WbMode::Left,
+            WbArg::Right => WbMode::Right,
+            WbArg::Off => WbMode::Off,
+        })),
+        ControlCommand::Brain { brain } => BotCommand::Brain(Some(match brain {
+            BrainArg::Hybrid => BrainKind::Hybrid,
+            BrainArg::Planner => BrainKind::Planner,
+            BrainArg::Scripted => BrainKind::Scripted,
+            BrainArg::Idle => BrainKind::Idle,
+            BrainArg::Fly => BrainKind::Fly,
+        })),
+        ControlCommand::Kill {} => BotCommand::Kill,
+        ControlCommand::Clip { note } => BotCommand::Clip(note.clone()),
+        ControlCommand::Goto { x, y } => BotCommand::Goto(GotoArg::Tile { x: *x, y: *y }),
+        ControlCommand::Spec {} => BotCommand::Spec,
+        ControlCommand::Join {} => BotCommand::Join,
+        ControlCommand::ReloadRelations {} => BotCommand::ReloadRelations,
+    }
+}
+
+// ---- the rate limit ---------------------------------------------------------------------------------
+
+/// A token bucket with an injectable clock.
+#[derive(Debug, Clone)]
+pub struct RateLimiter {
+    capacity: f64,
+    per_sec: f64,
+    tokens: f64,
+    last: Instant,
+}
+
+impl RateLimiter {
+    /// A full bucket of `capacity` tokens, refilled at `per_sec` tokens per second, as of `now`.
+    pub fn new(capacity: f64, per_sec: f64, now: Instant) -> RateLimiter {
+        RateLimiter {
+            capacity,
+            per_sec,
+            tokens: capacity,
+            last: now,
+        }
+    }
+
+    /// Takes one token if there is one.
+    pub fn try_acquire(&mut self, now: Instant) -> bool {
+        let dt = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = self.last.max(now);
+        self.tokens = (self.tokens + dt * self.per_sec).min(self.capacity);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// ---- the audit log ----------------------------------------------------------------------------------
+
+/// How a request ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The bot applied it (or queued it) and said ok.
+    Ok,
+    /// The bot answered, but refused or failed (a cooldown, no navigation, no clip directory ...).
+    Failed,
+    RateLimited,
+    BadRequest,
+    /// The bot did not answer in time.
+    Timeout,
+    /// The bot is stopping.
+    Gone,
+}
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Ok => "ok",
+            Outcome::Failed => "failed",
+            Outcome::RateLimited => "rate_limited",
+            Outcome::BadRequest => "bad_request",
+            Outcome::Timeout => "timeout",
+            Outcome::Gone => "gone",
+        }
+    }
+}
+
+/// One audit line. The fields are the whole record: there is nowhere to put a nickname, a clip note or a reply text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEntry {
+    /// Unix milliseconds.
+    pub ts_ms: u64,
+    /// The web session's opaque tag (`-` when the request had none that validated).
+    pub session: String,
+    /// `ControlCommand::tag` (`-` when the request did not parse).
+    pub cmd: String,
+    pub outcome: Outcome,
+}
+
+impl AuditEntry {
+    /// The JSON line (without the newline). Built from the validated parts only: a session tag is hex, a command tag is
+    /// `[a-z0-9:,-]`, so nothing needs escaping.
+    pub fn to_line(&self) -> String {
+        format!(
+            r#"{{"ts_ms":{},"session":"{}","cmd":"{}","outcome":"{}"}}"#,
+            self.ts_ms,
+            self.session,
+            self.cmd,
+            self.outcome.as_str()
+        )
+    }
+}
+
+/// Where audit entries go.
+pub trait AuditSink: Send + Sync {
+    fn record(&self, entry: &AuditEntry);
+}
+
+/// An in-memory sink (tests).
+#[derive(Default)]
+pub struct MemoryAudit(pub Mutex<Vec<AuditEntry>>);
+
+impl AuditSink for MemoryAudit {
+    fn record(&self, entry: &AuditEntry) {
+        if let Ok(mut v) = self.0.lock() {
+            v.push(entry.clone());
+        }
+    }
+}
+
+/// An append-only file (`0600`), one JSON line per entry, moved aside to `<name>.1` past [`AUDIT_MAX_BYTES`].
+pub struct FileAudit {
+    path: PathBuf,
+    file: Mutex<File>,
+    max_bytes: u64,
+}
+
+fn open_audit(path: &Path) -> io::Result<File> {
+    OpenOptions::new().create(true).append(true).mode(0o600).open(path)
+}
+
+impl FileAudit {
+    pub fn open(path: &Path) -> io::Result<FileAudit> {
+        FileAudit::open_with_cap(path, AUDIT_MAX_BYTES)
+    }
+
+    pub fn open_with_cap(path: &Path, max_bytes: u64) -> io::Result<FileAudit> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(FileAudit {
+            path: path.to_path_buf(),
+            file: Mutex::new(open_audit(path)?),
+            max_bytes,
+        })
+    }
+}
+
+impl AuditSink for FileAudit {
+    fn record(&self, entry: &AuditEntry) {
+        let Ok(mut file) = self.file.lock() else { return };
+        if file.metadata().is_ok_and(|m| m.len() > self.max_bytes) {
+            let mut old = self.path.as_os_str().to_owned();
+            old.push(".1");
+            if std::fs::rename(&self.path, PathBuf::from(old)).is_ok()
+                && let Ok(fresh) = open_audit(&self.path)
+            {
+                *file = fresh;
+            }
+        }
+        let mut line = entry.to_line();
+        line.push('\n');
+        if let Err(e) = file.write_all(line.as_bytes()) {
+            tracing::warn!(error = %e, "could not write the control audit log");
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+// ---- one request ------------------------------------------------------------------------------------
+
+struct Limits {
+    bucket: RateLimiter,
+    /// When a `rate_limited` entry was last written (a flood must not flood the audit log).
+    last_limited_audit: Option<Instant>,
+}
+
+/// Turns request lines into replies: parse, validate, rate-limit, hand to the bot, audit. No sockets in here, so every
+/// rule is testable without any.
+pub struct Dispatcher {
+    sender: CommandSender,
+    audit: Arc<dyn AuditSink>,
+    limits: Mutex<Limits>,
+    answer_timeout: Duration,
+}
+
+impl Dispatcher {
+    pub fn new(sender: CommandSender, audit: Arc<dyn AuditSink>) -> Dispatcher {
+        Dispatcher::with_limits(sender, audit, RATE_BURST, RATE_PER_SEC, ANSWER_TIMEOUT)
+    }
+
+    pub fn with_limits(
+        sender: CommandSender,
+        audit: Arc<dyn AuditSink>,
+        burst: f64,
+        per_sec: f64,
+        answer_timeout: Duration,
+    ) -> Dispatcher {
+        Dispatcher {
+            sender,
+            audit,
+            limits: Mutex::new(Limits {
+                bucket: RateLimiter::new(burst, per_sec, Instant::now()),
+                last_limited_audit: None,
+            }),
+            answer_timeout,
+        }
+    }
+
+    fn audit(&self, session: &str, cmd: &str, outcome: Outcome) {
+        let entry = AuditEntry {
+            ts_ms: now_ms(),
+            session: session.to_string(),
+            cmd: cmd.to_string(),
+            outcome,
+        };
+        tracing::info!(target: "control", session, cmd, outcome = outcome.as_str(), "control command");
+        self.audit.record(&entry);
+    }
+
+    /// Answers one request line (no trailing newline).
+    pub fn handle_line(&self, line: &[u8]) -> ControlReply {
+        let now = Instant::now();
+        {
+            let mut limits = self.limits.lock().unwrap_or_else(|e| e.into_inner());
+            if !limits.bucket.try_acquire(now) {
+                let log_it = limits
+                    .last_limited_audit
+                    .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
+                if log_it {
+                    limits.last_limited_audit = Some(now);
+                }
+                drop(limits);
+                if log_it {
+                    self.audit("-", "-", Outcome::RateLimited);
+                }
+                return ControlReply::refused(ReplyCode::RateLimited, "too many commands: wait a moment");
+            }
+        }
+        let req: ControlRequest = match serde_json::from_slice(line) {
+            Ok(r) => r,
+            Err(_) => {
+                self.audit("-", "-", Outcome::BadRequest);
+                return ControlReply::refused(ReplyCode::BadRequest, "bad request");
+            }
+        };
+        let tag = req.cmd.tag();
+        if let Err(e) = req.validate() {
+            let session = if ddai_botctl::proto::valid_session_tag(&req.session) {
+                req.session.as_str()
+            } else {
+                "-"
+            };
+            self.audit(session, &tag, Outcome::BadRequest);
+            return ControlReply::refused(ReplyCode::BadRequest, &e.to_string());
+        }
+        let (reply, outcome) = match self.sender.send(to_bot_command(&req.cmd), self.answer_timeout) {
+            Ok(r) => {
+                let mut reply = ControlReply::answer(r.ok, &r.text);
+                reply.data = r.data;
+                (reply, if r.ok { Outcome::Ok } else { Outcome::Failed })
+            }
+            Err(BusError::Timeout) => (
+                ControlReply::refused(ReplyCode::Timeout, "the bot did not answer in time"),
+                Outcome::Timeout,
+            ),
+            Err(BusError::Gone) => (
+                ControlReply::refused(ReplyCode::Gone, "the bot is stopping"),
+                Outcome::Gone,
+            ),
+        };
+        self.audit(&req.session, &tag, outcome);
+        reply
+    }
+}
+
+// ---- the socket -------------------------------------------------------------------------------------
+
+/// What reading one request line found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LineRead {
+    /// A line (without the newline) is in the buffer.
+    Line,
+    /// The peer closed the connection.
+    Eof,
+    /// The line passed the limit without a newline: the stream cannot be resynchronised.
+    TooLong,
+}
+
+/// Reads up to the next `\n`, never holding more than `max` bytes of it (newline included).
+pub fn read_line_bounded<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>, max: usize) -> io::Result<LineRead> {
+    buf.clear();
+    let n = reader.by_ref().take(max as u64 + 1).read_until(b'\n', buf)?;
+    if n == 0 {
+        return Ok(LineRead::Eof);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if n > max {
+            return Ok(LineRead::TooLong);
+        }
+        return Ok(LineRead::Line);
+    }
+    if n > max {
+        return Ok(LineRead::TooLong);
+    }
+    // EOF in the middle of a line: not a request.
+    Ok(LineRead::Eof)
+}
+
+fn write_reply(stream: &mut UnixStream, reply: &ControlReply) -> io::Result<()> {
+    let mut line = serde_json::to_vec(reply).map_err(io::Error::other)?;
+    line.push(b'\n');
+    stream.write_all(&line)
+}
+
+struct ConnGuard(Arc<AtomicUsize>);
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn serve_connection(mut stream: UnixStream, dispatcher: &Dispatcher) {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let Ok(read_half) = stream.try_clone() else { return };
+    let mut reader = BufReader::new(read_half);
+    let mut buf = Vec::with_capacity(256);
+    loop {
+        match read_line_bounded(&mut reader, &mut buf, MAX_REQUEST_BYTES) {
+            Ok(LineRead::Line) => {
+                let reply = dispatcher.handle_line(&buf);
+                if write_reply(&mut stream, &reply).is_err() {
+                    return;
+                }
+            }
+            Ok(LineRead::TooLong) => {
+                let _ = write_reply(
+                    &mut stream,
+                    &ControlReply::refused(ReplyCode::BadRequest, "request too long"),
+                );
+                return;
+            }
+            Ok(LineRead::Eof) | Err(_) => return,
+        }
+    }
+}
+
+/// The running control socket. Dropping it stops accepting and removes the socket file.
+pub struct ControlServer {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl ControlServer {
+    /// Binds `path` (mode `0600` in a `0700` directory; a live bot's socket is not stolen, a stale one is replaced) and
+    /// starts serving it on a thread named `ddai-botctl`.
+    pub fn start(path: &Path, sender: CommandSender, audit: Arc<dyn AuditSink>) -> io::Result<ControlServer> {
+        ControlServer::start_with(path, Dispatcher::new(sender, audit))
+    }
+
+    pub fn start_with(path: &Path, dispatcher: Dispatcher) -> io::Result<ControlServer> {
+        let listener = crate::bridge::bind_private_socket(path)?;
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            let dispatcher = Arc::new(dispatcher);
+            thread::Builder::new()
+                .name("ddai-botctl".into())
+                .spawn(move || accept_loop(&listener, &stop, &dispatcher))?
+        };
+        Ok(ControlServer {
+            path: path.to_path_buf(),
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn accept_loop(listener: &UnixListener, stop: &AtomicBool, dispatcher: &Arc<Dispatcher>) {
+    let active = Arc::new(AtomicUsize::new(0));
+    while !stop.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                    let _ = write_reply(
+                        &mut stream,
+                        &ControlReply::refused(ReplyCode::Busy, "too many connections"),
+                    );
+                    continue;
+                }
+                let guard = ConnGuard(Arc::clone(&active));
+                let dispatcher = Arc::clone(dispatcher);
+                let spawned = thread::Builder::new().name("ddai-botctl-conn".into()).spawn(move || {
+                    let _guard = guard;
+                    serve_connection(stream, &dispatcher);
+                });
+                if let Err(e) = spawned {
+                    // The guard moved into the closure that was never run is dropped with it.
+                    tracing::warn!(error = %e, "could not start a control connection thread");
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(25)),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "the control socket stopped accepting");
+                return;
+            }
+        }
+    }
+}
+
+impl Drop for ControlServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::{CommandBus, CommandInbox, CommandReply};
+    use std::os::unix::fs::PermissionsExt;
+
+    const SESSION: &str = "0a1b2c3d4e5f6071";
+
+    fn line(cmd: &ControlCommand) -> Vec<u8> {
+        serde_json::to_vec(&ControlRequest::new(SESSION, cmd.clone())).unwrap()
+    }
+
+    /// A stand-in bot thread: answers every command with `answer(cmd)` until `stop`, recording what reached it.
+    struct FakeBot {
+        seen: Arc<Mutex<Vec<BotCommand>>>,
+        stop: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl FakeBot {
+        fn start(inbox: CommandInbox, answer: impl Fn(&BotCommand) -> CommandReply + Send + 'static) -> FakeBot {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (s2, st2) = (Arc::clone(&seen), Arc::clone(&stop));
+            let thread = thread::spawn(move || {
+                while !st2.load(Ordering::SeqCst) {
+                    while let Some(req) = inbox.try_next() {
+                        let reply = answer(&req.cmd);
+                        s2.lock().unwrap().push(req.cmd);
+                        let _ = req.reply.send(reply);
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+            });
+            FakeBot {
+                seen,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn seen(&self) -> Vec<BotCommand> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for FakeBot {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    fn setup(
+        burst: f64,
+        per_sec: f64,
+        answer: impl Fn(&BotCommand) -> CommandReply + Send + 'static,
+    ) -> (Dispatcher, Arc<MemoryAudit>, FakeBot) {
+        let (sender, inbox) = CommandBus::open();
+        let audit = Arc::new(MemoryAudit::default());
+        let d = Dispatcher::with_limits(
+            sender,
+            Arc::clone(&audit) as Arc<dyn AuditSink>,
+            burst,
+            per_sec,
+            Duration::from_secs(2),
+        );
+        (d, audit, FakeBot::start(inbox, answer))
+    }
+
+    #[test]
+    fn the_token_bucket_allows_a_burst_then_the_refill_rate() {
+        let t0 = Instant::now();
+        let mut b = RateLimiter::new(3.0, 2.0, t0);
+        assert!(b.try_acquire(t0) && b.try_acquire(t0) && b.try_acquire(t0));
+        assert!(!b.try_acquire(t0), "burst of 3 is spent");
+        assert!(!b.try_acquire(t0 + Duration::from_millis(400)), "0.8 tokens");
+        assert!(
+            b.try_acquire(t0 + Duration::from_millis(500)),
+            "1 token after 500 ms at 2/s"
+        );
+        assert!(!b.try_acquire(t0 + Duration::from_millis(500)));
+        // A long pause refills to the capacity and no further.
+        let later = t0 + Duration::from_secs(60);
+        assert!(b.try_acquire(later) && b.try_acquire(later) && b.try_acquire(later));
+        assert!(!b.try_acquire(later));
+        // A clock that goes backwards neither panics nor mints tokens.
+        assert!(!b.try_acquire(t0));
+    }
+
+    #[test]
+    fn every_protocol_command_becomes_the_console_command_it_names() {
+        use ddai_botctl::proto::*;
+        let all: Vec<(ControlCommand, BotCommand)> = vec![
+            (
+                ControlCommand::Mode { mode: ModeArg::Fight },
+                BotCommand::Mode(Some(Mode::Fight)),
+            ),
+            (
+                ControlCommand::Mode { mode: ModeArg::Passive },
+                BotCommand::Mode(Some(Mode::Passive)),
+            ),
+            (
+                ControlCommand::Mode { mode: ModeArg::Hold },
+                BotCommand::Mode(Some(Mode::Hold)),
+            ),
+            (ControlCommand::Stop {}, BotCommand::Stop),
+            (ControlCommand::Go {}, BotCommand::Go),
+            (
+                ControlCommand::Wb { mode: WbArg::Auto },
+                BotCommand::Wb(Some(WbMode::Auto)),
+            ),
+            (
+                ControlCommand::Wb { mode: WbArg::Left },
+                BotCommand::Wb(Some(WbMode::Left)),
+            ),
+            (
+                ControlCommand::Wb { mode: WbArg::Right },
+                BotCommand::Wb(Some(WbMode::Right)),
+            ),
+            (
+                ControlCommand::Wb { mode: WbArg::Off },
+                BotCommand::Wb(Some(WbMode::Off)),
+            ),
+            (
+                ControlCommand::Brain {
+                    brain: BrainArg::Hybrid,
+                },
+                BotCommand::Brain(Some(BrainKind::Hybrid)),
+            ),
+            (
+                ControlCommand::Brain {
+                    brain: BrainArg::Planner,
+                },
+                BotCommand::Brain(Some(BrainKind::Planner)),
+            ),
+            (
+                ControlCommand::Brain {
+                    brain: BrainArg::Scripted,
+                },
+                BotCommand::Brain(Some(BrainKind::Scripted)),
+            ),
+            (
+                ControlCommand::Brain { brain: BrainArg::Idle },
+                BotCommand::Brain(Some(BrainKind::Idle)),
+            ),
+            (
+                ControlCommand::Brain { brain: BrainArg::Fly },
+                BotCommand::Brain(Some(BrainKind::Fly)),
+            ),
+            (ControlCommand::Kill {}, BotCommand::Kill),
+            (ControlCommand::Clip { note: "n".into() }, BotCommand::Clip("n".into())),
+            (
+                ControlCommand::Goto { x: 1, y: -2 },
+                BotCommand::Goto(GotoArg::Tile { x: 1, y: -2 }),
+            ),
+            (ControlCommand::Spec {}, BotCommand::Spec),
+            (ControlCommand::Join {}, BotCommand::Join),
+            (ControlCommand::ReloadRelations {}, BotCommand::ReloadRelations),
+        ];
+        for (c, want) in all {
+            assert_eq!(to_bot_command(&c), want, "{c:?}");
+            assert!(
+                !matches!(to_bot_command(&c), BotCommand::Quit | BotCommand::Unsupported(_)),
+                "no control command quits or is a dropped one"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_reaches_the_bot_and_its_reply_comes_back_and_is_audited() {
+        let (d, audit, bot) = setup(8.0, 1.0, |c| CommandReply::ok(format!("did {c:?}")));
+        let reply = d.handle_line(&line(&ControlCommand::Mode {
+            mode: ddai_botctl::proto::ModeArg::Hold,
+        }));
+        assert!(reply.ok && reply.code.is_none());
+        assert_eq!(reply.text, "did Mode(Some(Hold))");
+        assert_eq!(bot.seen(), vec![BotCommand::Mode(Some(Mode::Hold))]);
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].session.as_str(), entries[0].cmd.as_str(), entries[0].outcome),
+            (SESSION, "mode:hold", Outcome::Ok)
+        );
+        assert!(entries[0].ts_ms > 1_600_000_000_000, "a real timestamp");
+        drop(bot);
+    }
+
+    #[test]
+    fn a_refusal_by_the_bot_is_relayed_and_audited_as_failed() {
+        let (d, audit, _bot) = setup(8.0, 1.0, |_| CommandReply::err("reset is on cooldown"));
+        let reply = d.handle_line(&line(&ControlCommand::Kill {}));
+        assert!(!reply.ok && reply.code.is_none());
+        assert_eq!(reply.text, "reset is on cooldown");
+        assert_eq!(audit.0.lock().unwrap()[0].outcome, Outcome::Failed);
+    }
+
+    #[test]
+    fn nothing_that_is_not_a_known_command_reaches_the_bot() {
+        let (d, audit, bot) = setup(1000.0, 1000.0, |_| CommandReply::ok("x"));
+        for bad in [
+            &br#"{"v":1,"session":"0a","cmd":{"type":"say","text":"hello everyone"}}"#[..],
+            br#"{"v":1,"session":"0a","cmd":{"type":"quit"}}"#,
+            br#"{"v":1,"session":"0a","cmd":{"type":"target","name":"someone"}}"#,
+            br#"{"v":1,"session":"0a","cmd":{"type":"stop","say":"hi"}}"#,
+            br#"{"v":2,"session":"0a","cmd":{"type":"stop"}}"#,
+            br#"{"v":1,"session":"NOT HEX","cmd":{"type":"stop"}}"#,
+            br#"{"v":1,"session":"0a","cmd":{"type":"goto","x":99999999,"y":0}}"#,
+            br#"{"v":1,"session":"0a","cmd":{"type":"clip","note":"a\nb"}}"#,
+            b"!say hi",
+            b"hello",
+            b"",
+            b"\xff\xfe\x00",
+            b"{",
+        ] {
+            let r = d.handle_line(bad);
+            assert!(!r.ok, "{}", String::from_utf8_lossy(bad));
+            assert_eq!(r.code, Some(ReplyCode::BadRequest));
+        }
+        thread::sleep(Duration::from_millis(30));
+        assert!(bot.seen().is_empty(), "nothing reached the bot: {:?}", bot.seen());
+        assert!(audit.0.lock().unwrap().iter().all(|e| e.outcome == Outcome::BadRequest));
+    }
+
+    #[test]
+    fn commands_are_rate_limited_and_a_flood_does_not_flood_the_audit_log() {
+        // Burst 3, no refill within the test.
+        let (d, audit, bot) = setup(3.0, 0.000_001, |_| CommandReply::ok("x"));
+        let cmd = line(&ControlCommand::Go {});
+        let replies: Vec<ControlReply> = (0..50).map(|_| d.handle_line(&cmd)).collect();
+        assert_eq!(replies.iter().filter(|r| r.ok).count(), 3);
+        assert!(
+            replies[3..]
+                .iter()
+                .all(|r| !r.ok && r.code == Some(ReplyCode::RateLimited))
+        );
+        assert_eq!(bot.seen().len(), 3, "the refused ones never reached the bot");
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries.iter().filter(|e| e.outcome == Outcome::Ok).count(), 3);
+        assert_eq!(
+            entries.iter().filter(|e| e.outcome == Outcome::RateLimited).count(),
+            1,
+            "47 refusals within a second leave one audit line"
+        );
+        // Garbage costs tokens too (a malformed flood cannot be cheaper than a command flood).
+        let (d, _a, bot) = setup(2.0, 0.000_001, |_| CommandReply::ok("x"));
+        assert_eq!(d.handle_line(b"junk").code, Some(ReplyCode::BadRequest));
+        assert_eq!(d.handle_line(b"junk").code, Some(ReplyCode::BadRequest));
+        assert_eq!(d.handle_line(&cmd).code, Some(ReplyCode::RateLimited));
+        assert!(bot.seen().is_empty());
+    }
+
+    #[test]
+    fn the_audit_log_carries_tags_only_never_a_note_a_name_or_a_reply() {
+        let (d, audit, _bot) = setup(100.0, 100.0, |_| {
+            CommandReply::ok("saved 30 s to /x/SECRET-NICK-in-reply.clip")
+        });
+        d.handle_line(&line(&ControlCommand::Clip {
+            note: "SECRET-NOTE with SECRET-NICK".into(),
+        }));
+        d.handle_line(&line(&ControlCommand::Goto { x: 5, y: 6 }));
+        d.handle_line(&line(&ControlCommand::ReloadRelations {}));
+        d.handle_line(br#"{"v":1,"session":"0a","cmd":{"type":"say","text":"SECRET-NICK says hi"}}"#);
+        d.handle_line(b"SECRET-NICK");
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries.len(), 5);
+        let all: String = entries.iter().map(|e| e.to_line() + "\n").collect();
+        assert!(!all.contains("SECRET"), "{all}");
+        assert!(
+            all.contains(r#""cmd":"clip""#) && all.contains(r#""cmd":"goto:5,6""#),
+            "{all}"
+        );
+        assert!(all.contains(r#""cmd":"relations:reload""#), "{all}");
+        for e in &entries {
+            let v: serde_json::Value = serde_json::from_str(&e.to_line()).expect("every line is JSON");
+            assert!(v["ts_ms"].is_u64() && v["session"].is_string() && v["cmd"].is_string());
+            assert_eq!(v.as_object().unwrap().len(), 4, "exactly ts, session, cmd, outcome");
+        }
+    }
+
+    #[test]
+    fn a_bot_that_does_not_answer_or_has_stopped_is_reported_not_waited_for_forever() {
+        let (sender, inbox) = CommandBus::open();
+        let audit = Arc::new(MemoryAudit::default());
+        let d = Dispatcher::with_limits(
+            sender,
+            Arc::clone(&audit) as Arc<dyn AuditSink>,
+            100.0,
+            100.0,
+            Duration::from_millis(60),
+        );
+        let started = Instant::now();
+        let r = d.handle_line(&line(&ControlCommand::Go {})); // the inbox is never drained
+        assert_eq!(r.code, Some(ReplyCode::Timeout));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(inbox);
+        let r = d.handle_line(&line(&ControlCommand::Go {}));
+        assert_eq!(r.code, Some(ReplyCode::Gone));
+        let outcomes: Vec<Outcome> = audit.0.lock().unwrap().iter().map(|e| e.outcome).collect();
+        assert_eq!(outcomes, vec![Outcome::Timeout, Outcome::Gone]);
+    }
+
+    #[test]
+    fn lines_are_read_with_a_hard_size_limit() {
+        let mut buf = Vec::new();
+        let mut r = io::Cursor::new(b"abc\ndef\n".to_vec());
+        assert_eq!(read_line_bounded(&mut r, &mut buf, 16).unwrap(), LineRead::Line);
+        assert_eq!(buf, b"abc");
+        assert_eq!(read_line_bounded(&mut r, &mut buf, 16).unwrap(), LineRead::Line);
+        assert_eq!(buf, b"def");
+        assert_eq!(read_line_bounded(&mut r, &mut buf, 16).unwrap(), LineRead::Eof);
+        // Exactly at the limit (newline included) is fine, one more is not.
+        let mut r = io::Cursor::new(b"abcd\n".to_vec());
+        assert_eq!(read_line_bounded(&mut r, &mut buf, 5).unwrap(), LineRead::Line);
+        let mut r = io::Cursor::new(b"abcde\n".to_vec());
+        assert_eq!(read_line_bounded(&mut r, &mut buf, 5).unwrap(), LineRead::TooLong);
+        // No newline within the limit, however long the stream is: never buffers more than max + 1.
+        let mut r = io::Cursor::new(vec![b'x'; 1 << 20]);
+        assert_eq!(read_line_bounded(&mut r, &mut buf, 64).unwrap(), LineRead::TooLong);
+        assert!(buf.len() <= 65);
+        // A partial line at EOF is not a request.
+        let mut r = io::Cursor::new(b"abc".to_vec());
+        assert_eq!(read_line_bounded(&mut r, &mut buf, 16).unwrap(), LineRead::Eof);
+    }
+
+    fn roundtrip(stream: &mut UnixStream, line: &[u8]) -> ControlReply {
+        stream.write_all(line).unwrap();
+        stream.write_all(b"\n").unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut reply = String::new();
+        reader.read_line(&mut reply).unwrap();
+        serde_json::from_str(reply.trim_end()).unwrap_or_else(|e| panic!("reply {reply:?}: {e}"))
+    }
+
+    #[test]
+    fn the_socket_is_private_serves_requests_refuses_oversize_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bot").join(SOCKET_NAME);
+        let (sender, inbox) = CommandBus::open();
+        let _bot = FakeBot::start(inbox, |_| CommandReply::ok("fine"));
+        let audit = Arc::new(MemoryAudit::default());
+        let server = ControlServer::start(&path, sender.clone(), Arc::clone(&audit) as Arc<dyn AuditSink>).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // Two requests on one connection, strictly in turn.
+        let mut c = UnixStream::connect(&path).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let r = roundtrip(&mut c, &line(&ControlCommand::Stop {}));
+        assert!(r.ok && r.text == "fine");
+        let r = roundtrip(&mut c, br#"{"v":1,"session":"0a","cmd":{"type":"say","text":"hi"}}"#);
+        assert_eq!(r.code, Some(ReplyCode::BadRequest));
+        // Too long: refused, and the connection is closed (it cannot be resynchronised).
+        let mut c2 = UnixStream::connect(&path).unwrap();
+        c2.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut big = vec![b'x'; MAX_REQUEST_BYTES + 100];
+        big.push(b'\n');
+        c2.write_all(&big).unwrap();
+        let mut reader = BufReader::new(c2.try_clone().unwrap());
+        let mut reply = String::new();
+        reader.read_line(&mut reply).unwrap();
+        let r: ControlReply = serde_json::from_str(reply.trim_end()).unwrap();
+        assert_eq!(r.code, Some(ReplyCode::BadRequest));
+        reply.clear();
+        assert_eq!(
+            reader.read_line(&mut reply).unwrap(),
+            0,
+            "closed after the oversize line"
+        );
+        // A second bot does not steal the live socket.
+        let (s2, _i2) = CommandBus::open();
+        let err = ControlServer::start(&path, s2, Arc::clone(&audit) as Arc<dyn AuditSink>)
+            .err()
+            .unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        drop(c);
+        drop(server);
+        assert!(!path.exists(), "the socket file is removed when the server stops");
+    }
+
+    #[test]
+    fn only_a_few_connections_are_served_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let (sender, inbox) = CommandBus::open();
+        let _bot = FakeBot::start(inbox, |_| CommandReply::ok("fine"));
+        let audit = Arc::new(MemoryAudit::default());
+        let _server = ControlServer::start(&path, sender, audit as Arc<dyn AuditSink>).unwrap();
+        let held: Vec<UnixStream> = (0..MAX_CONNECTIONS)
+            .map(|_| {
+                let mut s = UnixStream::connect(&path).unwrap();
+                s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                // Proves each one is being served (and so counted).
+                assert!(roundtrip(&mut s, &line(&ControlCommand::Go {})).ok);
+                s
+            })
+            .collect();
+        let mut extra = UnixStream::connect(&path).unwrap();
+        extra.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut reply = String::new();
+        BufReader::new(&mut extra).read_line(&mut reply).unwrap();
+        let r: ControlReply = serde_json::from_str(reply.trim_end()).unwrap();
+        assert_eq!(r.code, Some(ReplyCode::Busy));
+        // Freeing a slot lets a new connection in.
+        drop(held);
+        let mut ok = false;
+        for _ in 0..100 {
+            let mut s = UnixStream::connect(&path).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            if roundtrip(&mut s, &line(&ControlCommand::Go {})).ok {
+                ok = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ok, "a slot is free again after the others closed");
+    }
+
+    #[test]
+    fn the_audit_file_is_private_append_only_and_rotates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs").join("audit.log");
+        let log = FileAudit::open_with_cap(&path, 300).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let entry = |n: u64| AuditEntry {
+            ts_ms: n,
+            session: SESSION.to_string(),
+            cmd: "go".to_string(),
+            outcome: Outcome::Ok,
+        };
+        for n in 0..10 {
+            log.record(&entry(n));
+        }
+        let now = std::fs::read_to_string(&path).unwrap();
+        let old = std::fs::read_to_string(dir.path().join("logs").join("audit.log.1")).unwrap();
+        assert!(!old.is_empty() && !now.is_empty(), "rotated once the cap passed");
+        let total = old.lines().count() + now.lines().count();
+        assert!((5..=10).contains(&total), "{total}");
+        assert!(
+            now.lines()
+                .chain(old.lines())
+                .all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("logs").join("audit.log.1"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        // Reopening appends.
+        drop(log);
+        let again = FileAudit::open(&path).unwrap();
+        again.record(&entry(99));
+        assert!(std::fs::read_to_string(&path).unwrap().lines().count() > now.lines().count());
+    }
+}

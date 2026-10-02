@@ -47,6 +47,13 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/login", post(http::login::login))
         .route("/api/logout", post(http::login::logout))
         .route("/api/me", get(http::login::me))
+        // Task 5.6: owner-only bot control (every one of these needs the session; the POSTs also CSRF + strict Origin).
+        .route("/api/bot/status", get(http::bot::status))
+        .route("/api/bot/command", post(http::bot::command))
+        .route(
+            "/api/bot/relations",
+            get(http::bot::relations_get).post(http::bot::relations_post),
+        )
         .route("/ws", get(ws::ws_handler))
         .route_layer(axum::middleware::from_fn(headers::no_store));
 

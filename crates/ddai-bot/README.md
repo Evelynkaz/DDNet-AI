@@ -58,6 +58,7 @@
 | `hooks` | `Navigator`, `WayBlock`, `Trek`, `RouteFinder` — трейты и no-op заглушки (тесты бота, `Hooks::default()`) |
 | `nav_hooks` | **настоящие тела хуков (4.2):** goto / follow / seek / trek / home, вейблок Copy Love Box, память фризов по sha256 карты; `NavHandle` / `NavCommand` — API для консольных команд 4.3; описание — `docs/formats.md` §23 и `crates/ddai-nav/README.md` |
 | `bridge` | мост к веб-юниту: Unix-сокет, только чтение (`docs/formats.md` §21.2) |
+| `control`, `identity` | **задача 5.6:** сокет управления для сайта (типизированные команды без чата, лимит частоты, аудит без ников), клан и скин бота (`docs/formats.md` §26) |
 | `mapgrid`, `tees` | плоский вид карты (слой игры + front) и тиев снапшота |
 
 ## Решения и отличия от TS (D-021)
@@ -137,3 +138,14 @@ DDAI_E2E=1 DDAI_E2E_BRAINS=planner,hybrid cargo test --release -p ddai-bot --tes
 ddnet-ai play --server 127.0.0.1:8303 --brain planner --name ddai-bot --duration 600
 ddnet-ai web --bot-socket ~/aiddnet/data/bot/live.sock            # вкладка «Игра» показывает живую игру
 ```
+
+## Управление с сайта и облик бота (задача 5.6, D-070, D-068)
+
+- `control` — Unix-сокет `<data-dir>/bot/control.sock` (`0600` в каталоге `0700`; `--control`, `--no-control`, `--control-audit`). Запрос — `ddai_botctl::proto::ControlRequest` (закрытый список команд, **чата нет по построению**), отображается на `BotCommand` 4.3 и
+  применяется между снапшотами через `CommandBus`, как консоль; ответ — `CommandReply`. Лимит: 8 пачкой и 2 в секунду на весь сокет, до 4 соединений. Аудит — файл с временем, меткой сессии, тегом команды и исходом: ни ников, ни заметок клипа, ни текста ответов.
+  Новая `BotCommand::ReloadRelations` перечитывает `relations.json`, который правит сайт (нечитаемый файл — отказ, списки остаются).
+- `STATUS` моста дополнен для панели сайта: `connected`, `server`, `map`, облик, `target_tag`, `wb`, `deaths`, `clips_saved`, `kill_cooldown_ticks`.
+- `identity` — клан `Neuroset` по умолчанию, случайный стандартный скин при каждом запуске (`--skin-seed` — детерминированно для тестов), `--clan` / `--skin` и `clan` / `skin` в `settings.toml`. Ник по-прежнему `--name` (на Swarfey — `Muha`).
+- `relations` и `names` теперь живут в крейте `ddai-botctl` (общие с сайтом) и переэкспортируются отсюда под прежними путями.
+- Тесты: `control::tests` (лимит с подставными часами, протокол, аудит без имён, соединения, права `0600`/`0700`), `identity::tests`, `tests/control.rs` (настоящий `Bot` в потоке, сокет, файл списков: режим меняется, друг перестаёт быть целью, аудит тегами),
+  `tests/commands.rs::reload_relations_*`. Живой e2e с сервером — после 4.4.

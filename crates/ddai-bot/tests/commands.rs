@@ -200,6 +200,7 @@ fn variant_name(c: &BotCommand) -> &'static str {
         BotCommand::Spec => "spec",
         BotCommand::Join => "join",
         BotCommand::Kill => "kill",
+        BotCommand::ReloadRelations => "reload_relations",
         BotCommand::Quit => "quit",
         BotCommand::Unsupported(_) => "unsupported",
     }
@@ -538,6 +539,121 @@ fn the_list_commands_toggle_persist_and_move_a_name_between_lists() {
         assert_eq!(r.say("!war off").text, "war: cleared");
         assert_eq!(r.say("!war").text, "war: nobody");
         assert!(Relations::load(&path).unwrap().contains(ListKind::Ignore, "p2"));
+    });
+}
+
+#[test]
+fn reload_relations_makes_the_lists_the_files_and_keeps_them_when_the_file_is_bad() {
+    big_stack(|| {
+        let mut r = rig(vec![tee(0, 1000), tee(1, 1100), tee(2, 1500)]);
+        let path = r.dir.path().join("relations.json");
+        r.step(10);
+        let first = r.bot.target_id();
+        assert!(
+            first == 1 || first == 2,
+            "nobody listed: somebody is the target ({first})"
+        );
+        let other = 3 - first;
+
+        // The web editor writes the file (folded keys, like every writer) ...
+        let mut edited = Relations::new();
+        edited.add(ListKind::Friend, &format!("  P{first} "));
+        edited.add(ListKind::ClanWar, "Foes");
+        edited.save(&path).unwrap();
+        let v0 = r.bot.relations().version();
+        // ... and asks the bot to reload it.
+        let reply = r.bot.command(BotCommand::ReloadRelations);
+        assert!(reply.ok, "{}", reply.text);
+        assert_eq!(
+            reply.text, "lists reloaded (friend 1, war 0, ignore 0, clanwar 1, clanfriend 0)",
+            "counts only, no names"
+        );
+        let data = reply.data.clone().expect("structured counts and digest");
+        assert_eq!(data["counts"]["friend"], 1);
+        assert_eq!(
+            data["digest"],
+            edited.digest(),
+            "the digest the web computes from the same lists"
+        );
+        assert!(r.bot.relations().version() > v0, "the per-player flags are recomputed");
+        assert!(r.bot.relations().contains(ListKind::Friend, &format!("p{first}")));
+        assert!(r.bot.relations().contains(ListKind::ClanWar, "foes"));
+        r.step(10);
+        assert_eq!(r.bot.target_id(), other, "the new friend is spared at once");
+
+        // An unchanged file does not bump the counter (nothing to recompute).
+        let v1 = r.bot.relations().version();
+        assert!(r.bot.command(BotCommand::ReloadRelations).ok);
+        assert_eq!(r.bot.relations().version(), v1);
+
+        // Removing the friend in the file takes them off the list.
+        Relations::new().save(&path).unwrap();
+        assert!(r.bot.command(BotCommand::ReloadRelations).ok);
+        assert!(r.bot.relations().is_empty());
+        r.step(10);
+        assert_ne!(
+            r.bot.target_id(),
+            -1,
+            "(the current target is kept: the picker has hysteresis)"
+        );
+
+        // A corrupt file: refused, the running lists stay (a corrupt file must never become "no friends").
+        r.say("!friend p1");
+        std::fs::write(&path, "{ not json").unwrap();
+        let reply = r.bot.command(BotCommand::ReloadRelations);
+        assert!(!reply.ok, "{}", reply.text);
+        assert!(
+            !reply.text.contains("not json") && !reply.text.contains("p1"),
+            "{}",
+            reply.text
+        );
+        assert!(r.bot.relations().contains(ListKind::Friend, "p1"), "kept");
+        // A missing file is an empty set of lists, as at start.
+        std::fs::remove_file(&path).unwrap();
+        assert!(r.bot.command(BotCommand::ReloadRelations).ok);
+        assert!(r.bot.relations().is_empty());
+    });
+}
+
+#[test]
+fn a_console_edit_starts_from_the_file_and_waits_for_the_other_writer() {
+    big_stack(|| {
+        let mut r = rig(vec![tee(0, 1000), tee(1, 1100), tee(2, 1500)]);
+        let path = r.dir.path().join("relations.json");
+        // The site added a friend to the file; the bot has not been told to reload yet.
+        let mut web = Relations::new();
+        web.add(ListKind::Friend, "from the site");
+        web.save(&path).unwrap();
+        assert!(r.say("!war p2").ok);
+        let file = Relations::load(&path).unwrap();
+        assert!(
+            file.contains(ListKind::Friend, "from the site") && file.contains(ListKind::War, "p2"),
+            "the console edit did not erase the site's: it started from the file"
+        );
+        assert!(r.bot.relations().contains(ListKind::Friend, "from the site"));
+        // While the site (or anyone) holds the lock, the edit is refused after a bounded wait, not applied.
+        let held = ddai_bot::relations::RelationsLock::acquire(&path).unwrap();
+        let started = std::time::Instant::now();
+        let reply = r.say("!friend p1");
+        assert!(!reply.ok && reply.text.contains("busy"), "{}", reply.text);
+        // The edit runs on the decision thread (D-042): it must give up within milliseconds, not wait for the holder.
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(150),
+            "a busy lock answered after {:?}",
+            started.elapsed()
+        );
+        assert!(!r.bot.relations().contains(ListKind::Friend, "p1"), "not applied");
+        drop(held);
+        assert!(r.say("!friend p1").ok);
+    });
+}
+
+#[test]
+fn reload_relations_without_a_lists_file_is_refused() {
+    big_stack(|| {
+        let mut r = rig_with(vec![tee(0, 1000)], BrainKind::Idle, |c, _| c.relations_path = None);
+        let reply = r.bot.command(BotCommand::ReloadRelations);
+        assert!(!reply.ok, "{}", reply.text);
     });
 }
 

@@ -76,6 +76,8 @@ pub enum HubEvent {
 struct Latest {
     map: Option<MapMeta>,
     players: Vec<PlayerMeta>,
+    /// Task 5.6: the newest `STATUS` JSON of the live bot and when it arrived (`GET /api/bot/status`).
+    bot_status: Option<(Instant, String)>,
 }
 
 pub struct LiveHub {
@@ -157,6 +159,7 @@ impl LiveHub {
                     }
                 }
                 SourceEvent::BotStatus(json) => {
+                    latest.lock().expect("live hub mutex poisoned").bot_status = Some((Instant::now(), json.clone()));
                     let _ = event_tx.send(Arc::new(HubEvent::BotStatus(json)));
                 }
                 SourceEvent::Error(message) => {
@@ -180,6 +183,16 @@ impl LiveHub {
 
     pub fn latest_players(&self) -> Vec<PlayerMeta> {
         self.latest.lock().expect("live hub mutex poisoned").players.clone()
+    }
+
+    /// The newest bot `STATUS` JSON and how long ago it arrived (task 5.6); `None` before the first one.
+    pub fn latest_bot_status(&self) -> Option<(Duration, String)> {
+        self.latest
+            .lock()
+            .expect("live hub mutex poisoned")
+            .bot_status
+            .as_ref()
+            .map(|(at, json)| (at.elapsed(), json.clone()))
     }
 
     /// Forwards a client `replay{...}` command to the running source (acceptance criterion 2).
@@ -254,6 +267,28 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(hub.latest_map(), Some(map));
         assert_eq!(hub.latest_players(), players);
+    }
+
+    #[tokio::test]
+    async fn the_newest_bot_status_is_kept_with_its_age() {
+        let source = ScriptedSource {
+            events: vec![
+                SourceEvent::BotStatus(r#"{"tick":1}"#.to_string()),
+                SourceEvent::BotStatus(r#"{"tick":2}"#.to_string()),
+            ],
+        };
+        let hub = LiveHub::start(Box::new(source), Arc::new(MapCache::new()));
+        let mut seen = None;
+        for _ in 0..200 {
+            if let Some((age, json)) = hub.latest_bot_status()
+                && json == r#"{"tick":2}"#
+            {
+                seen = Some(age);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(seen.expect("the newest status is kept") < Duration::from_secs(5));
     }
 
     #[tokio::test]

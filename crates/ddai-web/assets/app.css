@@ -418,3 +418,220 @@ button:active {
   border-radius: 2px;
   display: inline-block;
 }
+
+/* ---------------------------------------------------------------------------------------------
+   Task 5.6: bot control tab (owner only): status panel, commands, friends/war/ignore editor.
+   --------------------------------------------------------------------------------------------- */
+
+.bot-view[hidden] {
+  display: none;
+}
+
+.bot-view {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 16px 16px calc(80px + env(safe-area-inset-bottom, 0));
+}
+
+.bot-view h1 {
+  font-size: 1.3rem;
+  margin: 8px 0 16px;
+}
+
+.bot-view h2 {
+  font-size: 1.05rem;
+  margin: 0 0 12px;
+}
+
+.card {
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.bot-conn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 6px 16px;
+  margin: 0;
+}
+
+.kv dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.kv dd {
+  margin: 0;
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 4px 0 8px;
+}
+
+.hint.warn {
+  color: #e0b04a;
+}
+
+.cmd-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid #232a38;
+}
+
+.cmd-row:first-of-type {
+  border-top: none;
+}
+
+.cmd-label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.btn-group,
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-form > input,
+.inline-form > select {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+.bot-view select {
+  background: var(--bg);
+  border: 1px solid #2a3040;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 1rem;
+}
+
+.bot-view button {
+  min-height: 44px;
+}
+
+button.alt {
+  background: #28324a;
+  color: var(--text);
+}
+
+button.alt.current {
+  background: var(--accent);
+  color: #fff;
+}
+
+button.danger {
+  background: var(--danger);
+}
+
+.bot-view button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.result {
+  min-height: 1.3em;
+  margin: 10px 0 0;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.result.ok {
+  color: var(--ok);
+}
+
+.result.bad {
+  color: var(--danger);
+}
+
+.rel-lists {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.rel-group h3 {
+  font-size: 0.9rem;
+  margin: 0 0 6px;
+  color: var(--muted);
+}
+
+.rel-entries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rel-entries li {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg);
+  border: 1px solid #2a3040;
+  border-radius: 999px;
+  padding: 2px 4px 2px 12px;
+  overflow-wrap: anywhere;
+}
+
+.rel-entries li button {
+  background: transparent;
+  color: var(--danger);
+  padding: 0;
+  min-height: 36px;
+  min-width: 36px;
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.rel-empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+@media (min-width: 640px) {
+  .cmd-row {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .cmd-row > .cmd-label {
+    flex: 0 0 11rem;
+  }
+
+  .cmd-row > .btn-group,
+  .cmd-row > .inline-form {
+    flex: 1;
+  }
+
+  .cmd-row > .hint {
+    flex-basis: 100%;
+  }
+}

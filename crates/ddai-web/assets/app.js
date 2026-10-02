@@ -20,6 +20,8 @@
   var tabStatusButton = document.getElementById("tab-status");
   var tabGameButton = document.getElementById("tab-game");
   var gameViewEl = document.getElementById("game-view");
+  var tabBotButton = document.getElementById("tab-bot");
+  var botViewEl = document.getElementById("bot-view");
 
   var csrfToken = null;
   var socket = null;
@@ -34,6 +36,8 @@
     statusView.hidden = true;
     tabbar.hidden = true;
     gameViewEl.hidden = true;
+    botViewEl.hidden = true;
+    BotPanel.onHidden();
     setConnected(false);
   }
 
@@ -42,16 +46,23 @@
     loginView.hidden = true;
     statusView.hidden = name !== "status";
     gameViewEl.hidden = name !== "game";
+    botViewEl.hidden = name !== "bot";
     tabStatusButton.classList.toggle("active", name === "status");
     tabGameButton.classList.toggle("active", name === "game");
+    tabBotButton.classList.toggle("active", name === "bot");
     if (name === "game") {
       GameView.onShown();
+    }
+    if (name === "bot") {
+      BotPanel.onShown();
+    } else {
+      BotPanel.onHidden();
     }
   }
 
   function showAuthenticated() {
     tabbar.hidden = false;
-    showTab(currentTab === "game" ? "game" : "status");
+    showTab(currentTab === "game" || currentTab === "bot" ? currentTab : "status");
   }
 
   function setConnected(on) {
@@ -293,6 +304,9 @@
   });
   tabGameButton.addEventListener("click", function () {
     showTab("game");
+  });
+  tabBotButton.addEventListener("click", function () {
+    showTab("bot");
   });
 
   // -----------------------------------------------------------------------------------------
@@ -1253,6 +1267,420 @@
       onConnectionChanged: onConnectionChanged,
       onShown: onShown,
     };
+  })();
+
+  // -----------------------------------------------------------------------------------------
+  // Task 5.6: bot control (owner only). Status panel, commands, friends/war/ignore editor.
+  // Every request carries the session cookie and the CSRF token; a 401 means the session ended
+  // (back to the login form). Everything dynamic goes through `textContent`, never `innerHTML`,
+  // so a nickname (or a bot reply) can never be interpreted as markup. Nothing is written to the
+  // console, to storage or to the URL: names stay on this page.
+  // -----------------------------------------------------------------------------------------
+
+  var BotPanel = (function () {
+    var STATUS_POLL_MS = 2000;
+    var TICKS_PER_SECOND = 50; // DDNet server ticks (SERVER_TICK_SPEED); the kill cooldown is 500 ticks = 10 s
+    var timer = null;
+    var shown = false;
+    var lastStatus = null;
+    var busy = false;
+
+    var KIND_LABELS = {
+      friend: "Друзья",
+      war: "Война",
+      ignore: "Игнор",
+      clanfriend: "Клан-друзья",
+      clanwar: "Клан-война",
+    };
+    var KIND_ORDER = ["friend", "war", "ignore", "clanfriend", "clanwar"];
+    var MODE_LABELS = { fight: "бой", passive: "пассивный", hold: "стоит", goto: "идёт в точку" };
+    var APPLIED_TEXT = {
+      applied: "применено к работающему боту (бот перечитал тот же файл)",
+      mismatch: "ВНИМАНИЕ: бот перечитал другой файл списков, не тот, что правит сайт (проверьте --relations у бота и сайта): бот может не щадить ваших друзей",
+      unverified: "бот ответил, но сверить, что он прочитал тот же файл, не удалось",
+      unchanged: "без изменений",
+      unavailable: "бот не запущен: список сохранён и вступит в силу при запуске",
+      rate_limited: "сохранено, но бот пока не принял (слишком частые команды): нажмите «Перечитать списки в боте»",
+      busy: "сохранено, но бот занят: нажмите «Перечитать списки в боте»",
+      timeout: "сохранено, но бот не ответил вовремя: нажмите «Перечитать списки в боте»",
+      bot_refused: "сохранено, но бот не принял перечитывание списков",
+      error: "сохранено, но ответ бота не понят",
+    };
+    var ERROR_TEXT = {
+      unauthenticated: "Сессия закончилась.",
+      cross_origin: "Запрос отклонён проверкой источника.",
+      missing_csrf: "Нет токена защиты: обновите страницу.",
+      bad_csrf: "Токен защиты не подошёл: обновите страницу.",
+      bot_unavailable: "Бот не запущен (нет сокета управления).",
+      bot_timeout: "Бот не ответил вовремя.",
+      bot_protocol: "Ответ бота не понят.",
+      bad_request: "Некорректный запрос.",
+      invalid: "Недопустимое значение.",
+      invalid_name: "Недопустимое имя.",
+      list_full: "Список заполнен.",
+      relations_unreadable: "Файл списков не читается (повреждён). Исправьте его вручную: сайт его не перезапишет.",
+      relations_write_failed: "Не удалось записать файл списков.",
+      json_required: "Нужен JSON.",
+    };
+    var NAME_DETAIL = {
+      empty: "имя пустое после нормализации",
+      too_long: "имя длиннее 64 байт",
+      control: "в имени управляющие символы",
+    };
+
+    function el(id) {
+      return document.getElementById(id);
+    }
+
+    function setText(id, text) {
+      el(id).textContent = text;
+    }
+
+    function show(id, text, ok) {
+      var node = el(id);
+      node.textContent = text;
+      node.classList.toggle("ok", ok === true);
+      node.classList.toggle("bad", ok === false);
+    }
+
+    // Same normalisation as the bot's `fold_name` (trim, collapse whitespace, lower-case, drop one leading "(<digits>)"),
+    // for the preview only: the server's answer is what is stored and what the bot matches on.
+    function previewFold(name) {
+      var folded = name.trim().split(/\s+/).join(" ").toLowerCase();
+      // Every leading "(<digits>)", like the bot (the fold must be idempotent: the file is folded again on load).
+      var stripped = folded.replace(/^\(\d+\)\s*/, "");
+      while (stripped !== folded) {
+        folded = stripped;
+        stripped = folded.replace(/^\(\d+\)\s*/, "");
+      }
+      return folded.trim();
+    }
+
+    function api(method, path, body) {
+      var headers = {};
+      var options = { method: method, credentials: "same-origin", headers: headers };
+      if (method !== "GET") {
+        headers["Content-Type"] = "application/json";
+        headers["X-CSRF-Token"] = csrfToken || "";
+        options.body = JSON.stringify(body || {});
+      }
+      return fetch(path, options).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (data) {
+          if (response.status === 401) {
+            csrfToken = null;
+            disconnectWs();
+            showLogin();
+          }
+          return { status: response.status, data: data };
+        });
+      });
+    }
+
+    function errorText(res) {
+      var d = res.data || {};
+      if (d.error === "invalid_name" && NAME_DETAIL[d.detail]) {
+        return "Недопустимое имя: " + NAME_DETAIL[d.detail] + ".";
+      }
+      if (d.code === "rate_limited" || res.status === 429) {
+        return "Слишком много команд подряд: подождите секунду.";
+      }
+      if (d.text) {
+        return d.text;
+      }
+      return ERROR_TEXT[d.error] || "Ошибка " + res.status + ".";
+    }
+
+    // ---- status panel ---------------------------------------------------------------------
+
+    function fmtUs(us) {
+      if (typeof us !== "number") {
+        return "—";
+      }
+      return us >= 1000 ? (us / 1000).toFixed(2) + " мс" : us + " мкс";
+    }
+
+    function renderStatus(info) {
+      var dot = el("bot-conn-dot");
+      var s = info && info.live ? info.status : null;
+      lastStatus = s;
+      var cooldownEl = el("kill-cooldown");
+      if (!s) {
+        dot.classList.remove("dot-on");
+        dot.classList.add("dot-off");
+        var why = !info
+          ? "нет связи с сервером"
+          : !info.bridge
+            ? "мост к боту не подключён (сайт запущен без --bot-socket)"
+            : "бот не запущен (нет живого статуса)";
+        setText("bot-conn-text", why);
+        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-target", "bs-wb", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
+          setText(id, "—");
+        });
+        cooldownEl.textContent = "—";
+        updateButtons();
+        return;
+      }
+      dot.classList.toggle("dot-on", !!s.connected);
+      dot.classList.toggle("dot-off", !s.connected);
+      setText("bot-conn-text", s.connected ? "В игре" : "Бот запущен, но не в игре (подключается или ждёт)");
+      setText("bs-server", s.server || "—");
+      setText("bs-map", s.map || "—");
+      setText("bs-mode", MODE_LABELS[s.mode] || s.mode || "—");
+      setText("bs-brain", s.brain || "—");
+      setText("bs-target", s.target_tag || "нет");
+      setText("bs-wb", (s.wb || "—") + (s.goto ? " · идёт: " + s.goto : ""));
+      setText("bs-blocks", (s.blocks | 0) + " / " + (s.blocked_by | 0));
+      setText("bs-deaths", (s.deaths | 0) + " / " + (s.self_kills | 0));
+      setText("bs-clips", String(s.clips_saved | 0));
+      setText("bs-latency", fmtUs(s.decide_p50_us) + " / " + fmtUs(s.decide_p99_us));
+      setText("bs-latency2", fmtUs(s.brain_p99_us) + " / " + fmtUs(s.overhead_p99_us));
+      setText("bs-identity", [s.name, s.clan, s.skin].filter(Boolean).join(" · ") || "—");
+      setText("bs-tick", String(s.tick | 0));
+      var cd = s.kill_cooldown_ticks | 0;
+      cooldownEl.textContent = cd > 0 ? "доступно через " + Math.ceil(cd / TICKS_PER_SECOND) + " с" : "готово";
+      updateButtons();
+    }
+
+    function updateButtons() {
+      var s = lastStatus;
+      var mode = s ? s.mode : null;
+      // The bot's line is "WB: <auto|left|right|off>, ..." (docs/formats.md §23).
+      var wbMatch = s && s.wb ? /^WB: (auto|left|right|off)\b/.exec(s.wb) : null;
+      var wbMode = wbMatch ? wbMatch[1] : null;
+      document.querySelectorAll('[data-cmd="mode"]').forEach(function (b) {
+        b.classList.toggle("current", mode === b.getAttribute("data-mode"));
+      });
+      document.querySelectorAll('[data-cmd="wb"]').forEach(function (b) {
+        b.classList.toggle("current", wbMode === b.getAttribute("data-mode"));
+      });
+      var brain = el("cmd-brain");
+      if (s && s.brain && document.activeElement !== brain) {
+        brain.value = s.brain;
+      }
+      el("cmd-kill").disabled = busy || !s || (s.kill_cooldown_ticks | 0) > 0;
+    }
+
+    function pollStatus() {
+      api("GET", "/api/bot/status")
+        .then(function (res) {
+          if (shown) {
+            renderStatus(res.status === 200 ? res.data : null);
+          }
+        })
+        .catch(function () {
+          if (shown) {
+            renderStatus(null);
+          }
+        });
+    }
+
+    // ---- commands -------------------------------------------------------------------------
+
+    function setBusy(on) {
+      busy = on;
+      document.querySelectorAll("#bot-view button").forEach(function (b) {
+        if (b.id !== "cmd-kill") {
+          b.disabled = on;
+        }
+      });
+      updateButtons();
+    }
+
+    function sendCommand(body, label) {
+      setBusy(true);
+      show("cmd-result", label + "…", null);
+      return api("POST", "/api/bot/command", body)
+        .then(function (res) {
+          var d = res.data || {};
+          if (res.status === 200 && d.ok) {
+            show("cmd-result", label + ": " + (d.text || "готово"), true);
+          } else {
+            show("cmd-result", label + ": " + errorText(res), false);
+          }
+          pollStatus();
+        })
+        .catch(function () {
+          show("cmd-result", label + ": нет связи с сайтом.", false);
+        })
+        .then(function () {
+          setBusy(false);
+        });
+    }
+
+    function onCommandClick(event) {
+      var target = event.target.closest("[data-cmd]");
+      if (!target) {
+        return;
+      }
+      var cmd = target.getAttribute("data-cmd");
+      var mode = target.getAttribute("data-mode");
+      var label = target.textContent.trim();
+      if (cmd === "mode" || cmd === "wb") {
+        sendCommand({ type: cmd, mode: mode }, label);
+      } else {
+        sendCommand({ type: cmd }, label);
+      }
+    }
+
+    function bindCommands() {
+      el("bot-view").addEventListener("click", onCommandClick);
+      el("cmd-brain-apply").addEventListener("click", function () {
+        sendCommand({ type: "brain", brain: el("cmd-brain").value }, "Мозг " + el("cmd-brain").value);
+      });
+      el("cmd-kill").addEventListener("click", function () {
+        if (window.confirm("Убить бота и возродить? Следующее убийство — не раньше чем через 10 с.")) {
+          sendCommand({ type: "kill" }, "Убить");
+        }
+      });
+      el("cmd-clip").addEventListener("click", function () {
+        sendCommand({ type: "clip", note: el("cmd-clip-note").value.trim() }, "Клип").then(function () {
+          el("cmd-clip-note").value = "";
+        });
+      });
+      el("cmd-goto").addEventListener("click", function () {
+        var x = parseInt(el("cmd-goto-x").value, 10);
+        var y = parseInt(el("cmd-goto-y").value, 10);
+        if (isNaN(x) || isNaN(y)) {
+          show("cmd-result", "Идти: введите целые x и y (в тайлах).", false);
+          return;
+        }
+        sendCommand({ type: "goto", x: x, y: y }, "Идти в " + x + ", " + y);
+      });
+      el("cmd-spec").addEventListener("click", function () {
+        if (window.confirm("Отправить бота в наблюдатели? Вернуть можно кнопкой «В игру».")) {
+          sendCommand({ type: "spec" }, "В наблюдатели");
+        }
+      });
+    }
+
+    // ---- relations editor -----------------------------------------------------------------
+
+    function renderLists(lists) {
+      var root = el("rel-lists");
+      while (root.firstChild) {
+        root.removeChild(root.firstChild);
+      }
+      KIND_ORDER.forEach(function (kind) {
+        var group = document.createElement("div");
+        group.className = "rel-group";
+        var title = document.createElement("h3");
+        var names = (lists && lists[kind]) || [];
+        title.textContent = KIND_LABELS[kind] + " (" + names.length + ")";
+        group.appendChild(title);
+        if (names.length === 0) {
+          var empty = document.createElement("span");
+          empty.className = "rel-empty";
+          empty.textContent = "пусто";
+          group.appendChild(empty);
+        } else {
+          var ul = document.createElement("ul");
+          ul.className = "rel-entries";
+          names.forEach(function (name) {
+            var li = document.createElement("li");
+            var label = document.createElement("span");
+            label.textContent = name;
+            var remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "alt";
+            remove.textContent = "×";
+            remove.setAttribute("aria-label", "Убрать из списка «" + KIND_LABELS[kind] + "»: " + name);
+            remove.addEventListener("click", function () {
+              editRelations("remove", kind, name);
+            });
+            li.appendChild(label);
+            li.appendChild(remove);
+            ul.appendChild(li);
+          });
+          group.appendChild(ul);
+        }
+        root.appendChild(group);
+      });
+    }
+
+    function loadLists() {
+      return api("GET", "/api/bot/relations").then(function (res) {
+        if (res.status === 200) {
+          renderLists(res.data.lists);
+        } else {
+          show("rel-result", errorText(res), false);
+        }
+      });
+    }
+
+    function editRelations(op, kind, name) {
+      show("rel-result", "…", null);
+      return api("POST", "/api/bot/relations", { op: op, kind: kind, name: name })
+        .then(function (res) {
+          var d = res.data || {};
+          if (res.status !== 200 || !d.ok) {
+            show("rel-result", errorText(res), false);
+            return;
+          }
+          renderLists(d.lists);
+          var what = op === "add" ? "Добавлено" : d.changed ? "Убрано" : "Такого имени в списке не было";
+          var text = what + " («" + d.normalised + "», список «" + KIND_LABELS[d.kind] + "»)";
+          if (d.moved_from && d.moved_from.length) {
+            text += "; снято из: " + d.moved_from.map(function (k) { return KIND_LABELS[k]; }).join(", ");
+          }
+          text += " — " + (APPLIED_TEXT[d.applied] || d.applied) + ".";
+          if (d.applied_text && d.applied !== "unchanged") {
+            text += " Ответ бота: " + d.applied_text + ".";
+          }
+          show("rel-result", text, d.applied === "applied" || d.applied === "unchanged");
+          if (op === "add") {
+            el("rel-name").value = "";
+            updatePreview();
+          }
+        })
+        .catch(function () {
+          show("rel-result", "Нет связи с сайтом.", false);
+        });
+    }
+
+    function updatePreview() {
+      var raw = el("rel-name").value;
+      var folded = previewFold(raw);
+      setText("rel-preview", raw.trim() === "" ? "" : folded === "" ? "после нормализации имя пустое" : "будет сохранено как: «" + folded + "»");
+    }
+
+    function bindRelations() {
+      el("rel-name").addEventListener("input", updatePreview);
+      el("rel-form").addEventListener("submit", function (event) {
+        event.preventDefault();
+        var name = el("rel-name").value;
+        if (previewFold(name) === "") {
+          show("rel-result", "Введите непустое имя.", false);
+          return;
+        }
+        editRelations("add", el("rel-kind").value, name);
+      });
+      el("rel-reload").addEventListener("click", function () {
+        sendCommand({ type: "reload_relations" }, "Перечитать списки").then(function () {
+          show("rel-result", el("cmd-result").textContent, el("cmd-result").classList.contains("ok"));
+        });
+      });
+    }
+
+    function onShown() {
+      shown = true;
+      pollStatus();
+      loadLists();
+      if (!timer) {
+        timer = setInterval(pollStatus, STATUS_POLL_MS);
+      }
+    }
+
+    function onHidden() {
+      shown = false;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    bindCommands();
+    bindRelations();
+    return { onShown: onShown, onHidden: onHidden };
   })();
 
   refresh();

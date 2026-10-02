@@ -22,6 +22,29 @@ pub fn is_same_origin(host_header: Option<&str>, origin_header: Option<&str>, se
     }
 }
 
+/// The strict variant for the bot-control routes (task 5.6): everything [`is_same_origin`] checks, **and** `Origin` must be
+/// present and match the `Host` (no fallback to `Sec-Fetch-Site` alone), `Sec-Fetch-Site` — when the browser sends it —
+/// must be exactly `same-origin` (`none` is a user-typed navigation, never a `fetch` POST), and with `require_https`
+/// (a deployment behind HTTPS, `cookie_secure`) the `Origin` must be an `https://` one. A browser always sends `Origin`
+/// on a cross-origin or a non-GET request, so a legitimate page's `fetch()` POST is never refused by this.
+pub fn is_strict_same_origin(
+    host_header: Option<&str>,
+    origin_header: Option<&str>,
+    sec_fetch_site: Option<&str>,
+    require_https: bool,
+) -> bool {
+    if sec_fetch_site.is_some_and(|site| !site.eq_ignore_ascii_case("same-origin")) {
+        return false;
+    }
+    let (Some(host), Some(origin)) = (host_header, origin_header) else {
+        return false;
+    };
+    if require_https && !origin.starts_with("https://") {
+        return false;
+    }
+    origin_authority(origin).is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+}
+
 /// Extracts the `host[:port]` authority from an `Origin` header value like
 /// `"https://example.com"` or `"http://127.0.0.1:7788"`. `Origin` never carries a path or
 /// userinfo, so a plain `"://"` split is sufficient (no need for a full URL parser here).
@@ -115,6 +138,30 @@ mod tests {
     #[test]
     fn malformed_origin_is_rejected() {
         assert!(!is_same_origin(Some("127.0.0.1:7788"), Some("not-a-url"), None));
+    }
+
+    #[test]
+    fn strict_requires_an_origin_that_matches_the_host() {
+        let ok = |h, o, s, https| is_strict_same_origin(h, o, s, https);
+        assert!(ok(Some("h:1"), Some("http://h:1"), None, false));
+        assert!(ok(Some("h:1"), Some("http://H:1"), Some("same-origin"), false));
+        // No Origin: refused even when Sec-Fetch-Site says same-origin (the lax check would pass this).
+        assert!(is_same_origin(Some("h:1"), None, Some("same-origin")));
+        assert!(!ok(Some("h:1"), None, Some("same-origin"), false));
+        assert!(!ok(Some("h:1"), None, None, false));
+        assert!(!ok(None, Some("http://h:1"), None, false));
+        // A different host, a different port, "null", garbage.
+        assert!(!ok(Some("h:1"), Some("http://h:2"), None, false));
+        assert!(!ok(Some("h:1"), Some("http://evil.example"), None, false));
+        assert!(!ok(Some("h:1"), Some("null"), None, false));
+        assert!(!ok(Some("h:1"), Some("h:1"), None, false));
+        // Sec-Fetch-Site must be same-origin when present: not none, same-site or cross-site.
+        for site in ["none", "same-site", "cross-site", "garbage"] {
+            assert!(!ok(Some("h:1"), Some("http://h:1"), Some(site), false), "{site}");
+        }
+        // Behind HTTPS the Origin must be https.
+        assert!(ok(Some("h"), Some("https://h"), Some("same-origin"), true));
+        assert!(!ok(Some("h"), Some("http://h"), Some("same-origin"), true));
     }
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {

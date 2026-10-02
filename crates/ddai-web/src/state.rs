@@ -10,6 +10,8 @@ use crate::auth::device::DeviceStore;
 use crate::auth::rate_limit::LoginRateLimiter;
 use crate::auth::session::{SessionId, SessionStore};
 use crate::config::WebConfig;
+use crate::control::client::ControlClient;
+use crate::control::relations::RelationsStore;
 use crate::live::hub::LiveHub;
 use crate::secrets::SecretsPaths;
 
@@ -55,6 +57,10 @@ pub struct AppState {
     /// configured — `None` otherwise (the WS still works; it just never gets `map`/`live`
     /// messages). See `crate::live::hub`.
     pub live_hub: Option<Arc<LiveHub>>,
+    /// Task 5.6: the client of the bot's control socket (connect only).
+    pub control: ControlClient,
+    /// Task 5.6: the friend / war / ignore lists file.
+    pub relations: RelationsStore,
 }
 
 impl AppState {
@@ -74,6 +80,8 @@ impl AppState {
         let devices = DeviceStore::load_or_empty(&secrets_paths, config.trusted_device_ttl);
         let login_rate_limiter = LoginRateLimiter::new(config.login_rate_limit);
         let (session_invalidated, _rx) = broadcast::channel(SESSION_INVALIDATED_CHANNEL_CAPACITY);
+        let control = ControlClient::new(config.control_socket.clone());
+        let relations = RelationsStore::new(config.relations_path.clone());
         Self {
             config,
             secrets_paths,
@@ -86,6 +94,8 @@ impl AppState {
             argon2_semaphore: Semaphore::new(ARGON2_MAX_CONCURRENT),
             session_invalidated,
             live_hub,
+            control,
+            relations,
         }
     }
 

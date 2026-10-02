@@ -87,6 +87,134 @@
       </div>
     </section>
 
+
+    <!-- Task 5.6: bot control (owner only) — status panel, commands, friends/war/ignore editor. Outside `.shell`
+         like the game view, scrolls on its own; everything dynamic is set with `textContent` (never `innerHTML`). -->
+    <section id="bot-view" class="bot-view" hidden>
+      <h1>Бот</h1>
+
+      <section class="card" aria-labelledby="bot-status-title">
+        <h2 id="bot-status-title">Состояние</h2>
+        <p id="bot-conn" class="bot-conn"><span id="bot-conn-dot" class="dot dot-off" aria-hidden="true"></span> <span id="bot-conn-text">загрузка…</span></p>
+        <dl class="kv" id="bot-status-grid">
+          <dt>Сервер</dt><dd id="bs-server">—</dd>
+          <dt>Карта</dt><dd id="bs-map">—</dd>
+          <dt>Режим</dt><dd id="bs-mode">—</dd>
+          <dt>Мозг</dt><dd id="bs-brain">—</dd>
+          <dt>Цель</dt><dd id="bs-target">—</dd>
+          <dt>Вейблок</dt><dd id="bs-wb">—</dd>
+          <dt>Блоки / заблокирован</dt><dd id="bs-blocks">—</dd>
+          <dt>Смерти / самоубийства</dt><dd id="bs-deaths">—</dd>
+          <dt>Клипы</dt><dd id="bs-clips">—</dd>
+          <dt>Решение p50 / p99</dt><dd id="bs-latency">—</dd>
+          <dt>Мозг p99 / накладные p99</dt><dd id="bs-latency2">—</dd>
+          <dt>Облик (ник, клан, скин)</dt><dd id="bs-identity">—</dd>
+          <dt>Тик</dt><dd id="bs-tick">—</dd>
+        </dl>
+      </section>
+
+      <section class="card" aria-labelledby="bot-cmd-title">
+        <h2 id="bot-cmd-title">Команды</h2>
+        <p class="hint">Бот никогда не пишет в игровой чат: здесь нет ни одной команды, которая могла бы это сделать.</p>
+
+        <div class="cmd-row">
+          <span class="cmd-label">Режим</span>
+          <div class="btn-group" role="group" aria-label="Режим">
+            <button type="button" class="alt" data-cmd="mode" data-mode="fight">Бой</button>
+            <button type="button" class="alt" data-cmd="mode" data-mode="passive">Пассивный</button>
+            <button type="button" class="alt" data-cmd="mode" data-mode="hold">Стоять</button>
+          </div>
+        </div>
+        <div class="cmd-row">
+          <span class="cmd-label">Ход</span>
+          <div class="btn-group" role="group" aria-label="Стоп и ход">
+            <button type="button" class="alt" data-cmd="stop">Стоп</button>
+            <button type="button" class="alt" data-cmd="go">Играть</button>
+          </div>
+        </div>
+        <div class="cmd-row">
+          <span class="cmd-label">Вейблок</span>
+          <div class="btn-group" role="group" aria-label="Вейблок">
+            <button type="button" class="alt" data-cmd="wb" data-mode="auto">Авто</button>
+            <button type="button" class="alt" data-cmd="wb" data-mode="left">Лево</button>
+            <button type="button" class="alt" data-cmd="wb" data-mode="right">Право</button>
+            <button type="button" class="alt" data-cmd="wb" data-mode="off">Выкл</button>
+          </div>
+        </div>
+        <div class="cmd-row">
+          <label class="cmd-label" for="cmd-brain">Мозг</label>
+          <div class="inline-form">
+            <select id="cmd-brain">
+              <option value="hybrid">hybrid (муха + точный поиск)</option>
+              <option value="planner">planner</option>
+              <option value="scripted">scripted</option>
+              <option value="idle">idle (ничего не делает)</option>
+              <option value="fly">fly (муха одна)</option>
+            </select>
+            <button type="button" class="alt" id="cmd-brain-apply">Сменить</button>
+          </div>
+        </div>
+        <div class="cmd-row">
+          <span class="cmd-label">Убить и возродить</span>
+          <div class="inline-form">
+            <button type="button" class="danger" id="cmd-kill">Убить</button>
+            <span id="kill-cooldown" class="hint">—</span>
+          </div>
+        </div>
+        <div class="cmd-row">
+          <label class="cmd-label" for="cmd-clip-note">Клип (последние 30 с)</label>
+          <div class="inline-form">
+            <input id="cmd-clip-note" type="text" maxlength="60" autocomplete="off" placeholder="заметка (необязательно)" />
+            <button type="button" class="alt" id="cmd-clip">Сохранить клип</button>
+          </div>
+          <p class="hint warn">Заметка попадает в сам клип и в имя его файла. Клипами можно делиться, поэтому пишите без ников игроков.</p>
+        </div>
+        <div class="cmd-row">
+          <span class="cmd-label">Идти в тайл</span>
+          <div class="inline-form">
+            <input id="cmd-goto-x" type="number" inputmode="numeric" step="1" placeholder="x" aria-label="x" />
+            <input id="cmd-goto-y" type="number" inputmode="numeric" step="1" placeholder="y" aria-label="y" />
+            <button type="button" class="alt" id="cmd-goto">Идти</button>
+          </div>
+        </div>
+        <div class="cmd-row">
+          <span class="cmd-label">Наблюдатель</span>
+          <div class="btn-group" role="group" aria-label="Наблюдатель и игра">
+            <button type="button" class="alt" id="cmd-spec">В наблюдатели</button>
+            <button type="button" class="alt" data-cmd="join">В игру</button>
+          </div>
+        </div>
+        <p id="cmd-result" class="result" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="card" aria-labelledby="bot-rel-title">
+        <h2 id="bot-rel-title">Друзья, война, игнор</h2>
+        <p class="hint">
+          Совпадение точное после нормализации: пробелы по краям и повторы убираются, регистр не важен, префикс «(1)» от
+          дубликата ника снимается. Часть ника ничего не задевает. Имена видны только вам и нигде не пишутся в журнал.
+        </p>
+        <form id="rel-form" autocomplete="off">
+          <div class="inline-form">
+            <select id="rel-kind" aria-label="Список">
+              <option value="friend">Друзья — не трогать, защищать</option>
+              <option value="war">Война — бить при встрече</option>
+              <option value="ignore">Игнор — не трогать</option>
+              <option value="clanfriend">Клан-друзья (тег клана)</option>
+              <option value="clanwar">Клан-война (тег клана)</option>
+            </select>
+          </div>
+          <div class="inline-form">
+            <input id="rel-name" type="text" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ник или тег клана" aria-label="Ник или тег клана" required />
+            <button type="submit">Добавить</button>
+          </div>
+          <p id="rel-preview" class="hint"></p>
+        </form>
+        <p id="rel-result" class="result" role="status" aria-live="polite"></p>
+        <div id="rel-lists" class="rel-lists"></div>
+        <button type="button" class="alt" id="rel-reload">Перечитать списки в боте</button>
+      </section>
+    </section>
+
     <!-- Always `position: fixed` (see app.css) — must stay clickable, and above `#game-view`,
          at every viewport width (review round 1, finding F4: a previous version switched this to
          `position: static` on wide screens, which let the fixed, full-viewport `#game-view`
@@ -94,6 +222,7 @@
     <nav class="tabbar" id="tabbar" hidden>
       <button id="tab-status" type="button" class="active">Статус</button>
       <button id="tab-game" type="button">Игра</button>
+      <button id="tab-bot" type="button">Бот</button>
     </nav>
 
     <script src="/app.js"></script>

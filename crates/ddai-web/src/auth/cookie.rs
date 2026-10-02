@@ -34,6 +34,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const SESSION_CONTEXT: &[u8] = b"session";
 const DEVICE_CONTEXT: &[u8] = b"device";
+const AUDIT_CONTEXT: &[u8] = b"audit";
 
 pub const SESSION_COOKIE_NAME_SECURE: &str = "__Host-session";
 pub const SESSION_COOKIE_NAME_INSECURE: &str = "ddai_session";
@@ -75,6 +76,15 @@ fn decode_signed(key: &[u8], context: &[u8], value: &str) -> Option<[u8; 32]> {
     let id: [u8; 32] = id_bytes.as_slice().try_into().ok()?;
     hmac_for(key, context, &id).verify_slice(&sig_bytes).ok()?;
     Some(id)
+}
+
+/// An opaque, non-reversible tag of a session for the bot's audit log (task 5.6): 8 bytes of
+/// `HMAC-SHA256(key, "audit" || id)` as lower-case hex. It is **not** the session id nor the cookie (the bot's log must
+/// not be able to impersonate a session), it is stable for a session's life, and different sessions get different
+/// tags. Domain-separated from the cookie signatures by its own context.
+pub fn audit_tag(key: &[u8], id: &SessionId) -> String {
+    let full = hmac_for(key, AUDIT_CONTEXT, id).finalize().into_bytes();
+    full[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Encodes a session id into its signed cookie value.
@@ -142,6 +152,22 @@ mod tests {
         let value = encode_session_cookie_value(&key, &id);
         let decoded = decode_session_cookie_value(&key, &value).expect("should decode");
         assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn the_audit_tag_is_stable_per_session_valid_for_the_bot_and_not_the_cookie() {
+        let key = random_bytes::<32>();
+        let a: SessionId = random_bytes::<32>();
+        let b: SessionId = random_bytes::<32>();
+        let tag = audit_tag(&key, &a);
+        assert_eq!(tag, audit_tag(&key, &a), "stable");
+        assert_ne!(tag, audit_tag(&key, &b), "one per session");
+        assert_ne!(tag, audit_tag(&random_bytes::<32>(), &a), "keyed");
+        assert!(ddai_botctl::proto::valid_session_tag(&tag), "{tag}");
+        assert_eq!(tag.len(), 16);
+        // It reveals nothing of the id or the signed cookie value.
+        let cookie = encode_session_cookie_value(&key, &a);
+        assert!(!cookie.contains(&tag) && !encode_b64(&a).contains(&tag));
     }
 
     #[test]

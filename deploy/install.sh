@@ -181,6 +181,10 @@ fi
 # ---------------------------------------------------------------------------------------------
 mkdir -p "$DATA_DIR/logs/web"
 mkdir -p "$DATA_DIR/secrets"
+# Task 5.6: the unit has ReadWritePaths on bot/ (the friends editor writes relations.json there); the bot (ddnet-ai play)
+# uses the same directory for its sockets. 0700: it holds nicknames and the control socket.
+mkdir -p "$DATA_DIR/bot"
+chmod 700 "$DATA_DIR/bot"
 chmod 0700 "$DATA_DIR/secrets"
 
 if [[ ! -f "$DATA_DIR/secrets/web-auth.toml" ]]; then

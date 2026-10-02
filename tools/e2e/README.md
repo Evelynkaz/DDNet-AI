@@ -22,7 +22,10 @@ Caddy/HTTPS (`https://89-58-7-133.sslip.io`, настоящий сертифик
 BlmapChill.map` на диске (задача 2.1) — без него тест пропускается (`test.skip`), не падает.
 Скриншоты — `~/aiddnet/data/screenshots/5.2a-*.png`.
 
-Ни один из трёх не входит в CI (см. constraints задач 5.1/5.3/5.2a) — запускать руками после
+`bot-control.spec.ts` (задача 5.6) — вкладка «Бот»: панель состояния, команды и редактор списков, против настоящего `ddnet-ai web` на случайном порту в временном `--data-dir` и **поддельного бота на Node** (сокет управления `control.sock` и мост `live.sock`); настоящего бота и игрового сервера нет.
+Проверяет: статус из моста, кулдаун kill, команду → запрос на сокете → ответ на экране, добавление / удаление имени (предпросмотр свёрнутой формы, файл `relations.json`), разметку в имени как текст, POST без CSRF из настоящего браузера → 403, телефонный вьюпорт. Скриншоты — `~/aiddnet/data/screenshots/5.6-*.png`.
+
+Ни один из этих тестов не входит в CI (см. constraints задач 5.1/5.3/5.2a) — запускать руками после
 изменений в `ddai-web` или в развёртывании (`deploy/`).
 
 ## Как запустить
@@ -47,6 +50,9 @@ npx playwright test web-login.spec.ts
 # 3b. Против настоящего HTTPS-развёртывания (5.3) — нужен уже поднятый Caddy+ddnet-ai-web
 #     (deploy/install.sh) и сгенерированный пароль (ddnet-ai web-passwd):
 DDAI_E2E_BASE_URL=https://89-58-7-133.sslip.io npx playwright test web-login-https.spec.ts
+
+# 3d. Управление ботом (5.6) — как 3a, плюс поддельный бот внутри теста:
+npx playwright test bot-control.spec.ts
 
 # 3c. Живая карта (5.2a) — сам собирает пример-генератор синтетической трассы
 #     (cargo build -p ddai-web --features test-util --example make_test_trace) и поднимает

@@ -1,5 +1,6 @@
 //! `~/aiddnet/data/bot/settings.toml` (task 4.3): the few things the console commands change and the next
-//! run should remember — the brain, the wayblock mode, where the lists live, `!low` and `!strong`. Every
+//! run should remember — the brain, the wayblock mode, where the lists live, `!low` and `!strong` — and (task 5.6)
+//! the bot's clan and skin. Every
 //! field is optional: a missing file or key means "use the command line's / the built-in default".
 //! Nothing here is a secret and nothing a nickname, but it is **never in git** (CLAUDE.md).
 //!
@@ -28,6 +29,12 @@ pub struct Settings {
     pub low: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strong: Option<bool>,
+    /// The clan sent in `Cl_StartInfo` (default `Neuroset`, D-068). The nick is not here: see `identity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clan: Option<String>,
+    /// A fixed skin; without it the bot picks a random stock skin at every start (D-068).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skin: Option<String>,
 }
 
 /// `~/aiddnet/data/bot/settings.toml`.
@@ -117,6 +124,8 @@ mod tests {
             relations: Some(PathBuf::from("/x/relations.json")),
             low: Some(true),
             strong: Some(false),
+            clan: Some("Neuroset".into()),
+            skin: Some("pinky".into()),
         };
         save(&path, &s).unwrap();
         assert_eq!(load(&path), Loaded::Ok(s));

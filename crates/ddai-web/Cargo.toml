@@ -43,6 +43,8 @@ thiserror = "2"
 ddai-physics = { path = "../ddai-physics" }
 ddai-map = { path = "../ddai-map" }
 ddai-trace = { path = "../ddai-trace" }
+# Task 5.6: the control-channel protocol, name folding and the lists file shared with the bot.
+ddai-botctl = { path = "../ddai-botctl" }
 # Pure-Rust zlib deflate (no C dependency, same choice `ddai-map` already made) for the
 # compressed `/api/map/<sha256>` scene payload.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
@@ -50,6 +52,8 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 [dev-dependencies]
 tempfile = "3.14"
 tokio-tungstenite = "0.29"
+# Task 5.6: the bot-control test captures the web unit's log lines to prove no name is logged.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 futures-util = "0.3"
 # Enables `ddai_map::testutil` (see that crate's own `[dev-dependencies]` for the same
 # self-reference trick) so this crate's own tests can build a real, loadable synthetic `.map`

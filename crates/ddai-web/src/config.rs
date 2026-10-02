@@ -56,6 +56,12 @@ pub struct WebConfig {
     /// Live WS frame rate cap, in Hz (acceptance criterion 1: "≤ 50 Hz; default 25 Hz, 10 Hz
     /// эконом"). A client's `sub{live: hz}` request is clamped to this.
     pub max_live_hz: f32,
+    /// Task 5.6: the bot's control socket (`ddai_bot::control`, `docs/formats.md` §26) the owner's commands go to.
+    /// Default `<data-dir>/bot/control.sock`. The web only ever *connects* to it; it never creates it.
+    pub control_socket: PathBuf,
+    /// Task 5.6: the friend / war / ignore lists file the editor reads and writes. Default
+    /// `<data-dir>/bot/relations.json`.
+    pub relations_path: PathBuf,
 }
 
 impl WebConfig {
@@ -67,7 +73,6 @@ impl WebConfig {
     pub fn new(listen: SocketAddr, data_dir: PathBuf) -> Self {
         Self {
             listen,
-            data_dir,
             trust_proxy: false,
             i_know_this_is_public: false,
             cookie_secure: false,
@@ -83,6 +88,9 @@ impl WebConfig {
             bot_socket: None,
             map_search_dirs: Vec::new(),
             max_live_hz: 50.0,
+            control_socket: data_dir.join("bot").join("control.sock"),
+            relations_path: data_dir.join("bot").join("relations.json"),
+            data_dir,
         }
     }
 }

@@ -22,9 +22,13 @@ WorkingDirectory=/home/ubuntu/aiddnet/data
 # Fail closed if the binary is missing (e.g. deploy/install.sh was interrupted before the build
 # step finished) instead of systemd retrying a nonexistent exec forever.
 ExecStartPre=/usr/bin/test -x /home/ubuntu/aiddnet/bin/ddnet-ai
-# Task 5.2a: until the live bot exists (phase 4), the live map shows replays of the Oracle B
-# corpus (real DDNet 20.1 server games on real block maps). Read-only paths under ProtectHome.
-ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure --replay /home/ubuntu/aiddnet/data/traces/oracle-b/v1 --maps-dir /home/ubuntu/aiddnet/data/ddnet-server/maps --maps-dir /home/ubuntu/aiddnet/data/maps/copy-love-box --maps-dir /home/ubuntu/aiddnet/data/maps/cache
+# Task 5.6: the live view and the bot panel read the running bot (`ddnet-ai play`) through its bridge socket,
+# `data/bot/live.sock`; the owner's commands and the friends editor use `data/bot/control.sock` and
+# `data/bot/relations.json` (both defaults under --data-dir). `--replay` (the Oracle B corpus shown while there was no
+# bot, task 5.2a) conflicts with `--bot-socket` and is dropped: until the bot runs, the "Игра" tab says it is not
+# running. To get the replays back, swap `--bot-socket ...` for `--replay <dir>` (the "Бот" tab then has no status).
+# Read-only map directories under ProtectHome.
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure --bot-socket /home/ubuntu/aiddnet/data/bot/live.sock --maps-dir /home/ubuntu/aiddnet/data/ddnet-server/maps --maps-dir /home/ubuntu/aiddnet/data/maps/copy-love-box --maps-dir /home/ubuntu/aiddnet/data/maps/cache
 Restart=on-failure
 RestartSec=2
 
@@ -32,12 +36,14 @@ RestartSec=2
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-# The only two subtrees this process ever writes to (secrets: password hash/session key;
-# logs: the daily-rotating audit log — see ddnet-ai's `web_cmd::init_tracing`). Both already
-# exist before this unit's first start (deploy/install.sh pre-creates logs/web/; secrets/ was
-# created earlier by `ddnet-ai web-passwd`), so ProtectSystem=strict's read-only bind mount of
-# everything else never blocks a subdirectory create *inside* either of these two paths.
-ReadWritePaths=/home/ubuntu/aiddnet/data/secrets /home/ubuntu/aiddnet/data/logs
+# The only three subtrees this process ever writes to (secrets: password hash/session key;
+# logs: the daily-rotating audit log — see ddnet-ai's `web_cmd::init_tracing`; bot: task 5.6's friends editor
+# writes relations.json (+ its .lock and temporary files) there, next to the bot's own sockets — the web only
+# connects to those). All three already exist before this unit's first start (deploy/install.sh pre-creates
+# logs/web/ and bot/ (0700); secrets/ was created earlier by `ddnet-ai web-passwd`), so ProtectSystem=strict's
+# read-only bind mount of everything else never blocks a subdirectory create *inside* these paths. If bot/ is
+# missing the unit fails to start (status 226/NAMESPACE): `mkdir -p -m 700 ~/aiddnet/data/bot`.
+ReadWritePaths=/home/ubuntu/aiddnet/data/secrets /home/ubuntu/aiddnet/data/logs /home/ubuntu/aiddnet/data/bot
 PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true

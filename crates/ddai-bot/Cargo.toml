@@ -19,6 +19,7 @@ workspace = true
 ddai-brain = { path = "../ddai-brain" }
 ddai-client = { path = "../ddai-client" }
 ddai-clip = { path = "../ddai-clip" }
+ddai-botctl = { path = "../ddai-botctl" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-nav = { path = "../ddai-nav" }
 ddai-flyg = { path = "../ddai-flyg" }

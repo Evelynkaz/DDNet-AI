@@ -118,6 +118,27 @@ pub struct BotOpts {
     /// Do not read or write a settings file.
     #[arg(long, conflicts_with = "settings")]
     pub no_settings: bool,
+    /// The clan sent to the server (D-068: `Neuroset` by default; also `clan = "..."` in the settings file).
+    #[arg(long)]
+    pub clan: Option<String>,
+    /// A fixed skin name (also `skin = "..."` in the settings file). Without it the bot picks a random stock skin at
+    /// every start (D-068).
+    #[arg(long)]
+    pub skin: Option<String>,
+    /// Makes the random skin pick deterministic (tests). Ignored when `--skin` is given.
+    #[arg(long)]
+    pub skin_seed: Option<u64>,
+    /// Unix socket of the web control channel (task 5.6, D-070): the web unit's owner-only commands and the lists
+    /// editor reach the bot through it. Default `<data-dir>/bot/control.sock` (mode 0600 in a 0700 directory).
+    #[arg(long)]
+    pub control: Option<PathBuf>,
+    /// Do not open the web control socket.
+    #[arg(long, conflicts_with = "control")]
+    pub no_control: bool,
+    /// The control channel's audit log (command tags, session tags, outcomes; no nicknames). Default
+    /// `<data-dir>/logs/bot/control-audit.log`.
+    #[arg(long)]
+    pub control_audit: Option<PathBuf>,
 }
 
 /// Whether `--flag` (or `--flag=value`) was typed on the command line, as opposed to being a default: a
@@ -185,8 +206,24 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
             return ExitCode::FAILURE;
         }
     };
+    let identity = match ddai_bot::identity::resolve(
+        ddai_bot::identity::Overrides {
+            clan: o.clan.as_deref(),
+            skin: o.skin.as_deref(),
+            skin_seed: o.skin_seed,
+        },
+        &settings,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("identity: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let mut client = ClientConfig {
         name: args.name.clone(),
+        clan: identity.clan.clone(),
+        skin: identity.skin.clone(),
         cache_dir: data_dir.join("maps").join("cache"),
         timeout: args
             .timeout_secs
@@ -300,28 +337,65 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
                 .unwrap_or_else(|| data_dir.join("bot").join("live.sock")),
         )
     };
-    // The console (task 4.3): stdin lines become commands on the bus; nothing typed ever reaches the chat.
+    // The command bus: the console (task 4.3) and the web control socket (task 5.6) both put `BotCommand`s on it and
+    // the bot answers between two snapshots. Nothing typed or sent ever reaches the chat.
     let console = o.console || (!o.no_console && ddai_bot::console::stdin_is_terminal());
-    let (commands, console_out) = if console {
-        let (sender, inbox) = ddai_bot::command::CommandBus::open();
+    let (bus_sender, inbox) = ddai_bot::command::CommandBus::open();
+    let mut bus_used = false;
+    let console_out = if console {
         let print = ddai_bot::console::stdout_printer();
         match ddai_bot::console::spawn(
-            sender,
+            bus_sender.clone(),
             std::io::BufReader::new(std::io::stdin()),
             std::sync::Arc::clone(&print),
         ) {
             Ok(_) => {
                 println!("console: type !help for the commands; a line without ! or ? is not sent anywhere");
-                (Some(inbox), Some(print))
+                bus_used = true;
+                Some(print)
             }
             Err(e) => {
                 eprintln!("could not start the console: {e}");
-                (None, None)
+                None
             }
         }
     } else {
-        (None, None)
+        None
     };
+    // Held until the bot has stopped: dropping it closes and removes the socket.
+    let _control = if o.no_control {
+        None
+    } else {
+        let socket = o
+            .control
+            .clone()
+            .unwrap_or_else(|| data_dir.join("bot").join(ddai_bot::control::SOCKET_NAME));
+        let audit_path = o
+            .control_audit
+            .clone()
+            .unwrap_or_else(|| data_dir.join("logs").join("bot").join("control-audit.log"));
+        let audit = match ddai_bot::control::FileAudit::open(&audit_path) {
+            Ok(a) => std::sync::Arc::new(a),
+            Err(e) => {
+                eprintln!(
+                    "refusing to start: cannot open the control audit log {}: {e}",
+                    audit_path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        match ddai_bot::control::ControlServer::start(&socket, bus_sender.clone(), audit) {
+            Ok(server) => {
+                bus_used = true;
+                Some(server)
+            }
+            Err(e) => {
+                eprintln!("refusing to start: the control socket {}: {e}", socket.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+    let commands = bus_used.then_some(inbox);
     let cfg = RunnerConfig {
         server,
         client,

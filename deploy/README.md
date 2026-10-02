@@ -35,6 +35,34 @@ deploy/install.sh --no-ufw       # не трогать ufw вообще (есл�
 скрипт сам это печатает как напоминание. Пароль генерируется отдельно (см. ниже) **один раз** —
 дальше он переживает любой `deploy/install.sh`/`systemctl restart`.
 
+## Управление ботом с сайта (задача 5.6, D-070): что меняется при развёртывании
+
+Вкладка «Бот» (статус, команды, редактор друзей / войны / игнора) работает через три файла в `~/aiddnet/data/bot/` (каталог `0700`):
+`live.sock` (бот → сайт, только чтение), `control.sock` (сайт → бот: команды), `relations.json` (списки; пишет сайт, читает бот).
+
+Что изменено в юните `deploy/systemd/ddnet-ai-web.service` (ревью 5.6, F2):
+
+- `ReadWritePaths` получил `/home/ubuntu/aiddnet/data/bot`. Без этого (`ProtectHome=read-only`) каждое добавление в список давало бы 500
+  `relations_write_failed`. Сам сокет `control.sock` юнит только открывает на соединение, это разрешено (`AF_UNIX`).
+- `--replay …/traces/oracle-b/v1` заменён на `--bot-socket /home/ubuntu/aiddnet/data/bot/live.sock`: эти флаги несовместимы (источник кадров один).
+  **Цена:** пока бот не запущен, вкладка «Игра» не показывает реплеи корпуса Oracle B, а пишет, что бота нет. Вернуть реплеи: в юните заменить
+  `--bot-socket …` на `--replay /home/ubuntu/aiddnet/data/traces/oracle-b/v1` (тогда у вкладки «Бот» нет статуса, редактор и команды работают).
+  Совмещать «живой бот, а при его отсутствии реплеи» не стали: это второй источник кадров с переключением, а не флаг.
+- `deploy/install.sh` создаёт `~/aiddnet/data/bot` с `0700` до старта юнита. Если каталога нет, юнит не поднимется (`status=226/NAMESPACE`):
+  `mkdir -p -m 700 ~/aiddnet/data/bot`.
+
+Точные шаги (делает лид после ревью):
+
+1. Влить ветку; `deploy/install.sh` (пересборка `~/aiddnet/bin/ddnet-ai`, новый юнит, `daemon-reload`, перезапуск `ddnet-ai-web` и `caddy`). Пароль и секреты не трогаются; сессии сбрасываются перезапуском.
+2. Проверить юнит: `systemctl show ddnet-ai-web -p ReadWritePaths` (должен содержать `data/bot`) и `systemctl is-active ddnet-ai-web`.
+3. Бота запускать **с теми же путями**: `~/aiddnet/bin/ddnet-ai play … --data-dir ~/aiddnet/data` (по умолчанию `bot/live.sock`, `bot/control.sock`, `bot/relations.json`, аудит команд
+   `logs/bot/control-audit.log`). Если у бота свой `--relations` или `relations =` в `settings.toml`, сайт после правки напишет «бот перечитал другой файл списков»: привести пути к одному файлу.
+4. Войти на сайт, вкладка «Бот»: статус «В игре» (если бот в игре), кнопки, добавить тестовое имя в «Друзья», убедиться в ответе «применено к работающему боту (бот перечитал тот же файл)», потом убрать его.
+   `ls -l ~/aiddnet/data/bot/relations.json` — `-rw-------`.
+5. Журнал: ники в `~/aiddnet/data/logs/web/` и в журнале бота не пишутся; в `control-audit.log` — только метки.
+
+Откат: `git checkout <старый коммит> -- deploy/` и `deploy/install.sh --skip-build` (вернёт `--replay` и прежние `ReadWritePaths`).
+
 ## Пароль владельца
 
 ```bash
