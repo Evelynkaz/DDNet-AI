@@ -212,6 +212,10 @@ pub struct ClientConfig {
     /// never per tick). `false` by default. The live bot's e2e test turns it on to audit that no
     /// chat message is ever sent (D-007).
     pub emit_outgoing_audit: bool,
+    /// Task 4.4: when set, the driver also emits a [`crate::ClientEvent::MarginSummary`] about this often while
+    /// a connection runs, not only when it ends (the soak journal samples the input timing and the adaptive
+    /// margin of a connection that runs for an hour). `None` by default.
+    pub margin_report_every: Option<Duration>,
     /// Review round 1, finding F1: the D-027/D-038 safety switch, checked by
     /// [`crate::driver::Client`] before **every** socket connect it ever makes for this
     /// `ClientConfig` — the very first one, every reconnect, and every redirect (a server that
@@ -260,6 +264,7 @@ impl Default for ClientConfig {
             emit_input_sent: false,
             show_others: 0,
             emit_outgoing_audit: false,
+            margin_report_every: None,
             live_servers: default_live_servers(),
         }
     }
@@ -845,7 +850,9 @@ impl Session {
                     events.extend(self.handle_msg(msg, vital, now));
                 }
                 conn::Event::ClosedByPeer(reason) => {
-                    tracing::info!(reason = %reason, "connection: closed by peer (CLOSE received)");
+                    // The text is the server's free-form wording (a moderator may type a nickname into it): only its length is logged here;
+                    // the bot logs the text after replacing known names with tags (`ddai_bot::runner`).
+                    tracing::info!(reason_len = reason.len(), "connection: closed by peer (CLOSE received)");
                     events.push(SessionEvent::Disconnected {
                         reason: if reason.is_empty() { None } else { Some(reason) },
                         by_peer: true,
@@ -903,7 +910,10 @@ impl Session {
                 }
             }
             conn::Event::ClosedByPeer(reason) => {
-                tracing::info!(%reason, "connection: closed by peer (CLOSE received, detected by flush)");
+                tracing::info!(
+                    reason_len = reason.len(),
+                    "connection: closed by peer (CLOSE received, detected by flush)"
+                );
                 SessionEvent::Disconnected {
                     reason: if reason.is_empty() { None } else { Some(reason) },
                     by_peer: true,

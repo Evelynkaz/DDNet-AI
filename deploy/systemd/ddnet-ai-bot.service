@@ -1,0 +1,91 @@
+# The bot itself ("Muha": `ddnet-ai play --brain hybrid`), task 4.4, D-036. NOT enabled by deploy/install.sh and not
+# meant to be enabled for any public server: as shipped it plays on the LOCAL server 127.0.0.1:8303 and nothing else
+# (the cgroup firewall at the bottom drops every other address). Install, start and, deliberately, how to point it at
+# a public server one day: deploy/README.md, section "Бот под systemd".
+#
+# Exit codes (docs/formats.md 21.5): 0 = stopped on request (systemctl stop); 3 = kicked, banned, or moved to the
+# spectators after playing (moderation, D-016); 4 = could not join / the reconnect budget is spent (D-050, D-058);
+# 1 = anything else. 3 and 4 are never retried: RestartPreventExitStatus keeps the unit stopped ("failed") until the
+# owner has read the log. Restart=on-failure therefore only ever restarts a crash (a panic, a signal, exit 1), and
+# StartLimit* stops a crash loop after 3 starts in 10 minutes.
+#
+# The console is off (no stdin, --no-console), but the web control channel is on (control.sock in data/bot, task 5.6): the owner commands the
+# bot from the site's Bot tab (closed command list, no chat, rate-limited, audited). The bot's logs carry tags `c<id>-<hash>`, never other players'
+# nicknames (D-067); the bot's own nick is not logged either.
+
+[Unit]
+Description=DDNet-AI bot (hybrid brain; local server only until the owner opens a public one, D-043)
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+After=network.target ddnet-local.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/aiddnet/data
+# Fail closed if the binary is missing.
+ExecStartPre=/usr/bin/test -x /home/ubuntu/aiddnet/bin/ddnet-ai
+# --duration 0: no time limit (the unit runs until it is stopped). --report: the JSON report of the last run (latency,
+# counters, the outgoing-message audit: "no chat") is written when the bot stops. The freeze memory, the clips, the
+# bridge socket (live.sock, for the web unit) and settings.toml live in ~/aiddnet/data/bot (default paths).
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 127.0.0.1:8303 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+# No terminal, no input: the console cannot be reached even by accident.
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+# Plain log lines for the journal (no ANSI colour codes); info level.
+Environment=NO_COLOR=1
+Environment=RUST_LOG=info
+# glibc keeps big buffers in the heap once its dynamic mmap threshold has grown: after a map change to a large block map
+# (1244x667 tiles) the bot stayed 160 MiB larger for good. A fixed 128 KiB threshold returns them to the system at once
+# (E-009: 34 MiB again after the way back, 3 round trips).
+Environment=MALLOC_MMAP_THRESHOLD_=131072
+# SIGTERM makes the bot disconnect politely (CLOSE) and write its report; give it time.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=3 4
+
+# --- Hardening (as for ddnet-ai-web.service) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# What the bot writes: its state (freeze memory, clips, bridge socket, settings, report), the daily log, the map cache
+# (a map downloaded from the server), and the single-instance lock files (data/run). All four directories must exist
+# before the first start (deploy/README.md creates them).
+ReadWritePaths=/home/ubuntu/aiddnet/data/bot /home/ubuntu/aiddnet/data/logs /home/ubuntu/aiddnet/data/maps/cache /home/ubuntu/aiddnet/data/run
+# What the bot writes (clips, memory, report) is private to the owner.
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+MemoryMax=2G
+TasksMax=256
+# Kernel-level (cgroup eBPF) backstop, same pattern as ddnet-ai-web.service and ddnet-local.service: whatever the
+# command line says, traffic to or from anything but loopback is dropped for this unit's processes. A public game
+# server is therefore a deliberate, visible change (a drop-in with IPAddressAllow=<server ip>, deploy/README.md), never
+# an edit of --server alone.
+IPAddressAllow=127.0.0.0/8 ::1
+IPAddressDeny=any
+
+[Install]
+# Deliberately no WantedBy=/RequiredBy=: the unit stays "static", so `systemctl enable` does nothing and no boot starts it (D-043).
+# Start it by hand.

@@ -112,7 +112,9 @@ pub struct PlayArgs {
     pub name: String,
     #[arg(long, value_enum, default_value = "idle")]
     pub brain: Brain,
-    /// How long to stay connected, in seconds, before disconnecting gracefully.
+    /// How long to stay connected, in seconds, before disconnecting gracefully. For the bot (`--brain
+    /// planner|scripted|hybrid|fly`, `--bot`) `0` means no limit: it runs until SIGINT/SIGTERM, which is what a
+    /// systemd unit wants.
     #[arg(long, default_value_t = 30)]
     pub duration: u64,
     /// Base data directory (maps cache under `<data-dir>/maps/cache`, logs under

@@ -19,8 +19,8 @@
 //!   session's own input cadence (one input per predicted tick, up to 20 ms apart), which no
 //!   amount of bot speed changes.
 //!
-//! Samples live in fixed ring buffers (the last [`RING`] per series); percentiles are computed on a
-//! sorted copy when asked, never on the hot path.
+//! Samples live in fixed ring buffers (the last [`RING`] per series); percentiles for the status message and
+//! the log come from a histogram of the ring (no sort); [`Series::summary`] sorts a copy and is for the final report.
 
 use std::time::Duration;
 
@@ -82,6 +82,41 @@ pub struct Series {
     next: usize,
     count: u64,
     max_us: u32,
+    /// A histogram of the samples **currently in the ring** (a sample leaving the ring is subtracted), so a percentile
+    /// is a short scan of the buckets instead of a copy and a sort of 32 768 values (task 4.4: the status message and
+    /// the 10 s log line run on the decision thread, and a sorted copy cost about 0.9 ms per series).
+    hist: Vec<u32>,
+}
+
+/// Values below this get a bucket each; above it, 128 buckets per power of two (a bucket is at most 1/128 = 0.78% wide,
+/// the midpoint is reported: error <= 0.4%).
+const EXACT_BELOW: u32 = 256;
+const SUB_BITS: u32 = 7;
+/// 256 exact buckets plus octaves 2^8 .. 2^31 at 128 buckets each.
+const BUCKETS: usize = EXACT_BELOW as usize + 24 * (1 << SUB_BITS);
+
+fn bucket_of(us: u32) -> usize {
+    if us < EXACT_BELOW {
+        return us as usize;
+    }
+    let msb = 31 - us.leading_zeros();
+    let shift = msb - SUB_BITS;
+    let sub = (us >> shift) - (1 << SUB_BITS);
+    EXACT_BELOW as usize + ((msb - 8) as usize) * (1 << SUB_BITS) + sub as usize
+}
+
+/// The value reported for a bucket: exact below [`EXACT_BELOW`], the midpoint above.
+fn bucket_value(idx: usize) -> u32 {
+    if idx < EXACT_BELOW as usize {
+        return idx as u32;
+    }
+    let rel = idx - EXACT_BELOW as usize;
+    let msb = (rel >> SUB_BITS) as u32 + 8;
+    let sub = (rel & ((1 << SUB_BITS) - 1)) as u32;
+    let shift = msb - SUB_BITS;
+    let lo = u64::from((1u32 << SUB_BITS) + sub) << shift;
+    let mid = lo + (1u64 << shift) / 2;
+    u32::try_from(mid).unwrap_or(u32::MAX)
 }
 
 impl Default for Series {
@@ -91,6 +126,7 @@ impl Default for Series {
             next: 0,
             count: 0,
             max_us: 0,
+            hist: vec![0; BUCKETS],
         }
     }
 }
@@ -111,11 +147,51 @@ impl Series {
         if self.samples.len() < RING {
             self.samples.push(us);
         } else {
+            let old = self.samples[self.next];
+            self.hist[bucket_of(old)] -= 1;
             self.samples[self.next] = us;
         }
+        self.hist[bucket_of(us)] += 1;
         self.next = (self.next + 1) % RING;
         self.count += 1;
         self.max_us = self.max_us.max(us);
+    }
+
+    /// The same summary as [`Series::summary`] to within 0.4% (exact below 256 us), from the histogram: a scan of at most
+    /// a few thousand counters, no allocation, no sort. This is what the decision thread uses (status message, log line);
+    /// `summary` stays exact for the final report and the tests.
+    pub fn quick_summary(&self) -> Summary {
+        let n = self.samples.len();
+        if n == 0 {
+            return Summary::default();
+        }
+        let rank = |p: f64| ((n - 1) as f64 * p).round() as u64;
+        let (r50, r90, r99) = (rank(0.50), rank(0.90), rank(0.99));
+        let (mut p50, mut p90, mut p99) = (None, None, None);
+        let mut seen = 0u64;
+        for (idx, &c) in self.hist.iter().enumerate() {
+            if c == 0 {
+                continue;
+            }
+            seen += u64::from(c);
+            if p50.is_none() && seen > r50 {
+                p50 = Some(bucket_value(idx));
+            }
+            if p90.is_none() && seen > r90 {
+                p90 = Some(bucket_value(idx));
+            }
+            if seen > r99 {
+                p99 = Some(bucket_value(idx));
+                break;
+            }
+        }
+        Summary {
+            count: self.count,
+            p50_us: p50.unwrap_or(0).min(self.max_us),
+            p90_us: p90.unwrap_or(0).min(self.max_us),
+            p99_us: p99.unwrap_or(0).min(self.max_us),
+            max_us: self.max_us,
+        }
     }
 
     pub fn summary(&self) -> Summary {
@@ -191,7 +267,16 @@ impl LatencyStats {
         self.overhead.push(total.saturating_sub(brain));
     }
 
-    /// `key=value` lines for the log / report.
+    /// `total`, `brain` and `overhead` summaries for the bridge's status message (histogram scans: well under 0.05 ms).
+    pub fn status_summaries(&self) -> (Summary, Summary, Summary) {
+        (
+            self.total.quick_summary(),
+            self.brain.quick_summary(),
+            self.overhead.quick_summary(),
+        )
+    }
+
+    /// `key=value` lines for the log, from the histograms (within 0.4% of the exact percentiles).
     pub fn report(&self) -> String {
         let line = |name: &str, s: Summary| {
             format!(
@@ -200,12 +285,12 @@ impl LatencyStats {
             )
         };
         [
-            line("total", self.total.summary()),
-            line("brain", self.brain.summary()),
-            line("overhead", self.overhead.summary()),
-            line("pick", self.pick.summary()),
-            line("queue", self.queue.summary()),
-            line("wire", self.wire.summary()),
+            line("total", self.total.quick_summary()),
+            line("brain", self.brain.quick_summary()),
+            line("overhead", self.overhead.quick_summary()),
+            line("pick", self.pick.quick_summary()),
+            line("queue", self.queue.quick_summary()),
+            line("wire", self.wire.quick_summary()),
             format!(
                 "slots: decisions={} first_slot={} missed_first_slot={} as_predicted={} later_than_predicted={} earlier_than_predicted={}",
                 self.slots.decisions,
@@ -273,5 +358,91 @@ mod tests {
         });
         // `Vec::with_capacity(RING)` reserved everything up front in `default()`.
         assert_eq!(info.count_total, 0, "{info:?}");
+    }
+
+    /// A heavy-tailed, deterministic sample stream (microseconds): mostly 50-400, a long tail to ~30 ms.
+    fn stream(n: usize) -> Vec<u32> {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let u = (x % 1_000_000) as f64 / 1_000_000.0;
+                (50.0 + 30_000.0 * u.powi(6) + 300.0 * u) as u32
+            })
+            .collect()
+    }
+
+    fn close(quick: u32, exact: u32) -> bool {
+        quick == exact || (f64::from(quick) - f64::from(exact)).abs() <= 0.01 * f64::from(exact)
+    }
+
+    #[test]
+    fn the_histogram_summary_matches_the_sorted_one_within_one_percent_also_after_the_ring_wraps() {
+        for n in [10, 1_000, RING, RING + 1, 3 * RING + 123] {
+            let mut s = Series::default();
+            for us in stream(n) {
+                s.push(Duration::from_micros(u64::from(us)));
+            }
+            let (q, e) = (s.quick_summary(), s.summary());
+            assert_eq!((q.count, q.max_us), (e.count, e.max_us), "n={n}");
+            assert!(close(q.p50_us, e.p50_us), "n={n} p50 {q:?} vs {e:?}");
+            assert!(close(q.p90_us, e.p90_us), "n={n} p90 {q:?} vs {e:?}");
+            assert!(close(q.p99_us, e.p99_us), "n={n} p99 {q:?} vs {e:?}");
+        }
+        assert_eq!(Series::default().quick_summary(), Summary::default());
+    }
+
+    #[test]
+    fn small_values_are_exact_and_every_value_lands_in_a_bucket_of_at_most_one_percent() {
+        let mut s = Series::default();
+        for us in 1..=100u64 {
+            s.push(Duration::from_micros(us));
+        }
+        assert_eq!(s.quick_summary(), s.summary(), "below 256 us the histogram is exact");
+        for us in [
+            255u32,
+            256,
+            257,
+            1_000,
+            65_535,
+            65_536,
+            1_000_000,
+            u32::MAX / 2,
+            u32::MAX,
+        ] {
+            let idx = bucket_of(us);
+            assert!(idx < BUCKETS, "{us}");
+            assert!(
+                close(bucket_value(idx), us),
+                "{us} -> bucket {idx} -> {}",
+                bucket_value(idx)
+            );
+        }
+    }
+
+    /// Task 4.4 acceptance: the status path costs the decision thread at most 0.05 ms per call (it was three sorted copies of
+    /// 32 768 samples, about 2.7 ms). Best of 31 batches of 20 calls (the cost without host pauses: the VM is shared).
+    #[test]
+    fn the_status_summaries_of_full_rings_cost_under_fifty_microseconds() {
+        let mut l = LatencyStats::default();
+        for us in stream(2 * RING) {
+            let d = Duration::from_micros(u64::from(us));
+            l.record(d + Duration::from_micros(30), d);
+        }
+        let mut per_call = Vec::new();
+        let mut sink = 0u64;
+        for _ in 0..31 {
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                let (a, b, c) = l.status_summaries();
+                sink += u64::from(a.p99_us + b.p99_us + c.p99_us);
+            }
+            per_call.push(t.elapsed() / 20);
+        }
+        let best = per_call.into_iter().min().unwrap();
+        eprintln!("status_summaries: {best:?} per call (sink {sink})");
+        assert!(best < Duration::from_micros(50), "status_summaries took {best:?}");
     }
 }

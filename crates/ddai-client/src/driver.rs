@@ -1349,7 +1349,15 @@ fn run_one_connection(
     // this must never be silently absorbed — it must stop the session loudly rather than continue
     // as if nothing happened, which is exactly the failure mode this whole task exists to close.
     let mut seen_connected = false;
+    // Task 4.4: the optional periodic margin report (`ClientConfig::margin_report_every`).
+    let mut next_margin_report = config.margin_report_every.map(|every| Instant::now() + every);
     loop {
+        if let (Some(every), Some(due)) = (config.margin_report_every, next_margin_report)
+            && Instant::now() >= due
+        {
+            next_margin_report = Some(Instant::now() + every);
+            events_tx.send(ClientEvent::MarginSummary(margin_summary_of(session, latest_input)));
+        }
         // Task 2.3b: checked before anything else in the loop body, so a connection attempt that
         // is itself hanging (stuck in the TKEN handshake, or online but never in-game) cannot
         // sit here past the deadline just because nothing else in the loop happened to trip it.

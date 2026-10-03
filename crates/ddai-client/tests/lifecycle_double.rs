@@ -289,3 +289,39 @@ fn disconnect_interrupts_a_backoff_sleep_after_a_lost_connection() {
     );
     server_handle.join().expect("test double thread panicked");
 }
+
+/// Task 4.4: with `margin_report_every` set the driver sends a `MarginSummary` on that period while a connection runs,
+/// not only when it ends (the soak journal samples the input timing of a connection that lasts an hour); without it
+/// the summary comes only at the end.
+#[test]
+fn margin_summaries_arrive_periodically_only_when_asked_for() {
+    let count_summaries = |every: Option<Duration>| {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind test double socket");
+        let addr = socket.local_addr().unwrap();
+        let server_deadline = Instant::now() + Duration::from_secs(5);
+        let server_handle = thread::spawn(move || run_handshake_then_go_silent(socket, server_deadline));
+        let config = ddai_client::ClientConfig {
+            // Long enough that the silent double never ends the connection during the observation window.
+            timeout: Duration::from_secs(30),
+            margin_report_every: every,
+            ..ddai_client::ClientConfig::default()
+        };
+        let client = ddai_client::Client::connect(addr, config);
+        let mut seen = 0;
+        let end = Instant::now() + Duration::from_millis(1200);
+        while Instant::now() < end {
+            if let Some(ddai_client::ClientEvent::MarginSummary(_)) = client.recv_event(Duration::from_millis(20)) {
+                seen += 1;
+            }
+        }
+        client.disconnect();
+        server_handle.join().expect("test double thread panicked");
+        seen
+    };
+    assert_eq!(count_summaries(None), 0, "no periodic summary unless asked for");
+    let periodic = count_summaries(Some(Duration::from_millis(100)));
+    assert!(
+        (5..=13).contains(&periodic),
+        "one summary per 100 ms over about 1.2 s, got {periodic}"
+    );
+}

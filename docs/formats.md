@@ -4874,6 +4874,16 @@ Margin покрывает джиттер (8-14 мс вместо 3-5 мс на �
 p97 98,7% / 18% | 98,9% / 15% — чем выше квантиль, тем чаще решение целится во второй слот (точнее, но на тик медленнее).
 По умолчанию p90 (в приёмочных прогонах выше он держит 97-99% на предсказанный тик).
 
+### 21.7 Строки лога, которые читает soak (задача 4.4)
+
+`tracing`, уровень `info`, поля после текста: `starting the bot server=… brain=… mode=… wb=… strong=…` (при старте); раз в 10 с `bot status` (несколько
+строк: `total|brain|overhead|pick|queue|wire: n=… p50=…us p90=…us p99=…us max=…us`, `slots: …`, `stats=BotStats {…}`) и `input margin count=… late=… stalls=…
+late_fraction=… margin_ms=… adaptive=… changes=… min_ms=… p50_ms=… p99_ms=… superseded=…` (последний периодический `MarginSummary` драйвера,
+`ClientConfig::margin_report_every`; счёт идёт с начала **текущего** соединения; раз в 10 с на потоке драйвера, не решений: копия и сортировка окна из 8192 вводов и копия
+траектории margin, ≈ 45 мкс и 30-100 КиБ на вызов, без накопления); события: `unstick: Cl_Kill tick=… reason=Overdue|WayBlockLying|Stuck`, `block`,
+`blocked by`, `life started`, `clip saved`, `map changing map=…`, `map ready map=… w=… h=…`, `in game`, `disconnected`, `reconnecting`, `game tick went backwards`.
+Другие игроки только тегами `c<id>-<хэш>`. Разбор — `tools/e2e/soak_analyze.py` (`BotLog`).
+
 ## 22. Обучение мухи: датасет учителя и чекпоинты (задача 8.2, `crates/ddai-train`, `ddai-fly::bundle`, `ddai-controls`)
 
 Чекпоинты (§22.2, §22.3) и `state.bin` (как у чекпоинтов 7.2/7.3): **`[32 байта: sha256 postcard-байтов] ++ zstd(postcard-байты)`**

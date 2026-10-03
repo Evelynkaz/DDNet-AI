@@ -188,3 +188,90 @@ systemctl is-enabled ddnet-ai-web.service caddy.service   # оба должны 
 тест перезагрузки не входит в задачу 5.3 (см. `docs/SETUP.md`/BUILD REPORT) — `is-enabled`
 достаточен, так как оба юнита не завязаны на что-либо, зависящее от порядка старта, кроме
 `network.target`/друг друга (`Before=caddy.service`, не `Requires=`).
+
+## Бот под systemd (задача 4.4)
+
+`deploy/systemd/ddnet-ai-bot.service` — сам бот («Муха», `ddnet-ai play --brain hybrid`). **`deploy/install.sh` его не
+ставит и не включает**, и юнит нельзя включить командой `systemctl enable` (в нём нет `WantedBy`): после перезагрузки сам он
+не стартует, запускать его всегда явно. В поставляемом виде он играет **только на локальном сервере** `127.0.0.1:8303`
+(D-043): `IPAddressDeny=any` с разрешённым loopback — это ограничение на уровне cgroup, и оно сильнее любой правки `--server`.
+
+### Установка и запуск
+
+```bash
+mkdir -p -m 700 ~/aiddnet/data/bot      # уже есть, если стоит веб-юнит (его создаёт deploy/install.sh); юнит бота требует, чтобы он был
+mkdir -p ~/aiddnet/data/run ~/aiddnet/data/logs/play ~/aiddnet/data/logs/bot ~/aiddnet/data/maps/cache
+sudo install -m 0644 deploy/systemd/ddnet-ai-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start ddnet-ai-bot            # НЕ enable
+journalctl -u ddnet-ai-bot -f                # лог (нужен sudo или группа systemd-journal)
+sudo systemctl stop ddnet-ai-bot             # вежливое отключение (SIGTERM), отчёт пишется при остановке
+```
+
+Бинарник — `~/aiddnet/bin/ddnet-ai` (его же запускает веб-юнит; `deploy/install.sh` кладёт его туда). Новую сборку бота кладут
+туда же (`install -m 0755 target/release/ddnet-ai ~/aiddnet/bin/`) и перезапускают юниты, которые им пользуются.
+
+Что юнит пишет, и только это (`ProtectSystem=strict`): `~/aiddnet/data/bot` (память о фризах `memory/<sha256 карты>.json`,
+клипы `clips/`, сокеты `live.sock` (мост, бот → сайт) и `control.sock` (сайт → бот), списки `relations.json` (их правит сайт), `settings.toml`,
+`last-report.json`), `~/aiddnet/data/logs` (`play/play.log.<дата>`, аудит команд сайта `bot/control-audit.log`),
+`~/aiddnet/data/maps/cache` (карта, скачанная с сервера), `~/aiddnet/data/run` (замки «один бот на сервер»). Остальное только
+на чтение; `MemoryMax=2G`, `TasksMax=256`, `MemoryDenyWriteExecute`, без привилегий, адреса — только AF_INET/AF_INET6/AF_UNIX.
+
+### Что делает systemd при выходе бота
+
+| Код выхода | Значит | Юнит |
+|---|---|---|
+| `0` | остановлен по просьбе (`systemctl stop`, SIGTERM/SIGINT) | не перезапускается |
+| `3` | кик, бан, или бот переведён в зрители после игры (модерация, D-016) | **не перезапускается** (`RestartPreventExitStatus=3 4`), юнит остаётся `failed` |
+| `4` | не смог войти, исчерпаны попытки, или больше 3 обрывов связи в игре за 600 с (D-050, D-058) | **не перезапускается**, `failed` |
+| `1`, паника, сигнал | сбой | `Restart=on-failure` через 10 с; больше 3 запусков за 10 минут — стоп (`StartLimitBurst`) |
+
+После `3` или `4` сначала прочитать журнал (`journalctl -u ddnet-ai-bot -n 100`) и записать случай в `docs/STATUS.md` (CLAUDE.md:
+кик и бан не обходим), только потом `sudo systemctl reset-failed ddnet-ai-bot` и новый `start`.
+
+### Журнал: что в нём есть и чего нет
+
+- Консоль выключена: `StandardInput=null` и `--no-console`. **Канал управления с сайта включён** (задача 5.6, D-070): бот открывает `control.sock`
+  (`--no-control` в юнит не добавлен), и владелец командует ботом через вкладку «Бот» боевого веб-юнита (закрытый список команд, чата по построению нет,
+  лимит 2 в секунду, аудит с метками в `logs/bot/control-audit.log`). Править списки друзей / войны / игнора можно только там же: файл `relations.json` общий у бота и сайта.
+- Свободный текст сервера (причина кика или отключения) бот пишет в журнал, заменив известные ему ники и кланы игроков на теги, и добавляет длину оригинала
+  (`reason_len`); клиентский слой пишет о причине только длину.
+- Других игроков в журнале называют **теги** `c<id>-<хэш>` (соль меняется при каждом запуске); настоящие ники только с
+  `--debug-names`/`--console-names`/`--web-names`, в юнит они не добавлены. Свой ник (`Muha`) бот в лог тоже не пишет (он виден только в `systemctl status`,
+  в строке команды). Проверка: soak 4.4 искал по журналу юнита ники трёх скриптовых ботов и `Muha` (см. E-009), нашёл 0.
+- В игровой чат бот не пишет ничего (D-007): `last-report.json` содержит аудит исходящих сообщений (`outgoing_game_messages`):
+  только служебные при входе и `Cl_Kill`.
+- Цвета в журнале выключены (`NO_COLOR=1`), уровень `info`.
+
+### Веб-юнит и бот: общий каталог `data/bot`
+
+Боевой `ddnet-ai-web.service` уже запущен с `--bot-socket /home/ubuntu/aiddnet/data/bot/live.sock` и имеет `/home/ubuntu/aiddnet/data/bot` в
+`ReadWritePaths` (5.6, раздел «Управление ботом с сайта» выше): мост он только читает (плюс подписка на поток мухи), `control.sock` открывает на соединение,
+`relations.json` пишет. Поэтому юниту бота ничего менять в вебе не нужно: достаточно запустить бота с теми же путями (`--data-dir ~/aiddnet/data`, как в юните).
+Каталог `data/bot` обязан существовать **до** перезапуска любого из двух юнитов: без него юнит не поднимется (`status=226/NAMESPACE`). Карту веб берёт из
+`--maps-dir ~/aiddnet/data/maps/cache`, куда бот кладёт скачанные карты. Песочница веб-юнита (`ProtectHome=read-only`) подключаться к сокету бота не мешает: soak 4.4 проверил это на отдельном
+веб-юните (порт 7790) с теми же свойствами (E-009).
+
+### Публичный сервер (когда владелец разрешит, D-043, D-052)
+
+Три явных шага, ни один не делается сам:
+
+1. В `~/aiddnet/data/live-servers.toml` у записи сервера `ready = true` (иначе клиент откажется подключаться: D-067).
+2. `sudo systemctl edit ddnet-ai-bot` — drop-in с адресом сервера и **разрешением адреса в cgroup**:
+   ```
+   [Service]
+   ExecStart=
+   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server <ip>:<port> --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+   IPAddressAllow=<ip>
+   ```
+3. Первый запуск короткий и при владельце (D-068: 10-15 минут), `journalctl -u ddnet-ai-bot -f` открыт.
+
+Один бот на сервер (CLAUDE.md): не запускать одновременно юнит и ручной `ddnet-ai play` на тот же внешний адрес.
+
+### Проверка (soak 4.4)
+
+`tools/e2e/soak.sh --label D-wbauto-unit --unit` ставит этот юнит на время прогона (drop-in подменяет путь бинарника на свежую сборку и даёт **частный каталог данных**
+`<прогон>/botdata` со своими `--data-dir`, `--bridge`, `--control`, `--settings`, `--relations` и `ReadWritePaths` только на него и на `data/run`), гонит час игры на
+локальном сервере и убирает юнит. **`~/aiddnet/data/bot` стенд не использует, не переносит и не удаляет**: в конце он сверяет, что каталог остался таким, как был
+(список, права, размеры, время изменения), и пишет результат в вердикт. Результаты, таблицы и вердикт — `docs/EXPERIMENTS.md`, E-009. Для ≥ 6-часового прогона без присмотра
+(он нужен до многодневного запуска) стенд пока не рассчитан: гейт памяти считает базу на 25-й минуте и требует ≥ 35 минут.

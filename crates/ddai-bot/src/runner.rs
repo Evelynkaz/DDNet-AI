@@ -187,6 +187,8 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     // The bot's own needs: exact in-flight inputs, and the audit if asked for.
     client_cfg.emit_input_sent = true;
     client_cfg.emit_outgoing_audit = cfg.audit_outgoing;
+    // The input timing / margin of the connection, every log period (task 4.4: the soak journal reads it).
+    client_cfg.margin_report_every = Some(LOG_EVERY);
     let cache_dir = client_cfg.cache_dir.clone();
     let mut bridge = match &cfg.bridge_path {
         Some(path) => Some(Bridge::bind(path).map_err(|source| RunnerError::Bridge {
@@ -206,7 +208,14 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     );
     bot.set_nav_handle(cfg.nav_handle.clone());
     bot.set_brain_options(cfg.brain.clone());
-    tracing::info!(server = %cfg.server, brain = bot.brain_name(), mode = bot.mode().name(), "starting the bot");
+    tracing::info!(
+        server = %cfg.server,
+        brain = bot.brain_name(),
+        mode = bot.mode().name(),
+        wb = cfg.nav.wb_mode.name(),
+        strong = cfg.nav.strong,
+        "starting the bot"
+    );
     let mut client = Client::connect(cfg.server, client_cfg);
 
     let started = Instant::now();
@@ -322,13 +331,32 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         let now = Instant::now();
         if now >= next_status {
             next_status = now + STATUS_EVERY;
-            if let Some(b) = bridge.as_mut() {
+            // Nobody reading the bridge: do not even build the message.
+            if let Some(b) = bridge.as_mut()
+                && b.clients() > 0
+            {
                 b.send_status(&status_message(&bot, last_tick, &cfg));
             }
         }
         if now >= next_log {
             next_log = now + LOG_EVERY;
             tracing::info!(stats = ?bot.stats(), "bot status\n{}", bot.latency().report());
+            if let Some(m) = &report.margin {
+                tracing::info!(
+                    count = m.count,
+                    late = m.late_count,
+                    stalls = m.stall_count,
+                    late_fraction = m.late_fraction,
+                    margin_ms = m.margin_ms,
+                    adaptive = m.adaptive,
+                    changes = m.margin_changes,
+                    min_ms = m.min_ms.unwrap_or(-1),
+                    p50_ms = m.p50_ms.unwrap_or(-1),
+                    p99_ms = m.p99_ms.unwrap_or(-1),
+                    superseded = m.superseded_decisions,
+                    "input margin"
+                );
+            }
         }
     }
 
@@ -455,7 +483,9 @@ fn handle_event(
                 budget.on_in_game();
             }
             SessionEvent::Disconnected { reason, by_peer } => {
-                tracing::warn!(reason = ?reason, by_peer, "disconnected");
+                // The server's wording is free text: known names and clans become tags, and the original length is kept.
+                let (shown, reason_len) = redacted_reason(bot.players(), reason.as_deref());
+                tracing::warn!(reason = ?shown, reason_len, by_peer, "disconnected");
                 bot.on_disconnected();
                 *pending = None;
                 if !budget.on_dropped(Instant::now()) && report.gave_up.is_none() {
@@ -489,6 +519,11 @@ fn handle_event(
         ClientEvent::OwnPosition { .. } | ClientEvent::OwnTeam { .. } => {}
     }
     let _ = cfg;
+}
+
+/// A disconnect reason for the log: the text with every known player's name and clan replaced by the tag, and the original byte length.
+fn redacted_reason(players: &crate::players::PlayerTable, reason: Option<&str>) -> (Option<String>, usize) {
+    (reason.map(|r| players.redact(r)), reason.map_or(0, str::len))
 }
 
 fn apply_output(client: &Client, out: &Output, snap: &LiveWorldSnapshot, report: &mut RunReport) {
@@ -538,9 +573,7 @@ fn log_event(e: &BotEvent) {
 
 fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
     let s = bot.status();
-    let total = bot.latency().total.summary();
-    let brain = bot.latency().brain.summary();
-    let overhead = bot.latency().overhead.summary();
+    let (total, brain, overhead) = bot.latency().status_summaries();
     let nav = cfg.nav_handle.status();
     StatusMessage {
         tick,
@@ -705,5 +738,89 @@ mod tests {
             b.on_dropped(t0 + Duration::from_secs(13 * 60)),
             "second drop in the new window"
         );
+    }
+
+    #[test]
+    fn a_disconnect_reason_is_logged_with_names_as_tags_and_its_original_length() {
+        let mut players = crate::players::PlayerTable::new([3; 16]);
+        players.update(
+            &[
+                crate::players::test_support::player(0, "Muha", "Neuroset", true, 0, None),
+                crate::players::test_support::player(4, "Spammer9", "", false, 0, None),
+            ],
+            &Relations::new(),
+        );
+        let reason = "kicked for spam by Admin: Spammer9 and friends from neuroset";
+        let (shown, len) = redacted_reason(&players, Some(reason));
+        let shown = shown.expect("a reason stays a reason");
+        assert_eq!(len, reason.len(), "the original length");
+        assert!(
+            !shown.to_lowercase().contains("spammer9") && !shown.to_lowercase().contains("neuroset"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains(&players.tag(4).to_string()) && shown.starts_with("kicked for spam by Admin: "),
+            "{shown}"
+        );
+        assert_eq!(redacted_reason(&players, None), (None, 0));
+        assert_eq!(
+            redacted_reason(&players, Some("Server shutdown")),
+            (Some("Server shutdown".to_string()), 15)
+        );
+    }
+
+    /// Task 4.4 acceptance: building the bridge's status message (what the runner does 5 times a second between two snapshots)
+    /// costs the decision thread at most 0.05 ms (best of 31 batches: the VM is shared). Fresh hybrid bot, **full latency rings**
+    /// (the histogram scans), the navigation status and the brain's telemetry with its JSON parse.
+    #[test]
+    fn building_the_status_message_costs_the_decision_thread_under_fifty_microseconds() {
+        let brain =
+            make_brain(crate::brains::BrainKind::Hybrid, &BrainOptions::default()).expect("the hybrid brain builds");
+        let mut bot = Bot::new(
+            BotConfig::default(),
+            brain,
+            crate::hooks::Hooks::default(),
+            Relations::new(),
+        );
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..2 * crate::latency::RING {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let brain_us = 100 + x % 6_000;
+            bot.latency_mut().record(
+                Duration::from_micros(brain_us + 40 + x % 300),
+                Duration::from_micros(brain_us),
+            );
+        }
+        let cfg = RunnerConfig {
+            server: "127.0.0.1:8303".parse().unwrap(),
+            client: ClientConfig::default(),
+            bot: BotConfig::default(),
+            brain: BrainOptions::default(),
+            relations: Relations::new(),
+            duration: None,
+            bridge_path: None,
+            web_names: false,
+            debug_names_log: None,
+            audit_outgoing: false,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            nav: NavConfig::default(),
+            nav_handle: NavHandle::new(),
+            commands: None,
+            console_out: None,
+        };
+        let mut per_call = Vec::new();
+        let mut sink = 0usize;
+        for _ in 0..31 {
+            let t = Instant::now();
+            for _ in 0..20 {
+                sink += status_message(&bot, 1, &cfg).mode.len();
+            }
+            per_call.push(t.elapsed() / 20);
+        }
+        let best = per_call.into_iter().min().unwrap();
+        eprintln!("status_message: {best:?} per call (sink {sink})");
+        assert!(best < Duration::from_micros(50), "status_message took {best:?}");
     }
 }

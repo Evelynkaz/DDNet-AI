@@ -159,6 +159,24 @@ fn parse_pair(s: &str) -> Result<(i32, i32), String> {
     ))
 }
 
+/// `--duration`: `0` means no limit (a systemd unit runs the bot until it is stopped); before task 4.4 it meant "stop at once".
+fn run_for(seconds: u64) -> Option<Duration> {
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+/// The one-time startup warning when `MALLOC_MMAP_THRESHOLD_` is not set (Linux, glibc): without it the bot keeps ~160 MiB more
+/// memory for good after a map change to a large map (task 4.4, E-009 F1). The variable cannot be set from inside the process
+/// (no `unsafe`, no `mallopt`), so a manual run has to be told.
+fn mmap_threshold_warning(value: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    if !cfg!(target_os = "linux") || value.is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    Some(
+        "MALLOC_MMAP_THRESHOLD_ is not set: after a map change to a large map glibc keeps ~160 MiB of the old map's memory for good; \
+         start the bot with MALLOC_MMAP_THRESHOLD_=131072 (the systemd unit does; deploy/README.md)",
+    )
+}
+
 fn kind_of(args: &PlayArgs) -> BrainKind {
     match args.brain {
         Brain::Planner => BrainKind::Planner,
@@ -176,6 +194,9 @@ fn default_relations(data_dir: &Path) -> PathBuf {
 /// Runs the bot; the process exit code is the runner's (0 ok, 3 kick/ban, 4 join failed).
 pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> ExitCode {
     let o = &args.bot_opts;
+    if let Some(warning) = mmap_threshold_warning(std::env::var_os("MALLOC_MMAP_THRESHOLD_").as_deref()) {
+        tracing::warn!("{warning}");
+    }
     let Some(mode) = Mode::parse(&o.mode) else {
         eprintln!("unknown --mode {:?} (fight|passive|hold|goto)", o.mode);
         return ExitCode::FAILURE;
@@ -409,7 +430,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         bot,
         brain,
         relations,
-        duration: Some(Duration::from_secs(args.duration)),
+        duration: run_for(args.duration),
         bridge_path,
         web_names: o.web_names,
         debug_names_log: o.debug_names.clone(),
@@ -540,4 +561,25 @@ pub fn report_json(r: &RunReport) -> serde_json::Value {
         })),
         "events": r.events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_missing_malloc_variable_is_warned_about_once_and_a_set_one_is_not() {
+        use std::ffi::OsStr;
+        assert!(mmap_threshold_warning(None).is_some_and(|w| w.contains("131072")));
+        assert!(mmap_threshold_warning(Some(OsStr::new(""))).is_some());
+        assert_eq!(mmap_threshold_warning(Some(OsStr::new("131072"))), None);
+    }
+
+    #[test]
+    fn duration_zero_means_no_limit_for_the_bot() {
+        assert_eq!(run_for(0), None);
+        assert_eq!(run_for(1), Some(Duration::from_secs(1)));
+        assert_eq!(run_for(3600), Some(Duration::from_secs(3600)));
+    }
 }

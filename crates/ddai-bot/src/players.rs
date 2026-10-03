@@ -210,6 +210,45 @@ impl PlayerTable {
         self.own_id = None;
     }
 
+    /// `text` with every present player's name and clan replaced by that player's tag (`c<id>-<hash>`), matched case-insensitively
+    /// (a 1-2 character name only as a whole word, so `a` does not eat every letter). For free-form text from the server (a kick or
+    /// disconnect reason: a moderator may type a nickname into it) before it reaches a log.
+    pub fn redact(&self, text: &str) -> String {
+        let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+        let mut needles: Vec<(Vec<char>, String)> = Vec::new();
+        for (id, slot) in self.present() {
+            let tag = self.tag(id).to_string();
+            for s in [slot.name.trim(), slot.clan.trim()] {
+                if !s.is_empty() {
+                    needles.push((s.chars().map(fold).collect(), tag.clone()));
+                }
+            }
+        }
+        needles.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
+        let chars: Vec<char> = text.chars().collect();
+        let folded: Vec<char> = chars.iter().map(|&c| fold(c)).collect();
+        let word = |c: Option<&char>| c.is_some_and(|c| c.is_alphanumeric());
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        'outer: while i < chars.len() {
+            for (needle, tag) in &needles {
+                let end = i + needle.len();
+                if end <= chars.len()
+                    && folded[i..end] == needle[..]
+                    && (needle.len() > 2
+                        || (!word(i.checked_sub(1).and_then(|j| chars.get(j))) && !word(chars.get(end))))
+                {
+                    out.push_str(tag);
+                    i = end;
+                    continue 'outer;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
     /// Present slots, ascending id.
     pub fn present(&self) -> impl Iterator<Item = (i32, &PlayerSlot)> {
         self.slots
@@ -274,6 +313,48 @@ mod tests {
     use super::test_support::player;
     use super::*;
     use crate::relations::ListKind;
+
+    #[test]
+    fn free_text_loses_every_known_name_and_clan_to_the_tag() {
+        let mut t = PlayerTable::new([7; 16]);
+        t.update(
+            &[
+                player(0, "Muha", "Neuroset", true, 0, None),
+                player(3, "Bob", "ХАОС", false, 0, None),
+                player(5, "a", "", false, 0, None),
+            ],
+            &Relations::new(),
+        );
+        let (bob, own) = (t.tag(3).to_string(), t.tag(0).to_string());
+        let out = t.redact("banned BOB (clan хаос) by muha: a bad day, not Bobby-free");
+        assert!(
+            !out.to_lowercase().contains("bob ") && !out.contains("хаос") && !out.to_lowercase().contains("muha"),
+            "{out}"
+        );
+        assert!(
+            out.starts_with(&format!("banned {bob} (clan {bob}) by {own}: ")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("{} bad day", t.tag(5))),
+            "the one-letter name as a whole word: {out}"
+        );
+        assert!(
+            out.contains("bad day, not"),
+            "the 'a' inside words is left alone: {out}"
+        );
+        assert_eq!(
+            t.redact("Server shutdown"),
+            "Server shutdown",
+            "ordinary reasons are untouched"
+        );
+        assert_eq!(t.redact(""), "");
+        assert_eq!(
+            PlayerTable::new([7; 16]).redact("Bob"),
+            "Bob",
+            "nobody known: nothing to replace"
+        );
+    }
 
     #[test]
     fn flags_follow_the_lists_and_names_fold() {
