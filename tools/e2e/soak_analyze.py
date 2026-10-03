@@ -35,6 +35,15 @@ MAX_INGAME_RECONNECTS = 3
 # The lead's gate (task 4.4, review round 1): growth from the post-warm-up baseline (minute 25) is judged per process as at most
 # max(10% of the base, 1 MiB), on RssAnon + VmSwap: 1 MiB is the size of one allocator step on the 6 MiB web.
 ABS_MEM_TOL_MIB = 1.0
+# Task 4.5 (the >= 6 h run): the slope of the anonymous footprint over the last 5 hours, projected to 7 days, must stay under 50 MiB.
+# The bot prunes its own old automatic clips (at most 24, 16 a kind): in the real data dir a clip left by an earlier run may go; never a manual one.
+# Exactly what `ddai_clip::store::parse_auto_name` accepts (`<kind>-<tick>-s<severity>`, not `manual-*`): nothing else is the bot's to prune.
+PRUNED_AUTOCLIP = re.compile(r"^clips/(?!manual-)[^/]+-[0-9]+-s[0-9]+\.clip$")
+# A Cl_Kill must end the life (a new life starts) within this many ticks, or it did nothing (sv_kill_protection, E-011).
+KILL_EFFECT_TICKS = 50
+MAX_DEAD_KILLS_IN_A_ROW = 3
+SLOPE_WINDOW_S = 5 * 3600.0
+SLOPE_LIMIT_MIB_WEEK = 50.0
 INGAME_RECONNECT_WINDOW_S = 600
 # What the bot may put on the wire: the join's one-offs plus Cl_Kill / Cl_SetTeam (docs/formats.md 21.6).
 ALLOWED_OUTGOING = {
@@ -134,6 +143,7 @@ class BotLog:
             self.count("block")
         elif msg.startswith("life started"):
             self.count("life_started")
+            self.events.append((epoch, "life", {"tick": as_int(f, "tick")}))
         elif msg.startswith("clip saved"):
             self.count("clip_saved")
             self.events.append((epoch, "clip", f))
@@ -317,7 +327,8 @@ def analyze_processes(res, samples, meta, t_end):
     width = max(60.0, meta["sample_s"] * 3)
     min_seg = baseline + 2 * width
     rows = []
-    names = ["bot", "web", "s1", "server"]
+    names = ["bot", "web", "s1", "server", "pweb"]  # pweb: the production web unit (real-data runs), reported, not gated
+    slope_rows = []
     for name in names:
         segs = proc_segments(samples, name, t_end)
         if name in ("bot", "web"):
@@ -376,7 +387,7 @@ def analyze_processes(res, samples, meta, t_end):
                     max((p.get("swap_kb") or 0) for _, p in pts),
                 )
             )
-            if not judged:
+            if not judged or name == "pweb":
                 continue
             tag = f"{name} pid {seg['pid']}"
             limit = 10.0
@@ -402,6 +413,25 @@ def analyze_processes(res, samples, meta, t_end):
                 fd_e <= fd_b + tol_fd,
                 f"median {fd_b:.0f} -> {fd_e:.0f}, max {max(v for _, v in fds)}",
             )
+            if name in ("bot", "web"):
+                if seg["end"] - b0 >= SLOPE_WINDOW_S:
+                    wpts = [(t, size(p) / 1024.0) for t, p in pts if t >= seg["end"] - SLOPE_WINDOW_S]
+                    slope_h = theil_sen(wpts) * 3600.0
+                    week = slope_h * 168.0
+                    head = med([v for _, v in wpts[:120]])
+                    tail = med([v for _, v in wpts[-120:]])
+                    slope_rows.append((name, f"{wpts[0][0] / 3600:.2f}-{wpts[-1][0] / 3600:.2f}", len(wpts), fmt(head, 2), fmt(tail, 2), f"{slope_h:+.3f}", f"{week:+.1f}"))
+                    res.check(
+                        f"memory slope over the last 5 h projects to < {SLOPE_LIMIT_MIB_WEEK:.0f} MiB per 7 days ({tag})",
+                        week < SLOPE_LIMIT_MIB_WEEK,
+                        f"Theil-Sen {slope_h:+.3f} MiB/h over {len(wpts)} samples -> {week:+.1f} MiB per 7 days "
+                        f"(first / last 30 min of the window: {head:.2f} / {tail:.2f} MiB)",
+                    )
+                else:
+                    res.section(
+                        f"Memory slope not judged ({name})",
+                        f"only {(seg['end'] - b0) / 3600:.2f} h after the baseline; the 5 h slope gate needs {SLOPE_WINDOW_S / 3600:.0f} h (a >= 5.5 h run)",
+                    )
     if not any(r[14] for r in rows):
         res.section(
             "Memory gate not judged",
@@ -428,6 +458,11 @@ def analyze_processes(res, samples, meta, t_end):
         ],
     )
     res.section("Processes: memory (anonymous resident + swap; RSS where the journal has no RssAnon), threads, fds, CPU (base = minute 25 of the run, end = last minute)", body)
+    if slope_rows:
+        res.section(
+            "Memory slope over the last 5 h (anonymous MiB, Theil-Sen; 7 days = 168 h)",
+            table(["proc", "window h", "samples", "start MiB", "end MiB", "slope MiB/h", "MiB per 7 days"], slope_rows),
+        )
 
 
 def analyze_creep(res, samples, events, meta, t_end):
@@ -541,7 +576,54 @@ def analyze_kills(res, log):
         not bad,
         f"{len(kills)} kills {by_reason}; min gap {min((g for g, _ in gaps), default='-')} ticks; violations {bad[:5]}",
     )
+    analyze_kill_liveness(res, log)
     return len(kills)
+
+
+def analyze_kill_liveness(res, log):
+    """Task 4.5 (review F7): a `Cl_Kill` the server drops is invisible to every other check. DDNet refuses it silently once a life is
+    older than `sv_kill_protection` minutes (20 by default): the bot then sits frozen and asks every 10 s for hours (the 6 h rehearsal:
+    93 minutes, 548 of 677 kills). Each kill must be followed by a new life within KILL_EFFECT_TICKS (the respawn the kill asks for);
+    MAX_DEAD_KILLS_IN_A_ROW or more that did nothing in a row fail. The last kill of the log has no later tick to judge by and is not counted."""
+    evs = log.events
+    judged = dead = longest = run = 0
+    runs = []
+    for idx, (epoch, kind, d) in enumerate(evs):
+        if kind in ("tick_reset", "map_changing", "disconnected"):
+            if run:
+                runs.append(run)
+            run = 0
+            continue
+        if kind != "kill":
+            continue
+        later_kill = any(k == "kill" for _, k, _ in evs[idx + 1 :])
+        if not later_kill and not any(k == "life" for _, k, _ in evs[idx + 1 :]):
+            break  # the final kill: the log ended before its effect could show
+        t = d["tick"]
+        ok = False
+        for _, k2, d2 in evs[idx + 1 :]:
+            if k2 == "life":
+                ok = 0 <= d2["tick"] - t <= KILL_EFFECT_TICKS
+                break
+            if k2 in ("kill", "tick_reset", "map_changing", "disconnected"):
+                break
+        judged += 1
+        if ok:
+            if run:
+                runs.append(run)
+            run = 0
+        else:
+            dead += 1
+            run += 1
+    if run:
+        runs.append(run)
+    longest = max(runs, default=0)
+    res.check(
+        f"every Cl_Kill takes effect (a new life within {KILL_EFFECT_TICKS} ticks); fewer than {MAX_DEAD_KILLS_IN_A_ROW} that did nothing in a row",
+        longest < MAX_DEAD_KILLS_IN_A_ROW,
+        f"{judged} kills judged, {dead} did nothing, longest run {longest}"
+        + ("; the bot is stuck where the server will not let it die (sv_kill_protection: a life older than 20 minutes)" if longest >= MAX_DEAD_KILLS_IN_A_ROW else ""),
+    )
 
 
 def analyze_chat(res, log, report, console_text):
@@ -806,7 +888,20 @@ def analyze(run_dir, baseline=None):
             hits = {n: txt.count(n) for n in names if n and n in txt}
             extra["names:" + logname] = {"hits": hits}
     prod = meta.get("prod_bot_dir")
-    if prod:
+    if prod and prod.get("real"):
+        # runs recorded before the pruning rule: a pruned automatic clip is the bot's doing, not a removal by the harness
+        pruned = [d for d in prod["diff"] if d.startswith("removed ") and PRUNED_AUTOCLIP.match(d[len("removed "):])]
+        prod = dict(prod, diff=[d for d in prod["diff"] if d not in pruned])
+        prod["unchanged"] = not prod["diff"] and not any("relations.json" in d for d in prod["diff"])
+        if pruned:
+            prod["relations"] = f"{prod.get('relations', '?')}; {len(pruned)} old automatic clip(s) pruned by the bot itself"
+        res.check(
+            "~/aiddnet/data/bot (REAL data dir, production layout): nothing that was there before was removed or had its mode changed; "
+            "relations.json is as before (absent, or the same lists)",
+            prod["unchanged"],
+            f"{prod['entries']} entries before; differences: {prod['diff'] or 'none'}; relations.json: {prod.get('relations', '?')}",
+        )
+    elif prod:
         res.check(
             "~/aiddnet/data/bot (production state) untouched: listing, modes, sizes and mtimes as before the run",
             prod["unchanged"],
@@ -883,15 +978,16 @@ def analyze(run_dir, baseline=None):
 # ------------------------------------------------------------------------------------------------ self test
 
 
-def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99_growth=0.0, bad_kill=False, chat=False, panic=False, clips=10, drops=1, viewer=25, file_growth=0.0, swapped_growth=0.0, prod_dir_ok=True):
-    """A fake 60 minute run whose numbers we control, to prove that every acceptance check can fail."""
+def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99_growth=0.0, bad_kill=False, chat=False, panic=False, clips=10, drops=1, viewer=25, file_growth=0.0, swapped_growth=0.0, prod_dir_ok=True, duration=3600, leak_mib_h=0.0, real_dir=False, dead_kills=0):
+    """A fake run (60 minutes by default; `duration` for a long one) whose numbers we control, to prove that every acceptance check can fail."""
     import random
 
     rng = random.Random(7)
     run = Path(tmp)
     run.mkdir(parents=True, exist_ok=True)
     t0 = 1_700_000_000.0
-    D = 3600
+    D = duration
+    sc = D / 3600.0  # the scenario times (restart, map change, reconnects) scale with the run
     meta = {
         "label": "selftest",
         "mode": "process",
@@ -904,7 +1000,7 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
         "others_names": ["soak-s1", "soak-s2", "soak-s3"],
         "name_logs": [],
         "bot_exit_code": 0,
-        "prod_bot_dir": {"unchanged": prod_dir_ok, "entries": 3, "diff": [] if prod_dir_ok else ["changed relations.json"]},
+        "prod_bot_dir": {"unchanged": prod_dir_ok, "entries": 3, "diff": [] if prod_dir_ok else ["changed relations.json"], **({"real": True, "relations": "absent"} if real_dir else {})},
     }
     (run / "meta.json").write_text(json.dumps(meta))
     with open(run / "journal.jsonl", "w") as fh:
@@ -916,7 +1012,7 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
                 noise = 1 + rng.uniform(-0.005, 0.005)
                 # anonymous memory 80% of the size, file pages 20%; growth cases: anon grows (rss grows), file pages grow
                 # (rss grows, anon flat), or the anon growth sits in swap (rss flat)
-                anon = base * 0.8 * (1 + (rss_growth if is_bot else 0.0) * frac) * noise
+                anon = (base * 0.8 * (1 + (rss_growth if is_bot else 0.0) * frac) + (leak_mib_h * 1024.0 * i / 3600.0 if is_bot else 0.0)) * noise
                 swap = base * 0.8 * swapped_growth * frac if is_bot else 0.0
                 file_kb = base * 0.2 * (1 + (file_growth if is_bot else 0.0) * frac)
                 procs[name] = {
@@ -935,7 +1031,7 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
                         "load": [8.0, 8, 8],
                         "procs": procs,
                         "bot": {
-                            "map": {"name": "Copy Love Box" if (i < 2300 or i >= 2500) else "BlmapChill", "sha256": ("a" if (i < 2300 or i >= 2500) else "b") * 64},
+                            "map": {"name": "Copy Love Box" if (i < 2300 * sc or i >= 2500 * sc) else "BlmapChill", "sha256": ("a" if (i < 2300 * sc or i >= 2500 * sc) else "b") * 64},
                             "stats": {"decisions": i * 25, "collapsed": i // 100, "deaths": i // 60, "self_kills": 0},
                             "ev": {"block": i // 40, "blocked_by": i // 90},
                             "frozen_edges": i // 30,
@@ -949,8 +1045,8 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
                 + "\n"
             )
     with open(run / "events.jsonl", "w") as fh:
-        fh.write(json.dumps({"t": 720, "kind": "server_restart"}) + "\n")
-        fh.write(json.dumps({"t": 2300, "kind": "map_change", "map": "BlmapChill"}) + "\n")
+        fh.write(json.dumps({"t": 720 * sc, "kind": "server_restart"}) + "\n")
+        fh.write(json.dumps({"t": 2300 * sc, "kind": "map_change", "map": "BlmapChill"}) + "\n")
     lines = []
 
     def ts(sec):
@@ -969,23 +1065,29 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
         lines.append("slots: decisions=1 first_slot=1 missed_first_slot=0 as_predicted=1 later_than_predicted=0 earlier_than_predicted=0 stats=BotStats { snapshots: 5, decisions: 4 }")
     lines.append(f"{ts(1)}  INFO ddai_bot::runner: starting the bot server=127.0.0.1:8303 brain=\"hybrid\" mode=\"fight\" wb=\"auto\" strong=false")
     lines.append(f"{ts(100)}  INFO ddai_bot::runner: unstick: Cl_Kill tick=1000 reason=Overdue")
+    lines.append(f"{ts(100)}  INFO ddai_bot::runner: life started tick=1002")
     lines.append(f"{ts(120)}  INFO ddai_bot::runner: unstick: Cl_Kill tick={1100 if bad_kill else 1600} reason=Overdue")
+    lines.append(f"{ts(120)}  INFO ddai_bot::runner: life started tick={1102 if bad_kill else 1602}")
     lines.append(f"{ts(130)}  INFO ddai_bot::runner: unstick: Cl_Kill tick=1700 reason=WayBlockLying")
+    lines.append(f"{ts(130)}  INFO ddai_bot::runner: life started tick=1702")
+    for n in range(dead_kills):  # kills the server dropped: no new life follows
+        lines.append(f"{ts(200 + 10 * n)}  INFO ddai_bot::runner: unstick: Cl_Kill tick={2300 + 500 * n} reason=Overdue")
+    lines.append(f"{ts(400)}  INFO ddai_bot::runner: life started tick=9000")
     for k in range(drops):
-        lines.append(f"{ts(1500 + 30 * k)}  WARN ddai_bot::runner: disconnected reason=ServerShutdown by_peer=true")
-        lines.append(f"{ts(1512 + 30 * k)}  INFO ddai_bot::runner: in game")
-    lines.append(f"{ts(2300)}  INFO ddai_bot::runner: map changing map=BlmapChill")
-    lines.append(f"{ts(2305)}  INFO ddai_bot::runner: map ready map=BlmapChill w=100 h=100")
-    lines.append(f"{ts(2500)}  INFO ddai_bot::runner: map changing map=Copy Love Box")
-    lines.append(f"{ts(2505)}  INFO ddai_bot::runner: map ready map=Copy Love Box w=387 h=250")
+        lines.append(f"{ts(1500 * sc + 30 * k)}  WARN ddai_bot::runner: disconnected reason=ServerShutdown by_peer=true")
+        lines.append(f"{ts(1512 * sc + 30 * k)}  INFO ddai_bot::runner: in game")
+    lines.append(f"{ts(2300 * sc)}  INFO ddai_bot::runner: map changing map=BlmapChill")
+    lines.append(f"{ts(2300 * sc + 5)}  INFO ddai_bot::runner: map ready map=BlmapChill w=100 h=100")
+    lines.append(f"{ts(2500 * sc)}  INFO ddai_bot::runner: map changing map=Copy Love Box")
+    lines.append(f"{ts(2500 * sc + 5)}  INFO ddai_bot::runner: map ready map=Copy Love Box w=387 h=250")
     if panic:
         lines.append("thread 'ddai-bot' panicked at crates/x.rs:1:1:")
     (run / "bot.log").write_text("\n".join(lines) + "\n")
-    out = {"Cl_StartInfo": {"accepted": 1, "refused": 0}, "Cl_Kill": {"accepted": 3, "refused": 0}}
+    out = {"Cl_StartInfo": {"accepted": 1, "refused": 0}, "Cl_Kill": {"accepted": 3 + dead_kills, "refused": 0}}
     if chat:
         out["Cl_Say"] = {"accepted": 1, "refused": 0}
     (run / "bot-report.json").write_text(
-        json.dumps({"exit_code": 0, "gave_up": None, "outgoing_game_messages": out, "kill_ticks": [1000, 1600, 1700]})
+        json.dumps({"exit_code": 0, "gave_up": None, "outgoing_game_messages": out, "kill_ticks": [1000, 1600, 1700] + [2300 + 500 * n for n in range(dead_kills)]})
     )
     return run
 
@@ -1001,9 +1103,16 @@ def selftest():
         ("resident growth from file pages alone is not growth (anon flat)", {"file_growth": 1.0}, None),
         ("anonymous growth that sits in swap (rss flat) is caught", {"swapped_growth": 0.3}, "anon+swap growth"),
         ("production data/bot touched fails", {"prod_dir_ok": False}, "untouched"),
+        ("real data dir, nothing changed, passes", {"real_dir": True}, None),
+        ("real data dir: a removed or changed entry fails", {"real_dir": True, "prod_dir_ok": False}, "REAL data dir"),
+        ("a 6 h run with a 0.2 MiB/h creep (34 MiB per 7 days) passes", {"duration": 21600, "leak_mib_h": 0.2}, None),
+        ("a 6 h run with a 0.5 MiB/h leak (84 MiB per 7 days) fails the slope gate", {"duration": 21600, "leak_mib_h": 0.5}, "memory slope over the last 5 h"),
+        ("a 6 h flat run passes (and the slope gate ran)", {"duration": 21600, "leak_mib_h": 0.0}, None),
         ("fd growth fails", {"fd_growth": 12}, "fd growth"),
         ("p99 trend fails", {"p99_growth": 4.0}, "overhead p99"),
         ("kill cooldown fails", {"bad_kill": True}, "Cl_Kill within"),
+        ("two kills the server dropped pass", {"dead_kills": 2}, None),
+        ("three kills the server dropped in a row fail (sv_kill_protection)", {"dead_kills": 3}, "takes effect"),
         ("chat fails", {"chat": True}, "0 chat"),
         ("panic fails", {"panic": True}, "no panic"),
         ("unbounded clips fail", {"clips": 60}, "clips bounded"),

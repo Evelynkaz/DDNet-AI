@@ -32,7 +32,7 @@ use ddai_physics::core::{NetCharacterCore, PlayerInput};
 use ddai_physics::map::MapData;
 use ddai_world::{LiveWorld, OwnState, SnapshotInput, player_input_from_net};
 
-use crate::format::{Clip, ClipEvent, Frame};
+use crate::format::{Clip, ClipEvent, Frame, TeeRec};
 
 /// What the replay carries between frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,8 +46,10 @@ pub enum Mode {
 /// Why a step did not reproduce the recorded frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cause {
-    /// Another tee was hook-linked to us (either way), had its hook tip at us, or was within body / hammer reach
-    /// ([`BODY_REACH_PX`]): its input between the two frames is a guess.
+    /// Another tee was hook-linked to us (either way), had its hook in flight on a line that reaches us within the step
+    /// ([`flying_hook_reaches`]), or was within body / hammer reach ([`BODY_REACH_PX`]): its input between the two frames
+    /// is a guess (the replay holds the last input it knew, so a hook the tee let go of in between is still flying
+    /// and catches us in the replay, but not on the server).
     OtherTee { id: i32 },
     /// A projectile was within hit / explosion reach ([`PROJECTILE_REACH_PX`]).
     Projectile,
@@ -66,8 +68,12 @@ pub enum Cause {
     /// absolute and reproduced exactly. A known `ddai-world` gap (follow-up 2.4c), not a property of the server.
     /// Measured: about three quarters of such steps still reproduce exactly (`Report::freeze_exact`).
     FreezeChange,
-    /// An input of the step was not confirmed by the server's timing report when it was recorded, or the
-    /// step is longer than the inputs the frame holds.
+    /// The replay applies our sent inputs on the ticks they were tagged for; the server did not always. Either an input of
+    /// the step was not confirmed by the server's timing report when it was recorded (or the step is longer than the inputs
+    /// the frame holds), or it is **proved** that the server applied an input late and said nothing (it reports the timing
+    /// of the newest input of a packet only): (1) the replay with every input of the step applied one or two ticks later, or the newest input of the step applied to every tick of it, or
+    /// with one tick's input never applied (the previous input holds), reproduces the recorded state exactly, or (2) a stale, unfrozen own core contradicts the sent input
+    /// ([`stale_core_contradicts_sent`]). Not a property of our physics.
     InputTiming,
     /// Nothing the clip knows explains it: the server changed our state in a way the physics does not model
     /// or the frame does not hold (a correction).
@@ -113,6 +119,10 @@ pub struct Divergence {
     pub fresh: bool,
     /// Our freeze state changed in this step (a freeze or a thaw).
     pub freeze_change: bool,
+    /// Nobody who could touch us was around (see [`Report::isolated_steps`]).
+    pub isolated: bool,
+    /// `cause` is [`Cause::InputTiming`] by proof (a late input the server applied without a report), not by a missing report.
+    pub input_timing_proved: bool,
 }
 
 /// What a replay found.
@@ -154,6 +164,17 @@ impl Report {
     /// Every compared step was exact.
     pub fn is_exact(&self) -> bool {
         self.steps > 0 && self.exact == self.steps
+    }
+
+    /// Steps with nobody near that differ for a reason that is the server's choice or timing, not our physics: respawns,
+    /// teleports and proved late inputs.
+    pub fn isolated_designed(&self) -> usize {
+        self.divergences
+            .iter()
+            .filter(|d| {
+                d.isolated && (d.cause.is_by_design() || (d.cause == Cause::InputTiming && d.input_timing_proved))
+            })
+            .count()
     }
 
     /// Every compared step was exact except the ones over a respawn or a teleport.
@@ -314,8 +335,63 @@ const ISOLATED_PX: f64 = 420.0;
 pub const BODY_REACH_PX: f64 = 100.0;
 /// A projectile closer than this can hit us or explode on us (a grenade's blast reaches about 135 px).
 pub const PROJECTILE_REACH_PX: f64 = 140.0;
-/// An other tee's flying hook whose tip is this close to us may have caught us.
+/// An other tee's flying hook that passes this close to us may have caught us (the server's own test is 30 px,
+/// `PhysSize + 2`, from the segment the hook covers in a tick; the rest is slack for positions that are a tick or two old).
 const HOOK_TIP_PX: f64 = 60.0;
+/// A flying hook covers `hook_fire_speed` per tick (`tuning`'s default 80 px) along its direction.
+const HOOK_FIRE_SPEED_PX: f64 = 80.0;
+/// How far from its owner a hook can be: `hook_length` (380 px) and the hitbox (28 px).
+const HOOK_OWNER_RADIUS_PX: f64 = 380.0 + 28.0;
+
+/// Shortest distance from `p` to the segment `a..b`.
+fn point_segment_dist(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (abx, aby) = (b.0 - a.0, b.1 - a.1);
+    let len2 = abx * abx + aby * aby;
+    let t = if len2 > 0.0 {
+        (((p.0 - a.0) * abx + (p.1 - a.1) * aby) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    dist(p, (a.0 + abx * t, a.1 + aby * t))
+}
+
+/// Whether the flying hook of `tee` (as `frame` holds it, with `window` the tick span of the step) was, or could have
+/// been, on a line that reaches `me` within the step, whatever the tee did with it in between (the clip holds the
+/// tee's hook only at the two frames). The hook flies [`HOOK_FIRE_SPEED_PX`] per tick along `hook_dx / hook_dy` (the
+/// unit direction times 256): from the tip as the earlier frame holds it it flies on; the tip in the later frame came
+/// from behind. The tee's core may be a few ticks older than its frame (a snapshot only carries what changed), so the
+/// reach counts those ticks too. A hook that is not in flight reaches nobody.
+fn flying_hook_reaches(frame: &Frame, later: bool, tee: &TeeRec, me: (f64, f64), window: i32) -> bool {
+    if tee.ch.hook_state != ddai_physics::core::HOOK_FLYING {
+        return false;
+    }
+    let tip = (f64::from(tee.ch.hook_x), f64::from(tee.ch.hook_y));
+    let (dx, dy) = (f64::from(tee.ch.hook_dx) / 256.0, f64::from(tee.ch.hook_dy) / 256.0);
+    let norm = dx.hypot(dy);
+    let (ux, uy) = if norm > 1e-9 {
+        (dx / norm, dy / norm)
+    } else {
+        (0.0, 0.0)
+    };
+    let lag = (frame.tick - tee.ch.tick).max(0);
+    let mut reach = HOOK_FIRE_SPEED_PX * f64::from(window.max(1) + lag + 1);
+    let sign = if later { -1.0 } else { 1.0 };
+    // A flying hook never gets further than `hook_length` (380 px) from its owner (plus the hitbox): a core many ticks old
+    // must not stretch the line over the map. Clip the line to that disc around the owner.
+    let owner = tee.pos();
+    let (wx, wy) = (tip.0 - owner.0, tip.1 - owner.1);
+    let (b, c) = (
+        wx * ux * sign + wy * uy * sign,
+        wx * wx + wy * wy - HOOK_OWNER_RADIUS_PX * HOOK_OWNER_RADIUS_PX,
+    );
+    if c > 0.0 {
+        reach = 0.0; // the tip is already beyond the owner's reach: only the tip itself counts
+    } else {
+        reach = reach.min(-b + (b * b - c).max(0.0).sqrt());
+    }
+    let end = (tip.0 + ux * reach * sign, tip.1 + uy * reach * sign);
+    point_segment_dist(me, tip, end) < HOOK_TIP_PX
+}
 
 /// The tele tiles on our way: a tele-in the hitbox swept over between `from` and where physics would have taken
 /// us (`to`), or a tele-out the hitbox touches at the recorded end (`landed`). The server then picked the exit
@@ -354,6 +430,58 @@ fn tele_involved(map: &MapData, from: (f64, f64), to: (f64, f64), landed: (f64, 
         .any(|(dx, dy)| matches!(kind_at(landed.0 + dx, landed.1 + dy), TILE_TELEOUT | TILE_TELECHECKOUT))
 }
 
+/// Our own sent input at `tick`, looked up in the frames up to `last` (the clip keeps the inputs of the ticks since the
+/// previous frame in each frame).
+fn sent_at(frames: &[Frame], last: usize, tick: i32) -> Option<crate::format::InputRec> {
+    frames[last.saturating_sub(64)..=last]
+        .iter()
+        .rev()
+        .flat_map(|f| f.sent.iter())
+        .find(|s| s.tick == tick)
+        .map(|s| s.input)
+}
+
+/// Proof that the server applied one of our inputs late (see [`Cause::InputTiming`]). The server compares, every tick, the
+/// character it would send against the client's own prediction (`CCharacter::TickDeferred`: the written `CNetObj_Character`,
+/// which holds `m_Direction` and `m_Angle`) and resends the core on any difference. So an own core that is **older than its
+/// frame** says the server's direction and aim stayed those of the core for every tick since. If an input we sent for one of
+/// those ticks says otherwise (a different direction, or a target whose angle differs), the server had not applied it yet.
+/// Looked at in frame `i - 1` (where the step starts) and in frame `i` (where it ends). Freeze zeroes a tee's direction, jump and hook
+/// but keeps its target (`character.cpp:2248-2250`), and the core's angle follows the target every tick (`gamecore.cpp:211-223`),
+/// so a frozen tee is judged by the angle only.
+fn stale_core_contradicts_sent(frames: &[Frame], i: usize, own_id: i32) -> bool {
+    [i - 1, i].into_iter().any(|j| {
+        let f = &frames[j];
+        let Some(t) = f.tee(own_id) else { return false };
+        if t.ch.tick >= f.tick {
+            return false;
+        }
+        (t.ch.tick + 1..=f.tick).any(|k| {
+            sent_at(frames, j, k).is_some_and(|s| {
+                // The server never aims at the centre: (0, 0) becomes (0, -1) (`CCharacter::OnPredictedInput`).
+                let (tx, ty) = if (s.target_x, s.target_y) == (0, 0) {
+                    (0, -1)
+                } else {
+                    (s.target_x, s.target_y)
+                };
+                // Freeze zeroes the direction, jump and hook (`character.cpp:2248-2250`) but keeps the target, and
+                // `CCharacterCore::Tick` recomputes the angle from it every tick, frozen or not (`gamecore.cpp:211-223`):
+                // so the angle is judged for a frozen tee too, the direction only for a free one.
+                ddai_physics::core::angle_from_target(tx, ty) != t.ch.angle
+                    || (!t.frozen && s.direction != t.ch.direction)
+            })
+        })
+    })
+}
+
+/// Whether a step is proved to be a late or lost input of ours. The reproduction proof (some alternative input assumption gives the
+/// recorded core bit for bit) is accepted only when the end frame's own core is **fresh**, the server's own integers: with a stale
+/// end core the recording is `LiveWorld`'s reckoning and a handful of fake corrections were "reproduced" by chance (review F8). A stale
+/// core is the contradiction proof's business ([`stale_core_contradicts_sent`]).
+fn input_timing_proved_by(end_core_fresh: bool, reproduced: bool, contradicted: bool) -> bool {
+    (end_core_fresh && reproduced) || contradicted
+}
+
 /// What was around at the step `prev -> next` that the replay cannot know. Each named cause needs a physical
 /// reason in the clip; with none, the step is [`Cause::ServerCorrection`] (review F3).
 pub(crate) fn cause_of(map: &MapData, frames: &[Frame], i: usize, own_id: i32, replayed: (f64, f64)) -> Cause {
@@ -377,9 +505,10 @@ pub(crate) fn cause_of(map: &MapData, frames: &[Frame], i: usize, own_id: i32, r
         return Cause::Respawn;
     }
     // Another tee that could have touched us: linked by a hook, within body / hammer reach, or with its hook
-    // tip at us. Its inputs between the two frames are not in the clip.
+    // in flight on a line that reaches us. Its inputs between the two frames are not in the clip.
+    let window = next.tick - prev.tick;
     let mut other: Option<(f64, i32)> = None;
-    for f in [prev, next] {
+    for (f, later) in [(prev, false), (next, true)] {
         let Some(me) = f.tee(own_id) else { continue };
         for t in &f.tees {
             if t.id == own_id {
@@ -387,8 +516,7 @@ pub(crate) fn cause_of(map: &MapData, frames: &[Frame], i: usize, own_id: i32, r
             }
             let linked = t.ch.hooked_player == own_id || me.ch.hooked_player == t.id;
             let d = dist(t.pos(), me.pos());
-            let tip = t.ch.hook_state == ddai_physics::core::HOOK_FLYING
-                && dist((f64::from(t.ch.hook_x), f64::from(t.ch.hook_y)), me.pos()) < HOOK_TIP_PX;
+            let tip = flying_hook_reaches(f, later, t, me.pos(), window);
             let reach = if linked || tip { 0.0 } else { d };
             if (linked || tip || d < BODY_REACH_PX) && other.is_none_or(|(nd, _)| reach < nd) {
                 other = Some((reach, t.id));
@@ -428,6 +556,57 @@ pub(crate) fn cause_of(map: &MapData, frames: &[Frame], i: usize, own_id: i32, r
     // Tees left out of the frame (`tees_dropped`) explain nothing: the nearest are the ones kept, so a left-out
     // tee is never nearer than the farthest one recorded, and none of those was within reach.
     Cause::ServerCorrection
+}
+
+/// How the server may have applied our inputs of the step other than on the ticks they were tagged for (see
+/// [`Cause::InputTiming`]): every input one or two ticks later, the newest input on every tick, or one tick's input never applied. Our own core
+/// after the step into frame `i` under each such assumption, from the same base as the normal prediction; an assumption that
+/// changes nothing (the inputs of the step are all the same as the one before it) is left out.
+fn alternative_input_cores(
+    lw: &mut LiveWorld,
+    frames: &[Frame],
+    i: usize,
+    own_id: i32,
+    inputs: &[(i32, PlayerInput)],
+) -> Vec<NetCharacterCore> {
+    let Some(before) = frames[i - 1].sent.last() else {
+        return Vec::new();
+    };
+    let before = player_input_from_net(before.input.to_net());
+    let mut variants: Vec<Vec<(i32, PlayerInput)>> = Vec::new();
+    // Every input `d` ticks later than it was sent for (the input in force then, from the sent history).
+    for d in 1..=2 {
+        let late: Vec<_> = inputs
+            .iter()
+            .map(|(tick, _)| {
+                let rec = sent_at(frames, i, tick - d);
+                (*tick, rec.map_or(before, |r| player_input_from_net(r.to_net())))
+            })
+            .collect();
+        variants.push(late);
+    }
+    // The newest input of the step applied to every tick of it: a tick nobody claimed gets the latest *received* input
+    // (`m_aLastPlayerInput`, `CGameContext::OnClientPredictedInput`), which can be the one tagged for a later tick.
+    if let Some((_, newest)) = inputs.last() {
+        variants.push(inputs.iter().map(|(tick, _)| (*tick, *newest)).collect());
+    }
+    // One tick's input never applied (its claim was lost): the input in force before it holds, the rest as sent. Covers a
+    // one-tick pulse of a button the server did not see as well as a change of direction that skipped a tick.
+    for j in 0..inputs.len() {
+        let mut dropped = inputs.to_vec();
+        dropped[j].1 = if j == 0 { before } else { inputs[j - 1].1 };
+        variants.push(dropped);
+    }
+    variants
+        .into_iter()
+        .filter(|v| v.as_slice() != inputs)
+        .filter_map(|v| {
+            lw.predict(frames[i].tick, &v)
+                .cores
+                .get(own_id as u8)
+                .map(|c| c.write())
+        })
+        .collect()
 }
 
 /// Replays `clip` on `map` in `mode`.
@@ -473,6 +652,7 @@ pub fn replay_with(clip: &Clip, map: Arc<MapData>, mode: Mode, legacy_prev_pos: 
             .get(own_id as u8)
             .map(|c| c.write());
         let exported = lw.export_own_predicted();
+        let alternatives = alternative_input_cores(&mut lw, &clip.frames, i, own_id, &inputs);
         // The recorded frame as the bot saw it: the snapshot's own core, evolved ("reckoned") from its own tick
         // to the snapshot's, which is what `on_snapshot` builds. Where the core is fresh (its tick is the
         // snapshot's) these are the server's own integers.
@@ -501,7 +681,33 @@ pub fn replay_with(clip: &Clip, map: Arc<MapData>, mode: Mode, legacy_prev_pos: 
             report.fresh_exact += usize::from(fresh);
             report.isolated_exact += usize::from(isolated);
         } else {
-            let cause = cause_of(&map, &clip.frames, i, own_id, (f64::from(core.x), f64::from(core.y)));
+            let mut cause = cause_of(&map, &clip.frames, i, own_id, (f64::from(core.x), f64::from(core.y)));
+            let mut input_timing_proved = false;
+            // Proofs for a step nothing else explains (or only a freeze change): the server did not apply our inputs as
+            // sent and said nothing. (1) With the inputs one or two ticks late, the newest input on every tick, or one tick's input never
+            // applied, the recorded state comes out exactly. (2) A stale own core contradicts the sent input.
+            // A step already named `InputTiming` for want of a timing report is proved here too (it counts as designed only then).
+            if matches!(
+                cause,
+                Cause::ServerCorrection | Cause::FreezeChange | Cause::InputTiming
+            ) && input_timing_proved_by(
+                fresh,
+                alternatives.iter().any(|c| compare(c, &recon).is_empty()),
+                stale_core_contradicts_sent(&clip.frames, i, own_id),
+            ) {
+                cause = Cause::InputTiming;
+                input_timing_proved = true;
+            }
+            // Our own hook grabbed (or missed) a tee in the replay that the recording says otherwise: that tee's real place
+            // between the frames is not in the clip.
+            if cause == Cause::ServerCorrection
+                && let Some(&(_, recorded_id, replayed_id)) = diffs.iter().find(|d| d.0 == "hooked_player")
+            {
+                let id = if replayed_id != -1 { replayed_id } else { recorded_id };
+                if id != -1 && id != own_id {
+                    cause = Cause::OtherTee { id };
+                }
+            }
             let (field, recorded, got) = diffs[0];
             let d = Divergence {
                 frame: i,
@@ -513,6 +719,8 @@ pub fn replay_with(clip: &Clip, map: Arc<MapData>, mode: Mode, legacy_prev_pos: 
                 cause,
                 fresh,
                 freeze_change,
+                isolated,
+                input_timing_proved,
             };
             let respawn = d.cause.is_by_design();
             if !respawn && report.first_divergence.is_none() {
@@ -532,4 +740,132 @@ pub fn replay_with(clip: &Clip, map: Arc<MapData>, mode: Mode, legacy_prev_pos: 
         carried = exported;
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::{CharRec, InputRec, SentRec};
+    use ddai_physics::core::angle_from_target;
+
+    /// Frames with only our tee (id 0): a stale core of tick `core_tick` holding `dir` and the aim at `target`, and our sent
+    /// inputs `sent` (tick, direction, target) in the frame at tick 110.
+    fn frames(
+        core_tick: i32,
+        dir: i32,
+        target: (i32, i32),
+        frozen: bool,
+        sent: &[(i32, i32, (i32, i32))],
+    ) -> Vec<Frame> {
+        let tee = TeeRec {
+            id: 0,
+            ch: CharRec {
+                tick: core_tick,
+                direction: dir,
+                angle: angle_from_target(target.0, target.1),
+                ..CharRec::default()
+            },
+            frozen,
+            ..TeeRec::default()
+        };
+        let mk = |tick: i32, sent: Vec<SentRec>| Frame {
+            tick,
+            own_alive: true,
+            tees: vec![tee],
+            sent,
+            ..Frame::default()
+        };
+        let sent = sent
+            .iter()
+            .map(|&(tick, direction, (target_x, target_y))| SentRec {
+                tick,
+                input: InputRec {
+                    direction,
+                    target_x,
+                    target_y,
+                    ..InputRec::default()
+                },
+                timing_known: true,
+            })
+            .collect();
+        vec![mk(108, Vec::new()), mk(110, sent)]
+    }
+
+    #[test]
+    fn the_reproduction_proof_needs_a_fresh_end_core_the_contradiction_proof_does_not() {
+        // Reproduced by chance against a stale (reckoned) end core: not a proof (review F8: fake corrections were "explained").
+        assert!(!input_timing_proved_by(false, true, false));
+        assert!(input_timing_proved_by(true, true, false));
+        assert!(!input_timing_proved_by(true, false, false));
+        // A stale core that contradicts the sent input proves it on its own.
+        assert!(input_timing_proved_by(false, false, true));
+    }
+
+    #[test]
+    fn a_zero_target_is_the_servers_minus_one_in_the_angle_check() {
+        // A sent target (0, 0) is aimed at (0, -1) by the server: a core with that angle does not contradict it.
+        let up = (0, -1);
+        assert!(!stale_core_contradicts_sent(
+            &frames(108, 1, up, false, &[(110, 1, (0, 0))]),
+            1,
+            0
+        ));
+        assert!(stale_core_contradicts_sent(
+            &frames(108, 1, (1, 0), false, &[(110, 1, (0, 0))]),
+            1,
+            0
+        ));
+    }
+
+    #[test]
+    fn a_stale_unfrozen_core_that_contradicts_a_sent_input_proves_a_late_input() {
+        let aim = (100, -50);
+        // Core of tick 108, direction 1 and this aim; we sent direction -1 for tick 110: the server had not applied it.
+        assert!(stale_core_contradicts_sent(
+            &frames(108, 1, aim, false, &[(109, 1, aim), (110, -1, aim)]),
+            1,
+            0
+        ));
+        // Only the aim differs.
+        assert!(stale_core_contradicts_sent(
+            &frames(108, 1, aim, false, &[(110, 1, (100, -80))]),
+            1,
+            0
+        ));
+        // Everything sent agrees with the core: nothing to prove.
+        assert!(!stale_core_contradicts_sent(
+            &frames(108, 1, aim, false, &[(109, 1, aim), (110, 1, aim)]),
+            1,
+            0
+        ));
+        // A fresh core is the server's own integer for the frame's tick: not stale.
+        assert!(!stale_core_contradicts_sent(
+            &frames(110, 1, aim, false, &[(110, -1, aim)]),
+            1,
+            0
+        ));
+        // A frozen tee's direction is zeroed by the server: a different sent direction proves nothing...
+        assert!(!stale_core_contradicts_sent(
+            &frames(108, 1, aim, true, &[(110, -1, aim)]),
+            1,
+            0
+        ));
+        // ...but its target is kept and the angle follows it: an aim change contradicts a stale frozen core.
+        assert!(stale_core_contradicts_sent(
+            &frames(108, 0, aim, true, &[(110, 0, (100, -80))]),
+            1,
+            0
+        ));
+        assert!(!stale_core_contradicts_sent(
+            &frames(108, 0, aim, true, &[(110, 0, aim)]),
+            1,
+            0
+        ));
+        // An input sent for a tick at or before the core's own tick is not about the reckoned ticks.
+        assert!(!stale_core_contradicts_sent(
+            &frames(108, 1, aim, false, &[(108, -1, aim)]),
+            1,
+            0
+        ));
+    }
 }

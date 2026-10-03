@@ -240,6 +240,9 @@ fn store_error_response(e: StoreError) -> Response {
         StoreError::Full => json_error(StatusCode::CONFLICT, "list_full"),
         StoreError::Corrupt => json_error(StatusCode::INTERNAL_SERVER_ERROR, "relations_unreadable"),
         StoreError::Write => json_error(StatusCode::INTERNAL_SERVER_ERROR, "relations_write_failed"),
+        StoreError::ReadOnly => {
+            json_error_detail(StatusCode::INTERNAL_SERVER_ERROR, "relations_write_failed", "read_only")
+        }
     }
 }
 
@@ -357,4 +360,29 @@ pub async fn relations_post(
         "applied_text": applied_text,
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn body_of(r: Response) -> (StatusCode, serde_json::Value) {
+        let status = r.status();
+        let bytes = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// 4.5: a lists file on a read-only file system is told apart (the page tells the owner to restart the web unit); every
+    /// other write failure keeps its plain code.
+    #[tokio::test]
+    async fn a_read_only_lists_file_has_its_own_detail_and_a_plain_write_failure_does_not() {
+        let (status, body) = body_of(store_error_response(StoreError::ReadOnly)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "relations_write_failed");
+        assert_eq!(body["detail"], "read_only");
+        let (status, body) = body_of(store_error_response(StoreError::Write)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "relations_write_failed");
+        assert!(body.get("detail").is_none(), "{body}");
+    }
 }

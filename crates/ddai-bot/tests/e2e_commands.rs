@@ -365,7 +365,7 @@ fn console_commands_drive_the_bot_and_its_clips_replay_bit_for_bit() {
     let mut seen = std::collections::BTreeSet::<&'static str>::new();
     let (mut steps, mut exact, mut free_exact_clips) = (0usize, 0usize, 0usize);
     let (mut fresh_steps, mut fresh_exact, mut by_design) = (0usize, 0usize, 0usize);
-    let (mut isolated_steps, mut isolated_exact) = (0usize, 0usize);
+    let (mut isolated_steps, mut isolated_exact, mut isolated_designed) = (0usize, 0usize, 0usize);
     let mut causes = std::collections::BTreeMap::<String, usize>::new();
     for p in &files {
         let clip = Clip::read(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
@@ -391,6 +391,7 @@ fn console_commands_drive_the_bot_and_its_clips_replay_bit_for_bit() {
         by_design += resync.respawn_steps;
         isolated_steps += resync.isolated_steps;
         isolated_exact += resync.isolated_exact;
+        isolated_designed += resync.isolated_designed();
         // Every step that does not reproduce has a cause. What a clip cannot know is named (a respawn or a
         // teleporter exit the server chose, another tee's unrecorded inputs); what must never appear is a step
         // nothing explains: the server changing our state for no reason the clip shows.
@@ -451,7 +452,7 @@ fn console_commands_drive_the_bot_and_its_clips_replay_bit_for_bit() {
     }
     eprintln!("[replay] events seen across the clips: {seen:?}");
     eprintln!(
-        "[replay] resync: {exact}/{steps} steps bit-exact ({:.2}%), {by_design} by design (respawn / teleport); fresh-core steps {fresh_exact}/{fresh_steps} exact; steps with nobody near {isolated_exact}/{isolated_steps} exact; \
+        "[replay] resync: {exact}/{steps} steps bit-exact ({:.2}%), {by_design} by design (respawn / teleport); fresh-core steps {fresh_exact}/{fresh_steps} exact; steps with nobody near {isolated_exact}/{isolated_steps} exact ({isolated_designed} more by design or proved late inputs); \
          free-run reproduces {free_exact_clips}/{} clips; divergence causes {causes:?}",
         100.0 * exact as f64 / steps.max(1) as f64,
         files.len()
@@ -473,10 +474,11 @@ fn console_commands_drive_the_bot_and_its_clips_replay_bit_for_bit() {
     // does not reproduce has a named cause. The overall share depends on how much the scripted opponents brawl
     // with us (their inputs are not in the clip), so it is reported, not asserted.
     assert!(isolated_steps > 500, "only {isolated_steps} steps with nobody near");
-    let designed = causes.get("respawn").copied().unwrap_or(0) + causes.get("teleport").copied().unwrap_or(0);
+    // Counted per isolated step: a respawn or a teleport (the server's choice) or a proved late input (the server applied an
+    // input of ours a tick late and said nothing; not our physics) in a step with someone near is not an isolated step's excuse.
     assert!(
-        isolated_exact + designed >= isolated_steps,
-        "with nobody near, only respawns and teleports may differ: {isolated_exact}/{isolated_steps}, {causes:?}"
+        isolated_exact + isolated_designed >= isolated_steps,
+        "with nobody near, only respawns, teleports and proved late inputs may differ: {isolated_exact} exact + {isolated_designed} designed of {isolated_steps}, {causes:?}"
     );
     assert_eq!(causes.get("server-correction"), None, "{causes:?}");
     let explained: usize = causes.values().sum();

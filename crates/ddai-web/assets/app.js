@@ -1583,6 +1583,9 @@
       if (d.error === "invalid_name" && NAME_DETAIL[d.detail]) {
         return "Недопустимое имя: " + NAME_DETAIL[d.detail] + ".";
       }
+      if (d.error === "relations_write_failed" && d.detail === "read_only") {
+        return "Файл списков для веб-юнита только для чтения: каталог data/bot создан заново или перенесён после его запуска. Перезапустите юнит: sudo systemctl restart ddnet-ai-web.";
+      }
       if (d.code === "rate_limited" || res.status === 429) {
         return "Слишком много команд подряд: подождите секунду.";
       }
@@ -1664,7 +1667,8 @@
       });
       var brain = el("cmd-brain");
       if (s && s.brain && document.activeElement !== brain) {
-        brain.value = s.brain;
+        // The bot reports a descriptive name ("hybrid-none-4ms", "planner-normal-5ms", "hybrid:fly-..."): the select holds the kind.
+        brain.value = String(s.brain).split(/[-:]/)[0];
       }
       el("cmd-kill").disabled = locked() || busy || !s || (s.kill_cooldown_ticks | 0) > 0;
     }

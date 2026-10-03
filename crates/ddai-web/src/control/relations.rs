@@ -40,6 +40,22 @@ pub enum StoreError {
     Corrupt,
     #[error("the lists file cannot be written")]
     Write,
+    /// The file system under the lists file is read-only for this process (`EROFS`). The unit's `ReadWritePaths` are bind-mounted
+    /// when it starts, so a `data/bot` moved away or recreated afterwards leaves the unit with a read-only view of the new one
+    /// (found in the 4.5 rehearsal): the web unit must be restarted. Said apart from [`StoreError::Write`] so the owner is told.
+    #[error("the lists file is on a read-only file system")]
+    ReadOnly,
+}
+
+/// What a failed write of the lists file is to the owner, and why it failed in the log (the error kind and OS code only: the file
+/// is the one place names live, and nothing here holds one).
+fn write_failed(op: &'static str, e: &std::io::Error) -> StoreError {
+    tracing::warn!(op, kind = ?e.kind(), os_error = ?e.raw_os_error(), "the lists file could not be written");
+    if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem {
+        StoreError::ReadOnly
+    } else {
+        StoreError::Write
+    }
 }
 
 /// All five lists, as normalised names (the exact keys the bot matches on).
@@ -154,7 +170,7 @@ impl RelationsStore {
         let path = self.path.clone();
         let raw = raw.to_string();
         tokio::task::spawn_blocking(move || {
-            let _lock = RelationsLock::acquire(&path).map_err(|_| StoreError::Write)?;
+            let _lock = RelationsLock::acquire(&path).map_err(|e| write_failed("lock", &e))?;
             let mut r = load(&path)?;
             let already = r.contains_key(kind, &folded);
             if !already && r.len(kind) >= MAX_ENTRIES_PER_LIST {
@@ -167,7 +183,7 @@ impl RelationsStore {
                 .collect();
             if !already || !moved_from.is_empty() {
                 r.add(kind, &raw);
-                r.save(&path).map_err(|_| StoreError::Write)?;
+                r.save(&path).map_err(|e| write_failed("save", &e))?;
             }
             // Re-read what was written: the view is exactly what the bot will load.
             let back = load(&path)?;
@@ -190,11 +206,11 @@ impl RelationsStore {
         let path = self.path.clone();
         let raw = raw.to_string();
         tokio::task::spawn_blocking(move || {
-            let _lock = RelationsLock::acquire(&path).map_err(|_| StoreError::Write)?;
+            let _lock = RelationsLock::acquire(&path).map_err(|e| write_failed("lock", &e))?;
             let mut r = load(&path)?;
             let changed = r.remove(kind, &raw);
             if changed {
-                r.save(&path).map_err(|_| StoreError::Write)?;
+                r.save(&path).map_err(|e| write_failed("save", &e))?;
             }
             let back = load(&path)?;
             Ok(RemoveOutcome {
@@ -218,6 +234,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = RelationsStore::new(dir.path().join("bot").join("relations.json"));
         (dir, s)
+    }
+
+    #[test]
+    fn a_read_only_file_system_is_told_apart_from_any_other_write_failure() {
+        let erofs = std::io::Error::from_raw_os_error(30); // EROFS on Linux
+        assert_eq!(erofs.kind(), std::io::ErrorKind::ReadOnlyFilesystem);
+        assert_eq!(write_failed("save", &erofs), StoreError::ReadOnly);
+        for other in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::StorageFull,
+        ] {
+            assert_eq!(
+                write_failed("save", &std::io::Error::from(other)),
+                StoreError::Write,
+                "{other:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_directory_that_cannot_be_written_is_a_write_error_and_leaves_the_file_alone() {
+        let (d, s) = store();
+        s.add(ListKind::Friend, "pal").await.unwrap();
+        let bot = d.path().join("bot");
+        let before = std::fs::read(s.path()).unwrap();
+        std::fs::set_permissions(&bot, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::File::create(bot.join("probe")).is_ok() {
+            return; // running as root: permissions do not apply, nothing to prove here
+        }
+        let denied_add = s.add(ListKind::Friend, "other").await;
+        let denied_remove = s.remove(ListKind::Friend, "pal").await;
+        std::fs::set_permissions(&bot, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(denied_add, Err(StoreError::Write)), "{denied_add:?}");
+        assert!(matches!(denied_remove, Err(StoreError::Write)), "{denied_remove:?}");
+        assert_eq!(
+            std::fs::read(s.path()).unwrap(),
+            before,
+            "a failed write leaves the lists as they were"
+        );
     }
 
     #[tokio::test]

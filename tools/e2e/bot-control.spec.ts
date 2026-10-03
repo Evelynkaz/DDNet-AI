@@ -31,7 +31,7 @@ let bridgeTimer: NodeJS.Timeout;
 
 const received: any[] = [];
 const fakeStatus: Record<string, unknown> = {
-  tick: 1234, own: 3, target: 5, mode: "fight", brain: "hybrid", alive: true, frozen: false,
+  tick: 1234, own: 3, target: 5, mode: "fight", brain: "hybrid-none-4ms", alive: true, frozen: false,
   blocks: 7, blocked_by: 2, self_kills: 1, decisions: 99, collapsed: 0,
   decide_p50_us: 800, decide_p99_us: 4100, brain_p99_us: 3900, overhead_p99_us: 200, telemetry: null,
   connected: true, server: "127.0.0.1:8303", map: "Copy Love Box", name: "bot", clan: "Neuroset", skin: "pinky",
@@ -202,7 +202,9 @@ test("desktop: status, commands, and the lists editor round-trip", async ({ page
   await expect(page.locator("#bot-conn-text")).toHaveText("В игре", { timeout: 5_000 });
   await expect(page.locator("#bs-server")).toHaveText("127.0.0.1:8303");
   await expect(page.locator("#bs-map")).toHaveText("Copy Love Box");
-  await expect(page.locator("#bs-brain")).toHaveText("hybrid");
+  await expect(page.locator("#bs-brain")).toHaveText("hybrid-none-4ms");
+  // The select holds the kind of the descriptive name the bot reports (it used to stay blank).
+  await expect(page.locator("#cmd-brain")).toHaveValue("hybrid");
   await expect(page.locator("#bs-target")).toHaveText("c5-0a1b2c3d");
   await expect(page.locator("#bs-blocks")).toHaveText("7 / 2");
   await expect(page.locator("#bs-clips")).toHaveText("2");

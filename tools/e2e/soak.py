@@ -16,6 +16,12 @@ What one run does (everything on 127.0.0.1, never any other address):
 Then soak_analyze.analyze() judges the run. The local server's map is put back to "Copy Love Box" and read back at the end.
 Output: ~/aiddnet/data/logs/4.4/<stamp>-<label>/ (never in git). The bot gets a PRIVATE data dir <run>/botdata in both modes; the
 production ~/aiddnet/data/bot is never used, moved or removed, and the run ends by checking that it is unchanged (listing, modes, sizes, mtimes).
+--real-data (task 4.5, the dress rehearsal) is the one exception, on purpose: the bot runs through the UNMODIFIED production unit
+(only the binary path is swapped by a drop-in) with `--data-dir ~/aiddnet/data`, so it writes what a running bot normally writes into the
+real ~/aiddnet/data/bot (sockets, clips, memory, audit, report) and the production web unit reads its bridge. The harness itself never
+moves, removes or edits anything there: it takes a listing and the sha256 of relations.json (if any) before, and at the end checks that
+nothing that existed was removed or had its mode changed and that the owner's lists are as before. `--fly-bundle` adds `--fly-bundle` to the
+bot's command line (the 'Муха' tab session, `hybrid:fly`).
 The memory gate needs a baseline after the warm-up (minute 25) and 10 more minutes: a run shorter than 35 minutes does not judge it.
 """
 import argparse
@@ -49,6 +55,7 @@ SERVER_UNIT = "ddnet-local.service"
 HOME_MAP = "Copy Love Box"
 BOT_UNIT = "ddnet-ai-bot.service"
 WEB_UNIT = "ddai-soak-web"
+PROD_WEB_UNIT = "ddnet-ai-web.service"
 PROD_WEB_PORT = 7788
 # The memory baseline: after the latency rings fill (RING = 32 768 decisions / 25 Hz = 22 min), with margin. No scenario event (restart, map
 # change) falls into the 60 s window after it in a 60 minute run.
@@ -387,18 +394,23 @@ class Soak:
         self.players = None
         self.bot_proc = None
         self.web_password = None
-        self.unit_mode = a.unit
+        self.unit_mode = a.unit or a.real_data
         self.meta = {}
         self.others = ["soak-s1", "soak-s2", "soak-s3"]
         # The soak's bot always gets a PRIVATE data dir (both modes): ~/aiddnet/data/bot is the owner's production state (relations.json,
         # live.sock, control.sock; in the production web unit's ReadWritePaths) and is never used, moved or removed here.
-        self.botdata = self.run / "botdata"
+        self.real = bool(a.real_data)
+        if self.real:
+            self.unit_mode = True
+        # --real-data: the REAL data dir. Everything below then names files the bot itself creates and the harness only reads.
+        self.botdata = DATA if self.real else self.run / "botdata"
         self.bot_state = self.botdata / "bot"
         self.bridge_path = self.bot_state / "live.sock"
         self.control_path = self.bot_state / "control.sock"
         self.clips_dir = self.bot_state / "clips"
         self.memory_dir = self.bot_state / "memory"
         self.prod_bot_before = None
+        self.relations_before = None
 
     # ---- small helpers
     def t(self):
@@ -460,14 +472,26 @@ class Soak:
 
     def start_bot(self):
         a = self.a
-        self.bot_state.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.bot_state, 0o700)
-        settings = f'wb = "{a.wb}"\n' if a.wb != "auto" else ""
-        (self.bot_state / "settings.toml").write_text(settings)
-        paths = ["--data-dir", str(self.botdata), "--bridge", str(self.bridge_path), "--control", str(self.control_path),
-                 "--settings", str(self.bot_state / "settings.toml"), "--relations", str(self.bot_state / "relations.json"),
-                 "--clips-dir", str(self.clips_dir), "--memory-dir", str(self.memory_dir)]
-        if self.unit_mode:
+        if self.real:
+            paths = []  # the unit's own command line: --data-dir ~/aiddnet/data and the default paths under it
+        else:
+            self.bot_state.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.bot_state, 0o700)
+            settings = f'wb = "{a.wb}"\n' if a.wb != "auto" else ""
+            (self.bot_state / "settings.toml").write_text(settings)
+            paths = ["--data-dir", str(self.botdata), "--bridge", str(self.bridge_path), "--control", str(self.control_path),
+                     "--settings", str(self.bot_state / "settings.toml"), "--relations", str(self.bot_state / "relations.json"),
+                     "--clips-dir", str(self.clips_dir), "--memory-dir", str(self.memory_dir)]
+        if self.real:
+            unit_src = REPO / "deploy" / "systemd" / BOT_UNIT
+            sh(["sudo", "install", "-m", "0644", str(unit_src), f"/etc/systemd/system/{BOT_UNIT}"], check=True)
+            dropin = unit_binary_override(unit_src, self.bin(), ["--fly-bundle", a.fly_bundle] if a.fly_bundle else [])
+            sh(["sudo", "mkdir", "-p", f"/etc/systemd/system/{BOT_UNIT}.d"], check=True)
+            sh(["sudo", "tee", f"/etc/systemd/system/{BOT_UNIT}.d/soak.conf"], input=dropin, check=True)
+            sh(["sudo", "systemctl", "daemon-reload"], check=True)
+            self.start_journal_tail()
+            sh(["sudo", "systemctl", "start", BOT_UNIT], check=True)
+        elif self.unit_mode:
             unit_src = REPO / "deploy" / "systemd" / BOT_UNIT
             sh(["sudo", "install", "-m", "0644", str(unit_src), f"/etc/systemd/system/{BOT_UNIT}"], check=True)
             # The same unit, with our freshly built binary (~/aiddnet/bin/ddnet-ai is what production runs), a private data dir and
@@ -631,6 +655,8 @@ class Soak:
         pids = {"server": unit_pid(SERVER_UNIT), "bot": self.bot_pid()}
         if self.unit_mode:
             pids["web"] = unit_pid(WEB_UNIT)
+            if self.real:
+                pids["pweb"] = unit_pid(PROD_WEB_UNIT)  # the production web unit: measured, never touched
         else:
             w = self.procs.get("web")
             pids["web"] = w.pid if w and w.poll() is None else 0
@@ -770,6 +796,16 @@ class Soak:
             raise SystemExit("someone is on the local server: refusing to start (it is ours alone for this task)")
         if self.unit_mode and sh(["systemctl", "is-active", BOT_UNIT]).stdout.strip() == "active":
             raise SystemExit(f"{BOT_UNIT} is already running")
+        if self.real:
+            if Path(f"/etc/systemd/system/{BOT_UNIT}").exists() or Path(f"/etc/systemd/system/{BOT_UNIT}.d").exists():
+                raise SystemExit(f"{BOT_UNIT} (or its drop-in dir) is already installed: not overwriting someone else's unit")
+            if not (DATA / "bot").is_dir():
+                raise SystemExit("~/aiddnet/data/bot does not exist: the units need it (deploy/README.md); not creating it here")
+            if sh(["systemctl", "is-active", PROD_WEB_UNIT]).stdout.strip() != "active":
+                raise SystemExit(f"{PROD_WEB_UNIT} is not active: the rehearsal needs the production web unit running")
+            for stale in ("live.sock", "control.sock"):
+                if (DATA / "bot" / stale).exists():
+                    raise SystemExit(f"data/bot/{stale} exists: another bot is running or left it behind; not touching it")
 
     def run_all(self):
         a = self.a
@@ -777,15 +813,19 @@ class Soak:
         (self.run / "scripted").mkdir()
         self.events_fh = open(self.run / "events.jsonl", "a")
         self.preflight()
-        self.botdata.mkdir()
+        if not self.real:
+            self.botdata.mkdir()
         if not self.unit_mode:
             (self.botdata / "maps").symlink_to(DATA / "maps")  # the shared map cache (process mode only; the unit gets a private one)
         self.prod_bot_before = snapshot_dir(DATA / "bot")
+        self.relations_before = relations_state(DATA / "bot" / "relations.json")
+        if self.real and self.relations_before["exists"]:
+            shutil.copy2(DATA / "bot" / "relations.json", self.run / "relations.json.before")  # a copy, for the owner; the original stays
         self.meta = {
-            "label": a.label, "mode": "unit" if a.unit else "process", "wb": a.wb, "brain": "hybrid", "duration": a.duration,
+            "label": a.label, "mode": "real-data unit" if self.real else ("unit" if a.unit else "process"), "wb": a.wb, "brain": "hybrid", "duration": a.duration,
             "sample_s": a.sample, "baseline_s": WARMUP_S, "home_map": HOME_MAP, "other_map": a.other_map,
-            "binary": self.bin(), "others_names": self.others, "name_logs": ["bot.log"], "extra_logs": ["web.log"],
-            "memory": True, "started": now_iso(), "bot_died_early": False, "git_head": sh(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"]).stdout.strip(),
+            "binary": self.bin(), "others_names": self.others + (["Muha"] if self.real else []), "name_logs": ["bot.log"], "extra_logs": ["web.log"],
+            "memory": True, "real_data": self.real, "fly_bundle": bool(a.fly_bundle), "started": now_iso(), "bot_died_early": False, "git_head": sh(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"]).stdout.strip(),
         }
         (self.run / "meta.json").write_text(json.dumps(self.meta, indent=1))
         bridge = viewer = None
@@ -846,7 +886,7 @@ class Soak:
             (self.run / "web.log").write_text(wl)
             sh(["sudo", "systemctl", "stop", WEB_UNIT], timeout=30)
             rp = self.bot_state / "last-report.json"
-            if rp.exists():
+            if rp.exists() and (not self.real or rp.stat().st_mtime >= self.meta.get("t0_epoch", 0)):
                 shutil.copy(rp, self.run / "bot-report.json")
         else:
             if self.bot_proc and self.bot_proc.poll() is None:
@@ -875,8 +915,16 @@ class Soak:
             sh(["sudo", "systemctl", "daemon-reload"])
         # ~/aiddnet/data/bot is production state: it must be exactly as it was (listing, sizes, modes, mtimes)
         after = snapshot_dir(DATA / "bot")
-        diff = diff_snapshots(self.prod_bot_before, after)
-        self.meta["prod_bot_dir"] = {"unchanged": not diff, "entries": len((self.prod_bot_before or {}).get("entries", {})), "diff": diff[:20]}
+        if self.real:
+            diff = diff_real_dir(self.prod_bot_before, after)
+            rel_after = relations_state(DATA / "bot" / "relations.json")
+            rel_diff = relations_diff(self.relations_before, rel_after)
+            diff += rel_diff
+            self.meta["prod_bot_dir"] = {"real": True, "unchanged": not diff, "entries": len((self.prod_bot_before or {}).get("entries", {})),
+                                         "diff": diff[:20], "relations": f"before {relations_label(self.relations_before)}, after {relations_label(rel_after)}"}
+        else:
+            diff = diff_snapshots(self.prod_bot_before, after)
+            self.meta["prod_bot_dir"] = {"unchanged": not diff, "entries": len((self.prod_bot_before or {}).get("entries", {})), "diff": diff[:20]}
         self.ev("prod_bot_dir_checked", unchanged=not diff, diff=diff[:5])
         shutil.rmtree(self.run / "web-data" / "secrets", ignore_errors=True)
         # the server: back to the home map, read it back
@@ -982,12 +1030,150 @@ def diff_snapshots(a, b):
     return out
 
 
+def unit_binary_override(unit_file, binary, extra_args):
+    """A drop-in for the bot unit that changes ONLY the binary path (and optionally appends arguments): every other argument of the
+    unit's own ExecStart (server, name, brain, --data-dir, --report, ...) and its ReadWritePaths stay exactly as shipped (task 4.5)."""
+    for line in unit_file.read_text().splitlines():
+        if line.startswith("ExecStart="):
+            argv = shlex.split(line[len("ExecStart="):])
+            cmd = shlex.join([binary, *argv[1:], *extra_args])
+            return f"[Service]\nExecStart=\nExecStart={cmd}\n"
+    raise SystemExit("no ExecStart in the bot unit")
+
+
+RELATION_KINDS = ("friend", "war", "ignore", "clanWar", "clanFriend")
+
+
+def relations_state(path):
+    """What the owner's lists are: absent, or the sha256 of the file plus the parsed lists (the digest of the content, not the mtime)."""
+    import hashlib
+
+    path = Path(path)
+    if not path.exists():
+        return {"exists": False}
+    raw = path.read_bytes()
+    try:
+        lists = {k: sorted(json.loads(raw).get(k, [])) for k in RELATION_KINDS}
+    except (ValueError, AttributeError):
+        lists = None
+    return {"exists": True, "sha256": hashlib.sha256(raw).hexdigest(), "lists": lists}
+
+
+def relations_label(st):
+    if not st["exists"]:
+        return "absent"
+    if st["lists"] is not None and not any(st["lists"].values()):
+        return f"file with empty lists (sha {st['sha256'][:12]})"
+    return f"sha {st['sha256'][:12]}"
+
+
+def relations_diff(before, after):
+    """The lists must be as before. Same bytes always pass; an absent file may come back as a file with empty lists (the site's own
+    save after an add and a remove: it leaves the file, and the harness never deletes anything in data/bot); nothing else does."""
+    if before["exists"]:
+        if not after["exists"]:
+            return ["relations.json removed"]
+        return [] if before["sha256"] == after["sha256"] else ["relations.json content changed"]
+    if not after["exists"]:
+        return []
+    if after["lists"] is not None and not any(after["lists"].values()):
+        return []
+    return ["relations.json appeared with entries"]
+
+
+def diff_real_dir(before, after):
+    """The real data/bot: the bot (and the site) legitimately add files, grow memory/clips/report and prune its own old automatic clips,
+    so only what the harness must never cause is judged: any other entry that existed before is gone, or has another mode."""
+    if before is None or after is None:
+        return ["no snapshot"]
+    out = []
+    if before["exists"] and not after["exists"]:
+        out.append("data/bot removed")
+    for k, v in sorted(before["entries"].items()):
+        if k not in after["entries"]:
+            if an.PRUNED_AUTOCLIP.match(k):
+                continue  # the bot's own pruning of old automatic clips (at most 24, 16 a kind): its documented behaviour, never the harness
+            out.append(f"removed {k or '.'}")
+        elif after["entries"][k][0] != v[0]:
+            out.append(f"mode changed {k or '.'}")
+    return out
+
+
+def selftest():
+    """The 4.5 real-data helpers can fail: a removed entry, a changed mode, a changed relations.json, a drop-in that changes more than the binary."""
+    import tempfile
+
+    failed = []
+
+    def check(name, ok):
+        print(("ok   " if ok else "FAIL ") + name)
+        if not ok:
+            failed.append(name)
+
+    unit = REPO / "deploy" / "systemd" / BOT_UNIT
+    drop = unit_binary_override(unit, "/x/new-bin", ["--fly-bundle", "/b"])
+    orig = next(line for line in unit.read_text().splitlines() if line.startswith("ExecStart="))
+    new_cmd = [line for line in drop.splitlines() if line.startswith("ExecStart=") and len(line) > 10][0]
+    check("drop-in swaps only the binary and appends the extra arguments",
+          shlex.split(new_cmd[10:])[1:] == shlex.split(orig[10:])[1:] + ["--fly-bundle", "/b"] and shlex.split(new_cmd[10:])[0] == "/x/new-bin")
+    check("drop-in resets ExecStart and nothing else (ReadWritePaths stays as shipped)",
+          drop.splitlines()[:2] == ["[Service]", "ExecStart="] and "ReadWritePaths" not in drop)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "bot"
+        d.mkdir(mode=0o700)
+        (d / "memory").mkdir()
+        (d / "memory" / "m.json").write_text("{}")
+        before = snapshot_dir(d)
+        (d / "memory" / "m.json").write_text('{"grew": 1}')  # growth is the bot's normal business
+        (d / "live.sock").write_text("")  # a new file too
+        check("real dir: growth and new files pass", diff_real_dir(before, snapshot_dir(d)) == [])
+        (d / "memory" / "m.json").unlink()
+        check("real dir: a removed entry fails", diff_real_dir(before, snapshot_dir(d)) == ["removed memory/m.json"])
+        (d / "memory" / "m.json").write_text("{}")
+        os.chmod(d / "memory" / "m.json", 0o644)
+        (d / "clips").mkdir()
+        (d / "clips" / "self-freeze-1-s200.clip").write_text("x")
+        (d / "clips" / "manual-2-note.clip").write_text("x")
+        with_clips = snapshot_dir(d)
+        (d / "clips" / "self-freeze-1-s200.clip").unlink()
+        check("real dir: the bot pruning an old automatic clip passes", diff_real_dir(with_clips, snapshot_dir(d)) == [])
+        (d / "clips" / "manual-2-note.clip").unlink()
+        check("real dir: a removed manual clip fails", diff_real_dir(with_clips, snapshot_dir(d)) == ["removed clips/manual-2-note.clip"])
+        (d / "memory" / "m.json").unlink()
+        (d / "memory" / "m.json").write_text("{}")
+        (d / "memory" / "m.json").write_text("{}")
+        os.chmod(d / "memory" / "m.json", 0o666)
+        check("real dir: a changed mode fails", diff_real_dir(before, snapshot_dir(d)) == ["mode changed memory/m.json"])
+        os.chmod(d / "memory" / "m.json", 0o644)
+        rel = d / "relations.json"
+        absent = relations_state(rel)
+        check("relations: absent stays absent", relations_diff(absent, relations_state(rel)) == [])
+        rel.write_text(json.dumps({"friend": ["tag"], "war": [], "ignore": []}))
+        check("relations: absent -> entries fails", relations_diff(absent, relations_state(rel)) == ["relations.json appeared with entries"])
+        rel.write_text(json.dumps({"friend": [], "war": [], "ignore": [], "clanWar": [], "clanFriend": []}))
+        check("relations: absent -> the site's file with empty lists passes", relations_diff(absent, relations_state(rel)) == [])
+        rel.write_text(json.dumps({"friend": ["a"]}))
+        owner = relations_state(rel)
+        check("relations: same bytes pass", relations_diff(owner, relations_state(rel)) == [])
+        rel.write_text(json.dumps({"friend": ["a", "b"]}))
+        check("relations: changed content fails", relations_diff(owner, relations_state(rel)) == ["relations.json content changed"])
+        rel.unlink()
+        check("relations: a removed file fails", relations_diff(owner, relations_state(rel)) == ["relations.json removed"])
+    print("soak selftest:", "PASS" if not failed else f"{len(failed)} FAILED")
+    return not failed
+
+
 def main():
+    if "--selftest" in sys.argv[1:]:
+        sys.exit(0 if selftest() else 1)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--label", required=True, help="run name, e.g. A-wbauto")
     ap.add_argument("--duration", type=int, default=3600, help="measured seconds (default 3600)")
     ap.add_argument("--wb", default="auto", choices=["auto", "off", "left", "right"])
     ap.add_argument("--unit", action="store_true", help="run our bot through deploy/systemd/ddnet-ai-bot.service (console off)")
+    ap.add_argument("--real-data", action="store_true",
+                    help="task 4.5: the production layout: the unmodified unit (binary swapped by a drop-in), --data-dir ~/aiddnet/data, the real data/bot; implies --unit")
+    ap.add_argument("--fly-bundle", default=None, help="with --real-data: add --fly-bundle <path> to the bot (hybrid:fly)")
     ap.add_argument("--bin", default=str(REPO / "target" / "release" / "ddnet-ai"))
     ap.add_argument("--web-port", type=int, default=7790)
     ap.add_argument("--sample", type=float, default=15.0)
@@ -998,6 +1184,8 @@ def main():
     ap.add_argument("--no-mapchange", action="store_true")
     ap.add_argument("--out", default=str(DATA / "logs" / "4.4"))
     a = ap.parse_args()
+    if a.fly_bundle and not a.real_data:
+        ap.error("--fly-bundle needs --real-data")
     s = Soak(a)
 
     def on_signal(signum, frame):

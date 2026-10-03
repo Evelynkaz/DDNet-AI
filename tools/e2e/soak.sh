@@ -5,6 +5,9 @@
 #   tools/e2e/soak.sh --build --label A-wbauto                      # 60 min, WB auto, bot as a child process, console fed
 #   tools/e2e/soak.sh --label B-wboff --wb off --unit               # 60 min, WB off, through deploy/systemd/ddnet-ai-bot.service
 #   tools/e2e/soak.sh --label rehearsal --duration 600              # a 10 minute rehearsal (the whole timeline, compressed)
+#   tools/e2e/soak.sh --label rehearsal-6h --real-data --duration 21600 --out ~/aiddnet/data/logs/4.5   # task 4.5: the production layout
+#                                                                  # (unmodified unit, REAL ~/aiddnet/data/bot; never moves or deletes anything there)
+#   tools/e2e/soak.sh --label rehearsal-fly --real-data --duration 1500 --fly-bundle <bundle> --out ...   # the same with hybrid:fly
 #   tools/e2e/soak.sh --analyze ~/aiddnet/data/logs/4.4/<run>       # re-run the analysis of a finished run
 #   tools/e2e/soak.sh --selftest                                    # the analysis can fail (synthetic runs)
 #
@@ -18,7 +21,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
 case "${1:-}" in
-    --selftest) exec python3 "$HERE/soak_analyze.py" --selftest ;;
+    --selftest) python3 "$HERE/soak.py" --selftest && exec python3 "$HERE/soak_analyze.py" --selftest ;;
     --analyze) shift; exec python3 "$HERE/soak_analyze.py" "$@" ;;
 esac
 

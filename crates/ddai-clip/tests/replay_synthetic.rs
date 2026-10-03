@@ -453,6 +453,229 @@ fn a_jump_is_a_teleport_only_next_to_a_tele_in_or_on_a_tele_out() {
     );
 }
 
+/// The 4.4 flake (`manual-96752-fight-3`, frame 711, tick 96676, x 3997 vs 3998; found in the 4.5 rehearsal): another tee, 250 px
+/// away, had its hook in flight at us in the earlier frame (tip 126 px from us, aimed at us) and let go before the later one. The
+/// replay holds the last input it knew for a tee it cannot see into, so the hook kept flying, caught us and pulled us (+956 in vel_y
+/// in the first tick); the server's tee had released it. The step is unreproducible for a reason the clip shows, so it is
+/// `OtherTee`, not a `ServerCorrection`: the old rule (hook tip within 60 px) missed a hook flying 80 px per tick.
+#[test]
+fn a_flying_hook_aimed_at_us_that_the_tee_let_go_of_in_between_is_named_not_a_server_correction() {
+    let map = room();
+    let at = 30;
+    let stand = |_: i32| input(0, 0, 0, 100, 0);
+    // Tee 1 stands 13 tiles to our right on our row (416 px: out of body reach). Ours is +2 px at frame `at`; tee 1's hook is
+    // set in frame `frame` (`at - 1`: the earlier frame of the step, `at`: the later one).
+    let make = |tip_dx: i32, dir_x: i32, state: i32, frame: usize| {
+        let mut clip = record_with(&map, stand, 2, 120, false, 23, 90);
+        clip.frames[at].tees[0].ch.x += 2;
+        let (mx, my) = (clip.frames[frame].tees[0].ch.x, clip.frames[frame].tees[0].ch.y);
+        let t = &mut clip.frames[frame].tees[1];
+        t.ch.hook_state = state;
+        t.ch.hook_x = mx + tip_dx;
+        t.ch.hook_y = my;
+        t.ch.hook_dx = dir_x;
+        t.ch.hook_dy = 0;
+        clip
+    };
+    let first = |clip: &Clip| {
+        let r = replay(clip, Arc::clone(&map), Mode::Resync);
+        r.divergences.first().map(|d| (d.frame, d.cause.clone()))
+    };
+    let flying = 4; // HOOK_FLYING
+    // The flake: tip 126 px to our right, aimed at us (left), in the earlier frame.
+    assert_eq!(
+        first(&make(126, -256, flying, at - 1)),
+        Some((at, Cause::OtherTee { id: 1 }))
+    );
+    // The same tip aimed away from us: it cannot reach us.
+    assert_eq!(
+        first(&make(126, 256, flying, at - 1)),
+        Some((at, Cause::ServerCorrection))
+    );
+    // Aimed at us but 700 px away: beyond what a hook flies in the step.
+    assert_eq!(
+        first(&make(700, -256, flying, at - 1)),
+        Some((at, Cause::ServerCorrection))
+    );
+    // Not in flight (retracting, or on its way back): reaches nobody.
+    assert_eq!(first(&make(126, -256, 1, at - 1)), Some((at, Cause::ServerCorrection)));
+    // In the later frame the tip came from behind: a hook that has flown past us (aimed away) may have caught us on the way,
+    // one still coming at us (aimed at us) was farther away during the step.
+    assert_eq!(
+        first(&make(126, 256, flying, at)),
+        Some((at, Cause::OtherTee { id: 1 }))
+    );
+    assert_eq!(first(&make(126, -256, flying, at)), Some((at, Cause::ServerCorrection)));
+}
+
+/// 4.5: a server that applied every input one tick late and said nothing (the timing report covers the newest input of a packet
+/// only). The recorded cores come from the delayed physics, the recorded inputs are as sent: every step where the input changes
+/// diverges, and the replay proves the cause by running the step with the inputs one tick later and getting the recorded state.
+#[test]
+fn a_server_that_applied_the_inputs_a_tick_late_is_proved_input_timing_not_a_server_correction() {
+    let map = room();
+    let sent = |t: i32| input(if (t / 7) % 2 == 0 { 1 } else { -1 }, 0, 0, 100, 0);
+    // The physics steps with the previous tick's input; the frames keep the inputs as they were sent.
+    let mut clip = record_with(&map, move |t| sent(t - 1), 2, 120, false, 50, 90);
+    for f in &mut clip.frames {
+        for s in &mut f.sent {
+            s.input = InputRec::from_net(&ddai_world::player_input_to_net(sent(s.tick)));
+        }
+    }
+    let r = replay(&clip, Arc::clone(&map), Mode::Resync);
+    assert!(!r.divergences.is_empty(), "the late inputs must show as divergences");
+    assert!(
+        r.divergences.iter().all(|d| d.cause == Cause::InputTiming),
+        "{:?}",
+        r.divergences
+            .iter()
+            .map(|d| (d.frame, d.cause.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(r.unexplained().count(), 0);
+    // Tampering the same clip by 2 px where the inputs do not change is still a server correction: the proof is per step.
+    let mut tampered = clip.clone();
+    let quiet = (1..tampered.frames.len())
+        .find(|&k| {
+            let (a, b) = (&tampered.frames[k - 1], &tampered.frames[k]);
+            b.sent
+                .iter()
+                .chain(a.sent.last())
+                .all(|s| s.input == a.sent.last().unwrap().input)
+        })
+        .expect("a frame whose step has a constant input");
+    tampered.frames[quiet].tees[0].ch.x += 2;
+    let r = replay(&tampered, map, Mode::Resync);
+    assert!(
+        r.divergences
+            .iter()
+            .any(|d| d.frame == quiet && d.cause == Cause::ServerCorrection),
+        "{:?}",
+        r.divergences
+            .iter()
+            .map(|d| (d.frame, d.cause.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// 4.5: a server that lost the claim of single ticks (the input tagged for that tick never applied, the previous one held) while
+/// our hook pulse of one tick also never reached it. Proved per step, like the late inputs: one tick's input replaced by the
+/// one before it reproduces the recording bit for bit.
+#[test]
+fn a_tick_whose_input_the_server_never_applied_is_proved_input_timing() {
+    let map = room();
+    // Direction flips every 7 ticks and a one-tick jump pulse at tick 40: both are lost at the ticks named below.
+    let sent = |t: i32| {
+        let dir = if (t / 7) % 2 == 0 { 1 } else { -1 };
+        input(dir, i32::from(t == 40), 0, 100, 0)
+    };
+    let lost = [21, 40, 63];
+    let mut clip = record_with(
+        &map,
+        move |t| if lost.contains(&t) { sent(t - 1) } else { sent(t) },
+        2,
+        120,
+        false,
+        50,
+        90,
+    );
+    for f in &mut clip.frames {
+        for s in &mut f.sent {
+            s.input = InputRec::from_net(&ddai_world::player_input_to_net(sent(s.tick)));
+        }
+    }
+    let r = replay(&clip, Arc::clone(&map), Mode::Resync);
+    assert!(
+        r.divergences.len() >= 3,
+        "each lost tick shows as a divergence: {:?}",
+        r.divergences.iter().map(|d| (d.frame, d.tick)).collect::<Vec<_>>()
+    );
+    assert!(
+        r.divergences
+            .iter()
+            .all(|d| d.cause == Cause::InputTiming && d.input_timing_proved),
+        "{:?}",
+        r.divergences
+            .iter()
+            .map(|d| (d.frame, d.cause.clone(), d.input_timing_proved))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(r.unexplained().count(), 0);
+    // Isolated steps (nobody near) with a proved late input count among the designed ones, nothing else is.
+    assert_eq!(r.isolated_exact + r.isolated_designed(), r.isolated_steps, "{r:?}");
+}
+
+/// 4.5 (review F3): our own hook out in the step does not excuse a tee within hook reach by itself: a +2 px tamper with a hook
+/// state and a tee 192 px away is still a server correction. It is `OtherTee` for that id only when the replay's own hook caught
+/// (or missed) a tee the recording says otherwise (`hooked_player` differs): that tee's real place between the frames is unknown.
+#[test]
+fn our_hook_blames_a_tee_only_when_the_replay_hooked_a_different_one() {
+    let map = room();
+    let at = 30;
+    let stand = |_: i32| input(0, 0, 0, 100, 0);
+    let first = |clip: &Clip| {
+        let r = replay(clip, Arc::clone(&map), Mode::Resync);
+        r.divergences.first().map(|d| (d.frame, d.cause.clone()))
+    };
+    // A tamper of +2 px with our hook flying and tee 1 six tiles (192 px) away: nothing says the hook met it.
+    let mut plain = record_with(&map, stand, 2, 120, false, 16, 90);
+    plain.frames[at].tees[0].ch.x += 2;
+    plain.frames[at].tees[0].ch.hook_state = 4;
+    assert_eq!(first(&plain), Some((at, Cause::ServerCorrection)));
+    // Our tee hooks tee 1 (aimed at it, 192 px away); the recording of the frame where the hook attaches says "still flying,
+    // nobody hooked" (tee 1 was not where the replay has it): the replay hooked tee 1, the recording did not.
+    let hook_tee1 = |t: i32| {
+        if t >= 20 {
+            input(0, 0, 1, 192, 0)
+        } else {
+            input(0, 0, 0, 192, 0)
+        }
+    };
+    let mut clip = record_with(&map, hook_tee1, 2, 120, false, 16, 90);
+    let k = clip
+        .frames
+        .iter()
+        .position(|f| f.tees[0].ch.hooked_player == 1)
+        .expect("the hook attaches in the script");
+    clip.frames[k].tees[0].ch.hooked_player = -1;
+    clip.frames[k].tees[0].ch.hook_state = 4;
+    let r = replay(&clip, Arc::clone(&map), Mode::Resync);
+    let d = r
+        .divergences
+        .iter()
+        .find(|d| d.frame == k)
+        .expect("a divergence where the hook attaches");
+    assert!(d.fields.iter().any(|f| f.0 == "hooked_player"), "{d:?}");
+    assert_eq!(d.cause, Cause::OtherTee { id: 1 }, "{d:?}");
+}
+
+/// 4.5 (review F4): a flying hook never gets further than hook length (380 px) plus the hitbox from its owner, however old the
+/// owner's core is. The line of a hook whose tip is 578 px from its owner (impossible) is not stretched over the room.
+#[test]
+fn a_flying_hook_line_is_capped_at_the_owner_reach() {
+    let map = room();
+    let at = 30;
+    let stand = |_: i32| input(0, 0, 0, 100, 0);
+    let first = |tile: i32, lag: i32| {
+        let mut clip = record_with(&map, stand, 2, 120, false, tile, 90);
+        clip.frames[at].tees[0].ch.x += 2;
+        let (mx, my) = (clip.frames[at - 1].tees[0].ch.x, clip.frames[at - 1].tees[0].ch.y);
+        let t = &mut clip.frames[at - 1].tees[1];
+        t.ch.hook_state = 4;
+        t.ch.hook_x = mx + 126;
+        t.ch.hook_y = my;
+        t.ch.hook_dx = -256;
+        t.ch.hook_dy = 0;
+        t.ch.tick -= lag;
+        let r = replay(&clip, Arc::clone(&map), Mode::Resync);
+        r.divergences.first().map(|d| (d.frame, d.cause.clone()))
+    };
+    // Owner 13 tiles away (tip 290 px from it): possible, even with a core 100 ticks old.
+    assert_eq!(first(23, 100), Some((at, Cause::OtherTee { id: 1 })));
+    // Owner 22 tiles away (tip 578 px from it): the line is not stretched to us however old the core is.
+    assert_eq!(first(32, 100), Some((at, Cause::ServerCorrection)));
+}
+
 #[test]
 fn the_reviewers_tampered_cases_are_server_corrections_not_excuses() {
     let map = room();
