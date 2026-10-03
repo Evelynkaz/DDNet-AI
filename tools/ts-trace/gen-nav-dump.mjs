@@ -11,18 +11,18 @@
 import { writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
-import { loadMapCollision, sha256File, REPO_ROOT, SimWorld, f64Bits, teeStateJson } from "./lib.mjs";
+import { loadMapCollision, sha256File, TS_REF, SimWorld, f64Bits, teeStateJson } from "./lib.mjs";
 import { createRequire } from "node:module";
 
-const { findRoute, deadZone, spawnTiles } = await import(`${REPO_ROOT}/src/plan/route.ts`);
-const { Rng } = await import(`${REPO_ROOT}/src/nn/rng.ts`);
-const { emptyInput } = await import(`${REPO_ROOT}/src/core/types.ts`);
-const { WAYBLOCKS, WbSideChooser, wayblockFor, sideAt, inWbZone, inWbHall, inWbLeash, wbWalkAllowed } = await import(`${REPO_ROOT}/src/bot/wayblock.ts`);
-const { SwingCrosser } = await import(`${REPO_ROOT}/src/bot/crossing.ts`);
-const { Navigator, tileGoal } = await import(`${REPO_ROOT}/src/bot/navigate.ts`);
-// `bot.ts` needs `node_modules` (the `teeworlds` package): symlink the main checkout's into the worktree
-// (git-ignored) when running from one.
-const { DdnetBot } = await import(`${REPO_ROOT}/src/bot/bot.ts`);
+const { findRoute, deadZone, spawnTiles } = await import(`${TS_REF}/src/plan/route.ts`);
+const { Rng } = await import(`${TS_REF}/src/nn/rng.ts`);
+const { emptyInput } = await import(`${TS_REF}/src/core/types.ts`);
+const { WAYBLOCKS, WbSideChooser, wayblockFor, sideAt, inWbZone, inWbHall, inWbLeash, wbWalkAllowed } = await import(`${TS_REF}/src/bot/wayblock.ts`);
+const { SwingCrosser } = await import(`${TS_REF}/src/bot/crossing.ts`);
+const { Navigator, tileGoal } = await import(`${TS_REF}/src/bot/navigate.ts`);
+// `bot.ts` needs `node_modules` (the `teeworlds` package): run `npm ci` in `tools/ts-reference` first
+// (see its README).
+const { DdnetBot } = await import(`${TS_REF}/src/bot/bot.ts`);
 
 function parseArgs(argv) {
   const out = {};

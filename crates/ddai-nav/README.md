@@ -57,7 +57,8 @@ DROP»). Крейт общий для двух миров: `PlanWorld`/`PlanColl
 ```bash
 source ~/.cargo/env
 cargo test -p ddai-nav                                          # модульные тесты (память, дом, ВБ, поиск)
-# паритет с настоящим TS (нужны Node 24 и карты в ~/aiddnet/data/maps):
+# паритет с настоящим TS (нужны Node 24, карты в ~/aiddnet/data/maps и один раз `npm ci` в tools/ts-reference — пакет teeworlds для bot.ts):
+(cd tools/ts-reference && npm ci --ignore-scripts)
 node tools/ts-trace/gen-nav-dump.mjs --map "<карта>" --seed 1 --out ~/aiddnet/data/traces/nav/clb.jsonl
 DDAI_NAV_DUMP=~/aiddnet/data/traces/nav/clb.jsonl cargo test -p ddai-nav --features ts-parity --release --test parity_nav -- --ignored --nocapture
 # сравнение силы (доля прибытий, Уилсон, Макнемар) на трёх картах:

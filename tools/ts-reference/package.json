@@ -1,0 +1,14 @@
+{
+  "name": "ddnet-ai-ts-reference",
+  "description": "Frozen TypeScript reference of the original DDNet-AI bot, kept only so tools/ts-trace can generate parity dumps (see README.md)",
+  "license": "GPL-3.0-only",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "teeworlds": "2.6.1"
+  }
+}

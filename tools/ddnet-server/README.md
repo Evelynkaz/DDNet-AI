@@ -266,12 +266,17 @@ econ с одного IP одновременно; второе подряд по
 
 ## End-to-end тест с ботом
 
-Старый TS-бот (Node 24, из `~/aiddnet/DDNet-AI` или из этого чекаута после `npm ci`):
+Исторически (фаза 2.1) сюда подключали старый TS-бот; он удалён задачей 5.4 (последний коммит с ним — `0311695`:
+`git show 0311695:src/bot/main.ts`). Теперь клиент — Rust:
 
 ```bash
 cd ~/aiddnet/DDNet-AI
-node src/bot/main.ts --server 127.0.0.1:8303 --scripted --duration 30 --no-console --verbose
+target/release/ddnet-ai play --server 127.0.0.1:8303 --brain scripted --duration 30
+# исходная команда фазы 2.1: node src/bot/main.ts --server 127.0.0.1:8303 --scripted --duration 30 --no-console --verbose
 ```
+
+Наблюдения ниже — фазы 2.1 и относятся к старому TS-боту (его таймаут молчания ~15 с); у Rust-клиента таймаут по умолчанию
+100 с (как у клиента DDNet), для проверки реконнекта задаётся `--timeout-secs`.
 
 Посередине — смена карты через econ (`change_map`), бот следует за ней автоматически (видно `map change: ...` в
 логе бота). Реконнект после падения сервера: `sudo systemctl restart ddnet-local.service` во время `--duration 60`

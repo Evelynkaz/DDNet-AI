@@ -44,7 +44,7 @@ rustc --version   # rustc 1.98.1 (48a229cea 2026-09-01); компоненты: c
 
 Версия закрепляется в `rust-toolchain.toml` репозитория (фаза 1).
 
-## 4. Node 24 (только для старой TS-версии и генератора трасс)
+## 4. Node 24 (только для генераторов TS-паритета: `tools/ts-trace`, `tools/ts-reference`)
 
 Официальный архив с проверкой sha256, в `/usr/local`:
 
@@ -56,7 +56,7 @@ curl -sLO https://nodejs.org/dist/latest-v24.x/$F
 grep " $F\$" SHASUMS256.txt | sha256sum -c -
 sudo tar -xJf $F -C /usr/local --strip-components=1 --exclude CHANGELOG.md --exclude LICENSE --exclude README.md
 node --version    # v24.21.0 ; npm 11.19.0
-cd ~/aiddnet/DDNet-AI && npm ci --no-audit --no-fund   # node_modules в .gitignore
+cd ~/aiddnet/DDNet-AI/tools/ts-reference && npm ci --ignore-scripts --no-audit --no-fund   # node_modules в .gitignore; нужен только gen-nav-dump.mjs (пакет teeworlds)
 ```
 
 ## 5. Исследовательские инструменты фазы 0 (не нужны для работы проекта)

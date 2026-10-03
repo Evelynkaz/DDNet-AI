@@ -1,5 +1,6 @@
 // Shared code for the trace-ts v1 generator (task 1.9, docs/formats.md "trace-ts v1"). Runs the
-// REAL, unmodified `src/core/*.ts`/`src/map/loadMap.ts` (via Node 24's built-in TS type
+// REAL, unmodified `tools/ts-reference/src/core/*.ts`/`.../src/map/loadMap.ts` (the frozen TS
+// reference, relocated from the repo root's `src/` by task 5.4; via Node 24's built-in TS type
 // stripping — no compilation step, no copy of the sources) and dumps every field of the
 // resulting state as a JSON-lines trace `ddai-tsworld` (Rust) replays and compares bit-for-bit.
 //
@@ -8,20 +9,21 @@
 // same house convention).
 
 import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = join(HERE, "..", "..");
-export const CORE_DIR = join(REPO_ROOT, "src", "core");
+/** Root of the frozen TS reference (`tools/ts-reference`); the generators import `<TS_REF>/src/...`. */
+export const TS_REF = join(REPO_ROOT, "tools", "ts-reference");
+export const CORE_DIR = join(TS_REF, "src", "core");
 
-// --- imports of the REAL src/core/*.ts (never copied, never edited) ---------------------------
-export { SimWorld } from "../../src/core/world.ts";
-export { Collision } from "../../src/core/collision.ts";
-export { loadMapCollision } from "../../src/map/loadMap.ts";
-export * as types from "../../src/core/types.ts";
+// --- imports of the REAL tools/ts-reference/src/core/*.ts (never copied, never edited) ---------
+export { SimWorld } from "../ts-reference/src/core/world.ts";
+export { Collision } from "../ts-reference/src/core/collision.ts";
+export { loadMapCollision } from "../ts-reference/src/map/loadMap.ts";
+export * as types from "../ts-reference/src/core/types.ts";
 
 // --- f64 <-> hex bit pattern (matches ddai-tsworld's `f64::to_bits`/`from_bits`) ----------------
 
@@ -89,21 +91,17 @@ export class SplitMix64 {
   }
 }
 
-// --- git metadata (deterministic given a fixed checkout — never network, never wall clock) ----
+// --- TS core provenance (deterministic -- never network, never wall clock, never a git query) ---
 
-let cachedCoreCommit;
+/**
+ * The last commit that changed the TS core (`core/` + `map/`) before task 5.4 relocated the sources from the repo
+ * root's `src/` to `tools/ts-reference/src/` (the files are byte-identical since; `git log --follow` on any of them
+ * reaches this commit). It used to be `git log -1 -- src/core src/map`; a pinned value keeps the committed traces'
+ * `tsCoreCommit` header byte-identical and does not depend on a full-history checkout.
+ */
+export const TS_CORE_COMMIT = "dd8c1e3d8c3a3dd15d1f7834d3a64e3ba9dba8e1";
 export function tsCoreCommit() {
-  if (cachedCoreCommit === undefined) {
-    try {
-      cachedCoreCommit = execFileSync("git", ["log", "-1", "--format=%H", "--", "src/core", "src/map"], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-      }).trim();
-    } catch {
-      cachedCoreCommit = "unknown";
-    }
-  }
-  return cachedCoreCommit;
+  return TS_CORE_COMMIT;
 }
 
 export function sha256File(path) {

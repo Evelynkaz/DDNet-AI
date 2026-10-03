@@ -1045,6 +1045,10 @@ cd ~/aiddnet/DDNet-AI && node src/bot/main.ts --server 127.0.0.1:8303 --scripted
 python3 tests/fixtures/extract_capture.py ddnet-loopback.pcap tests/fixtures/local-capture-20260927.dat 8303 0:40 1414:2777
 ```
 
+Команда выше — историческая: фикстура снята старым TS-ботом (коммит `0311695`, `node src/bot/main.ts`, удалён
+задачей 5.4), и индексы датаграмм `0:40` и `1414:2777` относятся к той сессии. Повторить запись теперь можно Rust-клиентом
+(`ddnet-ai play --server 127.0.0.1:8303 --brain scripted --duration 20`), но индексы придётся подобрать заново.
+
 **Правка после первого раунда ревью:** первая версия этого раздела и фикстуры ошибочно описывала
 непрерывный префикс первых 400 пакетов как «хендшейк + ~2 c устоявшегося обмена снапшотами». На
 самом деле все 400 пакетов — это хендшейк TKEN плюс *начало* передачи карты по протоколу (карта не
@@ -3034,6 +3038,7 @@ Playwright читает его напрямую (`page.evaluate`), без поб
 ## 16. trace-ts v1 (задача 1.9: паритет `ddai-tsworld` со старым TS-миром)
 
 Формат для сверки буквального Rust-порта старого TS-мира (`crates/ddai-tsworld`, `src/core/*.ts`
+(с задачи 5.4 — `tools/ts-reference/src/core/*.ts`; все пути `src/…` TS ниже читать относительно `tools/ts-reference/`)
 — НЕ рабочая физика `ddai-physics`, см. `docs/DECISIONS.md` D-035) с настоящим TS, реально
 выполняемым на Node 24.21.0 (`tools/ts-trace/*.mjs`, type stripping, без копий `src/`).
 JSON-lines (не бинарный, в отличие от «trace v1» §6 / «trace-b» §11 — здесь читаемость при отладке
@@ -3049,7 +3054,8 @@ JSON-lines (не бинарный, в отличие от «trace v1» §6 / «t
 ### 16.1 Генератор (`tools/ts-trace/`)
 
 - `lib.mjs` — импортирует РЕАЛЬНЫЕ `src/core/world.ts` (`SimWorld`), `src/core/collision.ts`
-  (`Collision`), `src/map/loadMap.ts` (`loadMapCollision`) через относительные пути с type
+  (`Collision`), `src/map/loadMap.ts` (`loadMapCollision`) через относительные пути
+  (`../ts-reference/src/…`) с type
   stripping (Node 24 читает `.ts` напрямую); `SplitMix64` (свой JS-порт того же спека, что и
   `crates/ddai-trace/src/prng.rs` §4 — независимая от Rust реализация, не общий код: два порта
   одного письменного алгоритма, совпадающие побитово, — более сильная проверка детерминизма, чем

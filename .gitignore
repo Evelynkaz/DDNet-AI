@@ -4,6 +4,7 @@ runs/
 vendor/
 maps/
 policy.json
+opponent.json
 *.checkpoint.json
 *.bin
 human*.bin

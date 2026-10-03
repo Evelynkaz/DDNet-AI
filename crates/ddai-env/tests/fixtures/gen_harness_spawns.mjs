@@ -1,7 +1,8 @@
 // Regenerates harness_spawns.json: the spawn positions the phase-0 TS harness
 // (~/aiddnet/data/research/harness, docs/research/orig-run.md) produces for seeds 1..200 on each
 // arena, as `[ax, ay, bx, by]` pixel positions. ddai-env's `spawn_tiles` must reproduce them.
-//   node tests/fixtures/gen_harness_spawns.mjs > tests/fixtures/harness_spawns.json
+//   DDNET_AI_SRC=<repo>/tools/ts-reference/src node tests/fixtures/gen_harness_spawns.mjs > tests/fixtures/harness_spawns.json
+// (the harness imports the legacy TS sources, which since task 5.4 live in tools/ts-reference/src; commit 0311695 has the old tree)
 import { arenaPit, arenaPlatform, Rng } from "/home/ubuntu/aiddnet/data/research/harness/lib.mjs";
 import { mapArena } from "/home/ubuntu/aiddnet/data/research/harness/maps.mjs";
 const arenas = { pit: arenaPit(), platform: arenaPlatform(), "clb-left": mapArena("clb"), "clb-right": mapArena("clb-right") };

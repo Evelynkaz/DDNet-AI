@@ -2,7 +2,7 @@
 # Task 4.2 acceptance criterion 3: the arrival-rate comparison with the TS navigator on three maps.
 # Generates the TS side (`gen-nav-dump.mjs --section arrival|follow`) and runs the Rust side
 # (`ddai-nav` tests/arrival_vs_ts.rs) on the same pairs. Needs node >= 24 and, for the follow section,
-# `node_modules` linked into the checkout (the TS `bot.ts` imports the `teeworlds` package).
+# `npm ci` run once in tools/ts-reference (the TS `bot.ts` imports the `teeworlds` package).
 #   tools/ts-trace/run-nav-arrival.sh [pairs-per-mode]   (default 200)
 # `DDAI_MAPS="clb"` picks maps; the TS dumps are reused unless `DDAI_REGEN=1`.
 set -euo pipefail

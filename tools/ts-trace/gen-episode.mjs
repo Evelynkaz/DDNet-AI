@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // trace-ts v1 "episode" generator (docs/formats.md, new "trace-ts v1" section). Drives the REAL
-// `src/core/world.ts` `SimWorld` (via `../../src/map/loadMap.ts`'s real file-based loader — see
+// `src/core/world.ts` `SimWorld` (via `../ts-reference/src/map/loadMap.ts`'s real file-based loader — see
 // this crate's README for why synthetic maps are also real `.map` files, not a JS-side recipe
 // re-implementation) with seeded per-tee input, and writes one JSON object per line: a metadata
 // line, then one line per tick.

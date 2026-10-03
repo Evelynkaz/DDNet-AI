@@ -16,12 +16,12 @@
 
 import { writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { SimWorld, loadMapCollision, teeStateJson, inputJson, sha256File, tsCoreCommit, REPO_ROOT } from "./lib.mjs";
+import { SimWorld, loadMapCollision, teeStateJson, inputJson, sha256File, tsCoreCommit, TS_REF } from "./lib.mjs";
 
-const { Planner } = await import(`${REPO_ROOT}/src/plan/planner.ts`);
-const { scriptedAction } = await import(`${REPO_ROOT}/src/env/scripted.ts`);
-const { Rng } = await import(`${REPO_ROOT}/src/nn/rng.ts`);
-const { emptyInput } = await import(`${REPO_ROOT}/src/core/types.ts`);
+const { Planner } = await import(`${TS_REF}/src/plan/planner.ts`);
+const { scriptedAction } = await import(`${TS_REF}/src/env/scripted.ts`);
+const { Rng } = await import(`${TS_REF}/src/nn/rng.ts`);
+const { emptyInput } = await import(`${TS_REF}/src/core/types.ts`);
 
 function parseArgs(argv) {
   const out = {};

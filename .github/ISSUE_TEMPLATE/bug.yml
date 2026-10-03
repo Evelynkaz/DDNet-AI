@@ -1,14 +1,14 @@
 name: Ошибка / Bug
-description: Бот или окно делает что-то не так / The bot or the window does something wrong
+description: Бот или веб-интерфейс делает что-то не так / The bot or the web interface does something wrong
 title: "Ошибка: "
 labels: ["ошибка"]
 body:
   - type: markdown
     attributes:
       value: |
-        Лучше всего помогает архив. Щёлкни значок DDNet AI в трее, выбери **«Собрать отчёт об ошибке»** и перетащи zip с рабочего стола в поле ниже. Пароль сервера в архив не попадает.
+        Лучше всего помогает демка DDNet (`.demo`) или клип бота (`ddnet-ai clip info`) плюс кусок журнала. Пароли, токены и ники других игроков не прикладывай.
 
-        An archive helps most. Click the DDNet AI tray icon, choose **"Collect a bug report"** and drag the zip from the desktop into the field below. The server password stays out of it.
+        A DDNet demo (`.demo`) or a bot clip (`ddnet-ai clip info`) plus a piece of the log helps most. Leave out passwords, tokens and other players' names.
   - type: textarea
     id: what
     attributes:
@@ -20,8 +20,8 @@ body:
   - type: textarea
     id: archive
     attributes:
-      label: Архив или демка / Archive or demo
-      description: Zip из «Собрать отчёт об ошибке» или файл .demo из DDNet. / The zip from "Collect a bug report" or a .demo file from DDNet.
+      label: Клип, демка или журнал / Clip, demo or log
+      description: Клип бота, файл .demo из DDNet или фрагмент журнала. / A bot clip, a .demo file from DDNet or a piece of the log.
   - type: input
     id: server
     attributes:
@@ -31,7 +31,7 @@ body:
     id: version
     attributes:
       label: Версия / Version
-      description: Написана в окне справа сверху. / Shown at the top right of the window.
+      description: Вывод `ddnet-ai --version` и хеш коммита. / The output of `ddnet-ai --version` and the commit hash.
   - type: dropdown
     id: os
     attributes:

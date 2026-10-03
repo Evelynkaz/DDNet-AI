@@ -16,8 +16,9 @@ as modified, as required by GPLv3.
 Third-party code
 ------------------------------------------------------------------------
 
-The game physics in src/core (collision, character core, projectiles,
-tuning, world) is ported to TypeScript from the DDNet 20 C++ sources and
+The game physics in tools/ts-reference/src/core (collision, character core,
+projectiles, tuning, world; kept at the repository root as src/core before
+2026-10-03) is ported to TypeScript from the DDNet 20 C++ sources and
 altered for this bot; it is not the original DDNet software. The DDNet license applies to that part:
 
 Teeworlds Copyright (C) 2007-2014 Magnus Auvinen
@@ -40,11 +41,12 @@ freely, subject to the following restrictions:
   misrepresented as being the original software.
 3. This notice may not be removed or altered from any source distribution.
 
-The npm packages this program depends on (Electron, ink, react, teeworlds,
-typescript and others) keep their own licenses, found in each package.
-The icons are from Lucide (ISC license). The DDNet graphics and sounds the
-window uses are read from the player's own DDNet install and are not part
-of this program.
+The TypeScript files under tools/ts-reference are the retained part of the
+original project (Wranked1/DDNet-AI, GPL-3.0): they are kept unmodified only
+so that the parity tooling in tools/ts-trace can run them. They depend on one
+npm package, teeworlds (MIT), which is installed from the npm registry and
+keeps its own license, found in the package. No DDNet graphics or sounds are
+part of this repository.
 
 ------------------------------------------------------------------------
 crates/ddai-jsmath: V8 / fdlibm
@@ -111,18 +113,18 @@ linking against the system's libm, not copying its source.
 crates/ddai-tsworld
 ------------------------------------------------------------------------
 
-`crates/ddai-tsworld` is a literal Rust port of `src/core/*.ts`
+`crates/ddai-tsworld` is a literal Rust port of `tools/ts-reference/src/core/*.ts`
 (`vmath.ts`, `tuning.ts`, `types.ts`, `collision.ts`, `characterCore.ts`,
-`projectile.ts`, `world.ts`) and `src/map/loadMap.ts` — the same TypeScript
+`projectile.ts`, `world.ts`) and `tools/ts-reference/src/map/loadMap.ts` — the same TypeScript
 files the "Third-party code" section above already covers, ported one more
 step (TypeScript to Rust) instead of C++ to TypeScript. It exists only to
-prove a future Rust port of the old planner (`src/plan/*.ts`) makes the
+prove a future Rust port of the old planner (`tools/ts-reference/src/plan/*.ts`) makes the
 same decisions the TS planner did on the TS physics it was tuned against
 (decision D-035, `docs/DECISIONS.md`); it is not the project's production
 physics (`crates/ddai-physics`, bit-exact with the real DDNet C++ server
 instead). The same zlib-style DDNet notice above applies to this crate's
 ported files (see each file's own header doc comment for the exact
-`src/core/*.ts` file:line it mirrors); the crate itself is licensed
+`src/core/*.ts` file:line it mirrors, relative to `tools/ts-reference/`); the crate itself is licensed
 GPL-3.0-only like the rest of this repository, with credit to the original
 TS project (Wranked1/DDNet-AI) in its own README.
 
@@ -131,9 +133,9 @@ crates/ddai-planner
 ------------------------------------------------------------------------
 
 `crates/ddai-planner` is a literal Rust port of the old block planner
-(`src/plan/{planner,shield,seal,throwLines,memory,livePlan}.ts`, the BFS
-fields in `planner.ts`, and the scripted bot / opponent models in
-`src/env/{scripted,action}.ts`) — the same TypeScript project the sections
+(`tools/ts-reference/src/plan/{planner,shield,seal,throwLines,memory,livePlan}.ts`,
+the BFS fields in `planner.ts`, and the scripted bot / opponent models in
+`tools/ts-reference/src/env/{scripted,action}.ts`) — the same TypeScript project the sections
 above already cover (Wranked1/DDNet-AI, GPL-3.0). It proves the port makes
 the exact same decisions the TS planner did (decision D-035), and, on
 `ddai-physics::World<f32>`, is the precise-search half of the live bot's
@@ -148,6 +150,8 @@ Modified version
 This is a modified version of DDNet AI, maintained at
 https://github.com/Evelynkaz/DDNet-AI. Since 2026-09-27 it is being
 rewritten in Rust, with a neural network constrained by the Drosophila
-connectome ("the fly") and a web interface replacing the Electron window.
+connectome ("the fly") and a web interface replacing the Electron window
+(the Electron app and the TypeScript bot runtime were removed on 2026-10-03;
+they remain in the git history).
 It is not the original program by Wranked1; the original is available at
 https://github.com/Wranked1/DDNet-AI.

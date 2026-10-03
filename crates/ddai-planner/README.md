@@ -38,8 +38,9 @@ action}.ts`) в Rust, обобщённый по трейту `PlanWorld`, с д�
 ## Паритет с TS — результаты
 
 Харнесс (`tools/ts-trace/gen-planner-dump.mjs` и `gen-planner-freerun.mjs`) гоняет настоящий,
-неизменённый `src/plan/planner.ts` через Node 24 type-stripping (никогда не редактирует и не
-копирует `src/`) и дампит JSON-lines с побитовыми (hex) `f64`.
+неизменённый `src/plan/planner.ts` (теперь `tools/ts-reference/src/plan/planner.ts`, задача 5.4; все пути
+`src/…` TS в этом README читать относительно `tools/ts-reference/`) через Node 24 type-stripping
+(никогда не редактирует и не копирует `src/`) и дампит JSON-lines с побитовыми (hex) `f64`.
 
 **Способ 1 — teacher-forced, независимые решения** (`gen-planner-dump.mjs` +
 `tests/parity_planner.rs`): для каждого случая — свежий `Planner` + `reset()` + свежий
@@ -190,6 +191,7 @@ shield-stress-корпусе (способ 1, E-000 левый холл, гар�
 
 ```bash
 source ~/.cargo/env
+(cd tools/ts-reference && npm ci --ignore-scripts)   # только для навигации (gen-nav-dump); для планировщика не нужно
 cd tools/ts-trace
 bash run-planner-corpus.sh                     # OUT_DIR=~/aiddnet/data/traces/planner (не коммитится)
 DDAI_PLANNER_DUMP_DIR=~/aiddnet/data/traces/planner \

@@ -10,7 +10,7 @@
 | Файл | Назначение |
 |---|---|
 | `probe.mjs` | Универсальный раннер: манифест (`{functions:[{name,op,arity,ret,count},...]}`) + бинарные `<name>.in.f64` (входы, little-endian f64, по строкам) → бинарные `<name>.out.{f64,i32,u32}` (реальные ответы V8). Покрывает все 25 «скалярных» функций из задачи (semantics + fdlibm + `pow` + `opp_seed_next`) плюс n-арные `hypot`/`max`/`min`. |
-| `rng_probe.mjs` | Гоняет настоящий `Rng` из `src/nn/rng.ts` (импортирует файл как есть — Node 24 умеет запускать `.ts` напрямую через type-stripping, см. `docs/research/orig-plan.md` §2.4) по фиксированному чередующемуся паттерну вызовов (`nextU32`/`nextFloat`/`nextGaussian`, `i % 5`), чтобы упражнять и «свежий», и «взятый из spare» путь `nextGaussian`. |
+| `rng_probe.mjs` | Гоняет настоящий `Rng` из `tools/ts-reference/src/nn/rng.ts` (до задачи 5.4 — `src/nn/rng.ts`; импортирует файл как есть — Node 24 умеет запускать `.ts` напрямую через type-stripping, см. `docs/research/orig-plan.md` §2.4) по фиксированному чередующемуся паттерну вызовов (`nextU32`/`nextFloat`/`nextGaussian`, `i % 5`), чтобы упражнять и «свежий», и «взятый из spare» путь `nextGaussian`. |
 | `run.sh` | Собирает и гоняет `cargo test --release --test oracle -- --ignored full_oracle_vs_real_v8` (≥ 10⁶ проб на функцию) + `tests/perf.rs`'s `perf_report`; с `--fixture` — ещё и `regenerate_golden_fixture` (переписывает `crates/ddai-jsmath/tests/fixtures/golden.bin`/`.sha256`). |
 
 ## Почему раздельно от Rust-стороны
@@ -57,7 +57,7 @@ Node v24.21.0, V8 13.6.233.17-node.53 (`node -p process.versions.v8` на это
 - 18 доп. n-арных вариантов `hypot_n`/`max_n`/`min_n` (n ∈ {0,1,3,4,5,8}) — по 20 000 проб каждая
   — **0 расхождений**.
 - `Rng` — 10⁵ сидов × 1000 бросков (чередование `nextU32`/`nextFloat`/`nextGaussian`, упражняет
-  и «свежий», и «взятый из spare» путь Гаусса) против настоящего `src/nn/rng.ts` — **0
+  и «свежий», и «взятый из spare» путь Гаусса) против настоящего `tools/ts-reference/src/nn/rng.ts` — **0
   расхождений**.
 - `tests/pow_literal_args.rs` (находка ревью F1) — `pow(2.0,·)`, `pow(4.0,·)`, `pow(0.5,·)`,
   `pow(8.0,·)`, `pow(·,-1.0)`, константа буквально в месте вызова (не аргументом), по 10⁶ проб

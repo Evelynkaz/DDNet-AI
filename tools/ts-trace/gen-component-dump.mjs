@@ -19,15 +19,15 @@
 
 import { writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { SimWorld, loadMapCollision, teeStateJson, inputJson, f64Bits, sha256File, REPO_ROOT } from "./lib.mjs";
+import { SimWorld, loadMapCollision, teeStateJson, inputJson, f64Bits, sha256File, TS_REF } from "./lib.mjs";
 
-const { scriptedAction } = await import(`${REPO_ROOT}/src/env/scripted.ts`);
-const { restsInFreeze, touchesFreeze, sealedIn } = await import(`${REPO_ROOT}/src/plan/seal.ts`);
-const { throwLines, frozenThrowLines } = await import(`${REPO_ROOT}/src/plan/throwLines.ts`);
-const { escapeExists, saferInput } = await import(`${REPO_ROOT}/src/plan/shield.ts`);
-const { hazardField, unfreezeField } = await import(`${REPO_ROOT}/src/plan/planner.ts`);
-const { Rng } = await import(`${REPO_ROOT}/src/nn/rng.ts`);
-const { emptyInput } = await import(`${REPO_ROOT}/src/core/types.ts`);
+const { scriptedAction } = await import(`${TS_REF}/src/env/scripted.ts`);
+const { restsInFreeze, touchesFreeze, sealedIn } = await import(`${TS_REF}/src/plan/seal.ts`);
+const { throwLines, frozenThrowLines } = await import(`${TS_REF}/src/plan/throwLines.ts`);
+const { escapeExists, saferInput } = await import(`${TS_REF}/src/plan/shield.ts`);
+const { hazardField, unfreezeField } = await import(`${TS_REF}/src/plan/planner.ts`);
+const { Rng } = await import(`${TS_REF}/src/nn/rng.ts`);
+const { emptyInput } = await import(`${TS_REF}/src/core/types.ts`);
 
 function parseArgs(argv) {
   const out = {};

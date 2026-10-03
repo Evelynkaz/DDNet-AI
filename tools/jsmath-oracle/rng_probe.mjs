@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runs the real `Rng` (imported read-only from `src/nn/rng.ts`, per the task's constraint of
+// Runs the real `Rng` (imported read-only from `tools/ts-reference/src/nn/rng.ts`, per the task's constraint of
 // never modifying or copying the old TS code — Node 24 runs `.ts` directly via type stripping,
 // see `docs/research/orig-plan.md` "Можно ли запустить TS детерминированно") over a batch of
 // seeds and a fixed, interleaved draw pattern, and writes the resulting f64 sequence for the Rust
@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const { Rng } = await import(join(here, "..", "..", "src", "nn", "rng.ts"));
+const { Rng } = await import(join(here, "..", "ts-reference", "src", "nn", "rng.ts"));
 
 function main() {
   const [seedsPath, drawsArg, outPath] = process.argv.slice(2);

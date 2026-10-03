@@ -341,10 +341,10 @@ DDNet datafile v4 (`examples/gen_fixture_maps.rs`, дев-only, `cargo run --exa
 
 Полный формат — `docs/formats.md` §16 (новый раздел, по-русски). Коротко: JSON-lines, первая
 строка — метаданные (версия, `mapPath`/`mapSha256`, seed, tees, node/v8, `tsCoreCommit` —
-`git log -1 --format=%H -- src/core src/map`), далее — по строке на тик (`kind: "episode"`)
+закреплённая константа `TS_CORE_COMMIT` в `tools/ts-trace/lib.mjs` — раньше `git log -1 --format=%H -- src/core src/map`; после переноса в `tools/ts-reference` (5.4) значение то же), далее — по строке на тик (`kind: "episode"`)
 или на API-операцию (`kind: "opscript"`). Каждый `f64` — 16 hex-символов бит (`f64::to_bits`).
 Генератор — `tools/ts-trace/gen-episode.mjs`/`gen-opscript.mjs`, запускает РЕАЛЬНЫЙ
-`src/core/world.ts`/`src/map/loadMap.ts` через Node 24 type stripping (без копий `src/`).
+`tools/ts-reference/src/core/world.ts`/`…/src/map/loadMap.ts` (до задачи 5.4 — `src/core/…`) через Node 24 type stripping (без копий).
 Детерминизм: два запуска с одним seed → побайтово одинаковый файл (проверено вручную — `sha256sum`
 двух прогонов `gen-episode.mjs` с одним seed совпадает).
 

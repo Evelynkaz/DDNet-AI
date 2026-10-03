@@ -1,4 +1,4 @@
-> **Modified version.** This is a fork of [Wranked1/DDNet-AI](https://github.com/Wranked1/DDNet-AI) (author: Wranked1, GPL-3.0) that is being rewritten in Rust since 2026-09-27, with a neural network constrained by the Drosophila connectome ("the fly") and a web interface instead of Electron. It is not Wranked1's original program. Until the port is done, the text below describes the original TypeScript version. Plan (in Russian): [docs/PLAN.md](docs/PLAN.md).
+> **Modified version.** This is a fork of [Wranked1/DDNet-AI](https://github.com/Wranked1/DDNet-AI) (author: Wranked1, GPL-3.0), rewritten in Rust: the bot, a web interface instead of the Electron window, and a neural network constrained by the Drosophila connectome ("the fly"). It is not Wranked1's original program. The old TypeScript version (Electron, `start.mjs`, `run.sh`) has been removed from the tree; it stays in the git history, the last commit that has it is `0311695`.
 
 <div align="center">
 
@@ -6,175 +6,121 @@
 
 # DDNet AI
 
-**A bot that plays block in DDNet by itself**
+**A bot that plays block in DDNet by itself, written in Rust**
 
-It throws the hook, swings the hammer, puts opponents into freeze and gets itself out of it.<br>
-Every move is checked in the game's real physics, 25 times a second.
+It throws the hook, swings the hammer, puts opponents into freeze and keeps itself out of it.<br>
+A live decision fits in 5 ms (p99); the world runs at 50 ticks per second.
 
-[Русский](README.md) · **English** · [Project page](https://wranked1.github.io/DDNet-AI/en/)
-
-[![Windows 10 and 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)](#quick-start)
-[![DDNet 20](https://img.shields.io/badge/DDNet-20-E07A2E)](https://ddnet.org)
-[![Electron 44](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](#the-window)
-
-[Quick start](#quick-start) · [The window](#the-window) · [How it plays](#how-it-plays) · [Controls](#controls) · [FAQ](#faq)
-
-<img src="assets/en/window.png" width="900" alt="The DDNet AI window: the bot fighting on Copy Love Box">
+[Русский](README.md) · **English**
 
 </div>
 
-## Quick start
+## What it is
 
-1. Download **`ddnet-ai.zip`** from the [latest release](https://github.com/Wranked1/DDNet-AI/releases/latest) and unpack it anywhere.
-2. Double-click **`DDNet AI.exe`**.
+One binary, `ddnet-ai` (a cargo workspace in `crates/*`):
 
-Nothing else to install: the window and Node.js are inside. The window restarts the bot if it falls over, and keeps it updated.
+- **the bot** (`ddnet-ai play`) joins a DDNet 20.x server as an ordinary client, predicts the world on bit-exact
+  physics (`ddai-physics`, identical to the DDNet server) and picks a move; **the bot never writes to the game chat**;
+- **brains** are interchangeable: `planner` (search under a threat model, the reference and the teacher), `hybrid` (a
+  neural net proposes, exact search verifies; the live mode), `fly` (the fly alone), `scripted`, `idle`;
+- **the fly** is a network built on the Drosophila connectome (MaleCNS v1.0, CC-BY 4.0), trained by behaviour cloning
+  and DAgger;
+- **the web interface** (`ddnet-ai web`) replaces the Electron window: a live map and game frames, bot status and
+  commands, friend/war/ignore lists, a training viewer; served behind Caddy with HTTPS and a password;
+- **the arena** (`ddnet-ai arena`) runs offline N-player matches on the same physics for honest measurements (Wilson
+  confidence intervals).
 
-> [!NOTE]
-> `DDNet AI.exe` is not code-signed, so the first time Windows may show "Windows protected your PC". Click "More info", then "Run anyway".
+Status and plans (in Russian): [docs/STATUS.md](docs/STATUS.md), [docs/PLAN.md](docs/PLAN.md); design: [docs/FLY.md](docs/FLY.md),
+[docs/DECISIONS.md](docs/DECISIONS.md), formats: [docs/formats.md](docs/formats.md).
 
-The bot asks for its name, clan and skin, then goes to play. The server field can stay empty: the bot then joins the liveliest block server without a password by itself, and moves on when that one empties. The answers are saved in `settings.json`, and next time it joins the server by itself.
+## Build
 
-The window speaks English or Russian: it follows the system, and the language is also a setting (Settings, App, Language). The bot's page, its replies and its console follow the window.
+Linux and Rust are needed (the toolchain is pinned in `rust-toolchain.toml` and installed by `rustup`). Node.js is **not**
+needed to run the bot.
 
-<details>
-<summary><b>Linux and macOS</b></summary>
-<br>
+```bash
+git clone https://github.com/Evelynkaz/DDNet-AI && cd DDNet-AI
+cargo build --release          # -> target/release/ddnet-ai
+```
 
-Install [Node.js](https://nodejs.org) 24 or newer and run `./run.sh` in the bot's folder. The bot's page opens in the browser at `http://localhost:7777`, and you can type commands in the console. The desktop window is built for Windows only so far.
+Data (maps, demos, the connectome, checkpoints, secrets) is not part of the repository and lives outside it: by default
+in `~/aiddnet/data` (change it with `--data-dir`). Trained weights are never stored in git.
 
-</details>
+## Bot
 
-## The window
+```bash
+# a local DDNet server (docs/SETUP.md, in Russian), planner + neural net, no time limit
+target/release/ddnet-ai play --server 127.0.0.1:8303 --brain hybrid --name Muha --duration 0
+```
 
-<table>
-  <tr>
-    <td width="50%"><img src="assets/en/game.png" alt="The bot drags an opponent with the hook on Copy The Box TF"></td>
-    <td width="50%"><img src="assets/en/scoreboard.png" alt="The scoreboard over the game"></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>The game in DDNet's graphics: skins, hook, freeze, names over the players</sub></td>
-    <td align="center"><sub>Scoreboard, freeze feed, ping</sub></td>
-  </tr>
-  <tr>
-    <td><img src="assets/en/servers.png" alt="The DDNet server list"></td>
-    <td><img src="assets/en/setup.png" alt="The first-launch setup"></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>DDNet servers, searchable by map, mode and player name</sub></td>
-    <td align="center"><sub>First launch: a couple of fields and the bot goes to play</sub></td>
-  </tr>
-</table>
+- `--brain`, e.g. `planner`, `scripted`, `hybrid`, `fly` (the bot brains) and the utility `idle`, `circle`,
+  `random-scripted` (the full list is in `ddnet-ai play --help`); `--mode`
+  (default `fight`), friend/war/ignore lists via `--relations`; the full list is in `ddnet-ai play --help`.
+- Connections are allowed only to a local server and to servers listed in `~/aiddnet/data/live-servers.toml` (an
+  allow-list; `--server auto` picks the most populated allowed one). Project rule: never evade kicks or bans.
+- Stop with SIGINT/SIGTERM (under systemd use `--duration 0`).
 
-- **The game as in the client.** The map, skins, hook, hammer and emotes are drawn with the graphics of your own DDNet install. The camera follows the bot or any player.
-- **Servers.** The whole DDNet list with search, filters and favorites. "Play here" moves the bot to the chosen server.
-- **Pause from anywhere.** From the window, the tray, the taskbar thumbnail and with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F9</kbd> from any program, even from the game itself.
-- **Team, war and ignore.** Every player on the server has buttons: "team" (the bot leaves them alone), "war" (it always goes for them), "ignore" (it neither touches nor answers them). The same lists as `!friend`, `!war` and `!ignore`.
-- **Keys for the bot.** <kbd>F3</kbd> and <kbd>F4</kbd> vote for it, and buttons make it `/kill`, go to the spectators, show an emote or call a server vote.
-- **Mini mode.** A small window on top of everything, to watch the bot while you play yourself.
-- **Log and notifications.** The bot disconnected, came back, updated: the window tells you.
-- **A bug report.** "Collect a bug report" puts the clips, map memory and the demos you pick into one zip on the desktop. The server password stays out of it.
+## Web
 
-<p align="center"><img src="assets/en/mini.png" width="420" alt="Mini mode"><br><sub>Mini mode over the game</sub></p>
+```bash
+target/release/ddnet-ai web-passwd                       # the owner password (only its argon2id hash is stored)
+target/release/ddnet-ai web --listen 127.0.0.1:7788 --data-dir ~/aiddnet/data \
+  --bot-socket ~/aiddnet/data/bot/live.sock               # loopback only; expose it through Caddy
+# behind Caddy (HTTPS): add --trust-proxy --cookie-secure
+```
 
-## How it plays
+The server listens on `127.0.0.1` only; HTTPS and the public entry point are Caddy's job (`deploy/caddy/Caddyfile`,
+the unit `deploy/systemd/ddnet-ai-web.service`, installation with `deploy/install.sh`, details in
+[deploy/README.md](deploy/README.md)). The site takes the live map from the bot's socket, and the path must be given explicitly (`--bot-socket`; there is no
+default). The bot creates `<data-dir>/bot/live.sock` by default, so run the bot and the site with the same `--data-dir`.
+`--trust-proxy` and `--cookie-secure` are only for running behind Caddy (see `deploy/systemd/ddnet-ai-web.service`).
 
-The bot keeps its own copy of DDNet 20 physics and on every step runs dozens of options half a second ahead in it: where to run, when to jump, where and when to throw the hook, when to hit. It picks the one after which the opponent is closer to freeze and the bot itself is further from it.
+## Training
 
-| | |
+```bash
+# 1) the connectome (third-party data, a few GB), once
+cargo run --release -p ddai-connectome -- fetch --manifest manifests/connectome.toml --dest ~/aiddnet/data/connectome/raw
+# 2) teacher games of the planner in the arena -> a dataset; 3) training (BC + DAgger); 4) checkpoint evaluation
+target/release/ddnet-ai train collect --config configs/train/<name>.toml
+target/release/ddnet-ai train run     --config configs/train/<name>.toml
+target/release/ddnet-ai train eval    --config configs/train/<name>.toml --bundle <checkpoint>
+target/release/ddnet-ai arena run     --config configs/arena/dev-quick.toml --out ~/aiddnet/data/runs/arena-test
+```
+
+Configs live in `configs/train`, `configs/arena`, `configs/scenarios`; experiment results are in
+[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md); the sub-graph build and the `.flyg` format are described in
+`crates/ddai-connectome/README.md` and `crates/ddai-fly/README.md` (Russian).
+
+## Checks
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo deny check
+tools/ci/no-weights.sh        # no weights, demos, maps or big files in git
+```
+
+**Parity with the old TypeScript.** The Rust ports of the planner, navigation and the TS world prove that they make the
+same decisions as the original code. The reference dumps come from the generators in `tools/ts-trace`, run over the frozen
+sources in [`tools/ts-reference`](tools/ts-reference/README.md) (Node >= 24 and `npm ci` in that directory); the tests run
+with `--features ts-parity -- --ignored`, the commands are in `crates/ddai-planner/README.md` and
+`crates/ddai-nav/README.md`.
+
+## Repository layout
+
+| Path | Contents |
 |---|---|
-| **Hooks from a distance** | throws the hook from afar, like strong players do, instead of walking up close |
-| **Holds and drags** | leads the opponent on the hook to the freeze and finishes with the hammer |
-| **Minds its ping** | rolls the world forward by its own delay, counting the keys already on their way to the server |
-| **Picks its target** | does not stick to someone already frozen when a free one is nearby |
-| **Gets out by itself** | if it is stuck in freeze and nobody saves it, it does `/kill` |
+| `crates/` | Rust crates: physics, DDNet network and client, world, planner, navigation, brains, the fly, training, arena, web, clips |
+| `configs/` | arenas, scenarios, training and fly configs |
+| `manifests/` | the pinned file list of the connectome |
+| `deploy/` | Caddy, systemd, installer |
+| `tools/` | parity oracles (C++ DDNet, V8), TS dump generators, e2e (Playwright), CI scripts |
+| `tools/ts-reference/` | the frozen TS reference for parity (not a working bot) |
+| `docs/` | plan, status, decisions, experiments, formats, research (mostly Russian) |
 
-> [!NOTE]
-> The bot does not look at the screen and presses nothing for you. It is a separate player: it joins the server by itself, like a normal client, and you can play DDNet on the same computer at the same time.
+## License and credits
 
-## Controls
-
-| Keys | What they do |
-|---|---|
-| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F9</kbd> | pause and resume from any program (can be changed in the settings) |
-| <kbd>F3</kbd>, <kbd>F4</kbd> | vote yes / no for the bot, while the bot's window is focused |
-| <kbd>Esc</kbd> | close the servers or settings panel |
-| double-click the title bar | maximize the window |
-
-<details>
-<summary><b>Bot commands</b></summary>
-<br>
-
-Typed into the window's command line or into the console. They never reach the game chat. Anything typed without `!` the bot says in the chat under its own name.
-
-| Command | What it does |
-|---|---|
-| `!stop`, `!go` | stop / carry on |
-| `!mode fight`, `passive`, `hold` | fight / touch nobody / hold the position |
-| `!target <name>`, `!target -` | fight only this player / clear it |
-| `!war <name>`, `!friend <name>`, `!ignore <name>` | always hit / never touch / never touch and never answer |
-| `!clanwar <clan>`, `!clanfriend <clan>` | the same by clan |
-| `!home <x> <y>` | where to go back to when there is nobody to fight |
-| `!goto tele`, `!goto <x> <y>` | walk to the teleporter or to a point |
-| `!clip [note]` | save the last 30 seconds of the game to a file |
-| `!stats`, `!where` | counters / where the bot is and whom it fights |
-| `!emote <name>` | show an emote |
-| `!yes`, `!no`, `!votes`, `!vote <name>` | vote like F3 / F4, list the server's votes, call one |
-| `!spec`, `!join` | go to the spectators / back into the game |
-| `!kill`, `!reset` | kill itself and respawn |
-| `!lang en`, `!lang ru` | the language of the console and the bot's page |
-| `!quit` | quit |
-
-</details>
-
-## Updates
-
-Nothing to do. The bot checks for a new version when it starts and every five minutes after, downloads it and restarts by itself, and the window updates with it. Settings, clips and map memory are left alone.
-
-## FAQ
-
-<details>
-<summary><b>The bot jumped into freeze by itself or plays strangely. How can I help?</b></summary>
-<br>
-
-Click the tray icon and choose "Collect a bug report". A zip with the clips that show what went wrong appears on the desktop. If you recorded a demo, add it too.
-
-</details>
-
-<details>
-<summary><b>Does it need a graphics card?</b></summary>
-<br>
-
-No. The bot thinks on the processor, and any graphics card is enough for the window.
-
-</details>
-
-<details>
-<summary><b>A server with a password?</b></summary>
-<br>
-
-Type the password at the first launch or in the settings. It is kept only on your computer and is cleared when you move to another server.
-
-</details>
-
-<details>
-<summary><b>Where are the settings and recordings?</b></summary>
-<br>
-
-| Path | What is there |
-|---|---|
-| `settings.json` | server, name, clan, skin, language |
-| `runs/clips` | recordings of moments from the game |
-| `runs/memory` | what the bot remembers about maps |
-| `app-win` | the window itself (Electron), which `DDNet AI.exe` opens |
-
-</details>
-
-## License
-
-GPL-3.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). You may run, study and change the bot. Whoever publishes a version of it, changed or not, must name this project as the original and publish their source under the same license. The physics ported from DDNet stays under DDNet's license (zlib), the libraries under their own.
-
-## Credits
-
-- [DDNet](https://ddnet.org) and Teeworlds: the bot's physics is ported from the DDNet 20 sources (zlib license), and the window takes the graphics and sounds from your install of the game. The screenshots show DDNet graphics (CC-BY-SA 3.0).
-- [Electron](https://www.electronjs.org) (MIT) and [Lucide](https://lucide.dev) icons (ISC).
+[GPL-3.0](LICENSE). The original project is [Wranked1/DDNet-AI](https://github.com/Wranked1/DDNet-AI) by Wranked1; this is a
+modified version (section 7(b), see [NOTICE](NOTICE)). The physics is ported from DDNet (zlib notice in [NOTICE](NOTICE)),
+the network part follows the Teeworlds 0.6 + DDNet protocol. The connectome data is MaleCNS v1.0, CC-BY 4.0 (Berg et al., 2026).
