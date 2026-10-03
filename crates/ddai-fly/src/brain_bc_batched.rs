@@ -13,7 +13,7 @@ use ddai_brain::Observation;
 use rayon::prelude::*;
 
 use crate::batched::{BatchedEngine, BatchedForwardOptions, BatchedSeqGrad, BatchedSeqInput};
-use crate::bc::{HeadLogits, StepLoss};
+use crate::bc::{HeadLogits, StepLoss, StepTargets};
 use crate::brain_bc::{BcSequence, BcStepConfig, add_decoder_gradients};
 use crate::decoder::{DecoderGradients, DecoderModel, DecoderParams, DnCalibration, decoder_bc_loss_and_grad};
 use crate::encoder::{EncoderGradients, EncoderModel, EncoderParams, RayGridFeatures, compute_proprioception_values};
@@ -138,6 +138,10 @@ pub fn brain_bc_batched_step(
         })
         .collect();
     let want_activity = cfg.activity.weight > 0.0;
+    // Opt-in stop-gradient prefix (`BatchedEngine::with_stop_grad_decisions`, off by default): the
+    // first `no_grad` decisions of every window run forward only, so they are unscored here --
+    // no loss, no decoder gradient, no activity regulariser (whose taps the engine would drop).
+    let no_grad = engine.stop_grad_decisions();
     engine.forward(
         model,
         &inputs,
@@ -145,6 +149,7 @@ pub fn brain_bc_batched_step(
             memory_cap_bytes,
             segment_decisions: None,
             type_means: want_activity,
+            no_grad_decisions: no_grad,
         },
     )?;
 
@@ -165,7 +170,10 @@ pub fn brain_bc_batched_step(
             let mut activity_loss = 0.0f32;
             let mut taps = Vec::new();
             let mut means = vec![0.0f32; model.num_types()];
+            let unscored = StepTargets::burn_in();
             for (t, target) in seq.targets.iter().enumerate() {
+                let in_prefix = t < no_grad;
+                let target = if in_prefix { &unscored } else { target };
                 engine_ref.dn_rates(b, t, &mut dn);
                 let (l, dg, gdn, lg) = decoder_bc_loss_and_grad(decoder, &dn, calib, decoder_params, target, &cfg.loss);
                 loss.add(&l);
@@ -175,7 +183,7 @@ pub fn brain_bc_batched_step(
                 }
                 grad_dn.push(gdn);
                 logits.push(lg);
-                if want_activity {
+                if want_activity && !in_prefix {
                     engine_ref.type_mean_rates(b, t, &mut means);
                     for &m in &means {
                         let below = (cfg.activity.low - m).max(0.0);

@@ -158,6 +158,23 @@ fn bc_then_a_dagger_round_writes_a_run_directory_and_resumes_as_a_no_op() {
             .count(),
         lines_before
     );
+
+    // Task 7.2c: resuming with fly options that change the gradient is refused, before anything
+    // is touched (they are inert for this MLP run, but the check is on the config).
+    let mut changed = cfg.clone();
+    changed.fly.batched_subengines = 4;
+    let err = run_experiment(&changed, &mut |_| {}).unwrap_err();
+    assert!(
+        err.contains("refusing to resume") && err.contains("batched_subengines 1 -> 4"),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(run_dir.join("metrics.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        lines_before
+    );
 }
 
 /// Review F3 of E-005: a run killed between the jobs of a DAgger round must collect only the jobs

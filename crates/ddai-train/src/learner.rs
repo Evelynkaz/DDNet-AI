@@ -124,7 +124,7 @@ pub struct FlyTrainConfig {
     /// at once, state `[neuron][window]`, threads split the neurons -- what makes the M graph
     /// trainable). Same loss and gradients up to f32 summation order.
     pub backend: TrainBackend,
-    /// Cap (MiB) on the batched backend's working set (`0` = none): when a batch's `r`/`X`/`f'(V)`
+    /// Cap (MiB) on the batched backend's working set (`0` = none): when a batch's `r`/`X`
     /// recording does not fit, BPTT over the windows is chunked in time with recomputation
     /// (exact gradients, one extra forward pass).
     pub batched_memory_cap_mb: usize,
@@ -133,6 +133,22 @@ pub struct FlyTrainConfig {
     /// `ddai_fly::batched::DEFAULT_PAR_MIN_EDGE_CELLS`; `0` = always on the pool). A tuning knob
     /// for the thread rendezvous cost: it never changes the results (bitwise).
     pub batched_parallel_threshold: Option<usize>,
+    /// **Opt-in (task 7.2c), default `1` = off.** Runs the batch as this many independent
+    /// sub-batch engines, each on its own pool of `threads / K` threads and without a barrier
+    /// between them: for a host with fewer free cores than `threads`, where one engine's
+    /// per-substep rendezvous stalls on the slowest thread. About 1.3-2x the CPU per step;
+    /// per-window results are bitwise the same, the batch-summed gradient differs from another
+    /// `K`'s in the last f32 bits (still bitwise independent of the thread count). The memory cap
+    /// is split between the groups. See `ddai_fly::batched::cores` / README "Задача 7.2c".
+    pub batched_subengines: usize,
+    /// **Opt-in (task 7.2c), default `0` = off.** Stop-gradient burn-in: the first this many
+    /// decisions of every window run forward only (no recording, no gradient through them), so
+    /// the backward pass and the memory cover only the scored part -- truncated BPTT. It changes
+    /// the gradients (nothing flows back into the burn-in: the encoder gets no gradient from
+    /// those decisions, the connectome none from their substeps) and treats the first decisions
+    /// of *every* window as unscored, also for a window that starts at the beginning of a
+    /// sequence. Set it to the `[train]` `burn_in`.
+    pub batched_stop_grad_decisions: usize,
 }
 
 impl Default for FlyTrainConfig {
@@ -152,6 +168,8 @@ impl Default for FlyTrainConfig {
             backend: TrainBackend::default(),
             batched_memory_cap_mb: 3072,
             batched_parallel_threshold: None,
+            batched_subengines: 1,
+            batched_stop_grad_decisions: 0,
         }
     }
 }
@@ -421,7 +439,11 @@ impl FlyLearner {
             if let Some(threshold) = cfg.batched_parallel_threshold {
                 plan = plan.with_parallel_threshold(threshold);
             }
-            Mutex::new(BatchedEngine::with_plan(plan))
+            Mutex::new(
+                BatchedEngine::with_plan(plan)
+                    .with_subengines(cfg.batched_subengines)
+                    .with_stop_grad_decisions(cfg.batched_stop_grad_decisions),
+            )
         });
         Ok(FlyLearner {
             flyg_path,

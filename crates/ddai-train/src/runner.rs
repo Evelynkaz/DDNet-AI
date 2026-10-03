@@ -477,6 +477,62 @@ fn commit_of_source() -> String {
     if dirty { format!("{c}+dirty") } else { c }
 }
 
+/// Refuses to resume a run with fly options that change its gradient (task 7.2c): the backend and
+/// the batched sub-engine count `K` (both change the f32 summation order of the batch gradient) and
+/// the stop-gradient burn-in (truncated BPTT). `stored` is the run directory's `config.toml`,
+/// `new` the config of this invocation. There is no `--allow-config-change` on this build: restore
+/// the values or start a new run directory.
+pub fn check_resume_compat(stored: &FlyTrainConfig, new: &FlyTrainConfig) -> Result<(), String> {
+    let mut diffs = Vec::new();
+    if stored.backend != new.backend {
+        diffs.push(format!("fly.backend {:?} -> {:?}", stored.backend, new.backend));
+    }
+    let k = |c: &FlyTrainConfig| c.batched_subengines.max(1);
+    if k(stored) != k(new) {
+        diffs.push(format!("fly.batched_subengines {} -> {}", k(stored), k(new)));
+    }
+    if stored.batched_stop_grad_decisions != new.batched_stop_grad_decisions {
+        diffs.push(format!(
+            "fly.batched_stop_grad_decisions {} -> {}",
+            stored.batched_stop_grad_decisions, new.batched_stop_grad_decisions
+        ));
+    }
+    if diffs.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to resume: the run directory's config.toml differs from this config in settings that change \
+         the gradient ({}). Restore the old values to continue the run, or start a new run directory \
+         (there is no --allow-config-change on this build).",
+        diffs.join(", ")
+    ))
+}
+
+/// Warnings about fly options that do nothing or train nothing (printed at start).
+pub fn fly_config_warnings(cfg: &ExperimentConfig) -> Vec<String> {
+    let mut w = Vec::new();
+    let (fly, per_seq) = (&cfg.fly, cfg.fly.backend == ddai_fly::TrainBackend::PerSequence);
+    if per_seq && fly.batched_stop_grad_decisions > 0 {
+        w.push(format!(
+            "fly.batched_stop_grad_decisions = {} is ignored: backend = \"per-seq\" always backpropagates the whole window",
+            fly.batched_stop_grad_decisions
+        ));
+    }
+    if per_seq && fly.batched_subengines > 1 {
+        w.push(format!(
+            "fly.batched_subengines = {} is ignored: it needs backend = \"batched\"",
+            fly.batched_subengines
+        ));
+    }
+    if !per_seq && fly.batched_stop_grad_decisions > 0 && cfg.train.window_len <= fly.batched_stop_grad_decisions {
+        w.push(format!(
+            "fly.batched_stop_grad_decisions = {} >= train.window_len = {}: every window is all burn-in, nothing is scored or trained",
+            fly.batched_stop_grad_decisions, cfg.train.window_len
+        ));
+    }
+    w
+}
+
 /// Runs (or resumes) an experiment end to end.
 pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Result<(), String> {
     let env = load_env(
@@ -487,6 +543,19 @@ pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Resu
     let run_root = expand_home(&cfg.run_dir);
     let run = RunDir::create(&run_root).map_err(|e| e.to_string())?;
     let cfg_path = run.path("config.toml");
+    for w in fly_config_warnings(cfg) {
+        log(&format!("warning: {w}"));
+    }
+    if cfg_path.exists() && run.path("state.bin").exists() {
+        // A resume: the options that change the gradient must match what the run started with.
+        let stored = std::fs::read_to_string(&cfg_path).map_err(|e| e.to_string())?;
+        match toml::from_str::<ExperimentConfig>(&stored) {
+            Ok(old) => check_resume_compat(&old.fly, &cfg.fly)?,
+            Err(e) => log(&format!(
+                "warning: cannot parse the run's config.toml, resume options unchecked: {e}"
+            )),
+        }
+    }
     if !cfg_path.exists() {
         std::fs::write(&cfg_path, toml::to_string_pretty(cfg).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
@@ -719,3 +788,62 @@ pub fn final_bundle(cfg: &ExperimentConfig) -> PathBuf {
 
 #[allow(dead_code)]
 fn _keep(_: Arc<()>, _: BundleMeta) {}
+
+#[cfg(test)]
+mod resume_checks {
+    use ddai_fly::TrainBackend;
+
+    use super::*;
+
+    fn batched(k: usize, stop: usize) -> FlyTrainConfig {
+        FlyTrainConfig {
+            backend: TrainBackend::Batched,
+            batched_subengines: k,
+            batched_stop_grad_decisions: stop,
+            ..FlyTrainConfig::default()
+        }
+    }
+
+    #[test]
+    fn resume_refuses_a_changed_k_stop_gradient_or_backend_and_names_them() {
+        assert!(check_resume_compat(&batched(4, 6), &batched(4, 6)).is_ok());
+        // an old config.toml (no keys) resumes under the defaults; K = 0 means 1
+        assert!(check_resume_compat(&FlyTrainConfig::default(), &FlyTrainConfig::default()).is_ok());
+        assert!(check_resume_compat(&batched(0, 0), &batched(1, 0)).is_ok());
+        let e = check_resume_compat(&batched(1, 0), &batched(4, 0)).unwrap_err();
+        assert!(
+            e.contains("batched_subengines 1 -> 4") && e.contains("refusing to resume"),
+            "{e}"
+        );
+        let e = check_resume_compat(&batched(1, 0), &batched(1, 6)).unwrap_err();
+        assert!(e.contains("batched_stop_grad_decisions 0 -> 6"), "{e}");
+        let e = check_resume_compat(&FlyTrainConfig::default(), &batched(1, 0)).unwrap_err();
+        assert!(e.contains("fly.backend"), "{e}");
+    }
+
+    fn experiment(fly: FlyTrainConfig, window_len: usize) -> ExperimentConfig {
+        let text = "name = \"t\"\nflyg = \"f\"\nbrain_config = \"b\"\narenas_dir = \"a\"\nmap_dir = \"m\"\nrun_dir = \"r\"\n\
+             teacher_base = []\nteacher_dagger = \"d\"\nbc_steps = 1\n[model]\nkind = \"fly\"\n";
+        let mut cfg: ExperimentConfig = toml::from_str(text).expect("minimal experiment config");
+        cfg.fly = fly;
+        cfg.train.window_len = window_len;
+        cfg
+    }
+
+    #[test]
+    fn config_warnings_catch_options_that_do_nothing_or_train_nothing() {
+        assert!(fly_config_warnings(&experiment(batched(1, 0), 32)).is_empty());
+        assert!(fly_config_warnings(&experiment(batched(2, 6), 32)).is_empty());
+        let per_seq = FlyTrainConfig {
+            batched_stop_grad_decisions: 6,
+            batched_subengines: 2,
+            ..FlyTrainConfig::default()
+        };
+        let w = fly_config_warnings(&experiment(per_seq, 32));
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("per-seq") && w[1].contains("needs backend"));
+        let w = fly_config_warnings(&experiment(batched(1, 6), 6));
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("all burn-in"), "{w:?}");
+    }
+}

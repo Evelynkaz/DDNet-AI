@@ -999,3 +999,527 @@ fn serial_and_pool_regions_give_bitwise_identical_results() {
     assert_eq!(serial.grad_inputs, pooled.grad_inputs);
     assert_eq!(serial.grad_v_init, pooled.grad_v_init);
 }
+
+// ============================== task 7.2c ====================================================
+// The recomputed `f'(V)` (+ exact saturated patches), the `K` sub-batch engines and the opt-in
+// stop-gradient prefix.
+
+/// Pushes a problem into the saturated regime: per-type biases up to `+40` (`V / r_max` up to 4),
+/// per-lane initial states spanning `[-6, 40]` and large inputs, so that within one neuron's
+/// 8-lane cell some lanes are deep in saturation (`V / r_max > 1.5`) and some are not.
+fn saturate(p: &mut Problem, rng: &mut SplitMix64) {
+    for b in &mut p.params.b {
+        *b = rng.next_f32_unit() * 52.0 - 12.0;
+    }
+    for s in &mut p.seqs {
+        for v in &mut s.v_init {
+            *v = rng.next_f32_unit() * 46.0 - 6.0;
+        }
+        for x in s.inputs.iter_mut().flatten() {
+            *x *= 20.0;
+        }
+    }
+}
+
+/// Fraction of the (neuron, decision-end, sequence) states with `V / r_max > 1.5`, by the
+/// per-sequence path.
+fn saturated_fraction(p: &Problem) -> f64 {
+    let model = build_model(p);
+    let (mut sat, mut all) = (0usize, 0usize);
+    for seq in &p.seqs {
+        let mut state = FlyState::new(&model);
+        state.set_v(&model, &seq.v_init);
+        for x in &seq.inputs {
+            state.step_decision(&model, x);
+            sat += state.v().iter().filter(|&&v| v / p.config.r_max > 1.5).count();
+            all += state.v().len();
+        }
+    }
+    sat as f64 / all as f64
+}
+
+#[test]
+fn saturated_regime_matches_the_per_sequence_path_and_the_f64_reference() {
+    let mut rng = SplitMix64::new(20_261_003);
+    for trial in 0..24usize {
+        let n = 8 + (trial % 9);
+        let batch = [3usize, 9, 16, 21, 33, 70][trial % 6];
+        let mut p = random_problem(
+            &mut rng,
+            n,
+            1 + trial % 4,
+            10 + 3 * n,
+            1 + trial % 3,
+            2,
+            batch,
+            3,
+            1 + trial % 3,
+        );
+        saturate(&mut p, &mut rng);
+        let frac = saturated_fraction(&p);
+        assert!(
+            (0.05..0.95).contains(&frac),
+            "trial {trial}: {frac:.2} of the states saturated, the test needs a mix"
+        );
+        let model = build_model(&p);
+        for cost in [usize::MAX, 1] {
+            check_problem(
+                &p,
+                BatchedPlan::with_chunk_cost(&model, cost),
+                &BatchedForwardOptions::default(),
+            );
+        }
+    }
+}
+
+/// Everything deep in saturation (`V / r_max` 4-8: `f'` between 1e-3 and 1e-7), with the loss
+/// gradients scaled so the result is O(1): there the cheap `f' = 1 - t^2` from the stored rate is
+/// off by whole percent or is exactly 0, so only the exact patches recorded by the forward pass
+/// can pass the `1e-4` relative bar against the per-sequence path and the f64 reference.
+#[test]
+fn deep_saturation_derivatives_are_exact() {
+    let mut rng = SplitMix64::new(20_261_005);
+    for trial in 0..12usize {
+        let n = 8 + (trial % 7);
+        let batch = [4usize, 9, 17][trial % 3];
+        let mut p = random_problem(&mut rng, n, 1 + trial % 3, 10 + 3 * n, 2, 2, batch, 3, 1 + trial % 2);
+        for b in &mut p.params.b {
+            *b = 40.0 + rng.next_f32_unit() * 40.0;
+        }
+        for s in &mut p.seqs {
+            for v in &mut s.v_init {
+                *v = 45.0 + rng.next_f32_unit() * 40.0;
+            }
+            for g in s.grad_dn.iter_mut().flatten() {
+                *g *= 1e5;
+            }
+            for (_, _, g) in s.extra_taps.iter_mut() {
+                for x in g.iter_mut() {
+                    *x *= 1e5;
+                }
+            }
+        }
+        assert!(saturated_fraction(&p) > 0.9);
+        let model = build_model(&p);
+        let got = check_problem(
+            &p,
+            BatchedPlan::with_chunk_cost(&model, if trial % 2 == 0 { usize::MAX } else { 25 }),
+            &BatchedForwardOptions::default(),
+        );
+        // and the test is not vacuous: the gradients are far above the absolute tolerance
+        let scale = got.grad.b.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(f64::from(scale) > 1e-2, "trial {trial}: gradient scale {scale}");
+    }
+}
+
+/// The saturated-derivative patches are inside the memory cap: with everything saturated (the
+/// worst case: the store switches every slot to a dense `f'`), the engine holds no more than
+/// `estimate_memory` said -- and releases the stores when a later, smaller call has a cap they
+/// would break.
+#[test]
+fn fully_saturated_worst_case_stays_within_the_memory_cap() {
+    let mut rng = SplitMix64::new(20_261_019);
+    let mut p = random_problem(&mut rng, 400, 6, 3000, 8, 4, 64, 16, 4);
+    for b in &mut p.params.b {
+        *b = 50.0 + rng.next_f32_unit() * 30.0;
+    }
+    for s in &mut p.seqs {
+        for v in &mut s.v_init {
+            *v = 50.0 + rng.next_f32_unit() * 30.0;
+        }
+    }
+    assert!(saturated_fraction(&p) > 0.95);
+    let model = build_model(&p);
+    let plan = || BatchedPlan::with_chunk_cost(&model, 1500);
+    let mut engine = BatchedEngine::with_plan(plan());
+    assert!(engine.plan().num_chunks() > 3);
+    let plan_bytes = engine.plan().memory_bytes();
+    let held_by = |e: &BatchedEngine| e.memory_bytes() - plan_bytes;
+    let t_max = p.seqs.iter().map(|s| s.inputs.len()).max().unwrap();
+    let est = engine
+        .estimate_memory(&model, 64, t_max, &BatchedForwardOptions::default())
+        .unwrap();
+    for cap in [est.total_bytes(), est.total_bytes() / 3] {
+        let opts = BatchedForwardOptions {
+            memory_cap_bytes: Some(cap),
+            ..BatchedForwardOptions::default()
+        };
+        let mut e = BatchedEngine::with_plan(plan());
+        e.forward(&model, &batched_inputs(&p.seqs), &opts).unwrap();
+        e.backward(&model, &batched_grads(&p.seqs), true);
+        assert!(
+            held_by(&e) <= cap,
+            "held {} bytes against a cap of {cap} (fully saturated)",
+            held_by(&e)
+        );
+    }
+    // Uncapped, the dense stores are really there (about what the estimate bounds).
+    engine
+        .forward(&model, &batched_inputs(&p.seqs), &BatchedForwardOptions::default())
+        .unwrap();
+    engine.backward(&model, &batched_grads(&p.seqs), false);
+    let big = held_by(&engine);
+    assert!(
+        big as f64 > 0.8 * est.total_bytes() as f64 && big <= est.total_bytes(),
+        "{big}"
+    );
+    // A smaller capped call on the same engine drops them.
+    let small: Vec<Sequence> = p.seqs[..5].to_vec();
+    let small_est = engine
+        .estimate_memory(&model, 5, t_max, &BatchedForwardOptions::default())
+        .unwrap();
+    let cap = small_est.total_bytes() + 1024;
+    assert!(big > cap);
+    let opts = BatchedForwardOptions {
+        memory_cap_bytes: Some(cap),
+        ..BatchedForwardOptions::default()
+    };
+    engine.forward(&model, &batched_inputs(&small), &opts).unwrap();
+    engine.backward(&model, &batched_grads(&small), false);
+    assert!(held_by(&engine) <= cap, "held {} against {cap}", held_by(&engine));
+}
+
+/// `K` sub-batch engines: every per-lane result is bitwise the single engine's, the batch-summed
+/// parameter gradients agree to f32 summation order, and a batch below two cells is not split.
+#[test]
+fn subengines_match_a_single_engine() {
+    let mut rng = SplitMix64::new(20_261_007);
+    for &(batch, k) in &[
+        (9usize, 2usize),
+        (16, 2),
+        (33, 3),
+        (70, 4),
+        (130, 8),
+        (5, 3),
+        (64, 2),
+        (24, 8),
+    ] {
+        let p = random_problem(&mut rng, 30, 4, 140, 3, 3, batch, 4, 2);
+        let model = build_model(&p);
+        let opts = BatchedForwardOptions {
+            type_means: true,
+            ..BatchedForwardOptions::default()
+        };
+        let plan = || BatchedPlan::with_chunk_cost(&model, 40);
+        let mut single = BatchedEngine::with_plan(plan());
+        single.forward(&model, &batched_inputs(&p.seqs), &opts).unwrap();
+        let mut split = BatchedEngine::with_plan(plan()).with_subengines(k);
+        split.forward(&model, &batched_inputs(&p.seqs), &opts).unwrap();
+        for (b, seq) in p.seqs.iter().enumerate() {
+            for t in 0..seq.inputs.len() {
+                let (mut a, mut c) = (vec![0.0f32; model.num_outputs()], vec![0.0f32; model.num_outputs()]);
+                single.dn_rates(b, t, &mut a);
+                split.dn_rates(b, t, &mut c);
+                assert_eq!(a, c, "dn_rates bits, batch {batch} K={k} lane {b} t {t}");
+                let (mut a, mut c) = (vec![0.0f32; model.num_types()], vec![0.0f32; model.num_types()]);
+                single.type_mean_rates(b, t, &mut a);
+                split.type_mean_rates(b, t, &mut c);
+                assert_eq!(a, c, "type means bits");
+            }
+        }
+        let want = single.backward(&model, &batched_grads(&p.seqs), true);
+        let got = split.backward(&model, &batched_grads(&p.seqs), true);
+        assert_eq!(
+            got.grad_inputs, want.grad_inputs,
+            "input gradients bits, batch {batch} K={k}"
+        );
+        assert_eq!(
+            got.grad_v_init, want.grad_v_init,
+            "v_init gradients bits, batch {batch} K={k}"
+        );
+        assert_all_close(&to64(&got.grad.a), &to64(&want.grad.a), "grad_a K");
+        assert_all_close(&to64(&got.grad.b), &to64(&want.grad.b), "grad_b K");
+        assert_all_close(&to64(&got.grad.theta), &to64(&want.grad.theta), "grad_theta K");
+    }
+}
+
+/// The groups' pools do not enter the numerics: bitwise identical results for 1, 2, 3 and 8
+/// threads (and with every region forced onto the pools), and the same engine reused for another
+/// batch shape gives what a fresh one does.
+#[test]
+fn subengines_are_bitwise_independent_of_thread_counts() {
+    let mut rng = SplitMix64::new(20_261_009);
+    let p = random_problem(&mut rng, 40, 5, 200, 4, 3, 37, 5, 3);
+    let model = build_model(&p);
+    let run = |threads: usize, k: usize, seqs: &[Sequence]| {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| {
+            let mut engine =
+                BatchedEngine::with_plan(BatchedPlan::with_chunk_cost(&model, 30).with_parallel_threshold(0))
+                    .with_subengines(k);
+            engine
+                .forward(&model, &batched_inputs(seqs), &BatchedForwardOptions::default())
+                .unwrap();
+            engine.backward(&model, &batched_grads(seqs), true)
+        })
+    };
+    for k in [2usize, 3, 5] {
+        let one = run(1, k, &p.seqs);
+        for threads in [2, 3, 8] {
+            let g = run(threads, k, &p.seqs);
+            assert_eq!(one.grad.a, g.grad.a, "grad_a bits, K={k}, 1 vs {threads} threads");
+            assert_eq!(one.grad.b, g.grad.b);
+            assert_eq!(one.grad.theta, g.grad.theta);
+            assert_eq!(one.grad_inputs, g.grad_inputs);
+            assert_eq!(one.grad_v_init, g.grad_v_init);
+        }
+    }
+    // Reuse across shapes (and into the single-engine path and back).
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    pool.install(|| {
+        let mut engine = BatchedEngine::with_plan(BatchedPlan::with_chunk_cost(&model, 30)).with_subengines(3);
+        for &bs in &[37usize, 5, 20, 37, 1, 16] {
+            let seqs: Vec<Sequence> = p.seqs[..bs].to_vec();
+            engine
+                .forward(&model, &batched_inputs(&seqs), &BatchedForwardOptions::default())
+                .unwrap();
+            let g = engine.backward(&model, &batched_grads(&seqs), true);
+            let mut fresh = BatchedEngine::with_plan(BatchedPlan::with_chunk_cost(&model, 30)).with_subengines(3);
+            fresh
+                .forward(&model, &batched_inputs(&seqs), &BatchedForwardOptions::default())
+                .unwrap();
+            let g2 = fresh.backward(&model, &batched_grads(&seqs), true);
+            assert_eq!(g.grad.a, g2.grad.a, "reused == fresh, batch {bs}");
+            assert_eq!(g.grad_inputs, g2.grad_inputs);
+            assert_eq!(g.grad_v_init, g2.grad_v_init);
+        }
+    });
+}
+
+/// The memory cap is split between the groups: each gets `cap / K`, so a cap that one group could
+/// not meet is reported with that share, and a generous cap runs.
+#[test]
+fn subengines_split_the_memory_cap() {
+    let mut rng = SplitMix64::new(20_261_011);
+    let p = random_problem(&mut rng, 30, 4, 140, 3, 2, 32, 4, 2);
+    let model = build_model(&p);
+    let mut split = BatchedEngine::new(&model).with_subengines(2);
+    let tight = BatchedForwardOptions {
+        memory_cap_bytes: Some(2 * 16),
+        ..BatchedForwardOptions::default()
+    };
+    let err = split.forward(&model, &batched_inputs(&p.seqs), &tight).unwrap_err();
+    assert_eq!(err.cap_bytes, 16, "each group is given cap / K");
+    // Whole-batch need of one engine: a cap of twice that is plenty for two half-batch groups.
+    let need = BatchedEngine::new(&model)
+        .estimate_memory(&model, 32, 4, &BatchedForwardOptions::default())
+        .unwrap()
+        .total_bytes();
+    let opts = BatchedForwardOptions {
+        memory_cap_bytes: Some(2 * need),
+        ..BatchedForwardOptions::default()
+    };
+    split.forward(&model, &batched_inputs(&p.seqs), &opts).unwrap();
+    let g = split.backward(&model, &batched_grads(&p.seqs), false);
+    assert_eq!(g.grad_inputs.len(), 32);
+}
+
+// ---- stop-gradient prefix ----------------------------------------------------------------------
+
+/// The window's tail `[p..]` as a sequence of its own, starting from the per-sequence path's state
+/// after the first `p` decisions (the reference of a stop-gradient prefix): `None` if the sequence
+/// is not longer than `p`.
+fn suffix_sequence(model: &FlyModel, seq: &Sequence, p: usize) -> Option<Sequence> {
+    let len = seq.inputs.len();
+    if len <= p {
+        return None;
+    }
+    let mut state = FlyState::new(model);
+    state.set_v(model, &seq.v_init);
+    for x in &seq.inputs[..p] {
+        state.step_decision(model, x);
+    }
+    Some(Sequence {
+        v_init: state.v().to_vec(),
+        inputs: seq.inputs[p..].to_vec(),
+        grad_dn: seq.grad_dn.iter().skip(p).cloned().collect(),
+        extra_taps: seq
+            .extra_taps
+            .iter()
+            .filter(|(d, _, _)| *d >= p)
+            .map(|(d, l, g)| (*d - p, *l, g.clone()))
+            .collect(),
+    })
+}
+
+#[test]
+fn stop_gradient_prefix_is_truncated_bptt_from_the_prefix_state() {
+    let mut rng = SplitMix64::new(20_261_013);
+    for trial in 0..24usize {
+        let n = 10 + (trial % 8);
+        let s = 1 + trial % 3;
+        let batch = [1usize, 7, 9, 21][trial % 4];
+        let t_max = 3 + trial % 4;
+        let p = random_problem(&mut rng, n, 1 + trial % 4, 12 + 3 * n, 2, 2, batch, t_max, s);
+        let model = build_model(&p);
+        let index = BackwardIndex::build(&model);
+        for prefix in [1usize, 2, t_max - 1, t_max] {
+            let plan = BatchedPlan::with_chunk_cost(&model, if trial % 2 == 0 { usize::MAX } else { 30 });
+            let mut engine = BatchedEngine::with_plan(plan);
+            let opts = BatchedForwardOptions {
+                no_grad_decisions: prefix,
+                type_means: true,
+                ..BatchedForwardOptions::default()
+            };
+            engine.forward(&model, &batched_inputs(&p.seqs), &opts).unwrap();
+            // (`backward` consumes the recording: read the outputs first)
+            let outs: Vec<Vec<(Vec<f32>, Vec<f32>)>> = p
+                .seqs
+                .iter()
+                .enumerate()
+                .map(|(b, seq)| {
+                    (0..seq.inputs.len())
+                        .map(|t| {
+                            let mut dn = vec![0.0f32; model.num_outputs()];
+                            engine.dn_rates(b, t, &mut dn);
+                            let mut tm = vec![0.0f32; model.num_types()];
+                            engine.type_mean_rates(b, t, &mut tm);
+                            (dn, tm)
+                        })
+                        .collect()
+                })
+                .collect();
+            let got = engine.backward(&model, &batched_grads(&p.seqs), true);
+
+            let mut want_a = vec![0.0f64; p.params.a.len()];
+            let mut want_b = vec![0.0f64; p.params.b.len()];
+            let mut want_t = vec![0.0f64; p.params.theta.len()];
+            for (b, seq) in p.seqs.iter().enumerate() {
+                // outputs of the prefix decisions are still produced
+                let mut state = FlyState::new(&model);
+                state.set_v(&model, &seq.v_init);
+                for (t, x) in seq.inputs.iter().enumerate() {
+                    let out = state.step_decision(&model, x);
+                    let (dn, tm) = &outs[b][t];
+                    assert_all_close(&to64(dn), &to64(out.dn_rates), "dn_rates (prefix)");
+                    assert_all_close(&to64(tm), &to64(out.per_type_mean_rate), "type means (prefix)");
+                }
+                // nothing flows back into the prefix
+                for t in 0..prefix.min(seq.inputs.len()) {
+                    assert!(
+                        got.grad_inputs[b][t].iter().all(|&x| x == 0.0),
+                        "input gradient in the prefix"
+                    );
+                }
+                assert!(got.grad_v_init.as_ref().unwrap()[b].iter().all(|&x| x == 0.0));
+                // and the tail is the 7.2 BPTT of the tail
+                let Some(tail) = suffix_sequence(&model, seq, prefix) else {
+                    continue;
+                };
+                let r = per_seq_reference(&model, &index, &tail);
+                for (acc, x) in want_a.iter_mut().zip(&r.grad_a) {
+                    *acc += f64::from(*x);
+                }
+                for (acc, x) in want_b.iter_mut().zip(&r.grad_b) {
+                    *acc += f64::from(*x);
+                }
+                for (acc, x) in want_t.iter_mut().zip(&r.grad_theta) {
+                    *acc += f64::from(*x);
+                }
+                for t in 0..tail.inputs.len() {
+                    assert_all_close(
+                        &to64(&got.grad_inputs[b][prefix + t]),
+                        &to64(&r.grad_inputs[t]),
+                        "grad_inputs (tail) vs 7.2",
+                    );
+                }
+            }
+            assert_all_close(&to64(&got.grad.a), &want_a, "grad_a (stop-grad)");
+            assert_all_close(&to64(&got.grad.b), &want_b, "grad_b (stop-grad)");
+            assert_all_close(&to64(&got.grad.theta), &want_t, "grad_theta (stop-grad)");
+            if prefix >= t_max {
+                assert!(
+                    got.grad
+                        .a
+                        .iter()
+                        .chain(&got.grad.b)
+                        .chain(&got.grad.theta)
+                        .all(|&x| x == 0.0)
+                );
+            }
+        }
+    }
+}
+
+/// A stop-gradient prefix is a different *gradient*, but still exactly reproducible: bitwise
+/// independent of the thread count and of the BPTT segmentation, and the prefix changes nothing
+/// about the forward outputs.
+#[test]
+fn stop_gradient_prefix_is_bitwise_reproducible_and_leaves_the_forward_pass_alone() {
+    let mut rng = SplitMix64::new(20_261_015);
+    let p = random_problem(&mut rng, 36, 5, 180, 4, 3, 19, 7, 3);
+    let model = build_model(&p);
+    let run = |threads: usize, seg: Option<usize>, prefix: usize| {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| {
+            let mut engine =
+                BatchedEngine::with_plan(BatchedPlan::with_chunk_cost(&model, 30).with_parallel_threshold(0));
+            let opts = BatchedForwardOptions {
+                no_grad_decisions: prefix,
+                segment_decisions: seg,
+                ..BatchedForwardOptions::default()
+            };
+            engine.forward(&model, &batched_inputs(&p.seqs), &opts).unwrap();
+            let mut dns = Vec::new();
+            for b in 0..p.seqs.len() {
+                for t in 0..p.seqs[b].inputs.len() {
+                    let mut dn = vec![0.0f32; model.num_outputs()];
+                    engine.dn_rates(b, t, &mut dn);
+                    dns.push(dn);
+                }
+            }
+            (engine.backward(&model, &batched_grads(&p.seqs), true), dns)
+        })
+    };
+    let (full_grad, full_dn) = run(1, None, 0);
+    let (base, base_dn) = run(1, None, 3);
+    assert_eq!(
+        base_dn, full_dn,
+        "the forward pass is the same with and without a prefix"
+    );
+    assert_ne!(base.grad.a, full_grad.grad.a, "the gradient is a truncated one");
+    for (threads, seg) in [(3usize, None), (8, None), (1, Some(1)), (4, Some(2)), (2, Some(100))] {
+        let (g, dn) = run(threads, seg, 3);
+        assert_eq!(dn, base_dn);
+        assert_eq!(g.grad.a, base.grad.a, "{threads} threads, segments {seg:?}");
+        assert_eq!(g.grad.b, base.grad.b);
+        assert_eq!(g.grad.theta, base.grad.theta);
+        assert_eq!(g.grad_inputs, base.grad_inputs);
+        assert_eq!(g.grad_v_init, base.grad_v_init);
+    }
+    // prefix 0 is the plain full BPTT, bit for bit
+    let (zero, _) = run(1, None, 0);
+    assert_eq!(zero.grad.a, full_grad.grad.a);
+}
+
+#[test]
+fn stop_gradient_prefix_shrinks_the_recording() {
+    let mut rng = SplitMix64::new(20_261_017);
+    let p = random_problem(&mut rng, 30, 4, 140, 3, 2, 16, 8, 2);
+    let model = build_model(&p);
+    let engine = BatchedEngine::new(&model);
+    let est = |prefix: usize, cap: Option<usize>| {
+        engine
+            .estimate_memory(
+                &model,
+                16,
+                8,
+                &BatchedForwardOptions {
+                    no_grad_decisions: prefix,
+                    memory_cap_bytes: cap,
+                    ..BatchedForwardOptions::default()
+                },
+            )
+            .unwrap()
+    };
+    let (full, short) = (est(0, None), est(6, None));
+    assert_eq!((full.segment_decisions, short.segment_decisions), (8, 2));
+    assert!(short.recording_bytes < full.recording_bytes / 3);
+    // a cap that forces the full window into chunks is enough for the short one in one piece
+    let cap = full.total_bytes() - 1;
+    assert!(est(0, Some(cap)).segments > 1);
+    assert_eq!(est(6, Some(cap)).segments, 1);
+    // a prefix as long as the longest sequence (or longer) records nothing but one decision slot
+    assert_eq!(est(8, None).segments, 1);
+    assert_eq!(est(50, None).segment_decisions, 1);
+}

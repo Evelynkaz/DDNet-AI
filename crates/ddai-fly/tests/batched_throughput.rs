@@ -7,14 +7,19 @@
 //! FLY_BENCH_GRAPHS=S,M FLY_BENCH_THREADS=1,8 FLY_BENCH_BATCHES=32,64,128 FLY_BENCH_BACKENDS=batched \
 //!   cargo test -p ddai-fly --release --test batched_throughput -- --ignored --nocapture
 //! ```
-//! Also `FLY_BENCH_T` (decisions per sequence, default 32) and `FLY_BENCH_REPEATS` (default 3).
+//! Also `FLY_BENCH_T` (decisions per sequence, default 32) and `FLY_BENCH_REPEATS` (default 3), and
+//! the task 7.2c variants: `FLY_BENCH_SUBENGINES` (list of `K`, default 1: `K` independent
+//! sub-batch engines) and `FLY_BENCH_STOPGRAD` (list of stop-gradient prefixes in decisions,
+//! default 0 = full BPTT), `FLY_BENCH_CHUNK_COST` (default `DEFAULT_CHUNK_COST`).
 //! The load average is printed right before every timed run, and peak RSS is the high-water mark
 //! since the previous measurement (reset through `/proc/self/clear_refs`).
 
 use std::path::PathBuf;
 use std::time::Instant;
 
-use ddai_fly::batched::{BatchedEngine, BatchedForwardOptions, BatchedSeqGrad, BatchedSeqInput};
+use ddai_fly::batched::{
+    BatchedEngine, BatchedForwardOptions, BatchedPlan, BatchedSeqGrad, BatchedSeqInput, DEFAULT_CHUNK_COST,
+};
 use ddai_fly::rng::SplitMix64;
 use ddai_fly::{BackwardIndex, FlyConfig, FlyModel, FlyParams, FlyState, Sequence, train_step};
 
@@ -87,6 +92,8 @@ fn throughput_real_graphs() {
     let backends: Vec<String> = env_list("FLY_BENCH_BACKENDS", "batched");
     let t: usize = env_list("FLY_BENCH_T", "32")[0];
     let repeats: usize = env_list("FLY_BENCH_REPEATS", "3")[0];
+    let subengines: Vec<usize> = env_list("FLY_BENCH_SUBENGINES", "1");
+    let stopgrads: Vec<usize> = env_list("FLY_BENCH_STOPGRAD", "0");
     for g in &graphs {
         let path = compiled_dir().join(format!("fly-{g}-v1.flyg"));
         if !path.exists() {
@@ -107,83 +114,92 @@ fn throughput_real_graphs() {
                 model.num_neurons(),
                 model.flyg().edges.num_edges()
             );
-            let mut engine = BatchedEngine::new(&model);
+            let chunk_cost = env_list::<usize>("FLY_BENCH_CHUNK_COST", &DEFAULT_CHUNK_COST.to_string())[0];
+            let plan = BatchedPlan::with_chunk_cost(&model, chunk_cost);
             eprintln!(
                 "plan: {} chunks, {:.1} MiB",
-                engine.plan().num_chunks(),
-                engine.plan().memory_bytes() as f64 / 1048576.0
+                plan.num_chunks(),
+                plan.memory_bytes() as f64 / 1048576.0
             );
-            for &b in &batches {
-                let mut rng = SplitMix64::new(20261001 + b as u64);
-                let seqs = build_sequences(&model, &mut rng, b, t);
-                for &nt in &threads {
-                    let pool = rayon::ThreadPoolBuilder::new().num_threads(nt).build().unwrap();
-                    for backend in &backends {
-                        // warm-up (first touch, caches) -- also sizes the engine's buffers
-                        let run_once = |engine: &mut BatchedEngine, timing: &mut (f64, f64)| match backend.as_str() {
-                            "batched" => {
-                                let ins: Vec<BatchedSeqInput<'_>> = seqs
-                                    .iter()
-                                    .map(|q| BatchedSeqInput {
-                                        v_init: &q.v_init,
-                                        inputs: &q.inputs,
-                                    })
-                                    .collect();
-                                let gr: Vec<BatchedSeqGrad<'_>> = seqs
-                                    .iter()
-                                    .map(|q| BatchedSeqGrad {
-                                        grad_dn: &q.grad_dn,
-                                        extra_taps: &q.extra_taps,
-                                    })
-                                    .collect();
-                                let t0 = Instant::now();
-                                engine.forward(&model, &ins, &BatchedForwardOptions::default()).unwrap();
-                                let t1 = Instant::now();
-                                let _ = engine.backward(&model, &gr, false);
-                                let t2 = Instant::now();
-                                timing.0 += (t1 - t0).as_secs_f64();
-                                timing.1 += (t2 - t1).as_secs_f64();
-                            }
-                            "perseq" => {
-                                let t0 = Instant::now();
-                                let _ = train_step(&model, &index, &seqs, None).unwrap();
-                                timing.0 += t0.elapsed().as_secs_f64();
-                            }
-                            other => panic!("unknown backend {other}"),
-                        };
-                        pool.install(|| {
-                            let mut warm_timing = (0.0, 0.0);
-                            run_once(&mut engine, &mut warm_timing);
-                        });
-                        reset_peak_rss();
-                        let load = load_avg();
-                        let mut timing = (0.0, 0.0);
-                        let t0 = Instant::now();
-                        let cpu0 = cpu_seconds();
-                        let mut best_step = f64::MAX;
-                        pool.install(|| {
-                            for _ in 0..repeats {
-                                let before = timing.0 + timing.1;
-                                run_once(&mut engine, &mut timing);
-                                best_step = best_step.min(timing.0 + timing.1 - before);
-                            }
-                        });
-                        let el = t0.elapsed().as_secs_f64();
-                        let cpu = cpu_seconds() - cpu0;
-                        let samples = (b * t * repeats) as f64;
-                        eprintln!(
-                            "{g} {backend:<8} B={b:<4} threads={nt:<2} load={load:<17} step={:>8.1} ms (fwd {:>7.1} bwd {:>7.1}; best {:>7.1}; cpu {:>8.1}) \
+            for (&k_sub, &stopgrad) in subengines.iter().flat_map(|k| stopgrads.iter().map(move |p| (k, p))) {
+                let mut engine = BatchedEngine::with_plan(plan.clone()).with_subengines(k_sub);
+                for &b in &batches {
+                    let mut rng = SplitMix64::new(20261001 + b as u64);
+                    let seqs = build_sequences(&model, &mut rng, b, t);
+                    for &nt in &threads {
+                        let pool = rayon::ThreadPoolBuilder::new().num_threads(nt).build().unwrap();
+                        for backend in &backends {
+                            // warm-up (first touch, caches) -- also sizes the engine's buffers
+                            let run_once = |engine: &mut BatchedEngine, timing: &mut (f64, f64)| match backend.as_str()
+                            {
+                                "batched" => {
+                                    let ins: Vec<BatchedSeqInput<'_>> = seqs
+                                        .iter()
+                                        .map(|q| BatchedSeqInput {
+                                            v_init: &q.v_init,
+                                            inputs: &q.inputs,
+                                        })
+                                        .collect();
+                                    let gr: Vec<BatchedSeqGrad<'_>> = seqs
+                                        .iter()
+                                        .map(|q| BatchedSeqGrad {
+                                            grad_dn: &q.grad_dn,
+                                            extra_taps: &q.extra_taps,
+                                        })
+                                        .collect();
+                                    let t0 = Instant::now();
+                                    let opts = BatchedForwardOptions {
+                                        no_grad_decisions: stopgrad,
+                                        ..BatchedForwardOptions::default()
+                                    };
+                                    engine.forward(&model, &ins, &opts).unwrap();
+                                    let t1 = Instant::now();
+                                    let _ = engine.backward(&model, &gr, false);
+                                    let t2 = Instant::now();
+                                    timing.0 += (t1 - t0).as_secs_f64();
+                                    timing.1 += (t2 - t1).as_secs_f64();
+                                }
+                                "perseq" => {
+                                    let t0 = Instant::now();
+                                    let _ = train_step(&model, &index, &seqs, None).unwrap();
+                                    timing.0 += t0.elapsed().as_secs_f64();
+                                }
+                                other => panic!("unknown backend {other}"),
+                            };
+                            pool.install(|| {
+                                let mut warm_timing = (0.0, 0.0);
+                                run_once(&mut engine, &mut warm_timing);
+                            });
+                            reset_peak_rss();
+                            let load = load_avg();
+                            let mut timing = (0.0, 0.0);
+                            let t0 = Instant::now();
+                            let cpu0 = cpu_seconds();
+                            let mut best_step = f64::MAX;
+                            pool.install(|| {
+                                for _ in 0..repeats {
+                                    let before = timing.0 + timing.1;
+                                    run_once(&mut engine, &mut timing);
+                                    best_step = best_step.min(timing.0 + timing.1 - before);
+                                }
+                            });
+                            let el = t0.elapsed().as_secs_f64();
+                            let cpu = cpu_seconds() - cpu0;
+                            let samples = (b * t * repeats) as f64;
+                            eprintln!(
+                                "{g} {backend:<8} B={b:<4} threads={nt:<2} sub={k_sub} nograd={stopgrad:<2} load={load:<17} step={:>8.1} ms (fwd {:>7.1} bwd {:>7.1}; best {:>7.1}; cpu {:>8.1}) \
                          sample-steps/s={:>8.0} (best {:>8.0}) substep-samples/s={:>8.0} peakRSS={:>7.1} MiB",
-                            el / repeats as f64 * 1e3,
-                            timing.0 / repeats as f64 * 1e3,
-                            timing.1 / repeats as f64 * 1e3,
-                            best_step * 1e3,
-                            cpu / repeats as f64 * 1e3,
-                            samples / el,
-                            (b * t) as f64 / best_step,
-                            samples * s as f64 / el,
-                            peak_rss_mib(),
-                        );
+                                el / repeats as f64 * 1e3,
+                                timing.0 / repeats as f64 * 1e3,
+                                timing.1 / repeats as f64 * 1e3,
+                                best_step * 1e3,
+                                cpu / repeats as f64 * 1e3,
+                                samples / el,
+                                (b * t) as f64 / best_step,
+                                samples * s as f64 / el,
+                                peak_rss_mib(),
+                            );
+                        }
                     }
                 }
             }

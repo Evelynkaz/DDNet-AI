@@ -30,7 +30,8 @@
 //! `dL/dalpha` of substep 0 (against `f(V_init)`) is the initial-state pass's job.
 
 use super::lanes::{
-    L8, LANES, ZERO8, activation_pair_row, axpy8, fix_saturated_derivative, fma, hsum8, lane_dot_n, lane_sum,
+    L8, LANES, ZERO8, activation_row, axpy8, derivative_from_rate_row, fma, hsum8, lane_dot_n, lane_sum,
+    saturated_derivatives,
 };
 use super::plan::{BatchedPlan, NO_SLOT};
 use crate::kernel::PreIndex;
@@ -77,6 +78,149 @@ fn gather_acc<I: PreIndex + Sync, const G: usize>(
         }
     }
     *out = acc;
+}
+
+/// The exact `f'` of the deeply saturated entries (`V / r_max > 1.5`) of one chunk, recorded by the
+/// forward pass in place of the dense `f'(V)` array the first version of the backend kept (task
+/// 7.2c). Everywhere else the backward pass recomputes `f'` from the recorded rate `r`
+/// ([`derivative_from_rate_row`]); these few entries, whose small derivatives that formula would
+/// lose to cancellation, are patched back in. Typical data has none (V > 15 at the default
+/// `r_max`).
+///
+/// One *slot* per recorded `r` slot of the loaded segment (slot 0 = the segment's start state,
+/// slot `ls + 1` = substep `ls`). A slot is stored **sparsely** -- `(key, f')` entries in `vals`,
+/// `ends[k]` the end of slot `k`'s entries -- while at most half of its lanes are patched, and
+/// **densely** otherwise (the whole slot's `f'` in `dense`, `dense_ends[k]` its end; recomputed
+/// from `r` and overwritten with the patches when the slot closes). So a slot never takes more than
+/// 4 bytes per lane -- what the dense array of the first version cost -- and the worst case
+/// (everything saturated) is bounded and counted by `estimate_memory`/`memory_cap_bytes`.
+///
+/// Sparse entries of a slot come in the order the chunk's passes visit them -- lane groups outer,
+/// rows inner, cells then lanes -- and the backward pass visits them in the same order, so it
+/// consumes them with a cursor (see [`apply_patches`]). An entry's key is its flat lane index in
+/// the chunk's `[row][cell][lane]` block of that slot, which is also the index into a dense slot.
+#[derive(Debug, Default)]
+pub(crate) struct PatchStore {
+    pub vals: Vec<(u32, f32)>,
+    dense: Vec<f32>,
+    ends: Vec<u32>,
+    dense_ends: Vec<u32>,
+}
+
+/// What the recorded slot of one chunk holds, see [`PatchStore`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SlotPatches<'a> {
+    Sparse(&'a [(u32, f32)]),
+    Dense(&'a [f32]),
+}
+
+impl PatchStore {
+    pub(crate) fn clear(&mut self) {
+        self.vals.clear();
+        self.dense.clear();
+        self.ends.clear();
+        self.dense_ends.clear();
+    }
+
+    /// Closes the slot just recorded (`r` is the chunk's rate rows of that slot): the sparse
+    /// entries are turned into a dense slot when they would take more than 4 bytes per lane.
+    fn close_slot(&mut self, r: &[L8], inv_r_max: f32) {
+        let start = self.ends.last().map_or(0, |&e| e as usize);
+        let lanes = r.len() * LANES;
+        if (self.vals.len() - start) * 2 > lanes {
+            self.dense.reserve_exact(lanes);
+            let d0 = self.dense.len();
+            self.dense.resize(d0 + lanes, 0.0);
+            let d = &mut self.dense[d0..];
+            derivative_from_rate_row(r.as_flattened(), d, inv_r_max);
+            for &(pos, val) in &self.vals[start..] {
+                d[pos as usize] = val;
+            }
+            self.vals.truncate(start);
+        }
+        self.ends
+            .push(u32::try_from(self.vals.len()).expect("patch store overflow"));
+        self.dense_ends
+            .push(u32::try_from(self.dense.len()).expect("patch store overflow"));
+    }
+
+    /// The patches of slot `k`.
+    pub(crate) fn slot(&self, k: usize) -> SlotPatches<'_> {
+        let (lo, hi) = (
+            if k == 0 { 0 } else { self.ends[k - 1] as usize },
+            self.ends[k] as usize,
+        );
+        let (dlo, dhi) = (
+            if k == 0 { 0 } else { self.dense_ends[k - 1] as usize },
+            self.dense_ends[k] as usize,
+        );
+        if dhi > dlo {
+            SlotPatches::Dense(&self.dense[dlo..dhi])
+        } else {
+            SlotPatches::Sparse(&self.vals[lo..hi])
+        }
+    }
+
+    /// Heap held (capacities).
+    pub(crate) fn bytes(&self) -> usize {
+        self.vals.capacity() * std::mem::size_of::<(u32, f32)>()
+            + self.dense.capacity() * 4
+            + (self.ends.capacity() + self.dense_ends.capacity()) * 4
+    }
+
+    /// Gives back what growth left over when the store holds more than `bound_bytes` (the
+    /// geometric growth of a `Vec` can overshoot its length by up to 2x).
+    pub(crate) fn trim(&mut self, bound_bytes: usize) {
+        if self.bytes() > bound_bytes {
+            self.vals.shrink_to_fit();
+            self.dense.shrink_to_fit();
+            self.ends.shrink_to_fit();
+            self.dense_ends.shrink_to_fit();
+        }
+    }
+}
+
+/// Overwrites the entries of `d` (a group's flat `f'`, starting at flat lane index `base`) that
+/// the next entries of the slot's patch list belong to; `cursor` advances past them. An entry
+/// whose key is outside `[base, base + d.len())` belongs to a later group and ends the run.
+#[inline(always)]
+fn apply_patches(patches: &[(u32, f32)], cursor: &mut usize, base: u32, d: &mut [f32]) {
+    let hi = base + d.len() as u32;
+    while let Some(&(pos, val)) = patches.get(*cursor) {
+        if pos < base || pos >= hi {
+            break;
+        }
+        d[(pos - base) as usize] = val;
+        *cursor += 1;
+    }
+}
+
+/// `f'` of one row's group of lanes `(ri, nb, g0)` for the backward pass: recomputed from the
+/// recorded rates `r` and patched with the slot's exact saturated entries, or read from the dense
+/// slot.
+#[inline(always)]
+fn fill_derivative(
+    patches: SlotPatches<'_>,
+    cursor: &mut usize,
+    (ri, nb, g0): (usize, usize, usize),
+    r: &[f32],
+    d: &mut [f32],
+    inv_r_max: f32,
+) {
+    let base = lane_key(ri, nb, g0);
+    match patches {
+        SlotPatches::Dense(dense) => d.copy_from_slice(&dense[base as usize..base as usize + d.len()]),
+        SlotPatches::Sparse(p) => {
+            derivative_from_rate_row(r, d, inv_r_max);
+            apply_patches(p, cursor, base, d);
+        }
+    }
+}
+
+/// Flat lane index of cell `g0` of chunk-local row `ri`.
+#[inline(always)]
+fn lane_key(ri: usize, nb: usize, g0: usize) -> u32 {
+    ((ri * nb + g0) * LANES) as u32
 }
 
 /// Per-call constants of the model, shared by every chunk task of a region.
@@ -134,13 +278,13 @@ macro_rules! for_each_group {
 // ---------------------------------------------------------------------------------------------
 
 /// What one forward chunk task owns: its rows of the membrane state (updated in place) and of the
-/// substep's recorded `r`, `X = V_inf - V_prev` and `f'(V)`.
+/// substep's recorded `r` and `X = V_inf - V_prev`, plus the chunk's saturated-derivative store.
 pub(crate) struct FwdTask<'a> {
     pub chunk: usize,
     pub v: &'a mut [L8],
     pub r_new: &'a mut [L8],
     pub x_new: &'a mut [L8],
-    pub d_new: &'a mut [L8],
+    pub patches: &'a mut PatchStore,
 }
 
 /// Read-only inputs of a forward substep.
@@ -153,6 +297,7 @@ pub(crate) struct FwdRead<'a> {
 
 pub(crate) fn fwd_chunk<I: PreIndex + Sync>(ctx: &Ctx<'_, I>, rd: &FwdRead<'_>, mut task: FwdTask<'_>) {
     for_each_group!(ctx.nb, |g0, G| fwd_pass::<I, G>(ctx, rd, &mut task, g0));
+    task.patches.close_slot(task.r_new, ctx.inv_r_max);
 }
 
 /// One forward pass over the chunk's rows for the lane group `g0..g0+G`.
@@ -177,23 +322,48 @@ fn fwd_pass<I: PreIndex + Sync, const G: usize>(ctx: &Ctx<'_, I>, rd: &FwdRead<'
             task.v[cells.clone()].as_flattened_mut(),
             task.x_new[cells.clone()].as_flattened_mut(),
             task.r_new[cells.clone()].as_flattened_mut(),
-            task.d_new[cells.clone()].as_flattened_mut(),
             (ctx.bias[i], ctx.decay[i]),
             (ctx.r_max, ctx.inv_r_max),
         );
         if saturated {
-            fix_saturated_derivative(
-                task.v[cells.clone()].as_flattened(),
-                task.d_new[cells].as_flattened_mut(),
+            saturated_derivatives(
+                task.v[cells].as_flattened(),
+                lane_key(ri, nb, g0),
                 ctx.inv_r_max,
+                &mut task.patches.vals,
             );
         }
     }
 }
 
+/// What one start-of-segment activation task owns (`r = f(V)` of the segment's start state, the
+/// recording's slot 0).
+pub(crate) struct ActTask<'a> {
+    pub chunk: usize,
+    pub v: &'a [L8],
+    pub r: &'a mut [L8],
+    pub patches: &'a mut PatchStore,
+}
+
+/// `r = f(V)` of a chunk's rows, recording the saturated derivatives like a forward substep.
+pub(crate) fn act_chunk<I: PreIndex + Sync>(ctx: &Ctx<'_, I>, task: ActTask<'_>) {
+    let nb = ctx.nb;
+    let rows = ctx.plan.chunks[task.chunk].r1 - ctx.plan.chunks[task.chunk].r0;
+    for_each_group!(nb, |g0, G| {
+        for ri in 0..rows {
+            let cells = ri * nb + g0..ri * nb + g0 + G;
+            let v = task.v[cells.clone()].as_flattened();
+            if activation_row(v, task.r[cells].as_flattened_mut(), ctx.r_max, ctx.inv_r_max) {
+                saturated_derivatives(v, lane_key(ri, nb, g0), ctx.inv_r_max, &mut task.patches.vals);
+            }
+        }
+    });
+    task.patches.close_slot(task.r, ctx.inv_r_max);
+}
+
 /// The elementwise half of a forward substep for one neuron's group of cells: `V_inf = (bias +
-/// acc) + input`, `X = V_inf - V`, `V += decay * X`, then `r = f(V)` and `f'(V)`. Returns
-/// whether the group needs the saturated-derivative fix-up.
+/// acc) + input`, `X = V_inf - V`, `V += decay * X`, then `r = f(V)`. Returns whether the group
+/// has deeply saturated entries whose exact `f'` the caller has to record.
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn fwd_row_elementwise(
@@ -202,7 +372,6 @@ fn fwd_row_elementwise(
     v: &mut [f32],
     x_out: &mut [f32],
     r_out: &mut [f32],
-    d_out: &mut [f32],
     (bias, decay): (f32, f32),
     (r_max, inv_r_max): (f32, f32),
 ) -> bool {
@@ -215,7 +384,7 @@ fn fwd_row_elementwise(
         *xo = xx;
         *vv = vp + decay * xx;
     }
-    activation_pair_row(v, r_out, d_out, r_max, inv_r_max)
+    activation_row(v, r_out, r_max, inv_r_max)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -238,6 +407,8 @@ pub(crate) struct BwdTask<'a> {
     /// `dL/dalpha` lane partials of this chunk's local shared-parameter slots (the lane sum is
     /// taken once, at the very end).
     pub acc_a: &'a mut [L8],
+    /// The saturated-derivative patches of this chunk's slot for this substep's `r`.
+    pub patches: SlotPatches<'a>,
 }
 
 /// One dense `dL/dr` tap of a single batch lane (the activity regulariser's).
@@ -248,11 +419,10 @@ pub(crate) struct LaneTap<'a> {
 
 /// Read-only inputs of a backward substep.
 pub(crate) struct BwdRead<'a> {
-    /// `f'(V)` after this substep, every row.
-    pub d_l: &'a [L8],
     /// `V_inf - V_prev` of this substep, every row.
     pub x_l: &'a [L8],
-    /// `r = f(V)` after this substep (the rate that drives the *next* substep), every row.
+    /// `r = f(V)` after this substep (the rate that drives the *next* substep), every row; `f'`
+    /// is recomputed from it.
     pub r_l: &'a [L8],
     /// `dL/dV_inf` of the substep after this one; `None` for the last substep of the window.
     pub delta_next: Option<&'a [L8]>,
@@ -341,15 +511,27 @@ fn grad_a_group<I: PreIndex + Sync, const G: usize>(
 }
 
 pub(crate) fn bwd_chunk<I: PreIndex + Sync>(ctx: &Ctx<'_, I>, rd: &BwdRead<'_>, mut task: BwdTask<'_>) {
-    for_each_group!(ctx.nb, |g0, G| bwd_pass::<I, G>(ctx, rd, &mut task, g0));
+    let mut cursor = 0usize;
+    for_each_group!(ctx.nb, |g0, G| bwd_pass::<I, G>(ctx, rd, &mut task, g0, &mut cursor));
+    if let SlotPatches::Sparse(p) = task.patches {
+        debug_assert_eq!(cursor, p.len(), "saturated-derivative patches not all consumed");
+    }
 }
 
-/// One backward pass over the chunk's rows for the lane group `g0..g0+G`.
-fn bwd_pass<I: PreIndex + Sync, const G: usize>(ctx: &Ctx<'_, I>, rd: &BwdRead<'_>, task: &mut BwdTask<'_>, g0: usize) {
+/// One backward pass over the chunk's rows for the lane group `g0..g0+G`; `cursor` walks the
+/// chunk's saturated-derivative patches across the passes.
+fn bwd_pass<I: PreIndex + Sync, const G: usize>(
+    ctx: &Ctx<'_, I>,
+    rd: &BwdRead<'_>,
+    task: &mut BwdTask<'_>,
+    g0: usize,
+    cursor: &mut usize,
+) {
     let plan = ctx.plan;
     let ch = &plan.chunks[task.chunk];
     let nb = ctx.nb;
     let mut gt_cells = [ZERO8; G];
+    let mut d_cells = [ZERO8; G];
     for (ri, i) in (ch.r0..ch.r1).enumerate() {
         let (ps, pe) = (plan.out_row_start[i] as usize, plan.out_row_start[i + 1] as usize);
         let ty = plan.type_of[i] as usize;
@@ -358,9 +540,17 @@ fn bwd_pass<I: PreIndex + Sync, const G: usize>(ctx: &Ctx<'_, I>, rd: &BwdRead<'
         let full = i * nb + g0..i * nb + g0 + G;
 
         let dr = dr_group::<I, G>(ctx, rd, i, (ps, pe), g0);
+        fill_derivative(
+            task.patches,
+            cursor,
+            (ri, nb, g0),
+            rd.r_l[full.clone()].as_flattened(),
+            d_cells.as_flattened_mut(),
+            ctx.inv_r_max,
+        );
         bwd_row_elementwise(
             dr.as_flattened(),
-            rd.d_l[full.clone()].as_flattened(),
+            d_cells.as_flattened(),
             rd.x_l[full.clone()].as_flattened(),
             task.fut_dv[local.clone()].as_flattened_mut(),
             task.delta_cur[local.clone()].as_flattened_mut(),
@@ -430,6 +620,8 @@ pub(crate) struct InitTask<'a> {
     /// `dL/dV_init` rows of this chunk, if the caller wants them.
     pub grad_v_init: Option<&'a mut [L8]>,
     pub acc_a: &'a mut [L8],
+    /// The saturated-derivative patches of slot 0 of this chunk (the start state's).
+    pub patches: SlotPatches<'a>,
 }
 
 /// The pass "before" the first substep: the `dL/dalpha` of substep 0 (its delta against
@@ -437,7 +629,11 @@ pub(crate) struct InitTask<'a> {
 /// fut_dv`, where `dL/dr_init` is the transposed gather of the first substep's `dL/dV_inf` (plus
 /// the `substeps == 1` boundary tap).
 pub(crate) fn init_chunk<I: PreIndex + Sync>(ctx: &Ctx<'_, I>, rd: &BwdRead<'_>, mut task: InitTask<'_>) {
-    for_each_group!(ctx.nb, |g0, G| init_pass::<I, G>(ctx, rd, &mut task, g0));
+    let mut cursor = 0usize;
+    for_each_group!(ctx.nb, |g0, G| init_pass::<I, G>(ctx, rd, &mut task, g0, &mut cursor));
+    if let (SlotPatches::Sparse(p), Some(_)) = (task.patches, task.grad_v_init.as_ref()) {
+        debug_assert_eq!(cursor, p.len(), "saturated-derivative patches not all consumed");
+    }
 }
 
 fn init_pass<I: PreIndex + Sync, const G: usize>(
@@ -445,6 +641,7 @@ fn init_pass<I: PreIndex + Sync, const G: usize>(
     rd: &BwdRead<'_>,
     task: &mut InitTask<'_>,
     g0: usize,
+    cursor: &mut usize,
 ) {
     let plan = ctx.plan;
     let ch = &plan.chunks[task.chunk];
@@ -454,7 +651,15 @@ fn init_pass<I: PreIndex + Sync, const G: usize>(
         let full = i * nb + g0..i * nb + g0 + G;
         if let Some(gvi) = task.grad_v_init.as_deref_mut() {
             let dr = dr_group::<I, G>(ctx, rd, i, (ps, pe), g0);
-            let sd = &rd.d_l[full.clone()];
+            let mut sd = [ZERO8; G];
+            fill_derivative(
+                task.patches,
+                cursor,
+                (ri, nb, g0),
+                rd.r_l[full.clone()].as_flattened(),
+                sd.as_flattened_mut(),
+                ctx.inv_r_max,
+            );
             let fut = &task.fut_dv[ri * nb + g0..ri * nb + g0 + G];
             for j in 0..G {
                 let out = &mut gvi[ri * nb + g0 + j];
@@ -479,9 +684,11 @@ fn init_pass<I: PreIndex + Sync, const G: usize>(
 /// same process. The check is a *ratio* of best-of-N timings, which is robust to a loaded machine
 /// (both sides slow down together, and the minimum over repeats discards preemptions).
 ///
-/// They need an optimising build: under `cfg(debug_assertions)` (the default `cargo test`
-/// profile, opt-level 1, no loop vectorisation at all) they are `#[ignore]`d. Run them with
-/// `cargo test -p ddai-fly --release --lib vectorisation_guard` (`tools/check-vectorisation.sh`).
+/// They need a build where the loop vectoriser runs. The workspace's `[profile.dev.package.ddai-fly]`
+/// sets `opt-level = 3` for this crate, so plain `cargo test` (and CI) runs them; they would fail
+/// under `opt-level` 0-1 (nothing is vectorised there), e.g. with a `CARGO_PROFILE_DEV_OPT_LEVEL`
+/// override. `cargo test -p ddai-fly --release --lib vectorisation_guard` and
+/// `tools/vectorisation/check.sh` (which also reads the disassembly) check the release build.
 #[cfg(test)]
 mod vectorisation_guard {
     use std::hint::black_box;
@@ -617,7 +824,6 @@ mod vectorisation_guard {
     /// `G = 4` (8 SSE2 accumulators, no register pressure): a clean ~3-4x on the SSE2 baseline,
     /// ~1x if the loop is scalar.
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "needs an optimised build: cargo test --release")]
     fn gather_acc_g4_is_vectorised() {
         check_ratio("gather_acc::<u16, 4>", MIN_SPEEDUP, gather_acc_ratio::<4>);
     }
@@ -629,13 +835,11 @@ mod vectorisation_guard {
     /// `G = 4` test above and `lane_dot_n` carry the vectorisation check, `G = 8` is the same
     /// generic code).
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "needs an optimised build: cargo test --release")]
     fn gather_acc_g8_is_vectorised() {
         check_ratio("gather_acc::<u16, 8>", 1.0, gather_acc_ratio::<8>);
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "needs an optimised build: cargo test --release")]
     fn lane_dot_n_is_vectorised() {
         check_ratio("lane_dot_n::<4>", MIN_SPEEDUP, lane_dot_ratio);
     }

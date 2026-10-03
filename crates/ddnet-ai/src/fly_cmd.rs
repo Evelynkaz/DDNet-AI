@@ -41,6 +41,17 @@ pub enum FlyCommand {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
+    /// Task 7.2c: measures the cores other processes leave idle (two `/proc/stat` samples) and
+    /// prints the `threads` (and sub-engine count) to give the batched trainer -- on a shared
+    /// host its per-substep rendezvous wants as many threads as there are free cores, no more.
+    Cores {
+        /// Length of the measurement window.
+        #[arg(long, default_value_t = 1000)]
+        window_ms: u64,
+        /// Never recommend more threads than this (the trainer clamps `--threads` to 6).
+        #[arg(long, default_value_t = 6)]
+        max_threads: usize,
+    },
     /// Prints a loaded `.flyg`'s sizes, type/edge/sign counts, and output groups.
     Info {
         #[arg(long)]
@@ -141,6 +152,7 @@ pub fn run(args: FlyArgs) -> ExitCode {
             tick_ms,
             seed,
         } => bench(&flyg, substeps, decisions, tick_ms, seed),
+        FlyCommand::Cores { window_ms, max_threads } => cores(window_ms, max_threads),
         FlyCommand::Info { flyg } => info(&flyg),
         FlyCommand::TrainDemo {
             flyg,
@@ -316,6 +328,28 @@ fn bench(flyg_path: &Path, substeps: u32, decisions: u32, tick_ms: u64, seed: u6
         report.over_5ms
     );
 
+    ExitCode::SUCCESS
+}
+
+fn cores(window_ms: u64, max_threads: usize) -> ExitCode {
+    use ddai_fly::batched::cores::{advise, cpu_count, measure_free_cores};
+    let Some(free) = measure_free_cores(Duration::from_millis(window_ms.max(50))) else {
+        eprintln!("cannot read /proc/stat (not Linux?): pick `threads` by hand");
+        return ExitCode::FAILURE;
+    };
+    let advice = advise(free, cpu_count(), max_threads.max(1));
+    println!(
+        "usable cpus: {}, free cores of the host over {} ms: {:.2}",
+        advice.cpus,
+        window_ms.max(50),
+        advice.free_cores
+    );
+    println!("train.threads = {}", advice.threads);
+    println!("[fly] batched_subengines = {}", advice.subengines);
+    println!(
+        "note: K (batched_subengines) changes the gradient's f32 summation order, so keep K (and the \
+         stop-gradient setting) when resuming a run -- `train run` refuses a resume with a different K."
+    );
     ExitCode::SUCCESS
 }
 

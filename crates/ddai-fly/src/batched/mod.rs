@@ -17,9 +17,10 @@
 //!
 //! ## Algorithm, per substep
 //! Forward, per neuron row: `V_inf = bias + sum_e w_e * r_prev[pre_e] + input` (a gather of
-//! `NB` cells per in-edge), `V += decay * (V_inf - V)`, `r = f(V)`, `f'(V)`, recording `r`,
-//! `X = V_inf - V_prev` and `f'(V)`. Backward, per neuron row `j` (transposed CSR): `dL/dr_j` is
-//! the gather of the next substep's `delta` over `j`'s out-edges, the chain rule gives this
+//! `NB` cells per in-edge), `V += decay * (V_inf - V)`, `r = f(V)`, recording `r` and
+//! `X = V_inf - V_prev`. Backward, per neuron row `j` (transposed CSR): `dL/dr_j` is
+//! the gather of the next substep's `delta` over `j`'s out-edges, the chain rule (with `f'(V)`
+//! recomputed from the recorded `r`, see below) gives this
 //! substep's `delta` and the adjoints of `b`/`theta`/inputs, and `dL/dalpha` of the *next*
 //! substep is accumulated from the same `delta` rows (L1-hot from the gather) against `r_j` -- no
 //! second random gather. The activation uses a vector-friendly rational `tanh` instead of libm's
@@ -28,10 +29,13 @@
 //!
 //! ## Memory
 //! Per recorded substep and neuron the backward pass needs `r` (the rate that drove the substep,
-//! for `dL/dalpha`), `f'(V)` (for the chain rule through the activation) and `X = V_inf - V_prev`
-//! (for `dL/dtau`): three `f32` per neuron, lane and substep -- `T * S * N * B * 3 * 4` bytes (M,
-//! B = 64, T = 32, S = 4: 1.25 GB). (The per-sequence recorder stores `V`, `r`, `V_inf` instead;
-//! `f'(V)` is computed once, in the forward pass, from the same `tanh` that gives `r`, so the
+//! for `dL/dalpha`) and `X = V_inf - V_prev` (for `dL/dtau`): two `f32` per neuron, lane and
+//! substep -- `T * S * N * B * 2 * 4` bytes (M, B = 64, T = 32, S = 4: 0.84 GB). `f'(V)` for the
+//! chain rule is *not* recorded (task 7.2c): the backward pass recomputes it from `r`
+//! (`1 - (r / r_max)^2`), and the forward pass records the exact value only for the deeply
+//! saturated entries (`V / r_max > 1.5`), where that formula would lose the small derivatives to
+//! cancellation, in a sparse per-chunk patch list (empty on typical data; see
+//! [`kernels::PatchStore`]). (The per-sequence recorder stores `V`, `r`, `V_inf` instead; the
 //! membrane potential itself is a single rolling state here, not a recording.)
 //! [`BatchedForwardOptions::memory_cap_bytes`] caps the engine's working set (recording,
 //! adjoint state, inputs, taps, checkpoints, per-call model arrays; see
@@ -42,14 +46,21 @@
 //! bit-identical to the unchunked ones (the recomputation repeats the same operations in the same
 //! order); the price is one extra forward pass over all but the last segment.
 
+pub mod cores;
 pub(crate) mod kernels;
 pub(crate) mod lanes;
 mod plan;
+mod split;
+
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use self::kernels::{BwdRead, BwdTask, Ctx, FwdRead, FwdTask, InitTask, LaneTap, bwd_chunk, fwd_chunk, init_chunk};
-use self::lanes::{L8, LANES, LaneBuf, ZERO8, activation_pair_row, fix_saturated_derivative, hsum8};
+use self::kernels::{
+    ActTask, BwdRead, BwdTask, Ctx, FwdRead, FwdTask, InitTask, LaneTap, PatchStore, act_chunk, bwd_chunk, fwd_chunk,
+    init_chunk,
+};
+use self::lanes::{L8, LANES, LaneBuf, ZERO8, hsum8};
 use self::plan::Indices;
 pub use self::plan::{BatchedPlan, DEFAULT_CHUNK_COST, DEFAULT_PAR_MIN_EDGE_CELLS};
 use crate::activation::sigmoid;
@@ -105,6 +116,17 @@ pub struct BatchedForwardOptions {
     /// Also record the per-type mean rate of every decision's last substep
     /// ([`BatchedEngine::type_mean_rates`]), for an activity regulariser.
     pub type_means: bool,
+    /// **Opt-in stop-gradient prefix** (task 7.2c; `0` = off, the default, and then nothing here
+    /// differs from the full BPTT): the first `n` decisions of every sequence (clamped to the
+    /// longest sequence) run *forward only*: nothing is recorded for them and no gradient flows
+    /// through them -- the state at decision `n` is a constant. `dn_rates` /
+    /// `type_mean_rates` are still produced for them, but `grad_dn` and `extra_taps` of those
+    /// decisions are ignored, the parameters get no gradient from their substeps, their input
+    /// gradients and every `grad_v_init` are zero. It is the usual truncated BPTT for a burn-in
+    /// whose loss is masked anyway: the recording, the backward pass and the recomputation only
+    /// cover the remaining decisions (the gradients then differ from the full BPTT's by what
+    /// would have flowed back through the prefix).
+    pub no_grad_decisions: usize,
 }
 
 /// What [`BatchedEngine::backward`] returns.
@@ -121,18 +143,22 @@ pub struct BatchedGradients {
 /// Working-set estimate of a batch, see [`BatchedEngine::estimate_memory`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchedMemoryEstimate {
-    /// Decisions per BPTT segment (`t_decisions` when the window is not chunked).
+    /// Decisions per BPTT segment (all recorded decisions when the window is not chunked).
     pub segment_decisions: usize,
     pub segments: usize,
-    /// The `r`/`X`/`f'(V)` recording of one segment.
+    /// The `r`/`X` recording of one segment.
     pub recording_bytes: usize,
+    /// Upper bound of the saturated-derivative patch stores of one segment: they hold at most 4
+    /// bytes per lane and slot (a slot switches to a dense `f'` once more than half of its lanes are
+    /// patched, see [`kernels::PatchStore`]); on typical data they are empty.
+    pub patch_bytes: usize,
     /// Everything else (adjoint state, inputs, taps, checkpoints, accumulators).
     pub other_bytes: usize,
 }
 
 impl BatchedMemoryEstimate {
     pub fn total_bytes(&self) -> usize {
-        self.recording_bytes + self.other_bytes
+        self.recording_bytes + self.patch_bytes + self.other_bytes
     }
 }
 
@@ -145,30 +171,41 @@ struct Run {
     seg_decisions: usize,
     segments: usize,
     type_means: bool,
+    /// Length of the stop-gradient prefix (see [`BatchedForwardOptions::no_grad_decisions`]);
+    /// the recorded segments cover decisions `d_start..t_max`.
+    d_start: usize,
 }
 
 /// The batched forward/backward engine: a [`BatchedPlan`] plus the reusable buffers. One engine
 /// serves any number of calls (buffers grow as needed, never shrink); it is `&mut`-used, so keep
 /// one per training loop (the trainer wraps it in a mutex).
 pub struct BatchedEngine {
-    plan: BatchedPlan,
+    plan: Arc<BatchedPlan>,
     ws: Workspace,
     arrays: ModelArrays,
     run: Option<Run>,
     /// Length (decisions) of every sequence of the batch of the last `forward`.
     lens: Vec<usize>,
+    /// Requested number of independent sub-batch engines (`1` = this engine runs the batch
+    /// itself), see [`BatchedEngine::with_subengines`].
+    subengines: usize,
+    /// The sub-engines of the last `forward`, when it was split.
+    parts: Option<split::Parts>,
+    /// Stop-gradient prefix for callers that read it from the engine, see
+    /// [`BatchedEngine::with_stop_grad_decisions`].
+    stop_grad_decisions: usize,
 }
 
 /// Reusable buffers. Capacities only grow; every region that is read is written first.
 struct Workspace {
     /// The membrane state, updated in place (one slot).
     v_state: LaneBuf,
-    /// Recording: `r` (`steps + 1` slots; slot `l` is the rate that drives substep `l`), `X`
-    /// (`steps` slots) and `f'(V)` (`steps + 1` slots; slot `l + 1` belongs to substep `l`'s
-    /// resulting `V`, slot 0 to `V_init`).
+    /// Recording: `r` (`steps + 1` slots; slot `l` is the rate that drives substep `l`) and `X`
+    /// (`steps` slots). `f'(V)` is not recorded: the backward pass recomputes it from `r`, and
+    /// `patches` (one store per chunk) holds the exact values of the deeply saturated entries.
     r_rec: LaneBuf,
     x_rec: LaneBuf,
-    d_rec: LaneBuf,
+    patches: Vec<PatchStore>,
     delta: [LaneBuf; 2],
     fut_dv: LaneBuf,
     grad_v_init: LaneBuf,
@@ -184,6 +221,12 @@ struct Workspace {
     acc_a: LaneBuf,
 }
 
+/// Worst-case heap of the saturated-derivative stores for `slots` recorded slots: 4 bytes per
+/// lane (`slot_bytes` is one slot's `f32` cells) plus the per-slot bookkeeping of every chunk.
+fn patch_bound_bytes(slot_bytes: usize, chunks: usize, slots: usize) -> usize {
+    slots * (slot_bytes + chunks * 16)
+}
+
 fn empty() -> LaneBuf {
     LaneBuf::zeroed(0)
 }
@@ -194,7 +237,7 @@ impl Workspace {
             v_state: empty(),
             r_rec: empty(),
             x_rec: empty(),
-            d_rec: empty(),
+            patches: Vec::new(),
             delta: [empty(), empty()],
             fut_dv: empty(),
             grad_v_init: empty(),
@@ -214,11 +257,16 @@ impl Workspace {
     /// [`BatchedEngine::forward`] and `backward_all` `ensure`) would use: buffers kept from an
     /// earlier, larger call.
     fn excess_bytes(&self, needs: &WorkspaceNeeds) -> usize {
+        let patches = self
+            .patches
+            .iter()
+            .map(PatchStore::bytes)
+            .sum::<usize>()
+            .saturating_sub(needs.patch_bytes);
         let pairs = [
             (self.v_state.len(), needs.slot),
             (self.r_rec.len(), needs.r_rec),
             (self.x_rec.len(), needs.x_rec),
-            (self.d_rec.len(), needs.r_rec),
             (self.ckpt.len(), needs.ckpt),
             (self.inp.len(), needs.inp),
             (self.dn.len(), needs.dn),
@@ -236,13 +284,14 @@ impl Workspace {
             .map(|&(held, need)| held.saturating_sub(need))
             .sum::<usize>()
             * CELL_BYTES
+            + patches
     }
 
     fn bytes(&self) -> usize {
         self.v_state.bytes()
             + self.r_rec.bytes()
             + self.x_rec.bytes()
-            + self.d_rec.bytes()
+            + self.patches.iter().map(PatchStore::bytes).sum::<usize>()
             + self.delta[0].bytes()
             + self.delta[1].bytes()
             + self.fut_dv.bytes()
@@ -268,6 +317,8 @@ struct WorkspaceNeeds {
     dn: usize,
     tm: usize,
     acc_a: usize,
+    /// Bytes ([`patch_bound_bytes`]).
+    patch_bytes: usize,
 }
 
 /// The model's current numbers in the engine's neuron/edge order, refreshed by every
@@ -340,22 +391,61 @@ impl BatchedEngine {
     }
 
     pub fn with_plan(plan: BatchedPlan) -> Self {
+        Self::single(Arc::new(plan))
+    }
+
+    /// A plain (unsplit) engine over a shared plan.
+    fn single(plan: Arc<BatchedPlan>) -> Self {
         BatchedEngine {
             plan,
             ws: Workspace::new(),
             arrays: ModelArrays::new(),
             run: None,
             lens: Vec::new(),
+            subengines: 1,
+            parts: None,
+            stop_grad_decisions: 0,
         }
+    }
+
+    /// **Opt-in** (task 7.2c, default `1` = off): run every batch as `k` independent sub-batch
+    /// engines, each on its own thread pool of `threads / k` threads (`threads` = the size of the
+    /// pool [`forward`](Self::forward) is called from; with `k > threads` the groups share
+    /// `threads` one-thread pools, never more threads than that), without a barrier between them -- for a
+    /// host that cannot give all of one pool's threads a core at the same moment. Groups are
+    /// whole 8-lane cells (`k` is capped at the batch's cell count). Per-lane results are
+    /// bitwise those of one engine; the parameter gradients are summed group by group, so they
+    /// are bitwise reproducible across thread counts but differ in the last f32 bits from
+    /// another `k`. Costs more CPU per step (every group reads every edge); the memory cap is
+    /// split evenly. See [`split`].
+    pub fn with_subengines(mut self, k: usize) -> Self {
+        self.subengines = k.max(1);
+        self.parts = None;
+        self
+    }
+
+    /// Stores the stop-gradient prefix (in decisions) that [`brain_bc_batched_step`]
+    /// (crate::brain_bc_batched::brain_bc_batched_step) hands to [`forward`](Self::forward) as
+    /// [`BatchedForwardOptions::no_grad_decisions`] and treats as unscored (`0` = off).
+    pub fn with_stop_grad_decisions(mut self, decisions: usize) -> Self {
+        self.stop_grad_decisions = decisions;
+        self
+    }
+
+    pub fn stop_grad_decisions(&self) -> usize {
+        self.stop_grad_decisions
     }
 
     pub fn plan(&self) -> &BatchedPlan {
         &self.plan
     }
 
-    /// Bytes of heap the engine currently holds (buffers + plan).
+    /// Bytes of heap the engine currently holds (buffers + plan; with sub-engines, theirs too).
     pub fn memory_bytes(&self) -> usize {
-        self.ws.bytes() + self.arrays.bytes() + self.plan.memory_bytes()
+        self.ws.bytes()
+            + self.arrays.bytes()
+            + self.plan.memory_bytes()
+            + self.parts.as_ref().map_or(0, split::Parts::bytes)
     }
 
     /// Bytes of workspace buffers held beyond what a batch of this shape needs.
@@ -374,6 +464,7 @@ impl BatchedEngine {
                 0
             },
             acc_a: self.plan.sid_list.len(),
+            patch_bytes: patch_bound_bytes(slot * CELL_BYTES, self.plan.chunks.len(), seg_steps + 1),
         })
     }
 
@@ -394,10 +485,13 @@ impl BatchedEngine {
     ) -> Result<BatchedMemoryEstimate, MemoryCapExceeded> {
         let nb = batch.max(1).div_ceil(LANES);
         let s = model.config().substeps_per_decision as usize;
+        // Decisions that are recorded (the stop-gradient prefix is not).
+        let rec_t = t_decisions - opts.no_grad_decisions.min(t_decisions);
         let make = |seg: usize| -> BatchedMemoryEstimate {
             let slot = self.plan.n * nb * CELL_BYTES;
-            let segments = t_decisions.div_ceil(seg.max(1)).max(1);
-            let recording_bytes = (seg * s * 3 + 2) * slot;
+            let segments = rec_t.div_ceil(seg.max(1)).max(1);
+            let recording_bytes = (seg * s * 2 + 1) * slot;
+            let patch_bytes = patch_bound_bytes(slot, self.plan.chunks.len(), seg * s + 1);
             let other_bytes = (2 + 1 + 1 + 1) * slot // delta x2, fut_dv, grad_v_init, V state
                 + segments * slot // checkpoints
                 + t_decisions * self.plan.num_inputs * nb * CELL_BYTES // inputs
@@ -410,14 +504,15 @@ impl BatchedEngine {
                 segment_decisions: seg,
                 segments,
                 recording_bytes,
+                patch_bytes,
                 other_bytes,
             }
         };
-        if t_decisions == 0 {
+        if rec_t == 0 {
             return Ok(make(1));
         }
         if let Some(seg) = opts.segment_decisions {
-            let est = make(seg.clamp(1, t_decisions));
+            let est = make(seg.clamp(1, rec_t));
             return match opts.memory_cap_bytes {
                 Some(cap) if est.total_bytes() > cap => Err(MemoryCapExceeded {
                     estimated_bytes: est.total_bytes(),
@@ -427,9 +522,9 @@ impl BatchedEngine {
             };
         }
         let Some(cap) = opts.memory_cap_bytes else {
-            return Ok(make(t_decisions));
+            return Ok(make(rec_t));
         };
-        let mut seg = t_decisions;
+        let mut seg = rec_t;
         loop {
             let est = make(seg);
             if est.total_bytes() <= cap {
@@ -475,6 +570,13 @@ impl BatchedEngine {
         let k_in = self.plan.num_inputs;
         let batch = seqs.len();
         assert!(batch > 0, "BatchedEngine::forward: empty batch");
+        if self.subengines > 1 {
+            // (the shape asserts below run in the sub-engines)
+            if let Some(result) = self.forward_split(model, seqs, opts) {
+                return result;
+            }
+        }
+        self.parts = None;
         for s in seqs {
             assert_eq!(s.v_init.len(), n, "BatchedEngine::forward: v_init length");
             for x in s.inputs {
@@ -497,8 +599,8 @@ impl BatchedEngine {
         ensure(&mut ws.v_state, slot);
         ensure(&mut ws.r_rec, (seg_steps + 1) * slot);
         ensure(&mut ws.x_rec, seg_steps * slot);
-        ensure(&mut ws.d_rec, (seg_steps + 1) * slot);
         ensure(&mut ws.ckpt, est.segments * slot);
+        ws.patches.resize_with(self.plan.chunks.len(), PatchStore::default);
         ensure(&mut ws.inp, t_max * k_in * nb);
         ensure(&mut ws.dn, t_max * self.plan.num_outputs * nb);
         if opts.type_means {
@@ -539,6 +641,7 @@ impl BatchedEngine {
             seg_decisions: est.segment_decisions,
             segments: est.segments,
             type_means: opts.type_means,
+            d_start: opts.no_grad_decisions.min(t_max),
         };
         self.arrays.refresh(&self.plan, model);
         match &self.plan.indices {
@@ -557,6 +660,9 @@ impl BatchedEngine {
     /// `dn_rates` of sequence `b` at decision `t` (as `FlyState::step_decision` would return it),
     /// after [`BatchedEngine::forward`]. `out.len() == num_outputs`.
     pub fn dn_rates(&self, b: usize, t: usize, out: &mut [f32]) {
+        if let Some(parts) = &self.parts {
+            return parts.dn_rates(b, t, out);
+        }
         let run = self.run.expect("dn_rates: no forward pass has run");
         assert!(b < run.batch && t < run.t_max && out.len() == self.plan.num_outputs);
         let cells = self.ws.dn.cells();
@@ -569,6 +675,9 @@ impl BatchedEngine {
     /// Per-type mean `f(V)` after decision `t`'s last substep (`FlyState`'s
     /// `per_type_mean_rate`); only recorded with [`BatchedForwardOptions::type_means`].
     pub fn type_mean_rates(&self, b: usize, t: usize, out: &mut [f32]) {
+        if let Some(parts) = &self.parts {
+            return parts.type_mean_rates(b, t, out);
+        }
         let run = self.run.expect("type_mean_rates: no forward pass has run");
         assert!(run.type_means, "type_mean_rates: forward ran without `type_means`");
         assert!(b < run.batch && t < run.t_max && out.len() == self.plan.num_types);
@@ -594,6 +703,9 @@ impl BatchedEngine {
         want_v_init_grad: bool,
     ) -> BatchedGradients {
         self.plan.assert_matches(model);
+        if self.parts.is_some() {
+            return self.backward_split(model, seqs, want_v_init_grad);
+        }
         let run = self.run.expect("BatchedEngine::backward: no forward pass has run");
         assert_eq!(
             seqs.len(),
@@ -671,7 +783,8 @@ impl BatchedEngine {
     }
 }
 
-/// Runs every segment forward, each from its checkpointed start state.
+/// Runs the stop-gradient prefix (if any), then every segment forward, each from its
+/// checkpointed start state.
 fn forward_all<I: PreIndex + Sync>(
     plan: &BatchedPlan,
     arrays: &ModelArrays,
@@ -681,6 +794,9 @@ fn forward_all<I: PreIndex + Sync>(
     run: &Run,
 ) {
     let ctx = make_ctx(plan, arrays, model, (pre, post), run.nb);
+    if run.d_start > 0 {
+        forward_prefix(&ctx, ws, model, run);
+    }
     for seg in 0..run.segments {
         forward_segment(&ctx, ws, model, run, seg, true);
     }
@@ -710,9 +826,135 @@ fn make_ctx<'a, I: PreIndex + Sync>(
     }
 }
 
-/// Runs decisions `[d0, d1)` of segment `seg` forward from its checkpointed start state,
-/// recording `r`/`X`/`f'(V)` into the recording buffers. With `outputs`, also stores each
-/// decision's `dn_rates` (and type means) and the next segment's checkpoint.
+/// `r = f(V)` of the start state `v` into the recording's slot 0 `r0`, and the slot's
+/// saturated-derivative entries into the (just cleared) stores.
+fn act_region<I: PreIndex + Sync>(ctx: &Ctx<'_, I>, v: &[L8], r0: &mut [L8], patches: &mut [PatchStore]) {
+    let plan = ctx.plan;
+    let nb = ctx.nb;
+    for st in patches.iter_mut() {
+        st.clear();
+    }
+    let tasks: Vec<ActTask<'_>> = split_by_lens(r0, row_lens(plan, nb))
+        .into_iter()
+        .zip(patches.iter_mut())
+        .enumerate()
+        .map(|(chunk, (r, patches))| ActTask {
+            chunk,
+            v: &v[plan.chunks[chunk].r0 * nb..plan.chunks[chunk].r1 * nb],
+            r,
+            patches,
+        })
+        .collect();
+    if ctx.par {
+        tasks.into_par_iter().for_each(|t| act_chunk(ctx, t));
+    } else {
+        tasks.into_iter().for_each(|t| act_chunk(ctx, t));
+    }
+}
+
+/// Writes decision `dec`'s `dn_rates` (the mean of the last two substeps' output-neuron rates,
+/// `r_before` and `r_after`) and, if asked, its per-type mean rates.
+fn store_decision_outputs(
+    plan: &BatchedPlan,
+    model: &FlyModel,
+    run: &Run,
+    dec: usize,
+    (r_before, r_after): (&[L8], &[L8]),
+    (dn, tm): (&mut LaneBuf, &mut LaneBuf),
+) {
+    let nb = run.nb;
+    let n_out = plan.num_outputs;
+    let dn_cells = dn.cells_mut();
+    for (s, &neuron) in plan.out_neuron.iter().enumerate() {
+        let i = neuron as usize;
+        for c in 0..nb {
+            let (rb, ra) = (&r_before[i * nb + c], &r_after[i * nb + c]);
+            let o = &mut dn_cells[(dec * n_out + s) * nb + c];
+            for l in 0..LANES {
+                o[l] = 0.5 * (rb[l] + ra[l]);
+            }
+        }
+    }
+    if run.type_means {
+        let types = &model.flyg().types;
+        let tm_cells = &mut tm.cells_mut()[dec * plan.num_types * nb..(dec + 1) * plan.num_types * nb];
+        tm_cells.fill(ZERO8);
+        for i in 0..plan.n {
+            let ty = plan.type_of[i] as usize;
+            for c in 0..nb {
+                let (acc, ri) = (&mut tm_cells[ty * nb + c], &r_after[i * nb + c]);
+                for l in 0..LANES {
+                    acc[l] += ri[l];
+                }
+            }
+        }
+        for (ty, t) in types.iter().enumerate() {
+            let cnt = t.neuron_count.max(1) as f32;
+            for cell in &mut tm_cells[ty * nb..(ty + 1) * nb] {
+                for x in cell.iter_mut() {
+                    *x /= cnt;
+                }
+            }
+        }
+    }
+}
+
+/// The stop-gradient prefix (decisions `0..d_start`): forward only, from the checkpointed `V_init`
+/// in slot 0 of `ckpt`. Nothing is recorded -- the recording buffers' first `substeps + 1` slots
+/// are reused for every decision (the last rate slot is copied back to slot 0) -- except the
+/// outputs, and the state at the end of the prefix is written back to `ckpt` slot 0, where
+/// segment 0 picks it up as its start state.
+fn forward_prefix<I: PreIndex + Sync>(ctx: &Ctx<'_, I>, ws: &mut Workspace, model: &FlyModel, run: &Run) {
+    let plan = ctx.plan;
+    let nb = run.nb;
+    let slot = plan.n * nb;
+    let s_sub = model.config().substeps_per_decision as usize;
+    let k_in = plan.num_inputs;
+    let Workspace {
+        v_state,
+        r_rec,
+        x_rec,
+        patches,
+        ckpt,
+        inp,
+        dn,
+        tm,
+        ..
+    } = ws;
+    let v = &mut v_state.cells_mut()[..slot];
+    let r = r_rec.cells_mut();
+    let x = x_rec.cells_mut();
+    v.copy_from_slice(&ckpt.cells()[..slot]);
+    act_region(ctx, v, &mut r[..slot], patches);
+    let inp_cells = inp.cells();
+    for dec in 0..run.d_start {
+        let inp_d = &inp_cells[dec * k_in * nb..(dec + 1) * k_in * nb];
+        for j in 0..s_sub {
+            // Nothing reads the patches of the prefix: keep the stores empty.
+            for st in patches.iter_mut() {
+                st.clear();
+            }
+            fwd_region(ctx, slot, (&mut *v, &mut *r, &mut *x, patches.as_mut_slice()), inp_d, j);
+        }
+        store_decision_outputs(
+            plan,
+            model,
+            run,
+            dec,
+            (
+                &r[(s_sub - 1) * slot..s_sub * slot],
+                &r[s_sub * slot..(s_sub + 1) * slot],
+            ),
+            (dn, tm),
+        );
+        r.copy_within(s_sub * slot..(s_sub + 1) * slot, 0);
+    }
+    ckpt.cells_mut()[..slot].copy_from_slice(v);
+}
+
+/// Runs decisions of segment `seg` forward from its checkpointed start state, recording `r`/`X`
+/// (and the saturated-derivative entries) into the recording buffers. With `outputs`, also stores
+/// each decision's `dn_rates` (and type means) and the next segment's checkpoint.
 fn forward_segment<I: PreIndex + Sync>(
     ctx: &Ctx<'_, I>,
     ws: &mut Workspace,
@@ -726,14 +968,13 @@ fn forward_segment<I: PreIndex + Sync>(
     let slot = plan.n * nb;
     let s_sub = model.config().substeps_per_decision as usize;
     let k_in = plan.num_inputs;
-    let n_out = plan.num_outputs;
-    let d0 = seg * run.seg_decisions;
+    let d0 = run.d_start + seg * run.seg_decisions;
     let d1 = (d0 + run.seg_decisions).min(run.t_max);
     let Workspace {
         v_state,
         r_rec,
         x_rec,
-        d_rec,
+        patches,
         ckpt,
         inp,
         dn,
@@ -743,82 +984,55 @@ fn forward_segment<I: PreIndex + Sync>(
     let v = &mut v_state.cells_mut()[..slot];
     let r = r_rec.cells_mut();
     let x = x_rec.cells_mut();
-    let d = d_rec.cells_mut();
 
     v.copy_from_slice(&ckpt.cells()[seg * slot..(seg + 1) * slot]);
-    {
-        let (r_max, inv) = (ctx.r_max, ctx.inv_r_max);
-        let (r0, d_0) = (&mut r[..slot], &mut d[..slot]);
-        r0.par_chunks_mut(nb * 64)
-            .zip(d_0.par_chunks_mut(nb * 64))
-            .zip(v.par_chunks(nb * 64))
-            .for_each(|((rc, dc), vc)| {
-                let (vf, df) = (vc.as_flattened(), dc.as_flattened_mut());
-                if activation_pair_row(vf, rc.as_flattened_mut(), df, r_max, inv) {
-                    fix_saturated_derivative(vf, df, inv);
-                }
-            });
-    }
+    act_region(ctx, v, &mut r[..slot], patches);
 
     let inp_cells = inp.cells();
     for dec in d0..d1 {
         let inp_d = &inp_cells[dec * k_in * nb..(dec + 1) * k_in * nb];
         for j in 0..s_sub {
-            fwd_region(ctx, slot, v, r, x, d, inp_d, (dec - d0) * s_sub + j);
+            fwd_region(
+                ctx,
+                slot,
+                (&mut *v, &mut *r, &mut *x, patches.as_mut_slice()),
+                inp_d,
+                (dec - d0) * s_sub + j,
+            );
         }
         if outputs {
             let ls_last = (dec - d0) * s_sub + s_sub - 1;
-            let r_before = &r[ls_last * slot..(ls_last + 1) * slot];
-            let r_after = &r[(ls_last + 1) * slot..(ls_last + 2) * slot];
-            let dn_cells = dn.cells_mut();
-            for (s, &neuron) in plan.out_neuron.iter().enumerate() {
-                let i = neuron as usize;
-                for c in 0..nb {
-                    let (rb, ra) = (&r_before[i * nb + c], &r_after[i * nb + c]);
-                    let o = &mut dn_cells[(dec * n_out + s) * nb + c];
-                    for l in 0..LANES {
-                        o[l] = 0.5 * (rb[l] + ra[l]);
-                    }
-                }
-            }
-            if run.type_means {
-                let types = &model.flyg().types;
-                let tm_cells = &mut tm.cells_mut()[dec * plan.num_types * nb..(dec + 1) * plan.num_types * nb];
-                tm_cells.fill(ZERO8);
-                for i in 0..plan.n {
-                    let ty = plan.type_of[i] as usize;
-                    for c in 0..nb {
-                        let (acc, ri) = (&mut tm_cells[ty * nb + c], &r_after[i * nb + c]);
-                        for l in 0..LANES {
-                            acc[l] += ri[l];
-                        }
-                    }
-                }
-                for (ty, t) in types.iter().enumerate() {
-                    let cnt = t.neuron_count.max(1) as f32;
-                    for cell in &mut tm_cells[ty * nb..(ty + 1) * nb] {
-                        for x in cell.iter_mut() {
-                            *x /= cnt;
-                        }
-                    }
-                }
-            }
+            store_decision_outputs(
+                plan,
+                model,
+                run,
+                dec,
+                (
+                    &r[ls_last * slot..(ls_last + 1) * slot],
+                    &r[(ls_last + 1) * slot..(ls_last + 2) * slot],
+                ),
+                (dn, tm),
+            );
         }
     }
     if outputs && seg + 1 < run.segments {
         ckpt.cells_mut()[(seg + 1) * slot..(seg + 2) * slot].copy_from_slice(v);
     }
+    // Vec growth can overshoot a store's length by 2x: hand back what exceeds the bound the
+    // memory estimate promised (a no-op unless the data is heavily saturated).
+    let slots = run.seg_decisions * s_sub + 1;
+    for (st, ch) in patches.iter_mut().zip(&plan.chunks) {
+        st.trim(patch_bound_bytes((ch.r1 - ch.r0) * nb * CELL_BYTES, 1, slots));
+    }
 }
 
-/// One forward substep over all chunks in parallel.
-#[allow(clippy::too_many_arguments)]
+/// One forward substep over all chunks in parallel. `(v, r, x, patches)`: the membrane state, the
+/// recording's rate and `X` buffers and the chunks' saturated-derivative stores; `ls` is the
+/// substep's index in the loaded segment.
 fn fwd_region<I: PreIndex + Sync>(
     ctx: &Ctx<'_, I>,
     slot: usize,
-    v: &mut [L8],
-    r: &mut [L8],
-    x: &mut [L8],
-    d: &mut [L8],
+    (v, r, x, patches): (&mut [L8], &mut [L8], &mut [L8], &mut [PatchStore]),
     inp: &[L8],
     ls: usize,
 ) {
@@ -832,19 +1046,18 @@ fn fwd_region<I: PreIndex + Sync>(
     let vn = split_by_lens(v, row_lens(plan, nb));
     let rn = split_by_lens(&mut r_tail[..slot], row_lens(plan, nb));
     let xn = split_by_lens(&mut x[ls * slot..(ls + 1) * slot], row_lens(plan, nb));
-    let dn = split_by_lens(&mut d[(ls + 1) * slot..(ls + 2) * slot], row_lens(plan, nb));
     let tasks: Vec<FwdTask<'_>> = vn
         .into_iter()
         .zip(rn)
         .zip(xn)
-        .zip(dn)
+        .zip(patches.iter_mut())
         .enumerate()
-        .map(|(chunk, (((v, r_new), x_new), d_new))| FwdTask {
+        .map(|(chunk, (((v, r_new), x_new), patches))| FwdTask {
             chunk,
             v,
             r_new,
             x_new,
-            d_new,
+            patches,
         })
         .collect();
     if ctx.par {
@@ -873,6 +1086,8 @@ fn backward_all<I: PreIndex + Sync>(
     let n_out = plan.num_outputs;
     let k_in = plan.num_inputs;
     let num_chunks = plan.chunks.len();
+    // Decisions that are recorded and backpropagated (the stop-gradient prefix is neither).
+    let rec_t = t_max - run.d_start;
 
     // Taps and accumulators. The tap buffer is moved out of the workspace for the duration (it is
     // read-only while the regions borrow the rest of the workspace mutably).
@@ -928,7 +1143,7 @@ fn backward_all<I: PreIndex + Sync>(
         if seg + 1 != run.segments {
             forward_segment(&ctx, ws, model, run, seg, false);
         }
-        let d0 = seg * run.seg_decisions;
+        let d0 = run.d_start + seg * run.seg_decisions;
         let d1 = (d0 + run.seg_decisions).min(t_max);
         let steps = (d1 - d0) * s_sub;
         for ls in (0..steps).rev() {
@@ -963,10 +1178,14 @@ fn backward_all<I: PreIndex + Sync>(
     // The pass before the first substep (segment 0's recording is resident now): the `dL/dalpha`
     // of substep 0 against `f(V_init)`, and, if asked, the initial-state gradient (one more
     // transposed gather, the `substeps == 1` boundary tap, the chain rule through `f(V_init)`).
-    if t_max > 0 {
-        let tap_before = (s_sub == 1 && n_out > 0).then(|| &gdn_buf.cells()[..n_out * nb]);
-        init_region(&ctx, ws, cur ^ 1, tap_before, want_v_init_grad);
-    } else if want_v_init_grad {
+    // With a stop-gradient prefix the start state of the recorded decisions is a constant: no
+    // initial-state gradient (zero) and no boundary tap (`tap_before`) to chain through it.
+    if rec_t > 0 {
+        let want_gvi = want_v_init_grad && run.d_start == 0;
+        let tap_before = (s_sub == 1 && n_out > 0 && want_gvi).then(|| &gdn_buf.cells()[..n_out * nb]);
+        init_region(&ctx, ws, cur ^ 1, tap_before, want_gvi);
+    }
+    if want_v_init_grad && (rec_t == 0 || run.d_start > 0) {
         ws.grad_v_init.cells_mut()[..slot].fill(ZERO8);
     }
 
@@ -1020,13 +1239,13 @@ fn bwd_region<I: PreIndex + Sync>(
     let Workspace {
         r_rec,
         x_rec,
-        d_rec,
         delta,
         fut_dv,
         gin,
         acc_b,
         acc_t,
         acc_a,
+        patches,
         ..
     } = ws;
     let (d_lo, d_hi) = delta.split_at_mut(1);
@@ -1036,7 +1255,6 @@ fn bwd_region<I: PreIndex + Sync>(
         (&mut d_hi[0], &d_lo[0])
     };
     let rd = BwdRead {
-        d_l: &d_rec.cells()[(ls + 1) * slot..(ls + 2) * slot],
         x_l: &x_rec.cells()[ls * slot..(ls + 1) * slot],
         r_l: &r_rec.cells()[(ls + 1) * slot..(ls + 2) * slot],
         delta_next: have_next.then(|| &next_buf.cells()[..slot]),
@@ -1066,9 +1284,10 @@ fn bwd_region<I: PreIndex + Sync>(
         .zip(ab)
         .zip(at)
         .zip(aa)
+        .zip(patches.iter())
         .enumerate()
         .map(
-            |(chunk, (((((delta_cur, fut_dv), gin), acc_b), acc_t), acc_a))| BwdTask {
+            |(chunk, ((((((delta_cur, fut_dv), gin), acc_b), acc_t), acc_a), patches))| BwdTask {
                 chunk,
                 fut_dv,
                 delta_cur,
@@ -1076,6 +1295,7 @@ fn bwd_region<I: PreIndex + Sync>(
                 acc_b,
                 acc_t,
                 acc_a,
+                patches: patches.slot(ls + 1),
             },
         )
         .collect();
@@ -1101,15 +1321,14 @@ fn init_region<I: PreIndex + Sync>(
     let Workspace {
         r_rec,
         x_rec,
-        d_rec,
         delta,
         fut_dv,
         grad_v_init,
         acc_a,
+        patches,
         ..
     } = ws;
     let rd = BwdRead {
-        d_l: &d_rec.cells()[..slot],
         x_l: &x_rec.cells()[..slot],
         r_l: &r_rec.cells()[..slot],
         delta_next: Some(&delta[last].cells()[..slot]),
@@ -1141,6 +1360,7 @@ fn init_region<I: PreIndex + Sync>(
             fut_dv: &fut[plan.chunks[chunk].r0 * nb..plan.chunks[chunk].r1 * nb],
             grad_v_init: g.take(),
             acc_a,
+            patches: patches[chunk].slot(0),
         })
         .collect();
     if ctx.par {

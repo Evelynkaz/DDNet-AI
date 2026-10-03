@@ -88,16 +88,23 @@ fn corpus(n_seqs: usize) -> Corpus {
 }
 
 fn learner(backend: TrainBackend, par_threshold: Option<usize>) -> Option<FlyLearner> {
+    learner_with(FlyTrainConfig {
+        backend,
+        batched_parallel_threshold: par_threshold,
+        ..FlyTrainConfig::default()
+    })
+}
+
+/// A learner from `cfg` with the test's activity regulariser and `alpha_init` on top.
+fn learner_with(cfg: FlyTrainConfig) -> Option<FlyLearner> {
     let flyg = graph()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cfg = FlyTrainConfig {
-        backend,
-        batched_parallel_threshold: par_threshold,
         activity_weight: 0.05,
         activity_low: 0.4,
         activity_high: 0.8,
         alpha_init: 3.0,
-        ..FlyTrainConfig::default()
+        ..cfg
     };
     Some(FlyLearner::init(&flyg, &root.join("configs/fly/S-brain.toml"), 1, cfg, &[]).unwrap())
 }
@@ -168,7 +175,19 @@ fn train_cfg(threads: usize) -> TrainConfig {
 }
 
 fn train(backend: TrainBackend, threads: usize, steps: u64, par_threshold: Option<usize>) -> Option<(Vec<f32>, f64)> {
-    let l = learner(backend, par_threshold)?;
+    train_with(
+        FlyTrainConfig {
+            backend,
+            batched_parallel_threshold: par_threshold,
+            ..FlyTrainConfig::default()
+        },
+        threads,
+        steps,
+    )
+}
+
+fn train_with(cfg: FlyTrainConfig, threads: usize, steps: u64) -> Option<(Vec<f32>, f64)> {
+    let l = learner_with(cfg)?;
     let mut t = Trainer::new(
         Box::new(l),
         train_cfg(threads),
@@ -206,4 +225,57 @@ fn trainer_steps_track_between_backends_and_do_not_depend_on_the_thread_count() 
     assert_eq!(p1, p4);
     let (p_serial, _) = train(TrainBackend::Batched, 4, 5, Some(usize::MAX)).unwrap();
     assert_eq!(p4, p_serial);
+}
+
+/// The opt-in speed options of task 7.2c through the trainer: `K` sub-batch engines track the
+/// single engine and are bitwise independent of the thread count; the stop-gradient burn-in
+/// trains (finite, different gradients) and is bitwise independent of the thread count too.
+#[test]
+fn subengines_and_stop_gradient_burn_in_through_the_trainer() {
+    let batched = |k: usize, stop: usize, par: Option<usize>| FlyTrainConfig {
+        backend: TrainBackend::Batched,
+        batched_parallel_threshold: par,
+        batched_subengines: k,
+        batched_stop_grad_decisions: stop,
+        ..FlyTrainConfig::default()
+    };
+    let Some((p_one, loss_one)) = train_with(batched(1, 0, None), 2, 8) else {
+        eprintln!("note: fly-S-v1.flyg not found, skipping");
+        return;
+    };
+    // 6 windows are one 8-lane cell: split a batch of two cells instead (see `batch_windows`).
+    let wide = |cfg: FlyTrainConfig, threads: usize, steps: u64| {
+        let l = learner_with(cfg).unwrap();
+        let tc = TrainConfig {
+            batch_windows: 12,
+            ..train_cfg(threads)
+        };
+        let mut t = Trainer::new(Box::new(l), tc, Corpus::new(Vec::new()), corpus(8), None).unwrap();
+        let s = t.train_phase("bc", 0, steps, steps, &[], 0).unwrap();
+        (t.learner().params(), s.mean_loss_last_log)
+    };
+    let (p_k1, loss_k1) = wide(batched(1, 0, None), 2, 6);
+    let (p_k2, loss_k2) = wide(batched(2, 0, None), 4, 6);
+    assert!(
+        (loss_k1 - loss_k2).abs() <= 1e-3 * loss_k1.abs().max(1.0),
+        "loss with K=1 {loss_k1} vs K=2 {loss_k2}"
+    );
+    let drift = rel_err(&p_k2, &p_k1);
+    eprintln!("K=2 vs K=1 after 6 steps: max relative parameter drift {drift:.2e}");
+    assert!(drift < 1e-3, "{drift}");
+    let (q1, _) = wide(batched(2, 0, Some(0)), 1, 4);
+    let (q4, _) = wide(batched(2, 0, Some(0)), 4, 4);
+    assert_eq!(q1, q4, "K=2 trainer, 1 vs 4 threads");
+
+    // Stop-gradient burn-in (the config's `burn_in` is 2).
+    let (p_stop, loss_stop) = train_with(batched(1, 2, None), 2, 8).unwrap();
+    assert!(loss_stop.is_finite() && p_stop.iter().all(|x| x.is_finite()));
+    assert_ne!(p_stop, p_one, "a truncated gradient trains differently");
+    assert!(
+        (loss_stop - loss_one).abs() <= 0.2 * loss_one.abs().max(1.0),
+        "{loss_stop} vs {loss_one}"
+    );
+    let (s1, _) = train_with(batched(1, 2, Some(0)), 1, 5).unwrap();
+    let (s4, _) = train_with(batched(1, 2, Some(0)), 4, 5).unwrap();
+    assert_eq!(s1, s4, "stop-gradient trainer, 1 vs 4 threads");
 }

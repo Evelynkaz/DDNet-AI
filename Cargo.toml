@@ -57,3 +57,13 @@ inherits = "release"
 # entire test suite exists to check.
 [profile.dev.package.ddai-jsmath]
 opt-level = 3
+
+# ddai-fly's batched training kernels (task 7.2b) rest on a few loops the compiler must turn into
+# SIMD code (no `unsafe`, no intrinsics), and `batched::kernels::vectorisation_guard` times them
+# against scalar reductions to catch a silent loss of that (task 7.2c: runs in plain `cargo test`
+# and so in CI). The loop vectoriser does not run at opt-level 1, so this crate is built at
+# opt-level 3 in the dev/test profile too (it also makes ddai-fly's own heavy tests several times
+# faster). As with ddai-jsmath above, `opt-level` never changes the value a floating-point
+# operation produces, so nothing the physics-parity guarantees (D-002/D-004) rest on moves.
+[profile.dev.package.ddai-fly]
+opt-level = 3

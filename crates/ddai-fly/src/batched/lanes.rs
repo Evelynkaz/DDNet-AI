@@ -5,7 +5,8 @@
 //!
 //! Also the vector-friendly `f(V)` / `f'(V)` the batched path uses instead of libm's scalar
 //! `tanhf`/`coshf` (which LLVM cannot vectorise and which would cost as much as the edge work):
-//! [`activation_pair_row`], accurate to a few f32 ulp (unit tests below measure it against `f64`).
+//! [`activation_row`] and [`derivative_from_rate_row`] (plus the exact [`saturated_derivatives`]
+//! for deep saturation), accurate to a few f32 ulp (unit tests below measure it against `f64`).
 
 /// Batch lanes per cell.
 pub(crate) const LANES: usize = 8;
@@ -158,46 +159,59 @@ fn sech2_pos(x: f32) -> f32 {
     4.0 * q / (d * d)
 }
 
-/// `(f(V), f'(V))` for a row of values, `f(V) = r_max * tanh(relu(V) / r_max)`: both exactly `0`
-/// for `V <= 0` (the relu kink's subgradient convention of the per-sequence path), both NaN for
-/// NaN. Returns whether any value is deep enough in saturation for the cheap `f'` below to be
-/// inaccurate (see [`fix_saturated_derivative`]).
-///
-/// `f'` is `1 - t^2 = (1 - t)(1 + t)` with `t = tanh(V / r_max)` from the same rational as `f`
-/// (absolute error ~3e-7, relative `~2e-6` while `V / r_max <= 1.5`).
+/// `f(V) = r_max * tanh(relu(V) / r_max)` for a row of values: exactly `0` for `V <= 0` (the relu
+/// kink's subgradient convention of the per-sequence path), NaN for NaN. Returns whether any value
+/// is deep enough in saturation (`V / r_max > 1.5`) for the derivative recomputed from the rate
+/// ([`derivative_from_rate_row`]) to be inaccurate, i.e. whether the caller has to record the
+/// exact derivative of those entries ([`saturated_derivatives`]).
 ///
 /// Written over flat `f32` slices with one straight-line body so the loop vectorizer takes it;
-/// the form of the selects matters (a nested `if v <= 0 {0} else if v.is_nan() {v} else {x}` for
-/// each of the two outputs makes LLVM give up and run the whole loop scalar).
+/// the form of the selects matters (a nested `if v <= 0 {0} else if v.is_nan() {v} else {x}` makes
+/// LLVM give up and run the whole loop scalar).
 #[inline(always)]
-pub(crate) fn activation_pair_row(v: &[f32], r: &mut [f32], d: &mut [f32], r_max: f32, inv_r_max: f32) -> bool {
+pub(crate) fn activation_row(v: &[f32], r: &mut [f32], r_max: f32, inv_r_max: f32) -> bool {
     let mut sat = 0u32;
-    for ((&vi, ro), dd) in v.iter().zip(r.iter_mut()).zip(d.iter_mut()) {
+    for (&vi, ro) in v.iter().zip(r.iter_mut()) {
         let x = vi * inv_r_max;
         let xs = if x > 0.0 { x } else { 0.0 };
         let xc = if xs < TANH_X_MAX { xs } else { TANH_X_MAX };
         let t = tanh_rational(xc);
         // `fallback`: 0 for V <= 0, V itself (NaN) otherwise.
         let fallback = if vi <= 0.0 { 0.0 } else { vi };
-        let live = vi > 0.0;
-        *ro = if live { r_max * t } else { fallback };
-        *dd = if live { (1.0 - t) * (1.0 + t) } else { fallback };
+        *ro = if vi > 0.0 { r_max * t } else { fallback };
         sat |= u32::from(xs > SECH2_SLOW_ABOVE);
     }
     sat != 0
 }
 
-/// The deep-saturation fix-up of [`activation_pair_row`]: recomputes `f'` of the entries above
-/// the threshold with [`sech2_pos`], so the relative accuracy of the *small* derivatives of
-/// saturated neurons -- the property review F7a of task 7.2 asked for -- is kept. Out of line and
-/// cold: it only runs for rows with `V / r_max > 1.5` (V > 15 at the default `r_max`).
+/// `f'(V)` recomputed from the recorded rate `r = f(V)` instead of being recorded itself (task
+/// 7.2c: one of three recorded arrays less): `1 - t^2 = (1 - t)(1 + t)` with `t = r / r_max`, and
+/// exactly `0` where `r == 0` (`V <= 0`; a positive `V` whose rate underflows to zero has
+/// `f' = 1` in exact arithmetic and `0` here, below anything the model feeds), NaN for NaN.
+/// Absolute error ~4e-7 (the rational `tanh` of the forward pass plus the rounding of `r_max * t`
+/// and of `r * (1 / r_max)`); relative `~3e-6` while `V / r_max <= 1.5`. Entries beyond that are
+/// patched with the exact [`saturated_derivatives`] recorded by the forward pass.
+#[inline(always)]
+pub(crate) fn derivative_from_rate_row(r: &[f32], d: &mut [f32], inv_r_max: f32) {
+    for (&ri, dd) in r.iter().zip(d.iter_mut()) {
+        let t = ri * inv_r_max;
+        *dd = if ri > 0.0 { (1.0 - t) * (1.0 + t) } else { ri };
+    }
+}
+
+/// The deep-saturation fix-up, recorded by the forward pass: the exact `f'` of every entry of
+/// `v` above the threshold (`V / r_max > 1.5`, V > 15 at the default `r_max`), via [`sech2_pos`]
+/// -- no subtraction of nearly equal numbers, so the relative accuracy of the *small* derivatives
+/// of saturated neurons (the property review F7a of task 7.2 asked for) survives even though
+/// the dense `f'` array is gone. Appends `(base + index, f')` to `out`. Out of line and cold: it
+/// only runs for rows with a saturated entry.
 #[cold]
 #[inline(never)]
-pub(crate) fn fix_saturated_derivative(v: &[f32], d: &mut [f32], inv_r_max: f32) {
-    for (&vi, dd) in v.iter().zip(d.iter_mut()) {
+pub(crate) fn saturated_derivatives(v: &[f32], base: u32, inv_r_max: f32, out: &mut Vec<(u32, f32)>) {
+    for (i, &vi) in v.iter().enumerate() {
         let x = vi * inv_r_max;
         if x > SECH2_SLOW_ABOVE {
-            *dd = sech2_pos(x);
+            out.push((base + i as u32, sech2_pos(x)));
         }
     }
 }
@@ -271,11 +285,18 @@ mod tests {
         assert_eq!(hsum8(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]), 36.0);
     }
 
+    /// `(f, f')` the way the engine produces them: `f` in the forward pass, `f'` recomputed from
+    /// it in the backward pass and patched with the saturated entries the forward pass recorded.
     fn pair(vs: &[f32], r_max: f32) -> (Vec<f32>, Vec<f32>) {
         let inv = 1.0 / r_max;
         let (mut r, mut d) = (vec![0.0; vs.len()], vec![0.0; vs.len()]);
-        if activation_pair_row(vs, &mut r, &mut d, r_max, inv) {
-            fix_saturated_derivative(vs, &mut d, inv);
+        let mut patches = Vec::new();
+        if activation_row(vs, &mut r, r_max, inv) {
+            saturated_derivatives(vs, 0, inv, &mut patches);
+        }
+        derivative_from_rate_row(&r, &mut d, inv);
+        for (pos, v) in patches {
+            d[pos as usize] = v;
         }
         (r, d)
     }
@@ -357,7 +378,7 @@ mod tests {
             let ra = activation(v, r_max);
             let rd = activation_derivative(v, r_max);
             assert!((a - ra).abs() <= 1e-6 * ra.abs().max(1e-3), "v={v}: {a} vs {ra}");
-            // f' is `(1-t)(1+t)`: absolute error ~3e-7, see `activation_pair_row`.
+            // f' is `(1-t)(1+t)`: absolute error ~4e-7, see `derivative_from_rate_row`.
             assert!((d - rd).abs() <= 5e-7 + 1e-6 * rd.abs(), "v={v}: {d} vs {rd}");
         }
     }

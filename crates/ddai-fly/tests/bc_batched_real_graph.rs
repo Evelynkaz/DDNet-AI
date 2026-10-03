@@ -102,10 +102,23 @@ fn rel_err(a: &[f32], b: &[f32]) -> f64 {
         / scale
 }
 
-fn check_graph(name: &str, brain_config: &str, v_scale: f32) {
+/// The model, networks and batch of windows both tests below run.
+struct Fixture {
+    model: FlyModel,
+    index: BackwardIndex,
+    encoder: EncoderModel,
+    encoder_params: EncoderParams,
+    decoder: DecoderModel,
+    decoder_params: ddai_fly::decoder::DecoderParams,
+    calib: DnCalibration,
+    cfg: BcStepConfig,
+    seqs: Vec<BcSequence>,
+}
+
+fn fixture(name: &str, brain_config: &str, v_scale: f32) -> Option<Fixture> {
     let Some(flyg) = graph(name) else {
         eprintln!("skipped: fly-{name}-v1.flyg not found");
-        return;
+        return None;
     };
     let brain_cfg = ddai_fly::brain_config::load_brain_config(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../configs/fly/{brain_config}")),
@@ -173,6 +186,34 @@ fn check_graph(name: &str, brain_config: &str, v_scale: f32) {
             targets: targets_for(&mut rng, len),
         })
         .collect();
+    Some(Fixture {
+        model,
+        index,
+        encoder,
+        encoder_params,
+        decoder,
+        decoder_params,
+        calib,
+        cfg,
+        seqs,
+    })
+}
+
+fn check_graph(name: &str, brain_config: &str, v_scale: f32) {
+    let Some(Fixture {
+        model,
+        index,
+        encoder,
+        encoder_params,
+        decoder,
+        decoder_params,
+        calib,
+        cfg,
+        seqs,
+    }) = fixture(name, brain_config, v_scale)
+    else {
+        return;
+    };
 
     // Reference: window by window.
     let mut ws = BcWorkspace::new(&model, &encoder, 16);
@@ -270,4 +311,78 @@ fn batched_bc_step_matches_per_window_bc_step_on_the_real_s_graph() {
 #[test]
 fn batched_bc_step_matches_per_window_bc_step_on_the_real_m_graph() {
     check_graph("M", "M-brain.toml", 0.5);
+}
+
+/// The opt-in stop-gradient burn-in (`BatchedEngine::with_stop_grad_decisions`, task 7.2c) on the
+/// real S graph. The forward side of a step does not change at all -- loss, logits, decoder
+/// gradients are bitwise those of the full BPTT when the prefix decisions are the unscored
+/// burn-in anyway -- while the connectome gradient is a (finite, different) truncated one, and a
+/// prefix as long as the window leaves nothing to train.
+#[test]
+fn stop_gradient_burn_in_leaves_the_forward_side_of_a_bc_step_untouched() {
+    let Some(mut fx) = fixture("S", "S-brain.toml", 0.2) else {
+        return;
+    };
+    let prefix = 3usize;
+    fx.cfg.activity.weight = 0.0; // the regulariser's taps in the prefix are dropped by design
+    for seq in &mut fx.seqs {
+        for t in seq.targets.iter_mut().take(prefix) {
+            *t = StepTargets::burn_in();
+        }
+    }
+    let run = |engine: &mut BatchedEngine| {
+        brain_bc_batched_step(
+            &fx.model,
+            engine,
+            &fx.encoder,
+            &fx.encoder_params,
+            &fx.decoder,
+            &fx.decoder_params,
+            &fx.calib,
+            &fx.seqs,
+            &fx.cfg,
+            None,
+        )
+        .unwrap()
+    };
+    let full = run(&mut BatchedEngine::new(&fx.model));
+    let stopped = run(&mut BatchedEngine::new(&fx.model).with_stop_grad_decisions(prefix));
+    assert_eq!(full.windows.len(), stopped.windows.len());
+    for (w, (a, b)) in full.windows.iter().zip(&stopped.windows).enumerate() {
+        assert_eq!(a.loss.total, b.loss.total, "window {w}: loss bits");
+        assert_eq!(a.weight_sum, b.weight_sum, "window {w}: weight_sum");
+        assert_eq!(a.logits.len(), b.logits.len());
+        for (x, y) in a.logits.iter().zip(&b.logits) {
+            assert_eq!(
+                (x.hook, x.dir, x.jump),
+                (y.hook, y.dir, y.jump),
+                "window {w}: logits bits"
+            );
+        }
+        assert_eq!(a.decoder.hook_w, b.decoder.hook_w, "window {w}: decoder gradient bits");
+        assert_eq!(a.decoder.direction_lr_w, b.decoder.direction_lr_w);
+    }
+    assert!(
+        stopped
+            .fly
+            .a
+            .iter()
+            .chain(&stopped.fly.b)
+            .chain(&stopped.fly.theta)
+            .all(|x| x.is_finite())
+    );
+    assert_ne!(stopped.fly.b, full.fly.b, "a truncated gradient");
+    assert!(stopped.fly.b.iter().any(|&x| x != 0.0));
+    // Nothing is scored, nothing flows: a prefix covering every window.
+    let longest = fx.seqs.iter().map(|s| s.observations.len()).max().unwrap();
+    let none = run(&mut BatchedEngine::new(&fx.model).with_stop_grad_decisions(longest));
+    assert!(
+        none.fly
+            .a
+            .iter()
+            .chain(&none.fly.b)
+            .chain(&none.fly.theta)
+            .all(|&x| x == 0.0)
+    );
+    assert!(none.windows.iter().all(|w| w.weight_sum == 0.0));
 }
