@@ -21,11 +21,31 @@ use crate::encoder::{EncoderModel, EncoderParams};
 use crate::rng::SplitMix64;
 use crate::{FlyConfig, FlyModel, FlyParams};
 
+/// What one fly proposal costs on the arena's **work clock**, per mega-synapse-step (task 3.7a, D-080), in tee-tick
+/// equivalents (one tee-tick = `WORK_US_PER_TEE_TICK`, 1.25 us, of a whole search decision). A proposal runs
+/// `substeps_per_decision` exponential-Euler steps over the graph's synapses (`nnz`), plus the encoder and the
+/// plan sampling, whose cost is folded into the constant: `units = nnz x substeps x this / 10^6`. Calibrated on the
+/// S graph (49 741 synapse rows, 4 substeps, one proposal = 500 tee-ticks = 0.63 ms on an unloaded core), by
+/// `tests/fly_proposal_cost.rs` (E-012 §1): the ratio of the fly's wall time to the wall time per tee-tick of a whole
+/// decision, measured in the same process so that the load of a shared machine scales both alike. Proportional by
+/// construction; for a graph of another size it is an extrapolation.
+pub const FLY_TEE_TICKS_PER_MEGA_SYNAPSE_STEP: f64 = 2513.0;
+
+/// The work-clock price of one proposal of `brain` (see [`FLY_TEE_TICKS_PER_MEGA_SYNAPSE_STEP`]).
+pub fn proposal_tee_ticks(brain: &FlyBrain) -> u64 {
+    let model = brain.model();
+    let nnz = model.flyg().edges.row_start.last().copied().unwrap_or(0) as f64;
+    let substeps = f64::from(model.config().substeps_per_decision);
+    (nnz * substeps * FLY_TEE_TICKS_PER_MEGA_SYNAPSE_STEP / 1e6).round() as u64
+}
+
 /// The fly as a [`Proposer`].
 pub struct FlyProposer {
     brain: FlyBrain,
     rng: SplitMix64,
     name: String,
+    /// The work-clock price of one `propose` call, in tee-tick equivalents.
+    units: u64,
     /// Wall time of the last `decide()` (µs) and the decisions made (cost reporting).
     pub last_decide_us: u64,
     pub decisions: u64,
@@ -34,6 +54,7 @@ pub struct FlyProposer {
 impl FlyProposer {
     pub fn new(brain: FlyBrain, seed: u64) -> FlyProposer {
         FlyProposer {
+            units: proposal_tee_ticks(&brain),
             brain,
             rng: SplitMix64::new(seed),
             name: "fly".to_string(),
@@ -76,6 +97,10 @@ impl Proposer for FlyProposer {
         };
         let rng = &mut self.rng;
         plans_from_distribution(&dist, ctx.steps, ctx.k, &mut || f64::from(rng.next_f32_unit()), out);
+    }
+
+    fn work_units(&self) -> u64 {
+        self.units
     }
 
     fn viz_meta(&self) -> Option<String> {

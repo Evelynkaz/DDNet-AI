@@ -127,6 +127,10 @@ pub struct PlanTelemetry {
     pub shield_incomplete: bool,
     /// Candidates scored.
     pub candidates: u32,
+    /// Task 3.7a: microseconds the proposer took in this decision and the search (pool generation + scoring, shield
+    /// excluded), as the brain measured them on its own clock; `0` for a brain without them.
+    pub proposal_us: u32,
+    pub search_us: u32,
 }
 
 /// The shared decision-maker interface (task 7.3, acceptance criterion 1). Every implementer is

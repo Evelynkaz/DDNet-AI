@@ -198,6 +198,11 @@ pub struct HybridConfig {
     /// `min(budget_ms, cap - shield reserve)`. `None` = the budget alone (the extension of D-042
     /// may still go up to `adaptive.max_total_ms` when danger is confirmed).
     pub decision_cap_ms: Option<f64>,
+    /// Task 3.7a (D-080): the time the proposer took (`proposal_ms`) comes off the cap too, so the search
+    /// budget is `min(budget_ms, cap - proposal_ms - shield reserve)`, never below 1 ms, and the extension of D-042
+    /// counts from the start of the proposals. `false` = the 3.5-3.6 behaviour (the search starts its full budget
+    /// after the proposals). A proposer that does nothing (`NoProposer`) costs nothing either way.
+    pub proposal_in_cap: bool,
     /// Tees the rollouts simulate at most (task 3.5b, F2): us, the victim, whoever hooks us, then the
     /// nearest threats and the nearest frozen body; every other tee is dropped from the decision
     /// world, so a crowd costs like a fight. `0` = every tee (the 3.5 behaviour).
@@ -221,7 +226,8 @@ pub struct HybridConfig {
     pub shield_reserve_ms_per_tee: f64,
     /// Deadline mode on the **work clock**: microseconds charged per tee-tick (one physics tick of
     /// one tee; an anchor ray counts as two), instead of wall time. `None` = the wall clock (or the step clock a test
-    /// injects). Reproducible and load-independent; needs `workers = 1`. See [`crate::hybrid::work`].
+    /// injects). Reproducible and load-independent; with `workers > 1` the helpers only speculate, the result is
+    /// bit-identical to `workers = 1` (task 3.7a). See [`crate::hybrid::work`].
     pub work_clock_us_per_tick: Option<f64>,
     /// Keep a count of the physics ticks each phase simulates (D-045). Cheap; on by default.
     pub count_work: bool,
@@ -260,6 +266,7 @@ impl Default for HybridConfig {
             warm_bonus: 0.3,
             warm_fire_only: false,
             decision_cap_ms: Some(5.0),
+            proposal_in_cap: true,
             max_sim_tees: 4,
             shield_skip_tiles: 14,
             shield_plan_escape: true,
@@ -298,10 +305,8 @@ impl HybridConfig {
         if !(0.0..=1.0).contains(&self.robust.lambda) || !(0.0..1.0).contains(&self.stage2_fraction) {
             return Err("hybrid: robust.lambda in [0,1], stage2_fraction in [0,1)".into());
         }
-        if self.work_clock_us_per_tick.is_some_and(|u| !positive(u))
-            || (self.work_clock_us_per_tick.is_some() && self.workers > 1)
-        {
-            return Err("hybrid: the work clock needs us_per_tee_tick > 0 and workers = 1".into());
+        if self.work_clock_us_per_tick.is_some_and(|u| !positive(u)) {
+            return Err("hybrid: the work clock needs us_per_tee_tick > 0".into());
         }
         if self.robust.max_relevant > crate::hybrid::threat::MAX_THREATS + 1 {
             return Err("hybrid: robust.max_relevant above the number of modelled opponents".into());

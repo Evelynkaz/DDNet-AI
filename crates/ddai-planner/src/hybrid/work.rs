@@ -4,7 +4,14 @@
 //! deadline give a different search on every run (a loaded machine turns a "4 ms" search into a
 //! 1 ms one); with a work clock the deadline mode is **reproducible** and independent of load, so
 //! budget-versus-strength questions (D-042/D-044) can be answered in the arena without the noise.
-//! It needs no thread other than the deciding one (`workers = 1`): helper threads read wall time.
+//! The clock is advanced by the deciding thread only, one finished rollout at a time, in the order the search asks for
+//! them; with `workers > 1` (task 3.7a) the helper threads merely *prefetch* those rollouts in parallel
+//! ([`crate::hybrid::engine::Engine::prefetch`]) without touching the meter, so a work-clock decision is bit-identical for
+//! any number of workers.
+//!
+//! A proposer that does not simulate physics (the fly) is charged by its calibrated cost in tee-tick equivalents
+//! ([`crate::hybrid::Proposer::work_units`], D-080): the proposal then takes time off the decision cap on the work clock
+//! just as it does on the wall clock.
 //!
 //! The unit is a **tee-tick**: one physics tick of one tee (a tick's cost grows with the number of
 //! tees in the world). The rate is a calibration, not a truth: [`WORK_US_PER_TEE_TICK`] is what a whole

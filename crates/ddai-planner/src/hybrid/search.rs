@@ -69,6 +69,9 @@ enum Lens {
 /// The search never gets less than this under the decision cap (ms).
 const MIN_SEARCH_MS: f64 = 1.0;
 
+/// On the work clock the helpers speculate this many rollouts per worker ahead of the serial search.
+const SPEC_PER_WORKER: usize = 2;
+
 /// A tee within this many px of a spared position is that spared tee.
 const SPARE_MATCH_PX: f64 = 8.0;
 
@@ -131,6 +134,9 @@ pub struct WorkCounters {
     pub lag: u64,
     /// The proposer's own simulation (the scripted proposer; a fly is measured in wall time).
     pub proposal: u64,
+    /// The nominal cost of a proposer that does not simulate physics (the fly), in tee-tick
+    /// equivalents (task 3.7a): charged to the work clock, not part of [`WorkCounters::total_ticks`].
+    pub proposal_units: u64,
     pub stage1: u64,
     pub stage2: u64,
     /// The adaptive extension.
@@ -153,6 +159,7 @@ impl WorkCounters {
     pub fn add(&mut self, o: &WorkCounters) {
         self.lag += o.lag;
         self.proposal += o.proposal;
+        self.proposal_units += o.proposal_units;
         self.stage1 += o.stage1;
         self.stage2 += o.stage2;
         self.extension += o.extension;
@@ -204,6 +211,11 @@ pub struct DecisionTelemetry {
     pub pruned: u32,
     /// The search ran out of time before its pool was exhausted.
     pub out_of_time: bool,
+    /// Work clock with helper threads: rollouts the helpers computed ahead, and how many of them the
+    /// serial search then used. Not part of the decision (the JSON leaves them out: it must be equal
+    /// for any thread count).
+    pub spec_prefetched: u32,
+    pub spec_used: u32,
     pub best_score: f64,
     pub robust_value: f64,
     /// Mean estimated probability that the modelled opponents react (see `ReactBelief`).
@@ -260,7 +272,7 @@ impl DecisionTelemetry {
             "{{\"chosen\":\"{}\",\"plan\":[{}],\"victim\":{},\"threats\":[{}],\"danger\":\"{}\",\"combos\":{},\
 \"generated\":{{{}}},\"evaluated\":{{{}}},\"budget_ms\":{},\"search_ms\":{:.3},\"proposal_ms\":{:.3},\"rollout_ms\":{:.3},\"shield_ms\":{:.3},\
 \"extended\":{},\"shielded\":{},\"shield_incomplete\":{},\"shield_plan_ok\":{},\"sim_tees\":{},\"dropped_tees\":{},\"pruned\":{},\"out_of_time\":{},\"unsafe\":{},\"best_score\":{:.4},\"robust\":{:.4},\"react_belief\":{:.3},\
-\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{}}}{}}}",
+\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"proposal_units\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{}}}{}}}",
             self.chosen.map_or("none", Source::label),
             plan,
             self.victim_id,
@@ -289,6 +301,7 @@ impl DecisionTelemetry {
             w.total_ticks(),
             w.lag,
             w.proposal,
+            w.proposal_units,
             w.stage1,
             w.stage2,
             w.extension,
@@ -617,6 +630,46 @@ impl HybridSearch {
         cut
     }
 
+    /// Work clock with helper threads (task 3.7a): the helpers score, in parallel and without touching the
+    /// clock, the rollouts the serial search below is about to ask for; the search then finds them in the
+    /// engine's cache and charges the work clock one rollout at a time, in its own order. `fill` pushes the
+    /// plans and jobs (it gets the model-combination masks). A wrong guess only wastes a helper's time.
+    fn prefetch(&mut self, clock: &dyn Clock, fill: impl FnOnce(&mut Batch, &[u32])) {
+        if !self.engine.speculating() {
+            return;
+        }
+        self.batch.clear(self.cfg.planner.steps as usize);
+        fill(&mut self.batch, &self.masks);
+        self.engine.prefetch(&mut self.batch, clock);
+    }
+
+    /// How many rollouts ahead the work clock speculates.
+    fn spec_window(&self) -> usize {
+        SPEC_PER_WORKER * self.engine.workers()
+    }
+
+    /// Prefetches the (candidate, combination) rollouts of `jobs`, each over `horizon` steps (`0` = all).
+    fn prefetch_jobs(&mut self, clock: &dyn Clock, cands: &[Cand], jobs: &[(usize, u32)], horizon: u32) {
+        self.prefetch(clock, |b, masks| {
+            let mut last: Option<(usize, usize)> = None;
+            for &(ci, combo) in jobs {
+                let pi = match last {
+                    Some((lc, lp)) if lc == ci => lp,
+                    _ => {
+                        let p = b.push_plan(&cands[ci].plan);
+                        last = Some((ci, p));
+                        p
+                    }
+                };
+                if horizon > 0 {
+                    b.push_job_short(pi, masks[combo as usize], horizon);
+                } else {
+                    b.push_job(pi, masks[combo as usize]);
+                }
+            }
+        });
+    }
+
     /// Points the engine's workers at the reduced world (us and the victim) or the full one (the local
     /// tees with the threats). A no-op unless the decision runs the two-world search.
     fn set_lens(&mut self, lens: Lens) {
@@ -683,6 +736,7 @@ impl HybridSearch {
             ..DecisionTelemetry::default()
         };
         tel.work.lag = inp.roll_ticks;
+        let spec0 = self.engine.spec_stats();
         if let Some(m) = &self.meter {
             m.set_scale(self.world.all_tees().len());
             m.add(inp.roll_ticks);
@@ -992,16 +1046,31 @@ impl HybridSearch {
             };
             self.proposer.propose(&pctx, &mut props);
         }
-        tel.proposal_ms = now(clock) - t_prop;
         let pt = self.proposer.work_ticks();
         tel.work.proposal = pt - self.last_prop_ticks;
         self.last_prop_ticks = pt;
+        // A proposer's time counts against the decision cap (task 3.7a). On the work clock its cost is
+        // charged to the meter first: the simulated ticks of a scripted proposer, and the nominal
+        // tee-tick cost of one that does not simulate physics (the fly, `Proposer::work_units`).
+        let proposer_costs = self.proposer.costs_time();
+        // Charged (and reported) only where something was spent: on the work clock, in a decision that asked the
+        // proposer at all. On the wall clock the time is measured, not priced.
+        if proposer_costs && self.meter.is_some() && cfg.proposals > 0 {
+            tel.work.proposal_units = self.proposer.work_units();
+        }
         if let Some(m) = &self.meter {
             m.add(tel.work.proposal);
+            m.add_units(tel.work.proposal_units);
         }
-        // The search budget (D-042: 4 ms) starts here: after the proposals (the fly's ~1 ms is
-        // accounted separately), but it covers the candidate generation below.
+        tel.proposal_ms = now(clock) - t_prop;
+        // The search budget (D-042: 4 ms) starts here, after the proposals, and covers the candidate
+        // generation below. What the proposals took (`proposal_ms`) is taken off the decision cap
+        // (`HybridConfig::proposal_in_cap`), so proposals + search + shield fit the cap together.
         let t_search = now(clock);
+        let proposal_counts = cfg.proposal_in_cap && proposer_costs;
+        let counted_proposal_ms = if proposal_counts { tel.proposal_ms } else { 0.0 };
+        // Where the decision's time began as far as the extension of D-042 is concerned.
+        let t_decision = if proposal_counts { t_prop } else { t_search };
         let mut prop_c: Vec<Cand> = Vec::new();
         for p in props.into_iter().take(cfg.proposals) {
             push(&mut prop_c, &mut tel, sanitize(p, n), Source::Proposal);
@@ -1084,7 +1153,10 @@ impl HybridSearch {
             // would not fit under it (many tees); never below `MIN_SEARCH_MS`.
             HybridMode::Deadline { budget_ms } => {
                 let budget_ms = match cfg.decision_cap_ms {
-                    Some(cap) => js::min(budget_ms, js::max(cap - shield_reserve, MIN_SEARCH_MS)),
+                    Some(cap) => js::min(
+                        budget_ms,
+                        js::max(cap - shield_reserve - counted_proposal_ms, MIN_SEARCH_MS),
+                    ),
                     None => budget_ms,
                 };
                 // Frozen, the game ignores our movement inputs: only a cheap search keeps the warm
@@ -1131,9 +1203,12 @@ impl HybridSearch {
             js::min(search_end, js::max(static_stage1_end, search_end - need))
         };
         let mut stage1_end = static_stage1_end;
+        // Wall clock with a pool: the pool takes a few candidates at a time. The work clock always goes one
+        // candidate at a time (the helpers only speculate), which is what makes it independent of the
+        // thread count.
         let chunk = if !timed {
             usize::MAX
-        } else if self.engine.workers() > 1 {
+        } else if self.engine.workers() > 1 && self.meter.is_none() {
             2 * self.engine.workers()
         } else {
             1
@@ -1178,6 +1253,7 @@ impl HybridSearch {
                 if ncombos > 1 {
                     jobs.push((base, (ncombos - 1) as u32));
                 }
+                self.prefetch_jobs(clock, &cands, &jobs, 0);
                 let cut = self.run_jobs(clock, &mut cands, &jobs, None, &mut ticks1, &mut roll1);
                 debug_assert!(!cut);
                 have_any = true;
@@ -1217,6 +1293,7 @@ impl HybridSearch {
         let first_pool = cands.len();
         cands.extend(order);
         let mut next = first_pool;
+        let mut spec_end = next;
         while next < cands.len() {
             if timed {
                 stage1_end = stage1_end_at(now(clock), roll1);
@@ -1224,6 +1301,21 @@ impl HybridSearch {
             if timed && have_any && now(clock) >= stage1_end {
                 out_of_time = true;
                 break;
+            }
+            if next >= spec_end && self.engine.speculating() {
+                // Work clock: the helpers score the next few pool candidates (and their pruning pre-scores) now.
+                spec_end = (next + self.spec_window()).min(cands.len());
+                let (lo, hi) = (next, spec_end);
+                let prescreen_steps = if prune_on { prune_steps } else { 0 };
+                self.prefetch(clock, |b, masks| {
+                    for c in &cands[lo..hi] {
+                        let pi = b.push_plan(&c.plan);
+                        b.push_job(pi, masks[0]);
+                        if prescreen_steps > 0 && c.prunable() {
+                            b.push_job_short(pi, masks[0], prescreen_steps);
+                        }
+                    }
+                });
             }
             let end = next.saturating_add(chunk).min(cands.len());
             let dl = (timed && have_any).then_some(stage1_end);
@@ -1279,10 +1371,28 @@ impl HybridSearch {
             let pop = cfg.planner.population.max(0) as usize;
             let mut done = 0usize;
             let mut cut_any = false;
+            let mut spec_done = 0usize;
             while done < pop {
                 if timed && now(clock) >= dl {
                     cut_any = true;
                     break;
+                }
+                if done >= spec_done && this.engine.speculating() {
+                    // Work clock: the samples to come are already determined by the RNG state; the helpers
+                    // score the next few of them (a copy of the RNG draws them, the real one is untouched).
+                    let want = this.spec_window().min(pop - done);
+                    let preview = this.planner.preview_plans(dist, want);
+                    let prescreen_steps = if prune_on { prune_steps } else { 0 };
+                    this.prefetch(clock, |b, masks| {
+                        for plan in &preview {
+                            let pi = b.push_plan(plan);
+                            b.push_job(pi, masks[0]);
+                            if prescreen_steps > 0 {
+                                b.push_job_short(pi, masks[0], prescreen_steps);
+                            }
+                        }
+                    });
+                    spec_done = done + want;
                 }
                 let k = chunk.min(pop - done);
                 let base = cands.len();
@@ -1380,6 +1490,7 @@ impl HybridSearch {
                 }
             }
             let dl = timed.then_some(search_end);
+            self.prefetch_jobs(clock, &cands, &jobs, 0);
             let cut = self.run_jobs(clock, &mut cands, &jobs, dl, &mut ticks2, &mut roll2);
             out_of_time |= cut;
         }
@@ -1406,7 +1517,7 @@ impl HybridSearch {
             |cands: &[Cand], pick: Option<usize>| pick.is_some_and(|i| cands[i].worst_self_out(ncombos.max(1)) > 0);
         if timed && cfg.adaptive.enabled && !me.frozen && danger.flagged() && unsafe_now(&cands, pick) {
             tel.extended = true;
-            let ext_end = t_search + cfg.adaptive.max_total_ms - shield_reserve;
+            let ext_end = t_decision + cfg.adaptive.max_total_ms - shield_reserve;
             let mut ticks_e = 0u64;
             let mut roll_e = 0u32;
             // First whatever the pool still holds unscored (defensive techniques come first in
@@ -1415,11 +1526,22 @@ impl HybridSearch {
             if two_world {
                 self.set_lens(Lens::Reduced);
             }
-            for group in pending.chunks(chunk.max(1)) {
+            let mut spec_end = 0usize;
+            for (gi, group) in pending.chunks(chunk.max(1)).enumerate() {
                 if now(clock) >= ext_end {
                     break;
                 }
                 let jobs: Vec<(usize, u32)> = group.iter().map(|&i| (i, 0)).collect();
+                if gi >= spec_end && self.engine.speculating() {
+                    let ahead: Vec<(usize, u32)> = pending
+                        .iter()
+                        .skip(gi * chunk.max(1))
+                        .take(self.spec_window())
+                        .map(|&i| (i, 0))
+                        .collect();
+                    self.prefetch_jobs(clock, &cands, &ahead, 0);
+                    spec_end = gi + ahead.len().div_ceil(chunk.max(1));
+                }
                 self.run_jobs(clock, &mut cands, &jobs, Some(ext_end), &mut ticks_e, &mut roll_e);
             }
             let mut rounds = 0;
@@ -1438,6 +1560,7 @@ impl HybridSearch {
                             }
                         }
                     }
+                    self.prefetch_jobs(clock, &cands, &jobs, 0);
                     self.run_jobs(clock, &mut cands, &jobs, Some(ext_end), &mut ticks_e, &mut roll_e);
                 }
                 pick = choose(
@@ -1488,6 +1611,7 @@ impl HybridSearch {
                                 }
                             }
                         }
+                        self.prefetch_jobs(clock, &cands, &jobs, 0);
                         self.run_jobs(clock, &mut cands, &jobs, Some(ext_end), &mut ticks_e, &mut roll_e);
                     }
                     pick = choose(
@@ -1537,6 +1661,9 @@ impl HybridSearch {
             }
         }
         tel.out_of_time = out_of_time;
+        let (computed1, hits1) = self.engine.spec_stats();
+        tel.spec_prefetched = (computed1 - spec0.0) as u32;
+        tel.spec_used = (hits1 - spec0.1) as u32;
         tel.search_ms = now(clock) - t_search;
         tel.rollout_ms = self.rollout_ms;
 
@@ -1654,7 +1781,7 @@ impl HybridSearch {
             let use_plan = cfg.shield_plan_escape;
             let plan_ok = std::cell::Cell::new(false);
             if timed {
-                let call_start = t_search;
+                let call_start = t_decision;
                 let reserve_deadline = now(clock) + shield_reserve;
                 let dl: Option<(&dyn Clock, f64)> = Some((clock, reserve_deadline));
                 let status = {

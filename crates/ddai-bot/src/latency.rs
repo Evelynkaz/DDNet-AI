@@ -256,6 +256,15 @@ pub struct LatencyStats {
     pub pick: Series,
     pub queue: Series,
     pub wire: Series,
+    /// Task 3.7a: what the brain reported about its own decisions ([`ddai_brain::PlanTelemetry`]): candidates scored (the
+    /// "microseconds" of this series are a count), the proposer's time and the search's time. Only decisions the brain
+    /// made are counted.
+    pub candidates: Series,
+    pub proposal: Series,
+    pub search: Series,
+    /// `brain` restricted to the decisions the brain made (the calls with a target in reach: the ones that search); the
+    /// all-calls `brain` series is diluted by the cheap ones.
+    pub brain_made: Series,
     pub slots: SlotStats,
 }
 
@@ -265,6 +274,18 @@ impl LatencyStats {
         self.total.push(total);
         self.brain.push(brain);
         self.overhead.push(total.saturating_sub(brain));
+    }
+
+    /// What the brain said about one decision it made (see the fields). Only decisions that searched count: a
+    /// decision that returned early has no verdict of its own.
+    pub fn record_plan(&mut self, p: &ddai_brain::PlanTelemetry, brain: Duration) {
+        if !p.searched {
+            return;
+        }
+        self.brain_made.push(brain);
+        self.candidates.push(Duration::from_micros(u64::from(p.candidates)));
+        self.proposal.push(Duration::from_micros(u64::from(p.proposal_us)));
+        self.search.push(Duration::from_micros(u64::from(p.search_us)));
     }
 
     /// `total`, `brain` and `overhead` summaries for the bridge's status message (histogram scans: well under 0.05 ms).
@@ -291,6 +312,10 @@ impl LatencyStats {
             line("pick", self.pick.quick_summary()),
             line("queue", self.queue.quick_summary()),
             line("wire", self.wire.quick_summary()),
+            line("candidates (count)", self.candidates.quick_summary()),
+            line("proposal", self.proposal.quick_summary()),
+            line("search", self.search.quick_summary()),
+            line("brain (decisions made)", self.brain_made.quick_summary()),
             format!(
                 "slots: decisions={} first_slot={} missed_first_slot={} as_predicted={} later_than_predicted={} earlier_than_predicted={}",
                 self.slots.decisions,
@@ -321,6 +346,43 @@ mod tests {
         assert_eq!(sum.p99_us, 99);
         assert_eq!(sum.max_us, 100);
         assert_eq!(Series::default().summary(), Summary::default());
+    }
+
+    #[test]
+    fn the_brains_own_account_of_a_decision_feeds_three_series() {
+        let mut l = LatencyStats::default();
+        for k in 1..=100u32 {
+            l.record_plan(
+                &ddai_brain::PlanTelemetry {
+                    searched: true,
+                    candidates: k,
+                    proposal_us: 10 * k,
+                    search_us: 4000 + k,
+                    ..ddai_brain::PlanTelemetry::default()
+                },
+                Duration::from_micros(5000 + u64::from(k)),
+            );
+        }
+        let (c, p, s) = (l.candidates.summary(), l.proposal.summary(), l.search.summary());
+        assert_eq!((c.count, c.p50_us, c.p99_us, c.max_us), (100, 51, 99, 100));
+        assert_eq!((p.p99_us, p.max_us), (990, 1000));
+        assert_eq!((s.p50_us, s.max_us), (4051, 4100));
+        assert_eq!(l.brain_made.summary().max_us, 5100);
+        assert_eq!(l.brain.summary().count, 0, "only record() feeds the all-calls series");
+        assert!(l.report().contains("candidates (count): n=100"), "{}", l.report());
+        assert_eq!(LatencyStats::default().candidates.summary(), Summary::default());
+        // A decision that did not search leaves every series as it was.
+        l.record_plan(
+            &ddai_brain::PlanTelemetry {
+                searched: false,
+                candidates: 7,
+                proposal_us: 7,
+                search_us: 7,
+                ..ddai_brain::PlanTelemetry::default()
+            },
+            Duration::from_micros(9),
+        );
+        assert_eq!((l.candidates.summary().count, l.brain_made.summary().count), (100, 100));
     }
 
     #[test]

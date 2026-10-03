@@ -1,0 +1,54 @@
+# work-clock: default-rate
+# Task 3.7a (D-080, E-012): what a faster search would buy, on the deterministic work clock (the calibrated 1.25 us per tee-tick, so
+# the numbers do not depend on the machine's load): the hybrid at 4, 8 and 12 ms of WORK against the fixed planner, 200 games per hall.
+# The wall clock of a loaded VM gives `--search-threads N` only part of the ideal N-fold speed-up (E-012 section 2); this sweep answers
+# "and if it did?". Same seeds in every arm (McNemar pairs them); the 4 ms arm equals the NEW arm of E-010 game for game.
+#   ddnet-ai arena run --config configs/arena/e012-budget-sweep.toml --out ~/aiddnet/data/runs/E-012/sweep --threads 3
+name = "E-012: strength by work-clock budget"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 8 ms WORK vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 8.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 12 ms WORK vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 8 ms WORK vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 8.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 12 ms WORK vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 8 ms WORK vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 8.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 12 ms WORK vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0 } }, { brain = "planner", mode = "fixed" }]

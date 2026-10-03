@@ -622,6 +622,8 @@ impl Brain for PlannerBrain {
             shielded: i.shielded,
             shield_incomplete: i.shield_incomplete,
             candidates: i.candidates.max(0) as u32,
+            proposal_us: 0,
+            search_us: 0,
         })
     }
 

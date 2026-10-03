@@ -54,7 +54,7 @@
 | `sent` | «летящие» вводы: `InputSent`/`InputTiming` -> ввод, который сервер применит на тике T (D-023) |
 | `input` | `Action` -> `PlayerInput`: счётчик огня (нажатие/отпускание), молот по умолчанию |
 | `latency` | p50/p99, доля мозга отдельно от накладных расходов бота (D-042); `DecisionEstimator` — скользящий p95 времени решения (4.1b) |
-| `brains` | `--brain hybrid\|planner\|scripted\|idle\|fly`, `make_brain` — одна ветка `match` на мозг; hybrid — `HybridConfig::default()` (бюджет 4 мс, потолок 5 мс, адаптивное продление до 15 мс, модель угроз 1vN), без proposer'а (муха не обучена) |
+| `brains` | `--brain hybrid\|planner\|scripted\|idle\|fly`, `make_brain` — одна ветка `match` на мозг; hybrid — `HybridConfig::default()` (бюджет 4 мс, потолок 5 мс **вместе со временем предложений** (D-080), адаптивное продление до 15 мс, модель угроз 1vN), без proposer'а (муха не обучена) или с мухой (`--fly-bundle`); `--search-threads N\|auto` (`BrainOptions::search_threads`; умолчание и CLI, и библиотеки — **1 поток** (D-080: выигрыша на нагруженной машине не найдено); `auto` — по желанию: свободные ядра по `/proc/loadavg`, не больше 4, `auto_search_threads`) |
 | `hooks` | `Navigator`, `WayBlock`, `Trek`, `RouteFinder` — трейты и no-op заглушки (тесты бота, `Hooks::default()`) |
 | `nav_hooks` | **настоящие тела хуков (4.2):** goto / follow / seek / trek / home, вейблок Copy Love Box, память фризов по sha256 карты; `NavHandle` / `NavCommand` — API для консольных команд 4.3; описание — `docs/formats.md` §23 и `crates/ddai-nav/README.md` |
 | `bridge` | мост к веб-юниту: Unix-сокет, только чтение (`docs/formats.md` §21.2) |

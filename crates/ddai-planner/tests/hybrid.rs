@@ -116,6 +116,28 @@ fn fixed_cfg(workers: usize) -> HybridConfig {
 /// Plays `decisions` decisions (every 2 ticks) of slot 0 = the hybrid brain against scripted
 /// attackers and returns what the brain did and how (its telemetry per decision).
 fn drive(cfg: HybridConfig, clock: ClockKind, tees: &[(i32, f64, f64)], decisions: usize) -> Vec<(Action, String)> {
+    drive_with(cfg, clock, tees, decisions, |t| {
+        format!(
+            "{}|{}|{:?}|{:?}|{}|{}|{}",
+            t.chosen.map_or("none", |c| c.label()),
+            t.threat_ids.len(),
+            t.evaluated,
+            t.generated,
+            t.work.total_ticks(),
+            t.shielded,
+            t.best_score.to_bits()
+        )
+    })
+}
+
+/// [`drive`] with the per-decision record chosen by the caller.
+fn drive_with(
+    cfg: HybridConfig,
+    clock: ClockKind,
+    tees: &[(i32, f64, f64)],
+    decisions: usize,
+    record: impl Fn(&ddai_planner::hybrid::DecisionTelemetry) -> String,
+) -> Vec<(Action, String)> {
     let map = hall();
     let mut pw = PhysicsWorld::new(map.clone(), 1);
     place(&mut pw, tees);
@@ -149,18 +171,7 @@ fn drive(cfg: HybridConfig, clock: ClockKind, tees: &[(i32, f64, f64)], decision
             };
             let action = if slot == 0 {
                 let a = hybrid.decide_in(&obs, Some(&view));
-                let tel = hybrid.last_decision().map(|t| {
-                    format!(
-                        "{}|{}|{:?}|{:?}|{}|{}|{}",
-                        t.chosen.map_or("none", |c| c.label()),
-                        t.threat_ids.len(),
-                        t.evaluated,
-                        t.generated,
-                        t.work.total_ticks(),
-                        t.shielded,
-                        t.best_score.to_bits()
-                    )
-                });
+                let tel = hybrid.last_decision().map(&record);
                 log.push((a, tel.unwrap_or_default()));
                 a
             } else {
@@ -1080,6 +1091,218 @@ fn the_decision_cap_shortens_the_search_by_the_shield_reserve_of_many_tees() {
     assert_eq!(budget_of(Some(5.0), 0.5, &FOUR), 3.0, "5 - 4 x 0.5");
     assert_eq!(budget_of(Some(5.0), 2.0, &FOUR), 1.0, "never below 1 ms");
     assert_eq!(budget_of(None, 0.5, &FOUR), 4.0, "no cap: the budget as asked");
+}
+
+/// A proposer that proposes nothing and costs `units` tee-ticks on the work clock (the shape of the fly).
+struct Costly {
+    units: u64,
+}
+
+impl Proposer for Costly {
+    fn name(&self) -> &str {
+        "costly"
+    }
+    fn propose(&mut self, _ctx: &ProposeCtx<'_>, _out: &mut Vec<Vec<PlanStep>>) {}
+    fn work_units(&self) -> u64 {
+        self.units
+    }
+}
+
+/// One decision of slot 0 on the work clock at 1.25 us per tee-tick with the given proposer; the telemetry of it.
+fn work_decision(
+    proposer: Box<dyn Proposer>,
+    tweak: impl FnOnce(&mut HybridConfig),
+    tees: &[(i32, f64, f64)],
+) -> ddai_planner::hybrid::DecisionTelemetry {
+    let mut cfg = HybridConfig {
+        mode: HybridMode::Deadline { budget_ms: 4.0 },
+        proposals: 3,
+        work_clock_us_per_tick: Some(1.25),
+        ..HybridConfig::default()
+    };
+    tweak(&mut cfg);
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, tees);
+    let world = pw.inner().clone();
+    let mut b = HybridBrain::new(cfg, ClockKind::Wall, proposer).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let ids: Vec<i32> = tees.iter().map(|t| t.0).collect();
+    let obs = observation(&world, &map, 0, &ids, 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let _ = b.decide_in(&obs, Some(&view));
+    b.last_decision().expect("telemetry").clone()
+}
+
+const TWO: [(i32, f64, f64); 2] = [(0, 17.5, 9.5), (1, 24.5, 9.5)];
+
+#[test]
+fn work_clock_decisions_are_bit_identical_for_1_2_and_4_workers() {
+    // Task 3.7a: on the work clock the helpers only speculate. Everything the decision reports --
+    // the action, the work counters, the candidate counts, every time the clock reads (it is a
+    // counter of finished work) -- must equal the single-thread run, in every mode of the search.
+    type Tweak = fn(&mut HybridConfig);
+    let variants: [(&str, Tweak); 5] = [
+        ("plain 4 ms", |_| ()),
+        ("12 ms: CEM, stage 2 and the extension", |c| {
+            c.mode = HybridMode::Deadline { budget_ms: 12.0 };
+            c.decision_cap_ms = None;
+        }),
+        ("pruning, crowd stage, hook escapes", |c| {
+            c.prune.enabled = true;
+            c.robust.crowd_stage = true;
+            c.mode = HybridMode::Deadline { budget_ms: 9.0 };
+            c.decision_cap_ms = None;
+        }),
+        ("two worlds", |c| {
+            c.two_world = true;
+            c.mode = HybridMode::Deadline { budget_ms: 9.0 };
+            c.decision_cap_ms = None;
+        }),
+        ("all opponents modelled", |c| {
+            c.robust.max_relevant = 4;
+            c.robust.max_combos = 4;
+        }),
+    ];
+    let mut hits_total = 0u32;
+    for (name, tweak) in variants {
+        for scene in [&FOUR[..], &TWO[..]] {
+            let run = |workers: usize| {
+                let used = std::cell::Cell::new(0u32);
+                let prefetched = std::cell::Cell::new(0u32);
+                let mut cfg = HybridConfig {
+                    mode: HybridMode::Deadline { budget_ms: 4.0 },
+                    proposals: 0,
+                    workers,
+                    work_clock_us_per_tick: Some(1.25),
+                    ..HybridConfig::default()
+                };
+                tweak(&mut cfg);
+                let log = drive_with(cfg, ClockKind::Wall, scene, 20, |t| {
+                    used.set(used.get() + t.spec_used);
+                    prefetched.set(prefetched.get() + t.spec_prefetched);
+                    assert!(t.spec_used <= t.spec_prefetched);
+                    t.to_json()
+                });
+                (log, used.get(), prefetched.get())
+            };
+            let (one, used1, pre1) = run(1);
+            assert_eq!((used1, pre1), (0, 0), "{name}: one worker does not speculate");
+            assert_eq!(one.len(), 20);
+            for w in [2usize, 4] {
+                let (many, used, pre) = run(w);
+                if let Some(k) = one.iter().zip(&many).position(|(a, b)| a != b) {
+                    panic!(
+                        "{name}, {} tees: workers = {w} decided differently from workers = 1 at decision {k}:\n  1: {:?}\n  {w}: {:?}",
+                        scene.len(),
+                        one[k],
+                        many[k]
+                    );
+                }
+                assert_eq!(one.len(), many.len());
+                assert!(pre >= used);
+                hits_total += used;
+            }
+        }
+    }
+    assert!(
+        hits_total > 100,
+        "the helpers must really have supplied rollouts, else this proves nothing: {hits_total}"
+    );
+}
+
+#[test]
+fn a_decision_that_returns_early_leaves_no_verdict_behind() {
+    // Review 3.7a F5/F9: `last_decision`/`last_plan` must not report the previous decision's search as the verdict of
+    // a decision that never searched (no target, or the target gone from the planning world).
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &TWO);
+    let world = pw.inner().clone();
+    let ids = [0, 1];
+    let obs = observation(&world, &map, 0, &ids, 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let mut b = HybridBrain::new(fixed_cfg(1), ClockKind::Wall, Box::new(NoProposer)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let _ = b.decide_in(&obs, Some(&view));
+    assert!(b.last_decision().is_some());
+    assert!(
+        b.last_plan().is_some_and(|p| p.searched),
+        "a real decision reports its search"
+    );
+
+    // No target at all.
+    let mut none = observation(&world, &map, 0, &ids, 1);
+    none.target_id = None;
+    none.others.clear();
+    let _ = b.decide_in(&none, Some(&view));
+    assert!(
+        b.last_decision().is_none() && b.last_plan().is_none(),
+        "no target: no verdict"
+    );
+
+    // A target the observation names but the planning world no longer has.
+    let _ = b.decide_in(&obs, Some(&view));
+    assert!(b.last_plan().is_some());
+    let mut alone = PhysicsWorld::new(map.clone(), 1);
+    place(&mut alone, &TWO[..1]);
+    let alone_world = alone.inner().clone();
+    let alone_view = WorldView {
+        world: &alone_world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let _ = b.decide_in(&obs, Some(&alone_view));
+    assert!(
+        b.last_decision().is_none() && b.last_plan().is_none(),
+        "target gone from the world: no verdict"
+    );
+    // ... and the next real decision reports again.
+    let _ = b.decide_in(&obs, Some(&view));
+    assert!(b.last_plan().is_some_and(|p| p.searched));
+}
+
+#[test]
+fn the_proposers_time_comes_off_the_search_budget() {
+    // 800 tee-ticks x 1.25 us = 1.0 ms of proposal. Four tees: shield reserve 4 x 0.25 = 1.0 ms. Cap 5.
+    let with =
+        |units: u64, in_cap: bool| work_decision(Box::new(Costly { units }), |c| c.proposal_in_cap = in_cap, &FOUR);
+    let t = with(800, true);
+    assert_eq!(t.work.proposal_units, 800);
+    assert_eq!(t.proposal_ms, 1.0, "the work clock charges the proposer's units");
+    assert_eq!(t.budget_ms, 3.0, "5 - 1.0 (proposal) - 1.0 (shield reserve)");
+    assert!(
+        t.proposal_ms + t.search_ms + t.shield_ms <= 5.0 + 0.5,
+        "proposals + search + shield stay under the cap: {} + {} + {}",
+        t.proposal_ms,
+        t.search_ms,
+        t.shield_ms
+    );
+    assert_eq!(
+        with(800, false).budget_ms,
+        4.0,
+        "the old behaviour: the full budget after the proposals"
+    );
+    assert_eq!(with(400, true).budget_ms, 3.5);
+    assert_eq!(with(0, true).budget_ms, 4.0, "a free proposer costs nothing");
+    assert_eq!(with(4000, true).budget_ms, 1.0, "never below MIN_SEARCH_MS");
+    // `NoProposer` costs nothing and charges nothing, whatever the flag.
+    let none = work_decision(Box::new(NoProposer), |_| (), &FOUR);
+    assert_eq!(
+        (none.proposal_ms, none.work.proposal_units, none.budget_ms),
+        (0.0, 0, 4.0)
+    );
 }
 
 #[test]

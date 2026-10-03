@@ -1,0 +1,53 @@
+# Task 3.7a (D-080, E-012): strength of the live hybrid at the 4 ms WALL budget with 1, 2 and 4 search threads against the
+# fixed planner (the E-010 conditions, wall clock instead of the work clock). Same seeds and layouts in every arm, so games pair up
+# for McNemar. The wall clock depends on the machine: run with the arena at `--threads 1` (one game at a time, so the helper threads
+# have cores) and note the load average of every run.
+#   ddnet-ai arena run --config configs/arena/e012-wall-strength.toml --out ~/aiddnet/data/runs/E-012/wall-strength --threads 1
+name = "E-012: wall-clock strength, 1/2/4 search threads"
+base_seed = 1
+games = 400
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WALL N=1 vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 1 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WALL N=2 vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 2 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WALL N=4 vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 4 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WALL N=1 vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 1 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WALL N=2 vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 2 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WALL N=4 vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 4 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WALL N=1 vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 1 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WALL N=2 vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 2 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WALL N=4 vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, hybrid = { workers = 4 } }, { brain = "planner", mode = "fixed" }]

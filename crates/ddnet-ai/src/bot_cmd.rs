@@ -50,6 +50,15 @@ pub struct BotOpts {
     /// The planner's wall budget per decision, ms (D-042).
     #[arg(long, default_value_t = 5.0)]
     pub planner_budget_ms: f64,
+    /// Threads that score the hybrid brain's candidates, the deciding thread included (task 3.7a, D-080): `1` (the
+    /// default) = the deciding thread alone; `auto` = the cores nobody is using, at most 4 (opt-in: E-012 found no
+    /// gain on a loaded machine). A helper never delays the decision past its deadline.
+    #[arg(long, default_value = "1", value_parser = parse_search_threads)]
+    pub search_threads: SearchThreads,
+    /// Diagnostics (task 3.7a, D-080): leave the proposer's time out of the hybrid's decision cap, as before 3.7a
+    /// (the A/B of E-012). The default counts it.
+    #[arg(long)]
+    pub no_proposal_in_cap: bool,
     /// `--brain fly`: the compiled graph.
     #[arg(long)]
     pub fly_flyg: Option<PathBuf>,
@@ -149,6 +158,29 @@ pub struct BotOpts {
 /// value in the settings file only fills what the command line left open.
 fn flag_given(flag: &str) -> bool {
     std::env::args().any(|a| a == flag || a.strip_prefix(flag).is_some_and(|r| r.starts_with('=')))
+}
+
+/// `--search-threads`: `None` = `auto`, else the number of threads (a newtype, so that clap does not read the
+/// `Option` as "flag may be absent").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchThreads(pub Option<usize>);
+
+impl Default for SearchThreads {
+    /// One thread, like the `--search-threads` default.
+    fn default() -> Self {
+        SearchThreads(Some(1))
+    }
+}
+
+/// `--search-threads`: `auto` or a number from 1 to 16.
+fn parse_search_threads(s: &str) -> Result<SearchThreads, String> {
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(SearchThreads(None));
+    }
+    match s.trim().parse::<usize>() {
+        Ok(n @ 1..=16) => Ok(SearchThreads(Some(n))),
+        _ => Err("expected `auto` or a number from 1 to 16".to_string()),
+    }
 }
 
 fn parse_pair(s: &str) -> Result<(i32, i32), String> {
@@ -284,6 +316,21 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         },
         ..BrainOptions::default()
     };
+    // The count is decided once, here: the brain gets the number that is printed.
+    let search_threads = o
+        .search_threads
+        .0
+        .unwrap_or_else(ddai_bot::brains::auto_search_threads_here);
+    brain.search_threads = Some(search_threads);
+    brain.proposal_in_cap = !o.no_proposal_in_cap;
+    if kind == BrainKind::Hybrid {
+        eprintln!(
+            "hybrid search threads: {search_threads} ({})",
+            o.search_threads
+                .0
+                .map_or("auto: the free cores, at most 4", |_| "--search-threads"),
+        );
+    }
     if let Some(p) = &o.fly_flyg {
         brain.fly_flyg = p.clone();
     }
@@ -508,6 +555,14 @@ fn summary(r: &RunReport) -> String {
     out += &summary_of("queue", l.queue.summary());
     out.push('\n');
     out += &summary_of("wire", l.wire.summary());
+    out.push('\n');
+    out += &summary_of("candidates (count)", l.candidates.summary());
+    out.push('\n');
+    out += &summary_of("proposal", l.proposal.summary());
+    out.push('\n');
+    out += &summary_of("search", l.search.summary());
+    out.push('\n');
+    out += &summary_of("brain (decisions made)", l.brain_made.summary());
     out
 }
 
@@ -556,6 +611,12 @@ pub fn report_json(r: &RunReport) -> serde_json::Value {
             "wire": sum_json(r.latency.wire.summary()),
             "slots": {"decisions": r.latency.slots.decisions, "first_slot": r.latency.slots.in_first_slot, "missed_first_slot": r.latency.slots.missed_first_slot, "as_predicted": r.latency.slots.as_predicted, "later_than_predicted": r.latency.slots.later_than_predicted, "earlier_than_predicted": r.latency.slots.earlier_than_predicted},
         },
+        "brain_detail": {
+            "candidates": sum_json(r.latency.candidates.summary()),
+            "proposal_us": sum_json(r.latency.proposal.summary()),
+            "search_us": sum_json(r.latency.search.summary()),
+            "brain_made_us": sum_json(r.latency.brain_made.summary()),
+        },
         "input_margin": r.margin.as_ref().map(|m| serde_json::json!({
             "count": m.count, "late": m.late_count, "late_fraction": m.late_fraction, "p50_ms": m.p50_ms, "p99_ms": m.p99_ms, "min_ms": m.min_ms,
             "margin_ms": m.margin_ms, "margin_changes": m.margin_changes, "adaptive": m.adaptive, "margin_stable_ms": m.margin_stable_ms, "margin_changes_last_30s": m.margin_changes_last_30s, "superseded_decisions": m.superseded_decisions, "time_at_cap_ms": m.time_at_margin_ms.last().copied().unwrap_or(0),
@@ -582,5 +643,35 @@ mod tests {
         assert_eq!(run_for(0), None);
         assert_eq!(run_for(1), Some(Duration::from_secs(1)));
         assert_eq!(run_for(3600), Some(Duration::from_secs(3600)));
+    }
+}
+
+#[cfg(test)]
+mod search_threads_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        bot: BotOpts,
+    }
+
+    #[test]
+    fn search_threads_parses_auto_a_number_and_refuses_the_rest() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.search_threads)
+        };
+        assert_eq!(get(&[]).unwrap(), SearchThreads(Some(1)), "the default is one thread");
+        assert_eq!(SearchThreads::default(), SearchThreads(Some(1)));
+        assert_eq!(get(&["--search-threads", "auto"]).unwrap(), SearchThreads(None));
+        assert_eq!(get(&["--search-threads", "AUTO"]).unwrap(), SearchThreads(None));
+        assert_eq!(get(&["--search-threads", "1"]).unwrap(), SearchThreads(Some(1)));
+        assert_eq!(get(&["--search-threads", "4"]).unwrap(), SearchThreads(Some(4)));
+        for bad in ["0", "17", "-1", "many", ""] {
+            assert!(get(&["--search-threads", bad]).is_err(), "{bad:?}");
+        }
     }
 }

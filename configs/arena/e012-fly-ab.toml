@@ -1,0 +1,23 @@
+# work-clock: default-rate
+# Task 3.7a (D-080, E-012): the arena side of the accounting. The fly (untrained: plumbing and cost, no strength claim) is charged its price on
+# the work clock (`FlyProposer::work_units`, 500 tee-ticks for the S graph); `proposal_in_cap` takes that time off the 5 ms decision cap
+# (new default) or leaves it outside (3.5-3.6). Per-game telemetry carries `work.proposal_units`. Needs the compiled S graph.
+#   ddnet-ai arena run --config configs/arena/e012-fly-ab.toml --out ~/aiddnet/data/runs/E-012/fly-ab --threads 2
+name = "E-012: fly proposer on the work clock, proposal inside / outside the cap"
+base_seed = 1
+games = 100
+
+[[condition]]
+name = "clb-left: hybrid 4 ms, no proposer vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left: hybrid:fly 4 ms, proposal inside the cap vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, model = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg", hybrid = { proposer = "fly", proposals = 3 } }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left: hybrid:fly 4 ms, proposal outside the cap (3.6) vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, model = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg", hybrid = { proposer = "fly", proposals = 3, proposal_in_cap = false } }, { brain = "scripted" }]

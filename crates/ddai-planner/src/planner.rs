@@ -91,6 +91,33 @@ pub(crate) struct StepDist {
     aim_spread: f64,
 }
 
+/// One draw of `samplePlan` from `rng` (see [`Planner::sample_plan`]).
+fn sample_plan_with(rng: &mut Rng, dist: &[StepDist]) -> Vec<PlanStep> {
+    dist.iter()
+        .map(|d| {
+            let r = rng.next_float();
+            let dir = if r < d.p_left {
+                -1
+            } else if r < d.p_left + d.p_right {
+                1
+            } else {
+                0
+            };
+            let jump = i32::from(rng.next_float() < d.p_jump);
+            let hook = i32::from(rng.next_float() < d.p_hook);
+            let fire = i32::from(rng.next_float() < d.p_fire);
+            let aim = d.aim + rng.next_gaussian() * d.aim_spread;
+            PlanStep {
+                dir,
+                jump,
+                hook,
+                fire,
+                aim,
+            }
+        })
+        .collect()
+}
+
 /// `DecisionInfo` (`planner.ts:317-332`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecisionInfo {
@@ -2029,29 +2056,14 @@ impl<W: PlanWorld> Planner<W> {
     /// `samplePlan(dist)` (`planner.ts:1477-1490`). RNG draw order per step: `dir`, `jump`,
     /// `hook`, `fire`, `aim` (gaussian) -- matters for parity, see the module doc comment.
     pub(crate) fn sample_plan(&mut self, dist: &[StepDist]) -> Vec<PlanStep> {
-        dist.iter()
-            .map(|d| {
-                let r = self.rng.next_float();
-                let dir = if r < d.p_left {
-                    -1
-                } else if r < d.p_left + d.p_right {
-                    1
-                } else {
-                    0
-                };
-                let jump = i32::from(self.rng.next_float() < d.p_jump);
-                let hook = i32::from(self.rng.next_float() < d.p_hook);
-                let fire = i32::from(self.rng.next_float() < d.p_fire);
-                let aim = d.aim + self.rng.next_gaussian() * d.aim_spread;
-                PlanStep {
-                    dir,
-                    jump,
-                    hook,
-                    fire,
-                    aim,
-                }
-            })
-            .collect()
+        sample_plan_with(&mut self.rng, dist)
+    }
+
+    /// The next `count` plans `sample_plan` will return, without consuming the RNG (the hybrid search's
+    /// work-clock speculation, task 3.7a).
+    pub(crate) fn preview_plans(&self, dist: &[StepDist], count: usize) -> Vec<Vec<PlanStep>> {
+        let mut rng = self.rng;
+        (0..count).map(|_| sample_plan_with(&mut rng, dist)).collect()
     }
 
     /// `refit(dist, elites)` (`planner.ts:1492-1523`).

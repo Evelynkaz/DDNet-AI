@@ -875,6 +875,11 @@ impl Bot {
             self.stats.decisions += 1;
             let total = started.elapsed();
             self.latency.record(total, brain_time);
+            if self.stats.brain_decisions > before.brain_decisions
+                && let Some(p) = self.brain.last_plan()
+            {
+                self.latency.record_plan(&p, brain_time);
+            }
             // A rolling high quantile, not a mean (task 4.1b): the driver holds the decision until
             // the tick it was aimed at, so a conservative estimate only costs latency.
             self.estimator.push(total);

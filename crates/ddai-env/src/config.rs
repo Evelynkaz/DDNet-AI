@@ -229,6 +229,9 @@ pub struct HybridSpec {
     /// Cap of a non-extended decision (search + shield), ms; 0 = none (default 5).
     #[serde(default)]
     pub decision_cap_ms: Option<f64>,
+    /// The proposer's time comes off the decision cap too (task 3.7a, D-080; default true; `false` = the 3.5-3.6 behaviour).
+    #[serde(default)]
+    pub proposal_in_cap: Option<bool>,
     /// Shield time after the search, ms per tee in the world (default 0.25).
     #[serde(default)]
     pub shield_reserve_ms_per_tee: Option<f64>,
@@ -419,6 +422,9 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         }
         if let Some(v) = h.decision_cap_ms {
             cfg.decision_cap_ms = if v > 0.0 { Some(v) } else { None };
+        }
+        if let Some(v) = h.proposal_in_cap {
+            cfg.proposal_in_cap = v;
         }
         if let Some(v) = h.crowd_stage {
             cfg.robust.crowd_stage = v;
@@ -760,6 +766,48 @@ players = [
         assert_eq!(rate(""), Some(ddai_planner::hybrid::WORK_US_PER_TEE_TICK));
         assert_eq!(rate(", step_ms = 0.0022").map(f64::to_bits), Some(2.2f64.to_bits()));
         assert_eq!(rate(", step_ms = 0.00125").map(f64::to_bits), Some(1.25f64.to_bits()));
+    }
+
+    /// Task 3.7a (D-080): search threads now go with the work clock (the helpers only speculate), and the proposer's
+    /// time comes off the decision cap unless a config says otherwise; every E-012 config parses.
+    #[test]
+    fn work_clock_takes_workers_and_the_proposal_cap_flag_is_read() {
+        let spec = |hybrid: &str| {
+            let text = format!(
+                "name = \"t\"\n[[condition]]\nname = \"c\"\narena = \"a\"\nplayers = [{{ brain = \"hybrid\", clock = \"work\", hybrid = {{ {hybrid} }} }}, {{ brain = \"scripted\" }}]\n"
+            );
+            RunConfig::parse(&text).unwrap().condition[0].players[0].clone()
+        };
+        let (c, _) = hybrid_config(&spec("workers = 4")).unwrap();
+        assert_eq!(
+            (c.workers, c.work_clock_us_per_tick.is_some(), c.proposal_in_cap),
+            (4, true, true)
+        );
+        assert!(c.validate().is_ok(), "the work clock no longer needs workers = 1");
+        let (c, _) = hybrid_config(&spec("proposal_in_cap = false")).unwrap();
+        assert!(!c.proposal_in_cap);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/arena");
+        for name in [
+            "e012-wall-strength.toml",
+            "e012-golden-workers.toml",
+            "e012-budget-sweep.toml",
+            "e012-fly-ab.toml",
+        ] {
+            let text = std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let cfg = RunConfig::parse(&text).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert!(!cfg.condition.is_empty());
+            for cond in &cfg.condition {
+                for p in &cond.players {
+                    if p.brain == "hybrid" {
+                        hybrid_config(p)
+                            .unwrap_or_else(|e| panic!("{name}: {e:?}"))
+                            .0
+                            .validate()
+                            .unwrap();
+                    }
+                }
+            }
+        }
     }
 
     /// Every arena config that runs a `clock = "work"` player must say which work-clock rate it means: either

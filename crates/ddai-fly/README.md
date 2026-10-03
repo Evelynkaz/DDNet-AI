@@ -1113,6 +1113,8 @@ Love Box» — редакции одной базовой карты (85.7–88.
 обучения фазы 8); CLI-арена использует её для `hybrid = { proposer = "fly" }` (`configs/arena/e003-fly.toml`) — проводка и
 цена, **силы у необученной мухи нет**. Зависимость `ddai-fly → ddai-planner` односторонняя (планировщик мухи не знает).
 
+**Задача 3.7a (D-080): цена предложения.** `Proposer::work_units` у `FlyProposer` — цена одного `propose` на часах работы арены в ти-тиках: `proposal_tee_ticks` = `nnz × substeps × FLY_TEE_TICKS_PER_MEGA_SYNAPSE_STEP / 10⁶` (граф S: 500 ти-тиков ≈ 0,63 мс при 1,25 мкс); живой бот считает стенное время и цену не читает. Метод замера и таблица — `tests/fly_proposal_cost.rs` и E-012 §1 (`cargo test -p ddai-fly --release --test fly_proposal_cost -- --ignored --nocapture`), предварительно (load average 18–28, тихое ядро — после 8.2b).
+
 ## Задача 7.2b: батчевый бэкенд обучения (`src/batched/`, `src/brain_bc_batched.rs`)
 
 7.2 параллелит обучение **по последовательностям**: каждая из B последовательностей на каждом подшаге заново читает весь CSR

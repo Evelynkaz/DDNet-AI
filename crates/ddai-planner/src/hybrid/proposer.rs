@@ -78,6 +78,18 @@ pub trait Proposer {
     fn work_ticks(&self) -> u64 {
         0
     }
+    /// Whether a `propose` call takes time worth counting against the decision cap (task 3.7a). Only
+    /// [`NoProposer`], which does nothing, says no.
+    fn costs_time(&self) -> bool {
+        true
+    }
+    /// What one `propose` call costs on the **work clock** beyond the physics ticks of
+    /// [`Proposer::work_ticks`], in tee-tick equivalents (task 3.7a). A proposer that runs a network
+    /// instead of simulating physics (the fly) returns its calibrated cost here, a constant, so the
+    /// arena charges it the same on every machine; the live bot reads the wall clock and ignores it.
+    fn work_units(&self) -> u64 {
+        0
+    }
     /// Task 7.4: the static description of the proposer's visualisation stream (see
     /// [`ddai_brain::Brain::viz_meta`]); `None`: it has none (the default).
     fn viz_meta(&self) -> Option<String> {
@@ -102,6 +114,9 @@ impl Proposer for NoProposer {
         "none"
     }
     fn propose(&mut self, _ctx: &ProposeCtx<'_>, _out: &mut Vec<Vec<PlanStep>>) {}
+    fn costs_time(&self) -> bool {
+        false
+    }
 }
 
 /// The scripted bot (`scriptedAction`) playing for us on a scratch copy of the planning world for

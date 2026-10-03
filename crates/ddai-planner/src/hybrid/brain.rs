@@ -97,7 +97,7 @@ impl Totals {
         format!(
             "{{\"decisions\":{},\"extended\":{},\"danger_flagged\":{},\"shielded\":{},\"shield_incomplete\":{},\"shield_ran\":{},\"shield_plan_ok\":{},\"shield_skipped\":{},\
 \"out_of_time\":{},\"unsafe_choices\":{},\"with_threats\":{},\"generated\":{{{}}},\"evaluated\":{{{}}},\"chosen\":{{{}}},\
-\"techniques\":{{{}}},\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{},\
+\"techniques\":{{{}}},\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"proposal_units\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{},\
 \"rollouts_stage1\":{},\"rollouts_stage2\":{},\"rollouts_extension\":{}}}}}",
             self.decisions,
             self.extended,
@@ -117,6 +117,7 @@ impl Totals {
             w.total_ticks(),
             w.lag,
             w.proposal,
+            w.proposal_units,
             w.stage1,
             w.stage2,
             w.extension,
@@ -396,6 +397,9 @@ impl Brain for HybridBrain {
 
     fn decide(&mut self, obs: &Observation) -> Action {
         self.viz_fresh = false;
+        // A decision that returns early (no target, dead target) leaves no verdict behind: `last_plan` must not
+        // report the previous decision's search as this one's.
+        self.last = None;
         let Some(target) = self.target_id(obs) else {
             self.prev = empty_input();
             return Action::neutral();
@@ -415,6 +419,7 @@ impl Brain for HybridBrain {
 
     fn decide_in(&mut self, obs: &Observation, view: Option<&WorldView<'_>>) -> Action {
         self.viz_fresh = false;
+        self.last = None;
         let Some(view) = view else {
             return self.decide(obs);
         };
@@ -457,6 +462,8 @@ impl Brain for HybridBrain {
             shielded: t.shielded,
             shield_incomplete: t.shield_incomplete,
             candidates: t.evaluated.iter().sum(),
+            proposal_us: (t.proposal_ms * 1000.0).clamp(0.0, f64::from(u32::MAX)) as u32,
+            search_us: (t.search_ms * 1000.0).clamp(0.0, f64::from(u32::MAX)) as u32,
         })
     }
 

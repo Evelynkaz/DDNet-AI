@@ -2,8 +2,9 @@
 //!
 //! [`make_brain`] is the single place a [`BrainKind`] becomes a `Box<dyn Brain>`, so a new brain is
 //! one match arm. `hybrid` is `ddai_planner::hybrid::HybridBrain` (task 3.5, D-041/D-055) with its
-//! default production configuration: 4 ms search budget, 5 ms decision cap, adaptive extension up to
-//! 15 ms in confirmed danger (D-042), the 1vN threat model, the technique library, one deciding thread,
+//! default production configuration: 4 ms search budget, 5 ms decision cap (the proposals' time comes off it,
+//! D-080), adaptive extension up to 15 ms in confirmed danger (D-042), the 1vN threat model, the technique
+//! library, `--search-threads` scoring threads (task 3.7a: one by default, `auto` = the free cores, at most 4, opt-in),
 //! and no proposer (`NoProposer`: the fly is untrained, so nothing proposes yet; with `--fly-bundle` (7.4) a trained fly proposes, `hybrid:fly`). The bot talks to
 //! `dyn Brain` only (plus [`BrainKind::has_own_shield`], which says whether the bot must guard the
 //! brain's output); the hybrid sees the same local tees and exact predicted world as the planner.
@@ -88,7 +89,39 @@ pub struct BrainOptions {
     /// `--brain hybrid` gets the fly as its proposer (`hybrid:fly`); without it the fly is untrained and the hybrid
     /// has no proposer. The bundle names its own brain config; `.flyg` is `fly_flyg` (the hash must match).
     pub fly_bundle: Option<PathBuf>,
+    /// Task 3.7a (D-080): threads that score the hybrid's candidates, the deciding thread included; `None` = auto
+    /// ([`auto_search_threads`] at the time the brain is built). One thread by default, here and in the CLI (D-080:
+    /// no measured gain from more on a loaded machine; `--search-threads auto` is opt-in).
+    pub search_threads: Option<usize>,
+    /// Task 3.7a (D-080): the proposer's time comes off the hybrid's decision cap (`HybridConfig::proposal_in_cap`);
+    /// `false` only for the before/after comparison of E-012.
+    pub proposal_in_cap: bool,
     pub seed: u64,
+}
+
+/// Most threads `--search-threads auto` ever picks (the cores beyond the fourth buy little: E-012).
+pub const AUTO_SEARCH_THREADS_CAP: usize = 4;
+
+/// The number of search threads for a machine with `cores` cores and a 1-minute load average of `load1` (`None` =
+/// unknown): the cores nobody is using, at least 1 and at most [`AUTO_SEARCH_THREADS_CAP`]. The load average
+/// already contains the bot itself, so a quiet machine with four cores gets 4 only if the bot is the only user,
+/// which is what "free" means for a latency-bound job: helpers that would only fight a neighbour for a core
+/// make the decision slower, not faster.
+pub fn auto_search_threads(cores: usize, load1: Option<f64>) -> usize {
+    let busy = load1
+        .filter(|l| l.is_finite() && *l >= 0.0)
+        .unwrap_or(cores as f64 / 2.0);
+    let free = (cores as f64 - busy.round()).max(0.0) as usize;
+    free.clamp(1, AUTO_SEARCH_THREADS_CAP)
+}
+
+/// [`auto_search_threads`] for this machine (`/proc/loadavg` where it exists).
+pub fn auto_search_threads_here() -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let load1 = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|t| t.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()));
+    auto_search_threads(cores, load1)
 }
 
 impl Default for BrainOptions {
@@ -100,6 +133,8 @@ impl Default for BrainOptions {
             fly_flyg: home.join("aiddnet/data/connectome/compiled/fly-S-v1.flyg"),
             fly_config: PathBuf::from("configs/fly/S-brain.toml"),
             fly_bundle: None,
+            search_threads: Some(1),
+            proposal_in_cap: true,
             seed: 1,
         }
     }
@@ -121,7 +156,12 @@ pub fn make_brain(kind: BrainKind, opts: &BrainOptions) -> Result<Box<dyn Brain>
                 Some(_) => Box::new(FlyProposer::new(make_bundle_fly(opts)?, opts.seed)),
                 None => Box::new(NoProposer),
             };
-            Box::new(HybridBrain::new(HybridConfig::default(), ClockKind::Wall, proposer).map_err(BrainError::Hybrid)?)
+            let cfg = HybridConfig {
+                workers: opts.search_threads.unwrap_or_else(auto_search_threads_here).max(1),
+                proposal_in_cap: opts.proposal_in_cap,
+                ..HybridConfig::default()
+            };
+            Box::new(HybridBrain::new(cfg, ClockKind::Wall, proposer).map_err(BrainError::Hybrid)?)
         }
         BrainKind::Planner => Box::new(PlannerBrain::new(PlannerBrainConfig {
             preset: opts.planner_preset,
@@ -199,6 +239,51 @@ mod tests {
         assert_eq!(BrainKind::parse("nope"), None);
         assert!(BrainKind::Planner.has_own_shield() && BrainKind::Hybrid.has_own_shield());
         assert!(!BrainKind::Scripted.has_own_shield() && !BrainKind::Fly.has_own_shield());
+    }
+
+    #[test]
+    fn auto_search_threads_follow_the_free_cores_within_one_and_the_cap() {
+        // 8 cores, nobody else: 4 (the cap); a busy neighbour takes cores away; a saturated or unreadable machine: 1.
+        assert_eq!(auto_search_threads(8, Some(0.2)), 4);
+        assert_eq!(auto_search_threads(8, Some(5.2)), 3);
+        assert_eq!(auto_search_threads(8, Some(6.0)), 2);
+        assert_eq!(auto_search_threads(8, Some(4.4)), 4);
+        assert_eq!(auto_search_threads(8, Some(7.5)), 1);
+        assert_eq!(
+            auto_search_threads(8, Some(28.8)),
+            1,
+            "overloaded: one thread, never zero"
+        );
+        assert_eq!(auto_search_threads(2, Some(0.1)), 2);
+        assert_eq!(auto_search_threads(1, Some(0.0)), 1);
+        assert_eq!(auto_search_threads(16, None), 4, "unknown load: half the cores, capped");
+        assert_eq!(
+            auto_search_threads(4, Some(f64::NAN)),
+            2,
+            "a garbage load reads as half busy"
+        );
+        assert_eq!(auto_search_threads(4, Some(-1.0)), 2);
+        let here = auto_search_threads_here();
+        assert!((1..=AUTO_SEARCH_THREADS_CAP).contains(&here));
+    }
+
+    #[test]
+    fn the_hybrid_gets_the_requested_number_of_search_threads() {
+        for (asked, want) in [(Some(1), 1usize), (Some(3), 3), (Some(0), 1)] {
+            let opts = BrainOptions {
+                search_threads: asked,
+                ..BrainOptions::default()
+            };
+            let b = make_brain(BrainKind::Hybrid, &opts).expect("hybrid");
+            let t = b.telemetry().expect("telemetry");
+            let v: serde_json::Value = serde_json::from_str(&t).expect("json");
+            assert_eq!(v["workers"], want, "{asked:?}");
+        }
+        assert_eq!(
+            BrainOptions::default().search_threads,
+            Some(1),
+            "the library default is one thread"
+        );
     }
 
     #[test]
