@@ -1,4 +1,4 @@
-# E-003, part 4 (the hybrid deadline modes run on the work clock, `clock = "work"`, 2.2 us per tee-tick): technique scenarios T1-T18, hybrid vs the plain planner (task 3.5, D-048), 50 trials
+# E-003, part 4 (the hybrid deadline modes run on the work clock, `clock = "work", step_ms = 0.0022`, 2.2 us per tee-tick): technique scenarios T1-T18, hybrid vs the plain planner (task 3.5, D-048), 50 trials
 # each. Run:
 #   ddnet-ai arena scenarios --config configs/arena/scenarios-e003.toml --out ~/aiddnet/data/runs/E-003/scenarios
 name = "scenarios E-003"
@@ -25,7 +25,7 @@ mode = "fixed"
 label = "hybrid-4ms"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { adaptive = false }
 
@@ -33,7 +33,7 @@ hybrid = { adaptive = false }
 label = "hybrid-adaptive"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 
 [[brain]]

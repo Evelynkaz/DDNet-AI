@@ -12,39 +12,39 @@ crowd_spacing = 1.0
 [[condition]]
 name = "8 tees idle bystanders: hybrid 4 ms"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]
 
 [[condition]]
 name = "8 tees scripted crowd: hybrid 4 ms"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 7 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted", count = 7 }]
 
 [[condition]]
 name = "10 tees idle bystanders: hybrid 4 ms"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 8 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 8 }]
 
 [[condition]]
 name = "10 tees scripted crowd: hybrid 4 ms"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 9 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted", count = 9 }]
 
 [[condition]]
 name = "12 tees idle bystanders: hybrid 4 ms"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 10 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 10 }]
 
 [[condition]]
 name = "12 tees scripted crowd: hybrid 4 ms"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 11 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted", count = 11 }]
 
 [[condition]]
 name = "15 tees idle bystanders: hybrid 4 ms"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 13 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 13 }]
 
 [[condition]]
 name = "15 tees scripted crowd: hybrid 4 ms"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 14 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted", count = 14 }]

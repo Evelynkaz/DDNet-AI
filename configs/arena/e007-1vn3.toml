@@ -10,104 +10,104 @@ games = 200
 [[condition]]
 name = "1v3 cap 4 + crowd stage (reference)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 1v1 model (reference)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, threat_model = false } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, threat_model = false } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 4 + cs, threat weight 0.1"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 4 + cs, threat weight 0"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.0 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.0 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 4 + cs, lambda 0.25"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, lambda = 0.25 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, lambda = 0.25 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 4 + cs, weight 0.1, lambda 0.25"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1, lambda = 0.25 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1, lambda = 0.25 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 4 + cs, dynamic stage 2"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, stage2_dynamic = true } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, stage2_dynamic = true } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v5 cap 4 + crowd stage (reference)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 1v1 model (reference)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, threat_model = false } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, threat_model = false } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 4 + cs, threat weight 0.1"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 4 + cs, threat weight 0"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.0 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.0 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 4 + cs, lambda 0.25"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, lambda = 0.25 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, lambda = 0.25 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 4 + cs, weight 0.1, lambda 0.25"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1, lambda = 0.25 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1, lambda = 0.25 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 4 + cs, dynamic stage 2"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, stage2_dynamic = true } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, stage2_dynamic = true } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v2 cap 4 + crowd stage (reference)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 1v1 model (reference)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, threat_model = false } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, threat_model = false } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 cap 4 + cs, threat weight 0.1"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1 } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1 } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 cap 4 + cs, threat weight 0"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.0 } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.0 } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 cap 4 + cs, lambda 0.25"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, lambda = 0.25 } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, lambda = 0.25 } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 cap 4 + cs, weight 0.1, lambda 0.25"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1, lambda = 0.25 } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, threat_weight = 0.1, lambda = 0.25 } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 cap 4 + cs, dynamic stage 2"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, stage2_dynamic = true } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3, jumpless_air_cost = 0.5, max_sim_tees = 4, crowd_stage = true, stage2_dynamic = true } }, { brain = "scripted", count = 2 }]

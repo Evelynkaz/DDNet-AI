@@ -39,6 +39,7 @@ pub use proposer::{
 };
 pub use search::{DecisionTelemetry, WorkCounters};
 pub use techniques::Tech;
+pub use work::WORK_US_PER_TEE_TICK;
 
 /// Marker offset for an *absolute* aim angle inside a [`crate::planner::PlanStep`]. The planner
 /// encodes the aim relative to the direction to the victim (`track_aim`), which is what CEM

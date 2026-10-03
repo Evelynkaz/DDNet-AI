@@ -201,7 +201,7 @@ fn sign_dir(v: f64, dead: f64) -> i32 {
 }
 
 fn hazard_at(col: &impl PlanCollision, x: f64, y: f64) -> bool {
-    col.is_freeze(x, y) || col.is_death(x, y)
+    col.is_hazard(x, y)
 }
 
 /// The number of tiles from `pos` (`dir` = `+1` down, `-1` up) to the first freeze/death tile

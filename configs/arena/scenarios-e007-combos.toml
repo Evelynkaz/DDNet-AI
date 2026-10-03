@@ -19,14 +19,14 @@ mode = "fixed"
 label = "base (T1b, air 0)"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 
 [[brain]]
 label = "air 1"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 1.0 }
 
@@ -34,7 +34,7 @@ hybrid = { jumpless_air_cost = 1.0 }
 label = "air 0.5"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5 }
 
@@ -42,7 +42,7 @@ hybrid = { jumpless_air_cost = 0.5 }
 label = "air 1 + dynamic stage 2"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 1.0, stage2_dynamic = true }
 
@@ -50,7 +50,7 @@ hybrid = { jumpless_air_cost = 1.0, stage2_dynamic = true }
 label = "air 0.5 + dynamic stage 2"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5, stage2_dynamic = true }
 
@@ -58,7 +58,7 @@ hybrid = { jumpless_air_cost = 0.5, stage2_dynamic = true }
 label = "air 1 + dynamic + prune"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 1.0, stage2_dynamic = true, prune = true }
 
@@ -66,6 +66,6 @@ hybrid = { jumpless_air_cost = 1.0, stage2_dynamic = true, prune = true }
 label = "air 0.5 + dynamic + two-world"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5, stage2_dynamic = true, two_world = true }

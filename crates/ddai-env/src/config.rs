@@ -380,8 +380,12 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         "wall" => ClockKind::Wall,
         "work" => {
             // Deadline counted in simulated tee-ticks (reproducible, load-independent);
-            // `step_ms` names the milliseconds per tee-tick (default 0.0022, i.e. 2.2 us).
-            work_us = Some(spec.step_ms.map_or(2.2, |ms| ms * 1000.0));
+            // `step_ms` names the milliseconds per tee-tick (default `WORK_US_PER_TEE_TICK`, 1.25 us
+            // since task 3.6; the E-003/E-007 configs pin their original 2.2 us with `step_ms = 0.0022`).
+            work_us = Some(
+                spec.step_ms
+                    .map_or(ddai_planner::hybrid::WORK_US_PER_TEE_TICK, |ms| ms * 1000.0),
+            );
             ClockKind::Wall
         }
         "step" => ClockKind::Step {
@@ -740,6 +744,66 @@ players = [
         assert_eq!(slots.len(), 4);
         assert_eq!(slots[1].brain, "scripted");
         assert!(slots.iter().all(|s| s.count == 1));
+    }
+
+    /// Task 3.6 (D-076): `clock = "work"` without `step_ms` is the current calibration; with `step_ms` it is
+    /// exactly that many milliseconds per tee-tick, and `0.0022` is bit-exactly the old 2.2 us.
+    #[test]
+    fn work_clock_rate_defaults_to_the_calibrated_constant_and_step_ms_overrides_it() {
+        let spec = |extra: &str| {
+            let text = format!(
+                "name = \"t\"\n[[condition]]\nname = \"c\"\narena = \"a\"\nplayers = [{{ brain = \"hybrid\", clock = \"work\"{extra} }}, {{ brain = \"scripted\" }}]\n"
+            );
+            RunConfig::parse(&text).unwrap().condition[0].players[0].clone()
+        };
+        let rate = |extra: &str| hybrid_config(&spec(extra)).unwrap().0.work_clock_us_per_tick;
+        assert_eq!(rate(""), Some(ddai_planner::hybrid::WORK_US_PER_TEE_TICK));
+        assert_eq!(rate(", step_ms = 0.0022").map(f64::to_bits), Some(2.2f64.to_bits()));
+        assert_eq!(rate(", step_ms = 0.00125").map(f64::to_bits), Some(1.25f64.to_bits()));
+    }
+
+    /// Every arena config that runs a `clock = "work"` player must say which work-clock rate it means: either
+    /// pin it (`step_ms = ...`; the configs of E-003/E-007 pin their original 2.2 us, so re-running them
+    /// reproduces the recorded numbers) or carry the opt-in marker line `# work-clock: default-rate` to take the
+    /// calibrated default (`WORK_US_PER_TEE_TICK`). Nothing depends on a file's name.
+    #[test]
+    fn work_clock_configs_pin_their_rate_or_opt_into_the_default() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/arena");
+        let (mut pinned_2_2, mut opted_in) = (0, 0);
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let default_rate = text.lines().any(|l| l.trim() == "# work-clock: default-rate");
+            for (i, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with('#') {
+                    continue;
+                }
+                let mut rest = line;
+                while let Some(at) = rest.find("clock = \"work\"") {
+                    rest = &rest[at + "clock = \"work\"".len()..];
+                    let pinned = rest.starts_with(", step_ms = ");
+                    assert!(
+                        pinned || default_rate,
+                        "{name}:{}: a work-clock player needs `step_ms = ...` or the marker line `# work-clock: default-rate`: {line}",
+                        i + 1
+                    );
+                    if pinned {
+                        pinned_2_2 += usize::from(rest.starts_with(", step_ms = 0.0022"));
+                    } else {
+                        opted_in += 1;
+                    }
+                }
+            }
+        }
+        assert!(pinned_2_2 > 100, "only {pinned_2_2} pinned work-clock players found");
+        assert!(
+            opted_in > 0,
+            "no config uses the default rate: the marker path is untested"
+        );
     }
 
     #[test]

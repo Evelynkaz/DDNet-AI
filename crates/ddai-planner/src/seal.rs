@@ -14,7 +14,7 @@ const REST_TICKS: i32 = 60;
 
 /// `touchesFreeze(collision, x, y)` (`seal.ts:13-17`).
 pub fn touches_freeze(col: &impl PlanCollision, x: f64, y: f64) -> bool {
-    if col.is_freeze(x, y) || col.is_death(x, y) {
+    if col.is_hazard(x, y) {
         return true;
     }
     let d = PHYSICAL_SIZE / 3.0;

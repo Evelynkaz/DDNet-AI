@@ -7,15 +7,25 @@
 //! It needs no thread other than the deciding one (`workers = 1`): helper threads read wall time.
 //!
 //! The unit is a **tee-tick**: one physics tick of one tee (a tick's cost grows with the number of
-//! tees in the world). The rate is a calibration, not a truth: `2.2 us` per tee-tick is what
-//! rollouts cost end to end (physics plus scoring) on an unloaded core at 2, 4 and 6 tees
-//! (`docs/EXPERIMENTS.md` E-003), so a work budget of 4 ms is about 1 800 tee-ticks: 900 ticks with
-//! 2 tees, 450 with 4, 300 with 6 -- what the wall clock gives an idle machine.
+//! tees in the world). The rate is a calibration, not a truth: [`WORK_US_PER_TEE_TICK`] is what a whole
+//! decision costs per tee-tick (rollouts with their scoring, shield, search bookkeeping) on an unloaded
+//! core. Task 3.6 (D-076, `docs/EXPERIMENTS.md` E-010) sped the search up by about 1.75x and moved it from
+//! the `2.2 us` of E-003/E-007 to `1.25 us`, so a work budget of 4 ms is now 3 200 tee-ticks: 1 600 ticks
+//! with 2 tees, 800 with 4, 530 with 6 -- what the wall clock gives an idle machine.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clock::Clock;
+
+/// Microseconds one tee-tick of a hybrid decision costs on an unloaded core: the work clock's default rate
+/// (D-076, task 3.6; it was `2.2` in E-003/E-007, still pinned by `step_ms = 0.0022` in those experiments'
+/// configs). The unit of the 4 ms search budget and of the "<= 5 ms work" bound of D-042.
+///
+/// **Provisional:** derived from the measured old/new speed ratio (1.73x) applied to the old 2.2 us, not from a
+/// direct idle measurement (D-076); a pinned-core, training-paused measurement is scheduled. It only decides how
+/// much search the *arena* gives a "4 ms" hybrid (comparability); the live bot reads the wall clock.
+pub const WORK_US_PER_TEE_TICK: f64 = 1.25;
 
 /// The shared tick counter the search increments and a [`WorkClock`] reads.
 #[derive(Debug, Default)]

@@ -10,24 +10,24 @@ games = 400
 [[condition]]
 name = "base"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "steps 6 x 3"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { plan_steps = 6 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { plan_steps = 6 } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "steps 7 x 3"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { plan_steps = 7 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { plan_steps = 7 } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "steps 9 x 2"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { plan_step_ticks = 2 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { plan_step_ticks = 2 } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "steps 6 x 3 + dynamic"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { plan_steps = 6, stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { plan_steps = 6, stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]

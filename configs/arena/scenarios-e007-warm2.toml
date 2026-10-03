@@ -8,7 +8,7 @@ trials = 200
 label = "no bonus (air 0.5)"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5 }
 
@@ -16,7 +16,7 @@ hybrid = { jumpless_air_cost = 0.5 }
 label = "fire-only 0.7 (air 0.5)"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.7, warm_fire_only = true }
 
@@ -24,7 +24,7 @@ hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.7, warm_fire_only = true }
 label = "fire-only 1.5 (air 0.5)"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5, warm_bonus = 1.5, warm_fire_only = true }
 
@@ -32,6 +32,6 @@ hybrid = { jumpless_air_cost = 0.5, warm_bonus = 1.5, warm_fire_only = true }
 label = "fire-only 0.7 (air 1)"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 1.0, warm_bonus = 0.7, warm_fire_only = true }

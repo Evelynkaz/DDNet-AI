@@ -8,44 +8,44 @@ games = 400
 [[condition]]
 name = "clb-left: base"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-left: dynamic stage 2"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-left: dynamic stage 2 + prune 3/0.5"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-right: base"
 arena = "clb-right"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-right: dynamic stage 2"
 arena = "clb-right"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-right: dynamic stage 2 + prune 3/0.5"
 arena = "clb-right"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "chillblock5-ruler: base"
 arena = "chillblock5-ruler"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "chillblock5-ruler: dynamic stage 2"
 arena = "chillblock5-ruler"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { stage2_dynamic = true } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "chillblock5-ruler: dynamic stage 2 + prune 3/0.5"
 arena = "chillblock5-ruler"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { stage2_dynamic = true, prune = true } }, { brain = "planner", mode = "fixed" }]

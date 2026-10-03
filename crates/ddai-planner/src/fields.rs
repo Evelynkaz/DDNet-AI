@@ -235,7 +235,7 @@ pub fn drag_crosses_hazard(col: &impl PlanCollision, at: Vec2, from: Vec2, separ
         if col.is_solid(x, y) {
             return 0.0;
         }
-        if col.is_freeze(x, y) || col.is_death(x, y) {
+        if col.is_hazard(x, y) {
             return 1.0;
         }
     }
@@ -266,7 +266,7 @@ pub fn launch_lands_in_hazard(col: &impl PlanCollision, at: Vec2, from: Vec2, se
         if col.is_solid(x, y) {
             return 0.0;
         }
-        if col.is_freeze(x, y) || col.is_death(x, y) {
+        if col.is_hazard(x, y) {
             return 1.0;
         }
     }
@@ -343,26 +343,30 @@ pub fn launch_flight_lands_in_hazard(
     let mut vy = vel.y + k * (-1.0 + (10.0 * by) / bl);
     let mut x = at.x;
     let mut y = at.y;
+    // The tuning constants are `LazyLock`s: read them once, not on every one of the 50 ticks.
+    let (gravity, ground_friction, air_friction) = (
+        *crate::tuning::GRAVITY,
+        *crate::tuning::GROUND_FRICTION,
+        *crate::tuning::AIR_FRICTION,
+    );
+    let (ramp_start, ramp_curvature, ramp_range) = (
+        *crate::tuning::VELRAMP_START,
+        *crate::tuning::VELRAMP_CURVATURE,
+        *crate::tuning::VELRAMP_RANGE,
+    );
 
     let half = PHYSICAL_SIZE / 2.0;
     let mut grounded = col.is_solid(x + half, y + half + 5.0) || col.is_solid(x - half, y + half + 5.0);
     for _t in 0..LAUNCH_FLIGHT_TICKS {
-        vy += *crate::tuning::GRAVITY;
-        vx *= if grounded {
-            *crate::tuning::GROUND_FRICTION
-        } else {
-            *crate::tuning::AIR_FRICTION
-        };
+        vy += gravity;
+        vx *= if grounded { ground_friction } else { air_friction };
         grounded = false;
 
         let speed = js::hypot2(vx, vy) * 50.0;
-        let ramp = if speed < *crate::tuning::VELRAMP_START {
+        let ramp = if speed < ramp_start {
             1.0
         } else {
-            1.0 / js::pow(
-                *crate::tuning::VELRAMP_CURVATURE,
-                (speed - *crate::tuning::VELRAMP_START) / *crate::tuning::VELRAMP_RANGE,
-            )
+            1.0 / js::pow(ramp_curvature, (speed - ramp_start) / ramp_range)
         };
         let n = js::max(1.0, js::ceil(js::max(js::abs(vx), js::abs(vy)) / LAUNCH_PROBE_STEP_PX)) as i32;
         for _i in 0..n {
@@ -384,7 +388,7 @@ pub fn launch_flight_lands_in_hazard(
                     vy = 0.0;
                 }
             }
-            if col.is_freeze(x, y) || col.is_death(x, y) {
+            if col.is_hazard(x, y) {
                 return 1.0;
             }
             if landed {
@@ -393,6 +397,92 @@ pub fn launch_flight_lands_in_hazard(
         }
     }
     0.0
+}
+
+/// A direct-mapped memo of [`launch_flight_lands_in_hazard`] (task 3.6). The function is a pure
+/// function of `(at, (at - from) / separation, vel)` and the map; inside one hybrid decision every
+/// candidate's rollout starts from the same state and many share their first ticks, so the same
+/// arguments come back about four times in ten. An entry is only valid in the epoch it was written
+/// (the owner bumps [`LaunchMemo::new_epoch`] whenever the map or the decision may have changed), and
+/// a hit must match all six argument words bit for bit, so a memoised answer is the very value the
+/// function would compute.
+pub struct LaunchMemo {
+    slots: Vec<MemoSlot>,
+    epoch: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct MemoSlot {
+    epoch: u64,
+    key: [u64; 6],
+    value: f64,
+}
+
+const LAUNCH_MEMO_SLOTS: usize = 1024;
+
+impl Default for LaunchMemo {
+    fn default() -> Self {
+        LaunchMemo {
+            slots: vec![MemoSlot::default(); LAUNCH_MEMO_SLOTS],
+            epoch: 1,
+        }
+    }
+}
+
+impl LaunchMemo {
+    /// Invalidates every entry (O(1)): the next lookups recompute.
+    pub fn new_epoch(&mut self) {
+        self.epoch += 1;
+    }
+}
+
+/// [`launch_flight_lands_in_hazard`], through `memo` when there is one (`None`: just compute it).
+pub fn launch_flight_lands_in_hazard_memo(
+    memo: Option<&mut LaunchMemo>,
+    col: &impl PlanCollision,
+    at: Vec2,
+    from: Vec2,
+    separation: f64,
+    vel: Vec2,
+) -> f64 {
+    let Some(memo) = memo else {
+        return launch_flight_lands_in_hazard(col, at, from, separation, vel);
+    };
+    // The same `hx`/`hy` the function derives from `from` and `separation` (nothing else of `from` is read).
+    let hx = if separation > 0.0 {
+        (at.x - from.x) / separation
+    } else {
+        0.0
+    };
+    let hy = if separation > 0.0 {
+        (at.y - from.y) / separation
+    } else {
+        -1.0
+    };
+    let key = [
+        at.x.to_bits(),
+        at.y.to_bits(),
+        hx.to_bits(),
+        hy.to_bits(),
+        vel.x.to_bits(),
+        vel.y.to_bits(),
+    ];
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for k in key {
+        h = (h ^ k).wrapping_mul(0x0000_0100_0000_01b3);
+        h ^= h >> 29;
+    }
+    let slot = &mut memo.slots[(h >> 40) as usize % LAUNCH_MEMO_SLOTS];
+    if slot.epoch == memo.epoch && slot.key == key {
+        return slot.value;
+    }
+    let value = launch_flight_lands_in_hazard(col, at, from, separation, vel);
+    *slot = MemoSlot {
+        epoch: memo.epoch,
+        key,
+        value,
+    };
+    value
 }
 
 const FLIGHT_PROBE_TICKS: [f64; 4] = [6.0, 12.0, 18.0, 24.0];
@@ -411,7 +501,7 @@ pub fn flight_ends_in_hazard(col: &impl PlanCollision, pos: Vec2, vel: Vec2) -> 
         if col.is_solid(x, y) {
             return 0.0;
         }
-        if col.is_freeze(x, y) || col.is_death(x, y) {
+        if col.is_hazard(x, y) {
             return 1.0;
         }
     }
@@ -538,6 +628,66 @@ mod tests {
         FlatCol { w, h, tiles }
     }
     const TILE_AIR_FOR_TEST: u8 = 0;
+
+    /// Task 3.6: the memoised launch-flight check returns exactly what the function computes, for
+    /// arguments that repeat, that collide in the memo and that straddle an epoch change.
+    #[test]
+    fn launch_flight_memo_returns_the_exact_value() {
+        let (w, h) = (40, 30);
+        let mut s = 0xA5A5_1234_5678_9ABCu64;
+        let mut next = move || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            s.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let mut tiles = vec![TILE_AIR_FOR_TEST; (w * h) as usize];
+        for (i, tile) in tiles.iter_mut().enumerate() {
+            let (x, y) = (i as i32 % w, i as i32 / w);
+            *tile = if x == 0 || y == 0 || x == w - 1 || y == h - 1 || next() % 9 == 0 {
+                TILE_SOLID
+            } else if next() % 30 == 0 {
+                TILE_FREEZE
+            } else {
+                TILE_AIR_FOR_TEST
+            };
+        }
+        let col = FlatCol { w, h, tiles };
+        let mut memo = LaunchMemo::default();
+        let mut args: Vec<(Vec2, Vec2, Vec2)> = Vec::new();
+        let (mut ones, mut zeros) = (0, 0);
+        for k in 0..6_000u32 {
+            let (at, from, vel) = if k % 2 == 1 && !args.is_empty() {
+                args[(next() % args.len() as u64) as usize]
+            } else {
+                let at = vec2(64.0 + (next() % 1100) as f64, 64.0 + (next() % 800) as f64);
+                let from = vec2(at.x + (next() % 120) as f64 - 60.0, at.y + (next() % 120) as f64 - 60.0);
+                (
+                    at,
+                    from,
+                    vec2((next() % 400) as f64 / 10.0 - 20.0, (next() % 400) as f64 / 10.0 - 20.0),
+                )
+            };
+            args.push((at, from, vel));
+            let sep = vdistance(at, from);
+            let want = launch_flight_lands_in_hazard(&col, at, from, sep, vel);
+            let got = launch_flight_lands_in_hazard_memo(Some(&mut memo), &col, at, from, sep, vel);
+            assert_eq!(got.to_bits(), want.to_bits(), "case {k}");
+            assert_eq!(
+                launch_flight_lands_in_hazard_memo(None, &col, at, from, sep, vel).to_bits(),
+                want.to_bits()
+            );
+            if want == 1.0 {
+                ones += 1;
+            } else {
+                zeros += 1;
+            }
+            if k % 997 == 996 {
+                memo.new_epoch();
+            }
+        }
+        assert!(ones > 100 && zeros > 100, "both outcomes must occur ({ones}, {zeros})");
+    }
 
     #[test]
     fn hazard_nearness_is_1_at_the_freeze_tile_itself() {

@@ -1,0 +1,74 @@
+# work-clock: default-rate
+# Task 3.6 (D-076, E-010): OLD = the 2.2 us work clock of E-003/E-007 (pinned), NEW = the default `WORK_US_PER_TEE_TICK` (1.25 us),
+# same seeds and layouts, so games pair up for McNemar.
+#   ddnet-ai arena run --config configs/arena/e010-strength.toml --out ~/aiddnet/data/runs/E-010/strength --threads 3
+name = "E-010: strength, old vs new work-clock calibration"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: hybrid 4 ms OLD vs planner fixed"
+arena = "clb-left"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms NEW vs planner fixed"
+arena = "clb-left"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms OLD vs planner fixed"
+arena = "clb-right"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms NEW vs planner fixed"
+arena = "clb-right"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms OLD vs planner fixed"
+arena = "chillblock5-ruler"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms NEW vs planner fixed"
+arena = "chillblock5-ruler"
+games = 400
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms OLD vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms NEW vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms OLD vs scripted"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms NEW vs scripted"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms OLD vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms NEW vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+

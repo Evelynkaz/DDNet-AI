@@ -10,16 +10,16 @@ games = 200
 name = "clb-left: hybrid 3.5-like 4 ms vs planner fixed"
 arena = "clb-left"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-right: hybrid 3.5-like 4 ms vs planner fixed"
 arena = "clb-right"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "chillblock5-ruler: hybrid 3.5-like 4 ms vs planner fixed"
 arena = "chillblock5-ruler"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0, shield_skip_tiles = 0, max_sim_tees = 0, crowd_stage = false, warm_bonus = 0.0, jumpless_air_cost = 0.0, stage2_dynamic = false } }, { brain = "planner", mode = "fixed" }]

@@ -24,6 +24,7 @@ pub mod seal;
 pub mod shield;
 pub mod teacher;
 pub mod throw_lines;
+pub mod trig;
 #[cfg(feature = "ts-parity")]
 pub mod ts_adapter;
 pub mod tuning;

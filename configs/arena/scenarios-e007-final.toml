@@ -29,7 +29,7 @@ mode = "fixed"
 label = "hybrid-4ms"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { adaptive = false }
 
@@ -37,5 +37,5 @@ hybrid = { adaptive = false }
 label = "hybrid-default"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0

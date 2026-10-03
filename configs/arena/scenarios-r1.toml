@@ -19,13 +19,13 @@ mode = "fixed"
 label = "hybrid-4ms"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 
 [[brain]]
 label = "hybrid-4ms-no-techniques"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { techniques = false }

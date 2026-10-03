@@ -2,7 +2,7 @@
 # condition (docs/EXPERIMENTS.md E-003). "hybrid 4 ms" = HybridBrain, NoProposer, deadline 4 ms, no
 # adaptive extension; "adaptive" = the same with the D-042 extension (up to 15 ms in danger);
 # "fixed" = the deterministic fixed-work mode. The deadline is counted on the WORK clock (tee-ticks
-# x 2.2 us, `clock = "work"`): the arena VM is shared and loaded (load average 10-27 during the
+# x 2.2 us, `clock = "work", step_ms = 0.0022`): the arena VM is shared and loaded (load average 10-27 during the
 # runs), a wall deadline there gives a different, weaker search on every run; the work clock makes
 # the deadline mode reproducible. Wall-clock conditions ("wall") are kept as a real-time check.
 # Train arena clb-left; holdout arenas clb-right and chillblock5-ruler. The planner-only baselines
@@ -17,30 +17,30 @@ games = 200
 [[condition]]
 name = "clb-left hybrid 4ms vs scripted"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted" }]
 
 [[condition]]
 name = "clb-left hybrid 4ms vs planner fixed"
 arena = "clb-left"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-left hybrid adaptive vs scripted"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
 
 [[condition]]
 name = "clb-left hybrid adaptive vs planner fixed"
 arena = "clb-left"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-left hybrid adaptive vs hybrid 4ms"
 arena = "clb-left"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }]
 
 [[condition]]
 name = "clb-left hybrid fixed vs scripted"
@@ -58,34 +58,34 @@ players = [{ brain = "hybrid", mode = "fixed" }, { brain = "planner", mode = "fi
 [[condition]]
 name = "clb-right hybrid 4ms vs scripted"
 arena = "clb-right"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted" }]
 
 [[condition]]
 name = "clb-right hybrid 4ms vs planner fixed"
 arena = "clb-right"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-right hybrid adaptive vs scripted"
 arena = "clb-right"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
 
 # --- holdout arena: chillblock5-ruler ---
 
 [[condition]]
 name = "chillblock5-ruler hybrid 4ms vs scripted"
 arena = "chillblock5-ruler"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted" }]
 
 [[condition]]
 name = "chillblock5-ruler hybrid 4ms vs planner fixed"
 arena = "chillblock5-ruler"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "chillblock5-ruler hybrid adaptive vs scripted"
 arena = "chillblock5-ruler"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
 
 # --- real-time check on the loaded VM (wall clock, clb-left) ---
 

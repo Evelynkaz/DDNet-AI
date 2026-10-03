@@ -58,6 +58,12 @@ pub trait PlanCollision {
     fn is_freeze(&self, x: f64, y: f64) -> bool;
     fn is_un_freeze(&self, x: f64, y: f64) -> bool;
     fn is_no_hook(&self, x: f64, y: f64) -> bool;
+    /// `is_freeze(x, y) || is_death(x, y)`: the hazard test the ray/flight probes of `fields` make
+    /// at every sample. A backend may answer both with one lookup (task 3.6); the answer must equal
+    /// the two separate calls.
+    fn is_hazard(&self, x: f64, y: f64) -> bool {
+        self.is_freeze(x, y) || self.is_death(x, y)
+    }
 
     fn test_box(&self, pos: Vec2, size: Vec2) -> bool;
 

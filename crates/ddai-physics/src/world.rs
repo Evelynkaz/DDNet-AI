@@ -1432,6 +1432,8 @@ impl<R: Real> World<R> {
         // comment), so an explicit whole-map `recompute_tile_exists_cache()` call here is no
         // longer needed (task 1.10 had one; removed as redundant, not merely dead, per the
         // review — every door placement above already left the cache correct).
+        // Task 3.6: the door cells just placed changed a layer the derived fast-path tables read.
+        collision.recompute_derived();
         let mut cores: WorldCore<R, MAX_CLIENTS> = WorldCore::new();
         cores.switchers = switchers;
         cores.prng = Some({
@@ -2311,6 +2313,10 @@ pub fn ddrace_tick<R: Real>(
 /// (`character.cpp:1477-1484,2272-2279`) — factored out since it's the exact same expression
 /// twice in the C++ source too, just inlined both times.
 fn is_on_death_tile<R: Real>(collision: &Collision<R>, pos: Vec2<R>) -> bool {
+    // Task 3.6: no death tile within a tile of `pos`'s own tile means none of the eight lookups can hit.
+    if !collision.death_possibly_near(pos) {
+        return false;
+    }
     let r = core::physical_size::<R>() / R::from_i32(3);
     let corners = [(r, -r), (r, r), (-r, -r), (-r, r)];
     corners.iter().any(|&(dx, dy)| {
@@ -3336,7 +3342,7 @@ pub fn ddrace_post_core_tick<R: Real>(world: &mut World<R>, id: i32) -> bool {
         return false;
     }
 
-    let prev_pos = world.characters[id as usize].unwrap().prev_pos;
+    let prev_pos = world.characters[id as usize].as_ref().unwrap().prev_pos;
     let pos = world.cores.core_at(slot).pos;
     let mut indices = std::mem::take(&mut world.map_indices_scratch);
     world.collision.get_map_indices_into(prev_pos, pos, 0, &mut indices);
@@ -3360,17 +3366,17 @@ pub fn ddrace_post_core_tick<R: Real>(world: &mut World<R>, id: i32) -> bool {
     }
 
     // Teleport gun (`character.cpp:2351-2362`) — cosmetic `CreateDeath`/`CreateSound` dropped.
-    let mut character = world.characters[id as usize].unwrap();
+    let character = world.characters[id as usize].as_mut().unwrap();
     if character.tele_gun_teleport {
         let dest = character.tele_gun_pos;
-        world.cores.core_at_mut(slot).pos = dest;
-        if !character.is_blue_tele_gun_teleport {
-            world.cores.core_at_mut(slot).vel = Vec2::zero();
-        }
+        let blue = character.is_blue_tele_gun_teleport;
         character.tele_gun_teleport = false;
         character.is_blue_tele_gun_teleport = false;
+        world.cores.core_at_mut(slot).pos = dest;
+        if !blue {
+            world.cores.core_at_mut(slot).vel = Vec2::zero();
+        }
     }
-    world.characters[id as usize] = Some(character);
     true
 }
 
@@ -3439,8 +3445,9 @@ pub fn on_direct_input<R: Real>(world: &mut World<R>, id: i32, new_input: Player
 
 /// `CCharacter::HandleWeaponSwitch()` (`character.cpp:408-453`).
 pub fn handle_weapon_switch<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
-    let character = world.characters[id as usize].unwrap();
-    let core = *world.cores.core_at(slot);
+    // Task 3.6: read through references (nothing below writes the world until the queue update).
+    let character = world.characters[id as usize].as_ref().unwrap();
+    let core = world.cores.core_at(slot);
     let mut wanted_weapon = core.active_weapon;
     if character.queued_weapon != -1 {
         wanted_weapon = character.queued_weapon;
@@ -3483,10 +3490,10 @@ pub fn handle_weapon_switch<R: Real>(world: &mut World<R>, id: i32, slot: usize)
         // exactly (a long-standing DDNet quirk this port preserves bit-for-bit).
         wanted_weapon = core.input.wanted_weapon - 1;
     }
-    if (0..NUM_WEAPONS as i32).contains(&wanted_weapon)
+    let set_queue = (0..NUM_WEAPONS as i32).contains(&wanted_weapon)
         && wanted_weapon != core.active_weapon
-        && core.weapons[wanted_weapon as usize].got
-    {
+        && core.weapons[wanted_weapon as usize].got;
+    if set_queue {
         world.characters[id as usize].as_mut().unwrap().queued_weapon = wanted_weapon;
     }
     do_weapon_switch(world, id, slot);
@@ -3499,15 +3506,16 @@ pub fn handle_weapon_switch<R: Real>(world: &mut World<R>, id: i32, slot: usize)
 /// snapshot back *after* it — silently reverting `set_weapon`'s own `m_LastWeapon` update. Fixed
 /// by not touching `world.characters[id]` again after `set_weapon` returns.)
 pub fn do_weapon_switch<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
-    let character = world.characters[id as usize].unwrap();
-    if character.reload_timer != 0 || character.queued_weapon == -1 {
+    let character = world.characters[id as usize].as_ref().unwrap();
+    let (reload_timer, queued_weapon) = (character.reload_timer, character.queued_weapon);
+    if reload_timer != 0 || queued_weapon == -1 {
         return;
     }
     let core = world.cores.core_at(slot);
-    if core.weapons[WEAPON_NINJA as usize].got || !core.weapons[character.queued_weapon as usize].got {
+    if core.weapons[WEAPON_NINJA as usize].got || !core.weapons[queued_weapon as usize].got {
         return;
     }
-    set_weapon(world, id, slot, character.queued_weapon);
+    set_weapon(world, id, slot, queued_weapon);
 }
 
 /// `CCharacter::SetWeapon(int W)` (`character.cpp:154-166`), minus the switch sound.
@@ -3535,13 +3543,41 @@ fn set_weapon<R: Real>(world: &mut World<R>, id: i32, slot: usize, w: i32) {
 /// its exact trigger conditions).
 #[allow(clippy::too_many_lines)]
 pub fn fire_weapon<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
-    let character = world.characters[id as usize].unwrap();
-
-    if character.reload_timer != 0 {
+    if world.characters[id as usize].as_ref().unwrap().reload_timer != 0 {
         return;
     }
 
     do_weapon_switch(world, id, slot);
+    // Task 3.6: the common tick does not fire. Decide that from references, before copying the 300 B
+    // character and the 488 B core; the checks are the ones below, and every early return below only
+    // wrote the unchanged copy back, so returning here leaves the world exactly as it would be.
+    {
+        let character = world.characters[id as usize].as_ref().unwrap();
+        let core = world.cores.core_at(slot);
+        let mut full_auto = core.active_weapon == WEAPON_GRENADE
+            || core.active_weapon == WEAPON_SHOTGUN
+            || core.active_weapon == WEAPON_LASER;
+        if core.jetpack && core.active_weapon == WEAPON_GUN {
+            full_auto = true;
+        }
+        if character.frozen_last_tick {
+            full_auto = true;
+        }
+        if !world.config.sv_deepfly && core.active_weapon == WEAPON_HAMMER && core.deep_frozen {
+            return;
+        }
+        let mut will_fire = count_input_presses(character.latest_prev_input.fire, character.latest_input.fire) != 0;
+        if full_auto
+            && (character.latest_input.fire & 1) != 0
+            && core.active_weapon >= 0
+            && core.weapons[core.active_weapon as usize].ammo != 0
+        {
+            will_fire = true;
+        }
+        if !will_fire {
+            return;
+        }
+    }
     let mut character = world.characters[id as usize].unwrap();
     let mut core = *world.cores.core_at(slot);
 
@@ -4922,8 +4958,23 @@ impl<R: Real> World<R> {
         phase_time!(pickups, {
             // Task 1.10b, speed-up 1: computed once for the whole pass, not once per pickup.
             let characters_bbox = alive_characters_bbox(self);
-            for i in 0..self.pickups.len() {
-                pickup_tick(self, i, characters_bbox);
+            if self.tick % 7 == 0 {
+                // Movers drift on these ticks: every pickup runs its own `Move()` first.
+                for i in 0..self.pickups.len() {
+                    pickup_tick(self, i, characters_bbox);
+                }
+            } else if characters_bbox.is_some() {
+                // Task 3.6: on the other six ticks `pickup_tick` returns at once for a pickup no
+                // character can be near; test that here from the position alone (hoisting the reach)
+                // instead of copying the pickup and calling. Same pickups, same order.
+                let reach = R::from_f64(PICKUP_PROXIMITY_RADIUS as f64)
+                    + character_proximity_radius::<R>()
+                    + R::from_f64(RANGE_PREFILTER_SLACK);
+                for i in 0..self.pickups.len() {
+                    if could_be_near_alive_characters_bbox(characters_bbox, self.pickups[i].pos, reach) {
+                        pickup_tick(self, i, characters_bbox);
+                    }
+                }
             }
         });
 
@@ -5020,13 +5071,13 @@ pub fn character_pre_tick<R: Real>(world: &mut World<R>, id: i32, do_deferred_ti
         return;
     };
     {
-        let mut character = world.characters[id as usize].unwrap();
-        let mut core = *world.cores.core_at(slot);
-        ddrace_tick(&mut character, &mut core, &world.collision, &world.tuning);
+        // Task 3.6: in place (character and core are separate fields of the world), not on copies
+        // of the 300 B character and 488 B core written back afterwards.
+        let character = world.characters[id as usize].as_mut().unwrap();
+        let core = world.cores.core_at_mut(slot);
+        ddrace_tick(character, core, &world.collision, &world.tuning);
         // `m_Core.m_Input = m_Input;` (`character.cpp:814`, right before `m_Core.Tick(...)`).
         core.input = character.input;
-        world.characters[id as usize] = Some(character);
-        *world.cores.core_at_mut(slot) = core;
     }
     core::tick(
         &mut world.cores,
@@ -5067,10 +5118,10 @@ pub fn character_tick<R: Real>(world: &mut World<R>, id: i32, no_weak_hook: bool
     let Some(slot) = world.cores.slot_of(id as u8) else {
         return;
     };
-    let mut character = world.characters[id as usize].unwrap();
+    let pos = world.cores.core_at(slot).pos;
+    let character = world.characters[id as usize].as_mut().unwrap();
     character.prev_input = character.input;
-    character.prev_pos = world.cores.core_at(slot).pos;
-    world.characters[id as usize] = Some(character);
+    character.prev_pos = pos;
 }
 
 /// `CCharacter::TickDeferred()` (`character.cpp:857-971`), minus the dead-reckoning/`m_SendCore`

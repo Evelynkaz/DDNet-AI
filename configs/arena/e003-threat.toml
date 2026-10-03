@@ -14,17 +14,17 @@ games = 200
 [[condition]]
 name = "1v2 hybrid threat model"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 hybrid 1v1 model"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 hybrid threat model adaptive"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 planner fixed"
@@ -36,17 +36,17 @@ players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted", count = 
 [[condition]]
 name = "1v3 hybrid threat model"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 hybrid 1v1 model"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 hybrid threat model adaptive"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 planner fixed"
@@ -58,17 +58,17 @@ players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted", count = 
 [[condition]]
 name = "1v5 hybrid threat model"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 hybrid 1v1 model"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 hybrid threat model adaptive"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 planner fixed"

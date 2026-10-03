@@ -138,6 +138,26 @@ pub fn velocity_ramp<R: Real>(value: R, start: R, range: R, curvature: R) -> R {
 /// to the "generic over `R`" rule; the result narrows to `f32` (`float TmpAngle = ...;`) before
 /// the rest of the expression, which is genuinely `float` in the C++ source.
 pub fn angle_from_target(target_x: i32, target_y: i32) -> i32 {
+    // Task 3.6: a pure function of two integers that is evaluated every tick of every character with
+    // the aim that has not changed for a few ticks (a plan step holds its aim): a tiny per-thread
+    // direct-mapped memo of the exact result saves the `atan2` (tens of ns) on most calls.
+    thread_local! {
+        static MEMO: [std::cell::Cell<[i32; 4]>; 16] = const { [const { std::cell::Cell::new([0; 4]) }; 16] };
+    }
+    let slot = ((target_x as u32).wrapping_mul(0x9E37_79B1) ^ (target_y as u32).wrapping_mul(0x85EB_CA77)) >> 28;
+    MEMO.with(|memo| {
+        let entry = memo[slot as usize].get();
+        if entry[3] == 1 && entry[0] == target_x && entry[1] == target_y {
+            return entry[2];
+        }
+        let angle = angle_from_target_exact(target_x, target_y);
+        memo[slot as usize].set([target_x, target_y, angle, 1]);
+        angle
+    })
+}
+
+/// [`angle_from_target`] without the memo.
+fn angle_from_target_exact(target_x: i32, target_y: i32) -> i32 {
     let tmp_angle_f64 = (target_y as f64).atan2(target_x as f64);
     let tmp_angle = tmp_angle_f64 as f32;
     let pi = std::f32::consts::PI;
@@ -1619,7 +1639,25 @@ pub fn move_character<R: Real, const CAP: usize>(
 
     if me.is_super || (me.tuning.player_collision::<R>() != R::ZERO && !me.collision_disabled && !me.solo) {
         let distance = vmath::distance(me.pos, new_pos);
-        if distance > R::ZERO {
+        // Task 3.6: the sweep below can only stop at another character closer than `physical_size`
+        // to one of its samples; every sample lies in the bounding box of `me.pos..new_pos`, and
+        // `distance(a, b) >= max(|dx|, |dy|)` up to float rounding (a few ulp, nowhere near the 8 px of
+        // slack), so with nobody inside the box grown by `physical_size + 8` the sweep cannot return
+        // early and `me.pos = new_pos` below is exactly what it would end in. (A NaN coordinate makes
+        // every comparison false, as it makes `d < physical_size` false in the sweep.) Like every other
+        // fast path it declines (runs the sweep) for a non-finite coordinate or one past
+        // `EARLY_OUT_COORD_LIMIT`, where an `f32` ulp is no longer small against the 8 px of slack.
+        let limit = R::from_f64(crate::collision::EARLY_OUT_COORD_LIMIT);
+        let in_range = |v: R| v.is_finite() && v.abs() <= limit;
+        let reach = physical_size::<R>() + R::from_f64(8.0);
+        let (lo_x, hi_x) = (me.pos.x.min(new_pos.x) - reach, me.pos.x.max(new_pos.x) + reach);
+        let (lo_y, hi_y) = (me.pos.y.min(new_pos.y) - reach, me.pos.y.max(new_pos.y) + reach);
+        let someone_near = !(in_range(me.pos.x) && in_range(me.pos.y) && in_range(new_pos.x) && in_range(new_pos.y))
+            || (0..world.len).any(|slot| {
+                let p = world.cores[slot].pos;
+                slot != self_slot && p.x >= lo_x && p.x <= hi_x && p.y >= lo_y && p.y <= hi_y
+            });
+        if distance > R::ZERO && someone_near {
             let end = (distance + R::ONE).to_i32_trunc();
             let mut last_pos = me.pos;
             for i in 0..end {
@@ -1970,6 +2008,85 @@ mod tests {
         // Pointing left: atan2(0,-1) = pi -> wraps via the `< -pi/2` branch? atan2(0,-1)=pi, not
         // negative, so takes the `else` branch: (pi)*256 ≈ 804.
         assert_eq!(angle_from_target(-1000, 0), 804);
+    }
+
+    /// F5 of the 3.6 review: the player-collision sweep of `move_character` still stops a mover at a character in
+    /// its way when the coordinates are past `EARLY_OUT_COORD_LIMIT` (where the "nobody near" shortcut declines
+    /// and the sweep runs), and passes freely when nobody is in the way.
+    #[test]
+    fn the_player_sweep_stops_at_a_character_in_the_way_at_huge_coordinates() {
+        let map = crate::map::MapData {
+            width: 40,
+            height: 40,
+            game: vec![crate::map::Tile::default(); 1600],
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        };
+        let collision = Collision::<f32>::new(&map);
+        let teams = TeamsCore::default();
+        for x0 in [3_000.0f32, 6_000_000.0] {
+            let mut world: WorldCore<f32, 2> = WorldCore::new();
+            for (id, x) in [(0u8, x0), (1u8, x0 + 31.0)] {
+                let mut c = CharacterCore::<f32>::default();
+                c.reset();
+                c.id = i32::from(id);
+                c.pos = Vec2::new(x, 100.0);
+                world.insert(id, c);
+            }
+            world.cores[0].vel = Vec2::new(14.0, 0.0);
+            move_character(&mut world, 0, &collision, &teams);
+            assert!(
+                world.cores[0].pos.x < x0 + 6.0,
+                "x0 {x0}: the mover must stop at the other tee, got {}",
+                world.cores[0].pos.x - x0
+            );
+            // Nobody in the way: the mover goes all the way.
+            let mut alone: WorldCore<f32, 2> = WorldCore::new();
+            let mut c = CharacterCore::<f32>::default();
+            c.reset();
+            c.id = 0;
+            c.pos = Vec2::new(x0, 100.0);
+            c.vel = Vec2::new(14.0, 0.0);
+            alone.insert(0, c);
+            move_character(&mut alone, 0, &collision, &teams);
+            assert!(
+                alone.cores[0].pos.x >= x0 + 12.0,
+                "x0 {x0}: free mover at {}",
+                alone.cores[0].pos.x
+            );
+        }
+    }
+
+    /// Task 3.6: the memoised `angle_from_target` is the exact function, also when different aims
+    /// share a memo slot and when the same aim comes back.
+    #[test]
+    fn angle_memo_is_the_exact_function() {
+        let mut s = 0x1234_5678_9ABC_DEF0u64;
+        let mut next = || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            s.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let mut recent = Vec::new();
+        for k in 0..200_000u32 {
+            let (x, y) = if k % 3 == 0 && !recent.is_empty() {
+                recent[(next() % recent.len() as u64) as usize]
+            } else {
+                let range = [4i64, 400, 100_000, i64::from(i32::MAX)][(next() % 4) as usize];
+                let mut coord = || (next() % (2 * range as u64 + 1)) as i64 - range;
+                (coord() as i32, coord() as i32)
+            };
+            recent.push((x, y));
+            if recent.len() > 40 {
+                recent.remove(0);
+            }
+            assert_eq!(angle_from_target(x, y), angle_from_target_exact(x, y), "({x}, {y})");
+        }
     }
 
     #[test]

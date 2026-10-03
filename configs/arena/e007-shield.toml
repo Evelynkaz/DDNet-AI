@@ -13,59 +13,59 @@ games = 200
 [[condition]]
 name = "1v2 shield 3.5"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 shield plan"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 shield plan+hooks"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 shield plan+hooks+timeout"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3, shield_timeout_danger = true } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3, shield_timeout_danger = true } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v3 shield 3.5"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 shield plan"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 shield plan+hooks"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 shield plan+hooks+timeout"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3, shield_timeout_danger = true } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3, shield_timeout_danger = true } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v5 shield 3.5"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 shield plan"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 shield plan+hooks"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 shield plan+hooks+timeout"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3, shield_timeout_danger = true } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { shield_plan_escape = true, shield_hook_anchors = 3, shield_timeout_danger = true } }, { brain = "scripted", count = 5 }]

@@ -13,8 +13,9 @@ use crate::action::{ACTION_SIZE, decode_action};
 use crate::clock::Clock;
 use crate::config::{OpponentModel, PlannerConfig};
 use crate::fields::{
-    self, EDGE_GAP_PX, HazardField, drag_crosses_hazard, flight_ends_in_hazard, freeze_gap_px, hazard_nearness,
-    launch_flight_lands_in_hazard, launch_lands_in_hazard, wrap_angle,
+    self, EDGE_GAP_PX, HazardField, LaunchMemo, drag_crosses_hazard, flight_ends_in_hazard, freeze_gap_px,
+    hazard_nearness, launch_flight_lands_in_hazard, launch_flight_lands_in_hazard_memo, launch_lands_in_hazard,
+    wrap_angle,
 };
 use crate::memory::FreezeMemory;
 use crate::opponent_profile::OpponentProfile;
@@ -24,6 +25,7 @@ use crate::seal::rests_in_freeze;
 use crate::throw_lines::{
     ThrowSituation, frozen_throw_lines, frozen_throw_worth_trying, throw_lines, throw_worth_trying,
 };
+use crate::trig;
 use crate::tuning::{HOOK_LENGTH, PHYSICAL_SIZE};
 use crate::types::{HOOK_FLYING, HOOK_GRABBED, HOOK_IDLE, HOOK_RETRACT_START, PlayerInput, TeeState, empty_input};
 use crate::vmath::{Vec2, vdistance, vec2};
@@ -190,6 +192,7 @@ fn score_tick<W: PlanWorld>(
     memory: Option<&FreezeMemory>,
     thirds: &[Vec2],
     band: Option<&Band>,
+    launch_memo: Option<&mut LaunchMemo>,
 ) -> f64 {
     use crate::types::WorldEvent;
 
@@ -285,7 +288,7 @@ fn score_tick<W: PlanWorld>(
                 cfg.launch_exact_weight
             } else {
                 cfg.launch_exposure
-            }) * launch_flight_lands_in_hazard(col, me.pos, en.pos, separation, me.vel);
+            }) * launch_flight_lands_in_hazard_memo(launch_memo, col, me.pos, en.pos, separation, me.vel);
         } else {
             s -= cfg.launch_exposure * launch_lands_in_hazard(col, me.pos, en.pos, separation);
         }
@@ -477,6 +480,9 @@ pub struct Planner<W: PlanWorld> {
     predicted: Vec<PlayerInput>,
 
     pub(crate) track_rollout: bool,
+    /// Task 3.6: memo of the exact hammer-launch flight check (hybrid workers only; `None` keeps the
+    /// TS-parity path exactly as it was). Never changes a score, see [`LaunchMemo`].
+    pub(crate) launch_memo: Option<Box<LaunchMemo>>,
     /// Task 3.5b (hybrid shield): `evaluate_impl` leaves the world in its end-of-plan state instead of
     /// restoring the snapshot, so the caller can continue from there. `false` everywhere else.
     pub(crate) keep_final: bool,
@@ -575,6 +581,7 @@ impl<W: PlanWorld> Planner<W> {
             seed_offset,
             predicted: Vec::new(),
             track_rollout: false,
+            launch_memo: None,
             keep_final: false,
             last_input: crate::types::empty_input(),
             track_gap: false,
@@ -2467,7 +2474,7 @@ impl<W: PlanWorld> Planner<W> {
             return false;
         }
         let Some(me) = world.get_tee(self_id) else { return false };
-        let dir = vec2(js::cos(angle), js::sin(angle));
+        let dir = vec2(trig::cos(angle), trig::sin(angle));
         let hit = world.collision().intersect_line_hook(
             me.pos,
             vec2(me.pos.x + dir.x * *HOOK_LENGTH, me.pos.y + dir.y * *HOOK_LENGTH),
@@ -2490,7 +2497,7 @@ impl<W: PlanWorld> Planner<W> {
     /// `hookWouldReach` (`planner.ts:1733-1758`).
     fn hook_would_reach(&self, world: &W, self_id: i32, enemy_id: i32, angle: f64) -> bool {
         let Some(me) = world.get_tee(self_id) else { return false };
-        let dir = vec2(js::cos(angle), js::sin(angle));
+        let dir = vec2(trig::cos(angle), trig::sin(angle));
         let to = vec2(me.pos.x + dir.x * *HOOK_LENGTH, me.pos.y + dir.y * *HOOK_LENGTH);
         let hit = world.collision().intersect_line_hook(me.pos, to);
         let wall_hit = hit.collision != 0;
@@ -2703,10 +2710,10 @@ impl<W: PlanWorld> Planner<W> {
         raw[5] = -1.0;
         raw[6] = 1.0;
         raw[7] = -1.0;
-        raw[8] = js::cos(aim);
-        raw[9] = js::sin(aim);
+        raw[8] = trig::cos(aim);
+        raw[9] = trig::sin(aim);
         let probe = decode_action(&raw, &prev, false);
-        js::atan2(probe.target_y, probe.target_x)
+        trig::atan2(probe.target_y, probe.target_x)
     }
 
     /// `stepToInput` (`planner.ts:1917-1974`).
@@ -2731,8 +2738,8 @@ impl<W: PlanWorld> Planner<W> {
         raw[4] = if step.hook != 0 && hook_ok { 1.0 } else { -1.0 };
         raw[6] = 1.0;
         raw[7] = -1.0;
-        raw[8] = js::cos(aim);
-        raw[9] = js::sin(aim);
+        raw[8] = trig::cos(aim);
+        raw[9] = trig::sin(aim);
 
         let mut can_swing = self.cfg.hammer_range_px <= 0.0 || enemy_dist <= self.cfg.hammer_range_px;
         if can_swing
@@ -2922,7 +2929,7 @@ impl<W: PlanWorld> Planner<W> {
             let grounded = col.is_solid(m.pos.x - 13.0, m.pos.y + 16.0) || col.is_solid(m.pos.x + 13.0, m.pos.y + 16.0);
             let hazard_below = (1..=12).any(|k| {
                 let y = m.pos.y + f64::from(k) * 32.0;
-                col.is_freeze(m.pos.x, y) || col.is_death(m.pos.x, y)
+                col.is_hazard(m.pos.x, y)
             });
             if !grounded && hazard_below {
                 self.cfg.jumpless_anchor_bonus
@@ -2950,7 +2957,7 @@ impl<W: PlanWorld> Planner<W> {
             } else if self.cfg.track_aim
                 && let (Some(m), Some(e)) = (me_now, en_now)
             {
-                aim += js::atan2(e.pos.y - m.pos.y, e.pos.x - m.pos.x);
+                aim += trig::atan2(e.pos.y - m.pos.y, e.pos.x - m.pos.x);
             }
             self.swing_target_frozen = en_now.is_some_and(|e| e.frozen);
             self.swing_rope_on = me_now.is_some_and(|m| m.hooked_player == enemy_id);
@@ -3086,10 +3093,17 @@ impl<W: PlanWorld> Planner<W> {
                     self.memory.as_ref(),
                     &self.thirds,
                     self.band.as_ref(),
+                    self.launch_memo.as_deref_mut(),
                 );
                 if let Some(t) = &self.threats {
-                    tick_score +=
-                        t.weight * crate::hybrid::threat::threat_terms(world, self_id, &t.ids[..thr_n], &self.cfg);
+                    tick_score += t.weight
+                        * crate::hybrid::threat::threat_terms(
+                            world,
+                            self_id,
+                            &t.ids[..thr_n],
+                            &self.cfg,
+                            self.launch_memo.as_deref_mut(),
+                        );
                 }
                 score += tick_score * (1.0 - (s as f64) / (plan.len() as f64 * 2.0));
             }

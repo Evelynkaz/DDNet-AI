@@ -1,0 +1,22 @@
+# Task 3.6 (D-076, E-010): The wall-clock rows: hybrid 4 ms WALL against the planner at 4 ms WALL, run with the old and the new binary on the same
+# seeds (the load average is recorded next to every run).
+#   ddnet-ai arena run --config configs/arena/e010-wall.toml --out ~/aiddnet/data/runs/E-010/wall-<binary> --threads 2
+name = "E-010: wall clock, hybrid 4 ms vs planner 4 ms"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WALL vs planner 4 ms WALL"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0 }, { brain = "planner", mode = "deadline", budget_ms = 4.0 }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WALL vs planner 4 ms WALL"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0 }, { brain = "planner", mode = "deadline", budget_ms = 4.0 }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms WALL vs planner 4 ms WALL"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0 }, { brain = "planner", mode = "deadline", budget_ms = 4.0 }]
+

@@ -1,0 +1,33 @@
+# E-010 (task 3.6): bit-identity check of the hybrid on the work clock at the OLD rate (2.2 us, pinned). The same small set of games is played by the
+# binary before and after the speed-ups; the per-game decision hashes, end ticks and work counters must be equal.
+#   ddnet-ai arena run --config configs/arena/e010-golden.toml --out <dir> --threads 2
+name = "E-010 golden"
+base_seed = 1
+games = 6
+
+[[condition]]
+name = "clb-left: hybrid 4 ms vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms vs planner fixed"
+arena = "clb-right"
+games = 4
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid 4 ms vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "1v3 hybrid 4 ms"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left: hybrid fixed vs scripted"
+arena = "clb-left"
+games = 3
+players = [{ brain = "hybrid", mode = "fixed" }, { brain = "scripted" }]

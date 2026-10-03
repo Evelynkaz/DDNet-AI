@@ -15,7 +15,7 @@ mode = "fixed"
 label = "warm 0, air 0.5"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5 }
 
@@ -23,7 +23,7 @@ hybrid = { jumpless_air_cost = 0.5 }
 label = "warm 0.5, air 0.5"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.5 }
 
@@ -31,7 +31,7 @@ hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.5 }
 label = "warm 0.7, air 0.5"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.7 }
 
@@ -39,7 +39,7 @@ hybrid = { jumpless_air_cost = 0.5, warm_bonus = 0.7 }
 label = "warm 1.0, air 0.5"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 0.5, warm_bonus = 1.0 }
 
@@ -47,6 +47,6 @@ hybrid = { jumpless_air_cost = 0.5, warm_bonus = 1.0 }
 label = "warm 0.7, air 1"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { jumpless_air_cost = 1.0, warm_bonus = 0.7 }

@@ -10,29 +10,29 @@ games = 400
 [[condition]]
 name = "base"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "prune 3/0.5"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { prune = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { prune = true } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "prune 2/0.35"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { prune = true, prune_steps = 2, prune_keep = 0.35 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { prune = true, prune_steps = 2, prune_keep = 0.35 } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "stage2 0.2"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_fraction = 0.2 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { stage2_fraction = 0.2 } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "stage2 0.2 + prune 3/0.5"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { stage2_fraction = 0.2, prune = true } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { stage2_fraction = 0.2, prune = true } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "top_m 2"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { top_m = 2 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { top_m = 2 } }, { brain = "planner", mode = "fixed" }]

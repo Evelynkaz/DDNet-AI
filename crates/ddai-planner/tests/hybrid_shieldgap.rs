@@ -22,7 +22,7 @@ use ddai_physics::map::{MapData, TILE_FREEZE, TILE_SOLID, Tile};
 use ddai_physics::tuning::TuningParams;
 use ddai_physics::world::World;
 use ddai_planner::brains::{ClockKind, ScriptedBrain, enemy_input_from_tee, input_from_action};
-use ddai_planner::hybrid::{HybridBrain, HybridConfig, NoProposer};
+use ddai_planner::hybrid::{HybridBrain, HybridConfig, NoProposer, WORK_US_PER_TEE_TICK};
 use ddai_planner::physics_adapter::PhysicsWorld;
 use ddai_planner::plan_world::PlanWorld;
 use ddai_planner::shield::{Bounded, escape_exists_bounded};
@@ -59,7 +59,7 @@ fn char_obs(w: &World<f32>, id: i32) -> Option<CharacterObservation> {
 fn variant(name: &str) -> HybridConfig {
     let mut cfg = HybridConfig {
         proposals: 0,
-        work_clock_us_per_tick: Some(2.2),
+        work_clock_us_per_tick: Some(WORK_US_PER_TEE_TICK),
         shield_plan_escape: false,
         shield_hook_anchors: 0,
         shield_timeout_danger: false,

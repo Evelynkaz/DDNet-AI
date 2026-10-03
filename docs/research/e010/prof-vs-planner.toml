@@ -1,0 +1,8 @@
+name = "E-010 profile: hybrid 4 ms work vs planner fixed"
+base_seed = 7
+games = 10
+
+[[condition]]
+name = "clb-left: hybrid 4 ms vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]

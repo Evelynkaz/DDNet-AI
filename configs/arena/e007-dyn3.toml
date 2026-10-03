@@ -9,29 +9,29 @@ games = 200
 [[condition]]
 name = "1v3 defaults"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 + dynamic stage 2 (3+ opponents)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, stage2_dynamic = true } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, stage2_dynamic = true } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v5 defaults"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 + dynamic stage 2 (3+ opponents)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, stage2_dynamic = true } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, stage2_dynamic = true } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v2 defaults"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false } }, { brain = "scripted", count = 2 }]
 
 [[condition]]
 name = "1v2 + dynamic stage 2 (3+ opponents)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, stage2_dynamic = true } }, { brain = "scripted", count = 2 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, stage2_dynamic = true } }, { brain = "scripted", count = 2 }]

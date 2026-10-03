@@ -8,14 +8,14 @@ trials = 200
 label = "base"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 
 [[brain]]
 label = "steps 6 x 3"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { plan_steps = 6 }
 
@@ -23,7 +23,7 @@ hybrid = { plan_steps = 6 }
 label = "steps 7 x 3"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { plan_steps = 7 }
 
@@ -31,7 +31,7 @@ hybrid = { plan_steps = 7 }
 label = "steps 9 x 2"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { plan_step_ticks = 2 }
 
@@ -39,6 +39,6 @@ hybrid = { plan_step_ticks = 2 }
 label = "steps 6 x 3 + dynamic"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { plan_steps = 6, stage2_dynamic = true }

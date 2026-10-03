@@ -9,59 +9,59 @@ games = 200
 [[condition]]
 name = "1v3 3.5 (all tees, no crowd stage)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 0 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 0 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 6"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 4"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 6 + crowd stage"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6, crowd_stage = true } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6, crowd_stage = true } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 cap 4 + crowd stage"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 1v1 model"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v5 3.5 (all tees, no crowd stage)"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 0 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 0 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 6"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 4"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 6 + crowd stage"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6, crowd_stage = true } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 6, crowd_stage = true } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 cap 4 + crowd stage"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 1v1 model"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, threat_model = false } }, { brain = "scripted", count = 5 }]

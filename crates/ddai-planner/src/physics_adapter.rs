@@ -147,6 +147,12 @@ impl PlanCollision for Collision32 {
         self.game_tile(tx, ty) == ddai_physics::map::TILE_UNFREEZE
             || front_tile(self, tx, ty) == ddai_physics::map::TILE_UNFREEZE
     }
+    /// One table read for `is_freeze || is_death` (same tile arithmetic as both).
+    fn is_hazard(&self, x: f64, y: f64) -> bool {
+        let tx = (x / 32.0).floor() as i32;
+        let ty = (y / 32.0).floor() as i32;
+        self.hazard_tile(tx, ty)
+    }
     fn is_no_hook(&self, x: f64, y: f64) -> bool {
         let tx = (x / 32.0).floor() as i32;
         let ty = (y / 32.0).floor() as i32;
@@ -257,6 +263,39 @@ pub struct PhysicsSavedState {
     pending_input: Box<[PlayerInput; MAX_CLIENTS]>,
     present: Box<[bool; MAX_CLIENTS]>,
     last_known: Box<[Option<TeeState>; MAX_CLIENTS]>,
+    fresh: Box<[bool; MAX_CLIENTS]>,
+    /// See [`PhysicsWorld::id_end`].
+    id_end: usize,
+}
+
+/// The four per-id bookkeeping arrays of a [`PhysicsWorld`] / [`PhysicsSavedState`], borrowed.
+struct IdArrays<'a> {
+    pending_input: &'a [PlayerInput; MAX_CLIENTS],
+    present: &'a [bool; MAX_CLIENTS],
+    last_known: &'a [Option<TeeState>; MAX_CLIENTS],
+    fresh: &'a [bool; MAX_CLIENTS],
+}
+
+/// [`IdArrays`], mutably.
+struct IdArraysMut<'a> {
+    pending_input: &'a mut [PlayerInput; MAX_CLIENTS],
+    present: &'a mut [bool; MAX_CLIENTS],
+    last_known: &'a mut [Option<TeeState>; MAX_CLIENTS],
+    fresh: &'a mut [bool; MAX_CLIENTS],
+}
+
+/// Copies the per-id bookkeeping arrays (`pending_input`, `present`, `last_known`, `fresh`) of `src` over
+/// those of `dst` and makes `dst_end` equal to `src_end`. Both worlds keep every entry at or beyond their
+/// `id_end` at its default (task 3.6: a rollout world has two to four tees, but these arrays hold 128 slots
+/// of ~80 B (inputs) and ~250 B (tee states): copying all of them on every restore was ~40 KB per rollout),
+/// so copying the prefix up to the larger of the two bounds reproduces `src` in `dst` exactly.
+fn copy_id_arrays(dst: IdArraysMut<'_>, dst_end: &mut usize, src: IdArrays<'_>, src_end: usize) {
+    let n = (*dst_end).max(src_end).min(MAX_CLIENTS);
+    dst.pending_input[..n].copy_from_slice(&src.pending_input[..n]);
+    dst.present[..n].copy_from_slice(&src.present[..n]);
+    dst.last_known[..n].copy_from_slice(&src.last_known[..n]);
+    dst.fresh[..n].copy_from_slice(&src.fresh[..n]);
+    *dst_end = src_end;
 }
 
 impl PhysicsSavedState {
@@ -265,9 +304,22 @@ impl PhysicsSavedState {
     /// the hybrid search copies one decision snapshot per worker per decision.
     pub fn assign_from(&mut self, other: &PhysicsSavedState) {
         self.world.restore_from(&other.world);
-        self.pending_input.clone_from(&other.pending_input);
-        self.present.clone_from(&other.present);
-        self.last_known.clone_from(&other.last_known);
+        copy_id_arrays(
+            IdArraysMut {
+                pending_input: &mut self.pending_input,
+                present: &mut self.present,
+                last_known: &mut self.last_known,
+                fresh: &mut self.fresh,
+            },
+            &mut self.id_end,
+            IdArrays {
+                pending_input: &other.pending_input,
+                present: &other.present,
+                last_known: &other.last_known,
+                fresh: &other.fresh,
+            },
+            other.id_end,
+        );
     }
 }
 
@@ -300,6 +352,18 @@ pub struct PhysicsWorld {
     /// returned (with `alive` forced `false`) once the core disappears -- see `get_tee`'s doc
     /// comment on this field for the exact contract.
     last_known: Box<[Option<TeeState>; MAX_CLIENTS]>,
+    /// Task 3.6: `fresh[id]` means `last_known[id]` is exactly what [`PhysicsWorld::snapshot_live`]
+    /// would return right now (the core is live and nothing has touched the world since the cache was
+    /// refreshed), so [`PlanWorld::get_tee`] can return it instead of rebuilding the whole `TeeState`
+    /// (jump bookkeeping with two collision probes, ~30 fields) on every one of the half dozen reads per
+    /// simulated tick. Cleared by anything that can change the world behind the cache's back
+    /// ([`PhysicsWorld::inner_mut`], a death), set only by [`PhysicsWorld::refresh_cache`], and saved and
+    /// restored with the state like `last_known` itself.
+    fresh: Box<[bool; MAX_CLIENTS]>,
+    /// Exclusive upper bound of the ids whose entry in `pending_input`/`present`/`last_known`/`fresh` was
+    /// ever written to a non-default value; every entry at or beyond it is the default (see
+    /// [`copy_id_arrays`]). Only ever raised, by [`PhysicsWorld::touch`], and lowered to the source's on a restore.
+    id_end: usize,
     step_scratch: StepScratch,
 }
 
@@ -312,6 +376,11 @@ fn no_last_known() -> Box<[Option<TeeState>; MAX_CLIENTS]> {
 }
 
 impl PhysicsWorld {
+    /// Records that the per-id arrays now hold a non-default entry for `id` (see [`PhysicsWorld::id_end`]).
+    fn touch(&mut self, id: usize) {
+        self.id_end = self.id_end.max(id + 1);
+    }
+
     /// Builds a fresh world from a map (`World::from_map` + `World::init`, matching how every
     /// other consumer of `ddai_physics::World` sets one up). `seed`: the core PRNG seed
     /// (`World::from_map`'s own doc comment).
@@ -324,6 +393,8 @@ impl PhysicsWorld {
             pending_input: neutral_input_array(),
             present: Box::new([false; MAX_CLIENTS]),
             last_known: no_last_known(),
+            fresh: Box::new([false; MAX_CLIENTS]),
+            id_end: 0,
             step_scratch: StepScratch::default(),
         }
     }
@@ -340,6 +411,8 @@ impl PhysicsWorld {
             pending_input: neutral_input_array(),
             present: Box::new([false; MAX_CLIENTS]),
             last_known: no_last_known(),
+            fresh: Box::new([false; MAX_CLIENTS]),
+            id_end: 0,
             step_scratch: StepScratch::default(),
         }
     }
@@ -355,6 +428,9 @@ impl PhysicsWorld {
         self.world.restore_from(src);
         for id in 0..MAX_CLIENTS {
             let alive_core = self.world.cores.slot_of(id as u8).is_some();
+            if alive_core {
+                self.touch(id);
+            }
             self.present[id] = alive_core;
             self.pending_input[id] = match (alive_core, self.world.characters[id].as_ref()) {
                 (true, Some(character)) => from_ddnet_input(&character.input),
@@ -364,6 +440,7 @@ impl PhysicsWorld {
                 self.refresh_cache(id as i32);
             } else {
                 self.last_known[id] = None;
+                self.fresh[id] = false;
             }
         }
     }
@@ -384,6 +461,8 @@ impl PhysicsWorld {
     /// (e.g. a live caller applying a server snapshot via `ddai_physics`'s own state-sync helpers
     /// before handing control to the planner).
     pub fn inner_mut(&mut self) -> &mut World<f32> {
+        // The caller may change anything: no cached tee state can be trusted afterwards.
+        self.fresh.fill(false);
         &mut self.world
     }
 
@@ -434,7 +513,11 @@ impl PhysicsWorld {
     /// fallback (review round 1, F2) to keep returning.
     fn refresh_cache(&mut self, id: i32) {
         if let Some(live) = self.snapshot_live(id) {
+            self.touch(id as usize);
             self.last_known[id as usize] = Some(live);
+            self.fresh[id as usize] = true;
+        } else {
+            self.fresh[id as usize] = false;
         }
     }
 }
@@ -470,6 +553,9 @@ impl PlanWorld for PhysicsWorld {
         if !(0..MAX_CLIENTS as i32).contains(&id) || !self.present[id as usize] {
             return None;
         }
+        if self.fresh[id as usize] {
+            return self.last_known[id as usize];
+        }
         match self.snapshot_live(id) {
             Some(live) => Some(live),
             None => {
@@ -502,6 +588,7 @@ impl PlanWorld for PhysicsWorld {
 
     fn set_input(&mut self, id: i32, input: PlayerInput) {
         if (0..MAX_CLIENTS as i32).contains(&id) {
+            self.touch(id as usize);
             self.pending_input[id as usize] = input;
         }
     }
@@ -548,7 +635,10 @@ impl PlanWorld for PhysicsWorld {
         sc.fire_before.clear();
         sc.pos_before.clear();
         sc.inputs.clear();
-        for id in 0..MAX_CLIENTS {
+        // Only up to the highest present id (a rollout has two to four tees; scanning all 128
+        // slots every tick showed up in the profile).
+        let present_end = self.present.iter().rposition(|&p| p).map_or(0, |hi| hi + 1);
+        for id in 0..present_end {
             if self.present[id] {
                 sc.ids.push(id as i32);
             }
@@ -667,22 +757,50 @@ impl PlanWorld for PhysicsWorld {
             pending_input: self.pending_input.clone(),
             present: self.present.clone(),
             last_known: self.last_known.clone(),
+            fresh: self.fresh.clone(),
+            id_end: self.id_end,
         }
     }
     fn save_state_into(&self, into: &mut Self::SavedState) {
         // `World::restore_from` (not the derived `clone_from`, which builds a fresh clone and drops
         // the old one): field-wise copy into the existing buffers, no allocation once warm.
         into.world.restore_from(&self.world);
-        into.pending_input.clone_from(&self.pending_input);
-        into.present.clone_from(&self.present);
-        into.last_known.clone_from(&self.last_known);
+        copy_id_arrays(
+            IdArraysMut {
+                pending_input: &mut into.pending_input,
+                present: &mut into.present,
+                last_known: &mut into.last_known,
+                fresh: &mut into.fresh,
+            },
+            &mut into.id_end,
+            IdArrays {
+                pending_input: &self.pending_input,
+                present: &self.present,
+                last_known: &self.last_known,
+                fresh: &self.fresh,
+            },
+            self.id_end,
+        );
     }
     fn restore_state(&mut self, state: &Self::SavedState) {
         // See `save_state_into`: `restore_from` reuses the world's buffers.
         self.world.restore_from(&state.world);
-        self.pending_input.clone_from(&state.pending_input);
-        self.present.clone_from(&state.present);
-        self.last_known.clone_from(&state.last_known);
+        copy_id_arrays(
+            IdArraysMut {
+                pending_input: &mut self.pending_input,
+                present: &mut self.present,
+                last_known: &mut self.last_known,
+                fresh: &mut self.fresh,
+            },
+            &mut self.id_end,
+            IdArrays {
+                pending_input: &state.pending_input,
+                present: &state.present,
+                last_known: &state.last_known,
+                fresh: &state.fresh,
+            },
+            state.id_end,
+        );
     }
 
     /// Review round 1, F3: an earlier revision silently no-op'd here when the core was missing
@@ -696,6 +814,9 @@ impl PlanWorld for PhysicsWorld {
         if !self.present[id as usize] {
             return;
         }
+        // Spawning and hook bookkeeping can touch other characters: no cached tee state survives this
+        // call except the one refreshed at its end.
+        self.fresh.fill(false);
         if self.world.cores.slot_of(id as u8).is_none() {
             ddai_physics::world::spawn_character(&mut self.world, id, to_p_vec2(st.pos));
         }
@@ -741,6 +862,7 @@ impl PlanWorld for PhysicsWorld {
         if st.frozen {
             self.world.cores.core_at_mut(slot).freeze_start = tick - (st.frozen_for.unwrap_or(0) as i32);
         }
+        self.touch(id as usize);
         self.present[id as usize] = true;
         self.refresh_cache(id);
     }
@@ -749,7 +871,9 @@ impl PlanWorld for PhysicsWorld {
         if !(0..MAX_CLIENTS as i32).contains(&id) {
             return;
         }
+        self.fresh.fill(false);
         ddai_physics::world::spawn_character(&mut self.world, id, to_p_vec2(pos));
+        self.touch(id as usize);
         self.present[id as usize] = true;
         self.pending_input[id as usize] = crate::types::empty_input();
         self.refresh_cache(id);
@@ -768,11 +892,13 @@ impl PlanWorld for PhysicsWorld {
         if !(0..MAX_CLIENTS as i32).contains(&id) {
             return;
         }
+        self.fresh.fill(false);
         if self.world.cores.slot_of(id as u8).is_some() {
             ddai_physics::world::die(&mut self.world, id, -1, -1);
         }
         self.present[id as usize] = false;
         self.last_known[id as usize] = None;
+        self.fresh[id as usize] = false;
     }
 
     fn apply_force(&mut self, id: i32, force: Vec2) {
@@ -1123,5 +1249,93 @@ mod tests {
             "a removed tee must never come back on its own"
         );
         let _ = pos_before;
+    }
+
+    /// Task 3.6: whatever mix of mutating calls ran, `get_tee` (served from the cache while `fresh`) returns
+    /// exactly what a fresh `snapshot_live` computes, and a restored state brings its cache along.
+    #[test]
+    fn the_tee_cache_never_differs_from_a_fresh_snapshot() {
+        use crate::types::{blank_tee_state, empty_input};
+        let mut s = 0x0123_4567_89AB_CDEFu64;
+        let mut next = move || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            s.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let mut w = PhysicsWorld::new(map_with_death(), 3);
+        let mut other = PhysicsWorld::new(map_with_death(), 3);
+        for id in 0..3 {
+            w.add_tee(
+                id,
+                Vec2 {
+                    x: 60.0 + 40.0 * f64::from(id),
+                    y: 200.0,
+                },
+            );
+        }
+        let mut saved = w.save_state();
+        let check = |w: &PhysicsWorld, what: &str| {
+            for id in 0..6 {
+                let cached = w.get_tee(id);
+                let fresh = if w.present[id as usize] {
+                    w.snapshot_live(id)
+                } else {
+                    None
+                };
+                if let (Some(c), Some(f)) = (cached, fresh) {
+                    assert_eq!(c, f, "{what}: tee {id}");
+                }
+                assert_eq!(cached.is_some(), w.present[id as usize], "{what}: presence of tee {id}");
+            }
+        };
+        for k in 0..600u32 {
+            let id = (next() % 4) as i32;
+            match next() % 12 {
+                0..=4 => {
+                    let mut input = empty_input();
+                    input.direction = (next() % 3) as i32 - 1;
+                    input.jump = (next() % 2) as i32;
+                    input.hook = (next() % 2) as i32;
+                    input.target_x = (next() % 200) as f64 - 100.0;
+                    input.target_y = (next() % 200) as f64 - 100.0;
+                    w.set_input(id, input);
+                    w.step();
+                }
+                5 => {
+                    let mut st = blank_tee_state();
+                    st.id = id;
+                    st.alive = true;
+                    st.pos = Vec2 {
+                        x: 30.0 + (next() % 150) as f64,
+                        y: 150.0,
+                    };
+                    st.vel = Vec2 {
+                        x: (next() % 9) as f64 - 4.0,
+                        y: 0.0,
+                    };
+                    st.frozen = next() % 3 == 0;
+                    st.freeze_ticks_left = 40;
+                    w.apply_tee_state(id, &st);
+                }
+                6 => w.apply_force(id, Vec2 { x: 5.0, y: -7.0 }),
+                7 => w.unfreeze(id),
+                8 => saved = w.save_state(),
+                9 => w.restore_state(&saved),
+                10 => {
+                    if w.inner().cores.slot_of(id as u8).is_none() {
+                        w.add_tee(id, Vec2 { x: 120.0, y: 100.0 });
+                    } else {
+                        w.remove_tee(id);
+                    }
+                }
+                _ => {
+                    other.restore_state(&saved);
+                    other.step();
+                    w.sync_from(other.inner());
+                }
+            }
+            check(&w, &format!("op {k}"));
+        }
     }
 }

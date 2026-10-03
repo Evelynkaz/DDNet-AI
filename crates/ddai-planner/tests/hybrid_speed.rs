@@ -19,7 +19,9 @@ use ddai_physics::map::MapData;
 use ddai_physics::tuning::TuningParams;
 use ddai_physics::world::World;
 use ddai_planner::brains::{ClockKind, ScriptedBrain, input_from_action};
-use ddai_planner::hybrid::{HybridBrain, HybridConfig, HybridMode, NoProposer, Proposer, ScriptedProposer};
+use ddai_planner::hybrid::{
+    HybridBrain, HybridConfig, HybridMode, NoProposer, Proposer, ScriptedProposer, WORK_US_PER_TEE_TICK,
+};
 use ddai_planner::physics_adapter::PhysicsWorld;
 use ddai_planner::plan_world::PlanWorld;
 use ddai_planner::types::{PlayerInput, empty_input};
@@ -112,6 +114,16 @@ struct Row {
     extended: u64,
     shield_incomplete: u64,
     decisions: u64,
+    /// FNV-1a over every decision's action, work counters and candidate counts: equal digests mean
+    /// bit-identical decisions (the speed-ups of task 3.6 must not change it on the work clock).
+    digest: u64,
+}
+
+fn fnv(h: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *h ^= u64::from(b);
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
 }
 
 /// Plays scenes of `tees` tees (slot 0 = the hybrid, the others scripted attackers) on the left
@@ -135,6 +147,7 @@ fn run(map: &Arc<MapData>, cfg: &HybridConfig, proposer: Box<dyn Proposer>, tees
         extended: 0,
         shield_incomplete: 0,
         decisions: 0,
+        digest: 0xcbf2_9ce4_8422_2325,
     };
     let ids: Vec<i32> = (0..tees as i32).collect();
     let mut hybrid = HybridBrain::new(cfg.clone(), ClockKind::Wall, proposer).expect("config");
@@ -220,6 +233,17 @@ fn run(map: &Arc<MapData>, cfg: &HybridConfig, proposer: Box<dyn Proposer>, tees
                     row.extended += u64::from(t.extended);
                     row.shield_incomplete += u64::from(t.shield_incomplete);
                     row.decisions += 1;
+                    fnv(
+                        &mut row.digest,
+                        format!(
+                            "{a:?}|{}|{}|{:?}|{:?}",
+                            t.work.total_ticks(),
+                            t.sim_tees,
+                            t.evaluated,
+                            t.work
+                        )
+                        .as_bytes(),
+                    );
                     a
                 } else {
                     scripted[slot - 1].decide_in(&obs, Some(&view))
@@ -291,9 +315,9 @@ fn line(label: &str, r: &mut Row, us: f64) -> String {
         pct(&mut r.cands, 99.0),
     ];
     let tt = [
-        pct(&mut r.tee_ticks, 50.0) * 2.2 / 1000.0,
-        pct(&mut r.tee_ticks, 90.0) * 2.2 / 1000.0,
-        pct(&mut r.tee_ticks, 99.0) * 2.2 / 1000.0,
+        pct(&mut r.tee_ticks, 50.0) * WORK_US_PER_TEE_TICK / 1000.0,
+        pct(&mut r.tee_ticks, 90.0) * WORK_US_PER_TEE_TICK / 1000.0,
+        pct(&mut r.tee_ticks, 99.0) * WORK_US_PER_TEE_TICK / 1000.0,
     ];
     format!(
         "| {label} | {:.2} / {:.2} / {:.2} | {:.0} / {:.0} / {:.0} | {:.2} / {:.2} / {:.2} | {:.2} / {:.2} / {:.2} | {:.0} / {:.0} / {:.0} | {:.1}% |",
@@ -316,7 +340,7 @@ fn line(label: &str, r: &mut Row, us: f64) -> String {
     )
 }
 
-const HEADER: &str = "| Condition | wall ms p50/p90/p99 | work ticks p50/p90/p99 | physics-only ms (ticks x us/tick) p50/p90/p99 | work ms (tee-ticks x 2.2 us, the work-clock calibration) p50/p90/p99 | candidates p50/p90/p99 | extended |\n|---|---|---|---|---|---|---|";
+const HEADER: &str = "| Condition | wall ms p50/p90/p99 | work ticks p50/p90/p99 | physics-only ms (ticks x us/tick) p50/p90/p99 | work ms (tee-ticks x the work-clock calibration, WORK_US_PER_TEE_TICK) p50/p90/p99 | candidates p50/p90/p99 | extended |\n|---|---|---|---|---|---|---|";
 
 #[test]
 #[ignore = "heavy; needs the Copy Love Box map"]
@@ -384,7 +408,10 @@ fn speed_report() {
     }
 
     println!("\n### Work clock (deterministic, load-independent): decision work by tee count and shield reserve\n");
-    println!("Budget 4 ms of work = 1 818 tee-ticks, no proposer; work ms = tee-ticks x 2.2 us.\n");
+    println!(
+        "Budget 4 ms of work = {:.0} tee-ticks, no proposer; work ms = tee-ticks x {WORK_US_PER_TEE_TICK} us.\n",
+        4000.0 / WORK_US_PER_TEE_TICK
+    );
     println!(
         "| tees | decision cap ms | shield reserve ms/tee | adaptive | work ms p50 / p90 / p99 / max | candidates p50 | shield incomplete | search extended |\n|---|---|---|---|---|---|---|---|"
     );
@@ -400,12 +427,12 @@ fn speed_report() {
             (Some(5.0), 0.25, true, true),
         ] {
             let mut cfg = deadline(4.0, 1, adaptive, 0);
-            cfg.work_clock_us_per_tick = Some(2.2);
+            cfg.work_clock_us_per_tick = Some(WORK_US_PER_TEE_TICK);
             cfg.decision_cap_ms = cap;
             cfg.shield_reserve_ms_per_tee = reserve;
             cfg.shield_timeout_danger = timeout_danger;
             let mut r = run(&map, &cfg, Box::new(NoProposer), tees, n * 2);
-            let ms = |v: &mut Vec<f64>, p: f64| pct(v, p) * 2.2 / 1000.0;
+            let ms = |v: &mut Vec<f64>, p: f64| pct(v, p) * WORK_US_PER_TEE_TICK / 1000.0;
             println!(
                 "| {tees} | {} | {reserve} | {} | {:.2} / {:.2} / {:.2} / {:.2} | {:.0} | {:.1}% | {:.1}% |",
                 cap.map_or("none".to_string(), |c| format!("{c}")),
@@ -465,4 +492,80 @@ fn speed_report() {
         n,
     );
     println!("{}", line("scripted proposer K=3", &mut r, us4));
+}
+
+/// The work clock's calibration (task 3.6, D-045 amended): real microseconds per tee-tick of a whole
+/// decision (rollouts, scoring, shield, search bookkeeping) at the work-clock budget of 4 ms, on 2 and 4
+/// tees, plus the decision digest that proves the decisions did not change. `DDAI_CAL_REPS` repetitions
+/// (default 5); the minimum over repetitions is the least noisy estimate on a shared VM.
+///
+/// ```text
+/// cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture calibration_report
+/// ```
+#[test]
+#[ignore = "heavy; needs the Copy Love Box map"]
+fn calibration_report() {
+    let Some(map) = clb() else {
+        eprintln!("no Copy Love Box map; skipping");
+        return;
+    };
+    let n: usize = std::env::var("DDAI_SPEED_DECISIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    let reps: usize = std::env::var("DDAI_CAL_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    // The work-clock rate the decisions are made at (default: the old 2.2 us, so an old and a new build
+    // compare on the same decisions; `DDAI_CAL_US=1.25` measures the cost at the calibrated rate).
+    let cal_us: f64 = std::env::var("DDAI_CAL_US")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2.2);
+    println!("work clock {cal_us} us per tee-tick");
+    println!(
+        "\n| tees | us per tee-tick (min / median over {reps} runs) | per-decision us per tee-tick p50 / p99 | decision wall ms p50 / p99 | work ms (tee-ticks x rate) p50 / p99 | candidates p50 | tee-ticks p50 | digest |\n|---|---|---|---|---|---|---|---|"
+    );
+    for tees in [2usize, 4] {
+        let mut cfg = deadline(4.0, 1, false, 0);
+        cfg.work_clock_us_per_tick = Some(cal_us);
+        let mut ratios = Vec::new();
+        let mut last = None;
+        for _ in 0..reps {
+            let mut r = run(&map, &cfg, Box::new(NoProposer), tees, n);
+            let wall: f64 = r.wall.iter().sum();
+            let tt: f64 = r.tee_ticks.iter().sum();
+            ratios.push(wall * 1000.0 / tt);
+            if let Some((_, d)) = &last {
+                assert_eq!(*d, r.digest, "decisions on the work clock must be reproducible");
+            }
+            last = Some((
+                r.wall
+                    .iter()
+                    .zip(&r.tee_ticks)
+                    .map(|(w, t)| w * 1000.0 / t.max(1.0))
+                    .collect::<Vec<f64>>(),
+                r.digest,
+            ));
+            if ratios.len() == reps {
+                let mut per = last.as_ref().unwrap().0.clone();
+                let mut rr = ratios.clone();
+                println!(
+                    "| {tees} | {:.3} / {:.3} | {:.3} / {:.3} | {:.2} / {:.2} | {:.2} / {:.2} | {:.0} | {:.0} | {:016x} |",
+                    pct(&mut rr.clone(), 0.0),
+                    pct(&mut rr, 50.0),
+                    pct(&mut per, 50.0),
+                    pct(&mut per, 99.0),
+                    pct(&mut r.wall, 50.0),
+                    pct(&mut r.wall, 99.0),
+                    pct(&mut r.tee_ticks, 50.0) * cal_us / 1000.0,
+                    pct(&mut r.tee_ticks, 99.0) * cal_us / 1000.0,
+                    pct(&mut r.cands, 50.0),
+                    pct(&mut r.tee_ticks, 50.0),
+                    r.digest
+                );
+            }
+        }
+    }
 }

@@ -16,7 +16,7 @@ use ddai_physics::map::MapData;
 use ddai_physics::tuning::TuningParams;
 use ddai_physics::world::World;
 use ddai_planner::brains::{ClockKind, ScriptedBrain, input_from_action};
-use ddai_planner::hybrid::{HybridBrain, HybridConfig, NoProposer};
+use ddai_planner::hybrid::{HybridBrain, HybridConfig, NoProposer, WORK_US_PER_TEE_TICK};
 use ddai_planner::physics_adapter::PhysicsWorld;
 use ddai_planner::plan_world::PlanWorld;
 use ddai_planner::types::{PlayerInput, empty_input};
@@ -68,7 +68,7 @@ struct Row {
 fn measure(map: &Arc<MapData>, max_sim_tees: usize, bystanders: usize, attackers: bool) -> Row {
     let cfg = HybridConfig {
         proposals: 0,
-        work_clock_us_per_tick: Some(2.2),
+        work_clock_us_per_tick: Some(WORK_US_PER_TEE_TICK),
         max_sim_tees,
         ..HybridConfig::default()
     };
@@ -171,7 +171,7 @@ fn measure(map: &Arc<MapData>, max_sim_tees: usize, bystanders: usize, attackers
                     cands.push(f64::from(n));
                     budget.push(t.budget_ms);
                     sim.push(f64::from(t.sim_tees));
-                    work.push(t.work.total_ticks() as f64 * f64::from(t.sim_tees) * 2.2 / 1000.0);
+                    work.push(t.work.total_ticks() as f64 * f64::from(t.sim_tees) * WORK_US_PER_TEE_TICK / 1000.0);
                     tiny += u64::from(n <= 2);
                     a
                 } else if slot == 1 {

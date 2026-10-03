@@ -1,0 +1,556 @@
+diff --git a/crates/ddai-physics/src/collision.rs b/crates/ddai-physics/src/collision.rs
+index 9d4c8a3..061fb07 100644
+--- a/crates/ddai-physics/src/collision.rs
++++ b/crates/ddai-physics/src/collision.rs
+@@ -731,6 +731,7 @@ impl<R: Real> Collision<R> {
+         distance: R,
+         override_center_tile_index: Option<i32>,
+     ) -> i32 {
++    let _g = crate::sampler::enter(crate::sampler::PH_MOVERESTR);
+         assert!(
+             distance >= R::ZERO && distance <= R::from_i32(32),
+             "invalid distance {distance:?}"
+@@ -774,6 +775,7 @@ impl<R: Real> Collision<R> {
+ 
+     /// The 2-argument overload (`GetMoveRestrictions(vec2, float)`): no switch callback.
+     pub fn get_move_restrictions_simple(&self, pos: Vec2<R>, distance: R) -> i32 {
++    let _g = crate::sampler::enter(crate::sampler::PH_MOVERESTR);
+         self.get_move_restrictions::<fn(u8) -> bool>(None, pos, distance, None)
+     }
+ 
+@@ -791,6 +793,7 @@ impl<R: Real> Collision<R> {
+     /// produced a hit for still runs the loop exactly as before (this only ever substitutes for
+     /// the "no hit" outcome, never changes which inputs hit or what they hit).
+     pub fn intersect_line(&self, pos0: Vec2<R>, pos1: Vec2<R>) -> LineHit<R> {
++    let _g = crate::sampler::enter(crate::sampler::COL_LINE);
+         self.intersect_line_impl(pos0, pos1, true)
+     }
+ 
+@@ -909,6 +912,7 @@ impl<R: Real> Collision<R> {
+     /// `g_Config.m_SvOldTeleportHook` — pass `false` to match Oracle A's zero-initialized config
+     /// (see the module doc comment).
+     pub fn intersect_line_tele_hook(&self, pos0: Vec2<R>, pos1: Vec2<R>, sv_old_teleport_hook: bool) -> HookHit<R> {
++    let _g = crate::sampler::enter(crate::sampler::COL_HOOK);
+         let distance = vmath::distance(pos0, pos1);
+         let end = (distance + R::ONE).to_i32_trunc();
+         let mut last = pos0;
+@@ -1206,6 +1210,7 @@ impl<R: Real> Collision<R> {
+     /// doc comment for why skipping only the collision queries (not the loop shape) is what stays
+     /// bit-exact.
+     pub fn move_box(&self, pos: Vec2<R>, vel: Vec2<R>, size: Vec2<R>, elasticity: Vec2<R>) -> (Vec2<R>, Vec2<R>, bool) {
++    let _g = crate::sampler::enter(crate::sampler::COL_MOVEBOX);
+         self.move_box_impl(pos, vel, size, elasticity, true)
+     }
+ 
+@@ -1680,6 +1685,7 @@ impl<R: Real> Collision<R> {
+     /// `tile_exists` tile — freeze/speedup/stopper/tele/switch/kill/etc, i.e. most of a real
+     /// map's gameplay-relevant tiles — not a rare event the way `can_spawn`'s own allocation is).
+     pub fn get_map_indices_into(&self, prev_pos: Vec2<R>, pos: Vec2<R>, max_indices: usize, out: &mut Vec<i32>) {
++    let _g = crate::sampler::enter(crate::sampler::PH_MAPIDX);
+         out.clear();
+         let d = vmath::distance(prev_pos, pos);
+         if d == R::ZERO {
+diff --git a/crates/ddai-physics/src/core.rs b/crates/ddai-physics/src/core.rs
+index 881fcbc..dc95f5d 100644
+--- a/crates/ddai-physics/src/core.rs
++++ b/crates/ddai-physics/src/core.rs
+@@ -1202,6 +1202,7 @@ pub fn tick<R: Real, const CAP: usize>(
+     use_input: bool,
+     do_deferred_tick: bool,
+ ) {
++    let _g = crate::sampler::enter(crate::sampler::PH_CORE_TICK);
+     let self_id = world.ids[self_slot];
+     let mut me = world.cores[self_slot];
+ 
+@@ -1482,6 +1483,7 @@ fn tick_deferred_body<R: Real, const CAP: usize>(
+     teams: &TeamsCore,
+     me: &mut CharacterCore<R>,
+ ) {
++    let _g = crate::sampler::enter(crate::sampler::PH_PLCOLL);
+     for slot in 0..world.len {
+         if slot == self_slot {
+             continue;
+@@ -1578,6 +1580,7 @@ pub fn move_character<R: Real, const CAP: usize>(
+     collision: &Collision<R>,
+     teams: &TeamsCore,
+ ) {
++    let _g = crate::sampler::enter(crate::sampler::PH_MOVE);
+     let mut me = world.cores[self_slot];
+ 
+     let ramp_value = velocity_ramp(
+diff --git a/crates/ddai-physics/src/lib.rs b/crates/ddai-physics/src/lib.rs
+index 969b255..67e611b 100644
+--- a/crates/ddai-physics/src/lib.rs
++++ b/crates/ddai-physics/src/lib.rs
+@@ -18,6 +18,7 @@
+ 
+ /// Port of 20.1 `CCollision` (`src/game/collision.{h,cpp}`).
+ pub mod collision;
++pub mod sampler;
+ /// Port of 20.1 `CCharacterCore`/`CWorldCore`/`CTeamsCore` (`src/game/gamecore.{h,cpp}`,
+ /// `src/game/teamscore.{h,cpp}`).
+ pub mod core;
+diff --git a/crates/ddai-physics/src/sampler.rs b/crates/ddai-physics/src/sampler.rs
+new file mode 100644
+index 0000000..b92e494
+--- /dev/null
++++ b/crates/ddai-physics/src/sampler.rs
+@@ -0,0 +1,80 @@
++//! Scratch sampling-profiler markers (task 3.6, NOT part of the final diff).
++use std::sync::atomic::{AtomicU8, Ordering};
++pub static PHASE: AtomicU8 = AtomicU8::new(0);
++pub static CTX: AtomicU8 = AtomicU8::new(0);
++pub struct CtxGuard(u8);
++impl Drop for CtxGuard {
++    fn drop(&mut self) {
++        CTX.store(self.0, Ordering::Relaxed);
++    }
++}
++pub fn ctx(c: u8) -> CtxGuard {
++    let prev = CTX.load(Ordering::Relaxed);
++    CTX.store(c, Ordering::Relaxed);
++    CtxGuard(prev)
++}
++pub struct Guard(u8);
++impl Drop for Guard {
++    #[inline(always)]
++    fn drop(&mut self) {
++        PHASE.store(self.0, Ordering::Relaxed);
++    }
++}
++#[inline(always)]
++pub fn enter(p: u8) -> Guard {
++    let prev = PHASE.load(Ordering::Relaxed);
++    PHASE.store(p, Ordering::Relaxed);
++    Guard(prev)
++}
++pub const OUT: u8 = 0;
++pub const DECIDE: u8 = 1;
++pub const EV_PRE: u8 = 2;
++pub const EV_STI: u8 = 3;
++pub const EV_OPP: u8 = 4;
++pub const EV_SETIN: u8 = 5;
++pub const ADP_STEP_PRE: u8 = 6;
++pub const PH_STEP: u8 = 7;
++pub const PH_MISC: u8 = 8;
++pub const PH_CORE_TICK: u8 = 9;
++pub const PH_TILES: u8 = 10;
++pub const PH_WEAPONS: u8 = 11;
++pub const PH_MOVE: u8 = 12;
++pub const COL_MOVEBOX: u8 = 13;
++pub const COL_HOOK: u8 = 14;
++pub const COL_LINE: u8 = 15;
++pub const ADP_STEP_POST: u8 = 16;
++pub const ADP_REFRESH: u8 = 17;
++pub const ADP_GETTEE: u8 = 18;
++pub const EV_BOOK: u8 = 19;
++pub const EV_SCORE: u8 = 20;
++pub const SC_RAYS: u8 = 21;
++pub const EV_THREAT: u8 = 22;
++pub const EV_FINAL: u8 = 23;
++pub const ADP_RESTORE: u8 = 24;
++pub const SHIELD: u8 = 25;
++pub const PROPOSER: u8 = 26;
++pub const PH_CTICK_SELF: u8 = 27;
++pub const PH_DEFERRED: u8 = 28;
++pub const SC_LAUNCH_EXACT: u8 = 29;
++pub const EV_STEPLOOP: u8 = 30;
++pub const PH_PROJ: u8 = 31;
++pub const PH_FIX: u8 = 32;
++pub const PH_PICK: u8 = 33;
++pub const PH_RETAIN: u8 = 34;
++pub const PH_PLAYERTICK: u8 = 35;
++pub const PH_SKIP_TILES: u8 = 36;
++pub const PH_MAPIDX: u8 = 37;
++pub const PH_HANDLE_TILES: u8 = 38;
++pub const PH_TUNE: u8 = 39;
++pub const PH_PLCOLL: u8 = 40;
++pub const PH_MOVERESTR: u8 = 41;
++pub const PH_EARLY: u8 = 42;
++pub const PH_DDTICK: u8 = 43;
++pub const NAMES: [&str; 48] = [
++    "outside-hybrid", "decide-misc(search gen, cands, choose)", "eval prelude", "eval step_to_input+hook_allowed", "eval opponent model",
++    "eval set_input", "adapter step_into pre", "World::step self", "phys misc(proj/fixt/pickups/retain/sw)", "phys core::tick (hook,input,gravity)",
++    "phys tiles (ddrace_post_core_tick)", "phys weapons", "phys move_character self", "collision move_box", "collision hook ray",
++    "collision intersect_line", "adapter step_into post(events)", "adapter refresh_cache(snapshot_live)", "adapter get_tee(snapshot_live)",
++    "eval per-tick bookkeeping", "score_tick self", "score_tick rays(launch/drag)", "threat_terms", "eval final terms",
++    "adapter restore_state", "shield", "proposer", "phys character_tick self", "phys deferred(quantize)", "score launch_flight(exact)", "eval step loop self", "phys projectiles", "phys fixtures", "phys pickups", "phys retain+swid", "phys player_tick loop", "phys handle_skippable_tiles", "phys get_map_indices", "phys handle_tiles", "phys handle_tune_layer", "phys player-collision loop (deferred body)", "phys get_move_restrictions", "phys step early input", "phys ddrace_tick", "-","-","-","-",
++];
+diff --git a/crates/ddai-physics/src/world.rs b/crates/ddai-physics/src/world.rs
+index 65b54f9..ec53c98 100644
+--- a/crates/ddai-physics/src/world.rs
++++ b/crates/ddai-physics/src/world.rs
+@@ -113,9 +113,15 @@ macro_rules! phase_time {
+ }
+ #[cfg(not(feature = "phase_profile"))]
+ macro_rules! phase_time {
+-    ($field:ident, $body:expr) => {
+-        $body
+-    };
++    (projectiles, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_PROJ); $body }};
++    (fixtures, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_FIX); $body }};
++    (pickups, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_PICK); $body }};
++    (retain, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_RETAIN); $body }};
++    (strong_weak_id_pass, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_RETAIN); $body }};
++    (switch_expiry, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_RETAIN); $body }};
++    (character_pre_tick_pass, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_CTICK_SELF); $body }};
++    (character_tick_pass, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_CTICK_SELF); $body }};
++    (character_deferred_pass, $body:expr) => {{ let _g = crate::sampler::enter(crate::sampler::PH_DEFERRED); $body }};
+ }
+ 
+ /// `TuneZone::NUM` (`engine/shared/protocol.h`): `CGameContext::m_aTuningList`'s size.
+@@ -2248,6 +2254,7 @@ pub fn handle_tune_layer<R: Real>(
+     collision: &Collision<R>,
+     tuning: &TuningList,
+ ) {
++    let _g = crate::sampler::enter(crate::sampler::PH_TUNE);
+     character.tune_zone_old = character.tune_zone;
+     let current_index = collision.get_map_index(core.pos);
+     character.tune_zone = collision.is_tune(current_index);
+@@ -2265,6 +2272,7 @@ pub fn ddrace_tick<R: Real>(
+     collision: &Collision<R>,
+     tuning: &TuningList,
+ ) {
++    let _g = crate::sampler::enter(crate::sampler::PH_DDTICK);
+     // `mem_copy(&m_Input, &m_SavedInput, ...)` (`character.cpp:2230`) — `m_Input` here is
+     // `CCharacter`'s own field, copied into `m_Core.m_Input` separately by `PreTick()`
+     // (`character.cpp:814`, after this function returns — see [`character_pre_tick`]).
+@@ -2385,6 +2393,7 @@ fn apply_team_change_side_effects<R: Real>(world: &mut World<R>, id: i32, change
+ /// callers must stop touching this character's fields immediately if this returns `false`,
+ /// matching `if(!m_Alive) return;` at every C++ call site).
+ pub fn handle_skippable_tiles<R: Real>(world: &mut World<R>, id: i32, index: i32) -> bool {
++    let _g = crate::sampler::enter(crate::sampler::PH_SKIP_TILES);
+     let team = world.teams_core.team(id);
+     let Some(slot) = world.cores.slot_of(id as u8) else {
+         return false;
+@@ -2750,6 +2759,7 @@ pub fn handle_character_tiles<R: Real>(world: &mut World<R>, id: i32, map_index:
+ /// `SendChatTarget` (cosmetic) and `SetTimeCheckpoint`/broadcast bookkeeping (no compared field).
+ #[allow(clippy::too_many_lines)]
+ pub fn handle_tiles<R: Real>(world: &mut World<R>, id: i32, map_index: i32) {
++    let _g = crate::sampler::enter(crate::sampler::PH_HANDLE_TILES);
+     let Some(slot) = world.cores.slot_of(id as u8) else {
+         return;
+     };
+@@ -3288,6 +3298,7 @@ fn release_hooked_by_others<R: Real>(world: &mut World<R>, id: i32) {
+ /// calls (cosmetic; the position/velocity changes themselves are kept). Returns whether the
+ /// character is still alive (`HandleSkippableTiles`/`HandleTiles` may kill it).
+ pub fn ddrace_post_core_tick<R: Real>(world: &mut World<R>, id: i32) -> bool {
++    let _g = crate::sampler::enter(crate::sampler::PH_TILES);
+     let Some(slot) = world.cores.slot_of(id as u8) else {
+         return false;
+     };
+@@ -3781,6 +3792,7 @@ pub fn handle_jetpack<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
+ 
+ /// `CCharacter::HandleWeapons()` (`character.cpp:658-676`), minus `HandleNinja` (Stage B).
+ pub fn handle_weapons<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
++    let _g = crate::sampler::enter(crate::sampler::PH_WEAPONS);
+     handle_jetpack(world, id, slot);
+     let reload = world.characters[id as usize].unwrap().reload_timer;
+     if reload != 0 {
+@@ -4839,6 +4851,7 @@ impl<R: Real> World<R> {
+     ///
+     /// In debug builds, if `inputs` isn't sorted by ascending `id`.
+     pub fn step(&mut self, inputs: &[TickInput]) {
++        let _g = crate::sampler::enter(crate::sampler::PH_STEP);
+         debug_assert!(
+             inputs.windows(2).all(|w| w[0].id < w[1].id),
+             "World::step: inputs must be sorted by ascending client id"
+@@ -4859,6 +4872,7 @@ impl<R: Real> World<R> {
+         //    increments. This is the phase that actually calls `HandleWeaponSwitch`/`FireWeapon`
+         //    — *not* `OnPredictedInput` below, despite the name (see this function's citations;
+         //    an earlier revision of this port had the two swapped).
++        let _ge = crate::sampler::enter(crate::sampler::PH_EARLY);
+         for ti in inputs {
+             let id = ti.id as i32;
+             player_early_input(self, id, ti.input.fire);
+@@ -4891,6 +4905,7 @@ impl<R: Real> World<R> {
+         //    instead, so a player who sent no input this tick (an idle spectator-turned-player,
+         //    or simply every id `step`'s caller didn't bother building an entry for) never got
+         //    its own respawn bookkeeping run and could never respawn.
++        let _gpt = crate::sampler::enter(crate::sampler::PH_PLAYERTICK);
+         for id in 0..MAX_CLIENTS {
+             if self.players[id].is_some() {
+                 player_tick(self, id as i32);
+diff --git a/crates/ddai-planner/src/brains.rs b/crates/ddai-planner/src/brains.rs
+index dc906a3..b8bbe22 100644
+--- a/crates/ddai-planner/src/brains.rs
++++ b/crates/ddai-planner/src/brains.rs
+@@ -247,6 +247,7 @@ impl Brain for ScriptedBrain {
+     }
+ 
+     fn decide_in(&mut self, obs: &Observation, view: Option<&WorldView<'_>>) -> Action {
++        let _gx = ddai_physics::sampler::ctx(3);
+         let Some(view) = view else {
+             return self.decide(obs);
+         };
+@@ -530,6 +531,7 @@ impl Brain for PlannerBrain {
+     }
+ 
+     fn decide_in(&mut self, obs: &Observation, view: Option<&WorldView<'_>>) -> Action {
++        let _gx = ddai_physics::sampler::ctx(3);
+         let Some(view) = view else {
+             return self.decide(obs);
+         };
+diff --git a/crates/ddai-planner/src/fields.rs b/crates/ddai-planner/src/fields.rs
+index c8daa73..6769869 100644
+--- a/crates/ddai-planner/src/fields.rs
++++ b/crates/ddai-planner/src/fields.rs
+@@ -224,6 +224,7 @@ pub fn wrap_angle(mut a: f64) -> f64 {
+ 
+ /// `dragCrossesHazard(collision, at, from, separation)` (`planner.ts:610-621`).
+ pub fn drag_crosses_hazard(col: &impl PlanCollision, at: Vec2, from: Vec2, separation: f64) -> f64 {
++    let _g = ddai_physics::sampler::enter(ddai_physics::sampler::SC_RAYS);
+     let dx = (from.x - at.x) / separation;
+     let dy = (from.y - at.y) / separation;
+     for px in [TILE_PX, 2.0 * TILE_PX, 3.0 * TILE_PX] {
+@@ -244,6 +245,7 @@ pub fn drag_crosses_hazard(col: &impl PlanCollision, at: Vec2, from: Vec2, separ
+ 
+ /// `launchLandsInHazard(collision, at, from, separation)` (`planner.ts:623-639`).
+ pub fn launch_lands_in_hazard(col: &impl PlanCollision, at: Vec2, from: Vec2, separation: f64) -> f64 {
++    let _g = ddai_physics::sampler::enter(ddai_physics::sampler::SC_RAYS);
+     let hx = if separation > 0.0 {
+         (at.x - from.x) / separation
+     } else {
+@@ -324,6 +326,7 @@ pub fn launch_flight_lands_in_hazard(
+     separation: f64,
+     vel: Vec2,
+ ) -> f64 {
++    let _g = ddai_physics::sampler::enter(ddai_physics::sampler::SC_LAUNCH_EXACT);
+     let hx = if separation > 0.0 {
+         (at.x - from.x) / separation
+     } else {
+@@ -399,6 +402,7 @@ const FLIGHT_PROBE_TICKS: [f64; 4] = [6.0, 12.0, 18.0, 24.0];
+ 
+ /// `flightEndsInHazard(collision, pos, vel)` (`planner.ts:778-790`).
+ pub fn flight_ends_in_hazard(col: &impl PlanCollision, pos: Vec2, vel: Vec2) -> f64 {
++    let _g = ddai_physics::sampler::enter(ddai_physics::sampler::SC_RAYS);
+     let half = PHYSICAL_SIZE / 2.0;
+     let grounded = col.is_solid(pos.x + half, pos.y + half + 5.0) || col.is_solid(pos.x - half, pos.y + half + 5.0);
+     for t in FLIGHT_PROBE_TICKS {
+diff --git a/crates/ddai-planner/src/hybrid/brain.rs b/crates/ddai-planner/src/hybrid/brain.rs
+index 0540927..587e321 100644
+--- a/crates/ddai-planner/src/hybrid/brain.rs
++++ b/crates/ddai-planner/src/hybrid/brain.rs
+@@ -414,6 +414,7 @@ impl Brain for HybridBrain {
+     }
+ 
+     fn decide_in(&mut self, obs: &Observation, view: Option<&WorldView<'_>>) -> Action {
++        let _gd = ddai_physics::sampler::enter(ddai_physics::sampler::DECIDE);
+         self.viz_fresh = false;
+         let Some(view) = view else {
+             return self.decide(obs);
+diff --git a/crates/ddai-planner/src/hybrid/search.rs b/crates/ddai-planner/src/hybrid/search.rs
+index 90edbd3..e7898a8 100644
+--- a/crates/ddai-planner/src/hybrid/search.rs
++++ b/crates/ddai-planner/src/hybrid/search.rs
+@@ -990,6 +990,7 @@ impl HybridSearch {
+                 prev,
+                 k: cfg.proposals,
+             };
++            let _gpr = ddai_physics::sampler::ctx(2);
+             self.proposer.propose(&pctx, &mut props);
+         }
+         tel.proposal_ms = now(clock) - t_prop;
+@@ -1644,6 +1645,7 @@ impl HybridSearch {
+             } else {
+                 Vec::new()
+             };
++            let _gsh = ddai_physics::sampler::ctx(1);
+             let was_on = crate::prof::is_enabled();
+             crate::prof::enable();
+             let (s0, _) = crate::prof::counters();
+diff --git a/crates/ddai-planner/src/physics_adapter.rs b/crates/ddai-planner/src/physics_adapter.rs
+index 83b410b..9973005 100644
+--- a/crates/ddai-planner/src/physics_adapter.rs
++++ b/crates/ddai-planner/src/physics_adapter.rs
+@@ -34,6 +34,7 @@ use ddai_physics::map::MapData;
+ use ddai_physics::vmath::Vec2 as PVec2;
+ use ddai_physics::world::{TickInput, World};
+ use std::sync::Arc;
++use ddai_physics::sampler as sp;
+ 
+ type Collision32 = ddai_physics::collision::Collision<f32>;
+ 
+@@ -433,6 +434,7 @@ impl PhysicsWorld {
+     /// right: that's what leaves the *previous* (pre-death) snapshot in place for `get_tee`'s
+     /// fallback (review round 1, F2) to keep returning.
+     fn refresh_cache(&mut self, id: i32) {
++        let _g = sp::enter(sp::ADP_REFRESH);
+         if let Some(live) = self.snapshot_live(id) {
+             self.last_known[id as usize] = Some(live);
+         }
+@@ -467,6 +469,7 @@ impl PlanWorld for PhysicsWorld {
+     }
+ 
+     fn get_tee(&self, id: i32) -> Option<TeeState> {
++        let _g = sp::enter(sp::ADP_GETTEE);
+         if !(0..MAX_CLIENTS as i32).contains(&id) || !self.present[id as usize] {
+             return None;
+         }
+@@ -538,6 +541,7 @@ impl PlanWorld for PhysicsWorld {
+ 
+     fn step_into(&mut self, events: &mut Vec<WorldEvent>) {
+         events.clear();
++        let _gpre = sp::enter(sp::ADP_STEP_PRE);
+         // Task 3.5: the per-tick scratch lives in the world and is reused (five fresh `Vec`s per
+         // tick before) -- a rollout is dozens of ticks and the hybrid search runs dozens of
+         // rollouts per decision, so the allocations were a measurable share of the cost and made
+@@ -575,6 +579,8 @@ impl PlanWorld for PhysicsWorld {
+             });
+         }
+         self.world.step(&sc.inputs);
++        drop(_gpre);
++        let _gpost = sp::enter(sp::ADP_STEP_POST);
+         let (ids, alive_before, fire_before, pos_before) = (&sc.ids, &sc.alive_before, &sc.fire_before, &sc.pos_before);
+         for (i, &id) in ids.iter().enumerate() {
+             let now_alive = self.world.characters[id as usize].as_ref().is_some_and(|c| c.alive);
+@@ -678,6 +684,7 @@ impl PlanWorld for PhysicsWorld {
+         into.last_known.clone_from(&self.last_known);
+     }
+     fn restore_state(&mut self, state: &Self::SavedState) {
++        let _g = sp::enter(sp::ADP_RESTORE);
+         // See `save_state_into`: `restore_from` reuses the world's buffers.
+         self.world.restore_from(&state.world);
+         self.pending_input.clone_from(&state.pending_input);
+diff --git a/crates/ddai-planner/src/planner.rs b/crates/ddai-planner/src/planner.rs
+index a6ff068..e42bc3a 100644
+--- a/crates/ddai-planner/src/planner.rs
++++ b/crates/ddai-planner/src/planner.rs
+@@ -192,6 +192,7 @@ fn score_tick<W: PlanWorld>(
+     band: Option<&Band>,
+ ) -> f64 {
+     use crate::types::WorldEvent;
++    let _g = ddai_physics::sampler::enter(ddai_physics::sampler::EV_SCORE);
+ 
+     let Some(me) = world.get_tee(self_id) else {
+         return -1000.0;
+@@ -2848,6 +2849,7 @@ impl<W: PlanWorld> Planner<W> {
+         unfreeze: &HazardField,
+         deadline: Option<(&dyn crate::clock::Clock, f64)>,
+     ) -> Option<f64> {
++        let _gev = ddai_physics::sampler::enter(ddai_physics::sampler::EV_PRE);
+         let mut score = 0.0;
+         let mut input = prev;
+ 
+@@ -2937,6 +2939,7 @@ impl<W: PlanWorld> Planner<W> {
+         let mut rollout_tick: i64 = 0;
+ 
+         for (s, plan_step) in plan.iter().enumerate() {
++            let _gsl = ddai_physics::sampler::enter(ddai_physics::sampler::EV_STI);
+             let me_now = world.get_tee(self_id);
+             let en_now = world.get_tee(enemy_id);
+             let enemy_dist = match (me_now, en_now) {
+@@ -2970,6 +2973,7 @@ impl<W: PlanWorld> Planner<W> {
+                 aim,
+             );
+ 
++            let _gopp = ddai_physics::sampler::enter(ddai_physics::sampler::EV_OPP);
+             if self.react_this_pass || self.cfg.opponent_model == OpponentModel::React {
+                 opp_input = scripted_action(world, enemy_id, self_id, &opp_input, &mut opp_rng);
+             } else if !self.predicted.is_empty() {
+@@ -2983,9 +2987,12 @@ impl<W: PlanWorld> Planner<W> {
+                 }
+             }
+ 
++            drop(_gopp);
++            let _gloop = ddai_physics::sampler::enter(ddai_physics::sampler::EV_STEPLOOP);
+             for _ in 0..self.step_ticks[s] {
+                 rollout_tick += 1;
+                 self.eval_ticks += 1;
++                let _gin = ddai_physics::sampler::enter(ddai_physics::sampler::EV_SETIN);
+                 if self.cfg.release_dead_hook && input.hook != 0 && self.hook_is_dead(world, self_id) {
+                     world.set_input(self_id, PlayerInput { hook: 0, ..input });
+                 } else {
+@@ -2999,7 +3006,9 @@ impl<W: PlanWorld> Planner<W> {
+                         }
+                     }
+                 }
++                drop(_gin);
+                 world.step_into(&mut events);
++                let _gbk = ddai_physics::sampler::enter(ddai_physics::sampler::EV_BOOK);
+                 let me_now = world.get_tee(self_id);
+                 if let Some(me_now) = me_now {
+                     if (me_now.jumped & 2) == 0 && me_now.jumps_left < prev_jumps_left {
+@@ -3072,6 +3081,7 @@ impl<W: PlanWorld> Planner<W> {
+                         self.rollout_min_gap = gap;
+                     }
+                 }
++                drop(_gbk);
+                 let mut tick_score = score_tick(
+                     world,
+                     self_id,
+@@ -3088,11 +3098,13 @@ impl<W: PlanWorld> Planner<W> {
+                     self.band.as_ref(),
+                 );
+                 if let Some(t) = &self.threats {
++                    let _gth = ddai_physics::sampler::enter(ddai_physics::sampler::EV_THREAT);
+                     tick_score +=
+                         t.weight * crate::hybrid::threat::threat_terms(world, self_id, &t.ids[..thr_n], &self.cfg);
+                 }
+                 score += tick_score * (1.0 - (s as f64) / (plan.len() as f64 * 2.0));
+             }
++            drop(_gloop);
+             if let Some((clock, deadline_ms)) = deadline
+                 && clock.now_ms() >= deadline_ms
+             {
+@@ -3102,6 +3114,7 @@ impl<W: PlanWorld> Planner<W> {
+             }
+         }
+ 
++        let _gfin = ddai_physics::sampler::enter(ddai_physics::sampler::EV_FINAL);
+         if self.cfg.value_weight != 0.0 {
+             // No value-net loader in this crate (out of scope, see
+             // `PlannerConfig::value_weight`'s doc comment) -- `value_weight` should stay `0` for
+diff --git a/crates/ddnet-ai/src/main.rs b/crates/ddnet-ai/src/main.rs
+index df76302..8ced0f3 100644
+--- a/crates/ddnet-ai/src/main.rs
++++ b/crates/ddnet-ai/src/main.rs
+@@ -90,7 +90,22 @@ fn main() -> ExitCode {
+         );
+         return ExitCode::from(2);
+     }
+-    match cli.command {
++    let sampling = std::env::var("DDAI_SAMPLE").is_ok();
++    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
++    let table = std::sync::Arc::new((0..4 * 48).map(|_| std::sync::atomic::AtomicU64::new(0)).collect::<Vec<_>>());
++    let handle = sampling.then(|| {
++        let (stop, table) = (stop.clone(), table.clone());
++        std::thread::spawn(move || {
++            use std::sync::atomic::Ordering::Relaxed;
++            while !stop.load(Relaxed) {
++                std::thread::sleep(std::time::Duration::from_micros(20));
++                let c = (ddai_physics::sampler::CTX.load(Relaxed) as usize).min(3);
++                let p = (ddai_physics::sampler::PHASE.load(Relaxed) as usize).min(47);
++                table[c * 48 + p].fetch_add(1, Relaxed);
++            }
++        })
++    });
++    let code = match cli.command {
+         None => ExitCode::SUCCESS,
+         Some(Command::Trace(args)) => trace_cmd::run(args),
+         Some(Command::Fly(args)) => fly_cmd::run(args),
+@@ -106,7 +121,24 @@ fn main() -> ExitCode {
+         Some(Command::Rec(args)) => rec_cmd::run(args),
+         Some(Command::Servers(args)) => servers_cmd::run(args),
+         Some(Command::Clip(args)) => clip_cmd::run(args),
++    };
++    if let Some(h) = handle {
++        use std::sync::atomic::Ordering::Relaxed;
++        stop.store(true, Relaxed);
++        let _ = h.join();
++        let total: u64 = table.iter().map(|a| a.load(Relaxed)).sum();
++        let inhyb: u64 = (0..4 * 48).filter(|i| i % 48 != 0).map(|i| table[i].load(Relaxed)).sum();
++        eprintln!("SAMPLES total={total} in-hybrid={inhyb}");
++        for c in 0..3 {
++            for p in 0..48 {
++                let n = table[c * 48 + p].load(Relaxed);
++                if n > 0 {
++                    eprintln!("SAMPLE ctx={c} {:>3} {:6} {:5.2}% {}", p, n, 100.0 * n as f64 / inhyb.max(1) as f64, ddai_physics::sampler::NAMES[p]);
++                }
++            }
++        }
+     }
++    code
+ }
+ 
+ #[cfg(test)]

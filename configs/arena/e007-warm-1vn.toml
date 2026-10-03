@@ -7,19 +7,19 @@ games = 200
 [[condition]]
 name = "1v3 warm bonus 0"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.0 } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.0 } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v3 fire-only warm bonus 0.7"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.7, warm_fire_only = true } }, { brain = "scripted", count = 3 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.7, warm_fire_only = true } }, { brain = "scripted", count = 3 }]
 
 [[condition]]
 name = "1v5 warm bonus 0"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.0 } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.0 } }, { brain = "scripted", count = 5 }]
 
 [[condition]]
 name = "1v5 fire-only warm bonus 0.7"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.7, warm_fire_only = true } }, { brain = "scripted", count = 5 }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, max_sim_tees = 4, crowd_stage = true, warm_bonus = 0.7, warm_fire_only = true } }, { brain = "scripted", count = 5 }]

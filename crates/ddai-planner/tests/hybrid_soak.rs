@@ -19,7 +19,7 @@ use ddai_physics::map::{MapData, TILE_FREEZE, TILE_SOLID, Tile};
 use ddai_physics::tuning::TuningParams;
 use ddai_physics::world::World;
 use ddai_planner::brains::{ClockKind, input_from_action};
-use ddai_planner::hybrid::{HybridBrain, HybridConfig, HybridMode, NoProposer, ScriptedProposer};
+use ddai_planner::hybrid::{HybridBrain, HybridConfig, HybridMode, NoProposer, ScriptedProposer, WORK_US_PER_TEE_TICK};
 use ddai_planner::physics_adapter::PhysicsWorld;
 use ddai_planner::plan_world::PlanWorld;
 use ddai_planner::types::empty_input;
@@ -433,7 +433,7 @@ fn soak_cfg() -> HybridConfig {
     // The 4 ms deadline on the work clock: reproducible, with the adaptive extension allowed.
     HybridConfig {
         mode: HybridMode::Deadline { budget_ms: 4.0 },
-        work_clock_us_per_tick: Some(2.2),
+        work_clock_us_per_tick: Some(WORK_US_PER_TEE_TICK),
         ..HybridConfig::default()
     }
 }
@@ -451,7 +451,7 @@ fn run_soak(total: usize, cfg: HybridConfig) {
         max_ticks = soak(&mut b, &map, &mut rng, total - warm);
     });
     println!(
-        "soak {} decisions after {} warm-up: net live heap growth {} bytes (peak {} bytes), max work of a decision {} tee-ticks, of which search without the proposer {} (2.2 us each)",
+        "soak {} decisions after {} warm-up: net live heap growth {} bytes (peak {} bytes), max work of a decision {} tee-ticks, of which search without the proposer {} ({WORK_US_PER_TEE_TICK} us each)",
         total - warm,
         warm,
         info.bytes_current,
@@ -467,15 +467,21 @@ fn run_soak(total: usize, cfg: HybridConfig) {
         info.bytes_current
     );
     // The search (without the proposer, whose ~1 ms is separate) is bounded by the extension cap:
-    // 15 ms on the work clock is 6 818 tee-ticks. The work clock advances when a rollout finishes,
-    // so the last rollout can run past the cap: at most 27 ticks x 8 tees = 216 tee-ticks here.
+    // 15 ms on the work clock is `cap` tee-ticks (12 000 at the calibrated 1.25 us). The work clock advances
+    // when a rollout finishes, so the last rollout can run past the cap: at most 27 ticks x 8 tees = 216
+    // tee-ticks here.
+    let cap = (15_000.0 / WORK_US_PER_TEE_TICK) as u64;
     assert!(
-        max_ticks.1 < 7_100,
-        "one search simulated {} tee-ticks (cap 6 818)",
+        max_ticks.1 < cap + 300,
+        "one search simulated {} tee-ticks (cap {cap})",
         max_ticks.1
     );
     // With the proposer's own work on top (here 3 scripted rollouts, 81 ticks of the world).
-    assert!(max_ticks.0 < 8_000, "one decision simulated {} tee-ticks", max_ticks.0);
+    assert!(
+        max_ticks.0 < cap + 1_200,
+        "one decision simulated {} tee-ticks",
+        max_ticks.0
+    );
     let t = b.totals();
     assert!(t.decisions > 0);
     assert!(t.extended <= t.danger_flagged);

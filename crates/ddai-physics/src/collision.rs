@@ -147,7 +147,7 @@ type TeleNumber = u8;
 /// (2^22 px = 131072 tiles, far beyond any real map): past it they decline and the exact loop
 /// runs. Keeps `to_i32_trunc` far from saturating (task 1.10b review R4) and keeps an `f32`
 /// coordinate's own `ulp` (0.5 px at 2^23) well below the 1 px pads.
-const EARLY_OUT_COORD_LIMIT: f64 = 4_194_304.0;
+pub(crate) const EARLY_OUT_COORD_LIMIT: f64 = 4_194_304.0;
 
 /// Builds [`Collision::solid_sat`] from `solid` — see that field's doc comment for the table's
 /// exact layout. `width`/`height` `<= 0` (an [`Collision::empty`] map) yields an empty table.
@@ -167,6 +167,28 @@ fn build_solid_sat(solid: &[bool], width: i32, height: i32) -> Vec<u32> {
         }
     }
     sat
+}
+
+/// `flags` dilated by one cell in every direction (8-neighbourhood): `out[c]` is true iff `flags` holds for `c` or
+/// any cell adjacent to it. An empty map yields an empty table.
+fn dilate(flags: &[bool], width: i32, height: i32) -> Vec<bool> {
+    if width <= 0 || height <= 0 || flags.len() != (width * height) as usize {
+        return Vec::new();
+    }
+    let (w, h) = (width as usize, height as usize);
+    let mut out = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            if flags[y * w + x] {
+                for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                    for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                        out[ny * w + nx] = true;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Port of 20.1 `CCollision`: the map's tile layers plus everything `CCollision::Init`
@@ -190,7 +212,7 @@ pub struct Collision<R: Real> {
     /// `solid_sat[y * (width+1) + x]` (`0 <= x <= width`, `0 <= y <= height`, so this is
     /// `(width+1) * (height+1)` entries, one extra all-zero row/column as the base case) is the
     /// count of solid cells in the tile rectangle `[0, x) x [0, y)`. Lets
-    /// [`Collision::solid_count_in_tile_rect`] answer "how many solid cells in this axis-aligned
+    /// [`Collision::sat_count_in_tile_rect`] answer "how many solid cells in this axis-aligned
     /// tile rectangle?" in `O(1)` (4 lookups, 3 additions) instead of `O(rectangle area)` —
     /// [`Collision::intersect_line`]'s own early-out (its doc comment) is built on this. Rebuilt
     /// in full whenever [`Collision::set_collision_at`] changes `solid` — a summed-area table
@@ -221,6 +243,26 @@ pub struct Collision<R: Real> {
     tele_check_outs: HashMap<TeleNumber, Vec<Vec2<R>>>,
     tele_others: HashMap<TeleNumber, Vec<Vec2<R>>>,
     has_hook_tele_ins: bool,
+    /// Task 3.6 derived tables (see [`Collision::recompute_derived`]), per cell: whether its game, front or
+    /// door tile restricts movement (`GetMoveRestrictions` can only return non-zero near one), ...
+    restrict_cell: Vec<bool>,
+    /// ... the same dilated by one cell in every direction (a `GetMoveRestrictions` probe reaches at most one tile
+    /// from the centre tile), ...
+    restrict_near: Vec<bool>,
+    /// ... the cells within one cell of a death tile of either layer (`is_on_death_tile`'s corners are within
+    /// one tile of the centre tile), ...
+    death_near: Vec<bool>,
+    /// ... a summed-area table over `tile_exists_cache` (`get_map_indices_into` can only report a cell it counts), ...
+    exists_sat: Vec<u32>,
+    /// ... over the cells a hook ray can stop at or be altered by (solid, hook-tele, through-all /
+    /// through-dir tiles of either layer), ...
+    hook_sat: Vec<u32>,
+    /// ... and per cell: the planner's "freeze or death" hazard test (game or front freeze, a heart's
+    /// reach, game death), see [`Collision::hazard_tile`].
+    hazard: Vec<bool>,
+    /// `false` whenever a layer changed after the tables were last built (`set_collision_at`,
+    /// `set_door_collision_at`); the fast paths that read them then fall back to the exact code.
+    derived_ok: bool,
 }
 
 impl<R: Real> Collision<R> {
@@ -250,6 +292,13 @@ impl<R: Real> Collision<R> {
             tele_check_outs: HashMap::new(),
             tele_others: HashMap::new(),
             has_hook_tele_ins: false,
+            restrict_cell: Vec::new(),
+            restrict_near: Vec::new(),
+            death_near: Vec::new(),
+            exists_sat: Vec::new(),
+            hook_sat: Vec::new(),
+            hazard: Vec::new(),
+            derived_ok: false,
         }
     }
 
@@ -339,6 +388,13 @@ impl<R: Real> Collision<R> {
             tele_check_outs,
             tele_others,
             has_hook_tele_ins,
+            restrict_cell: Vec::new(),
+            restrict_near: Vec::new(),
+            death_near: Vec::new(),
+            exists_sat: Vec::new(),
+            hook_sat: Vec::new(),
+            hazard: Vec::new(),
+            derived_ok: false,
         };
         // Every layer `tile_exists_uncached` reads is already in place above, so it's safe to
         // evaluate now, once per cell, for the rest of this `Collision`'s life (see
@@ -346,7 +402,75 @@ impl<R: Real> Collision<R> {
         // collision afterward (`World::from_map` does, and calls
         // `recompute_tile_exists_cache` again once it's done — see that method's doc comment).
         result.recompute_tile_exists_cache();
+        result.recompute_derived();
         result
+    }
+
+    /// (Re)builds the task-3.6 derived tables (`restrict_cell`/`restrict_near`, `death_near`, `exists_sat`, `hook_sat`, `hazard`) from the layers,
+    /// which must be in their final state, and re-enables the fast paths that read them. [`Collision::new`]
+    /// calls it; `World::from_map` calls it again after placing door collision. Until then (after any
+    /// later `set_collision_at` / `set_door_collision_at`) the fast paths are off and the exact code runs,
+    /// so a caller that forgets this only loses speed, never exactness.
+    pub fn recompute_derived(&mut self) {
+        let n = self.game.len();
+        let restricts = |t: &Tile| move_restrictions_raw(t.index, t.flags) != 0;
+        let restrict: Vec<bool> = (0..n)
+            .map(|i| {
+                restricts(&self.game[i])
+                    || self.front.as_ref().is_some_and(|f| restricts(&f[i]))
+                    || self
+                        .door
+                        .as_ref()
+                        .is_some_and(|d| move_restrictions_raw(d[i].index, d[i].flags) != 0)
+            })
+            .collect();
+        self.restrict_near = dilate(&restrict, self.width, self.height);
+        self.restrict_cell = restrict;
+        let death: Vec<bool> = (0..n)
+            .map(|i| {
+                self.game[i].index == map::TILE_DEATH
+                    || self.front.as_ref().is_some_and(|f| f[i].index == map::TILE_DEATH)
+            })
+            .collect();
+        self.death_near = dilate(&death, self.width, self.height);
+        self.exists_sat = build_solid_sat(&self.tile_exists_cache, self.width, self.height);
+        let hook_blocker = |t: &Tile| t.index == map::TILE_THROUGH_ALL || t.index == map::TILE_THROUGH_DIR;
+        let hook: Vec<bool> = (0..n)
+            .map(|i| {
+                self.solid[i]
+                    || hook_blocker(&self.game[i])
+                    || self.front.as_ref().is_some_and(|f| hook_blocker(&f[i]))
+                    || self.tele.as_ref().is_some_and(|t| t[i].kind == map::TILE_TELEINHOOK)
+            })
+            .collect();
+        self.hook_sat = build_solid_sat(&hook, self.width, self.height);
+        self.hazard = (0..n)
+            .map(|i| {
+                self.game[i].index == map::TILE_FREEZE
+                    || self.game[i].index == map::TILE_DEATH
+                    || self.front.as_ref().is_some_and(|f| f[i].index == map::TILE_FREEZE)
+                    || self.pickup_freeze.get(i).copied().unwrap_or(false)
+            })
+            .collect();
+        self.derived_ok = true;
+    }
+
+    /// The planner's tile-based hazard test: a freeze tile (game or front layer), a heart pickup's
+    /// freeze reach, or a death tile (game layer) at tile `(tx, ty)`; `false` off the map. Exactly
+    /// `is_freeze || is_death` of `ddai-planner`'s `PlanCollision` on this type, as one table read.
+    /// Falls back to computing it from the layers while the derived tables are stale.
+    pub fn hazard_tile(&self, tx: i32, ty: i32) -> bool {
+        if tx < 0 || ty < 0 || tx >= self.width || ty >= self.height {
+            return false;
+        }
+        let i = (ty * self.width + tx) as usize;
+        if self.derived_ok {
+            return self.hazard[i];
+        }
+        self.game[i].index == map::TILE_FREEZE
+            || self.game[i].index == map::TILE_DEATH
+            || self.front.as_ref().is_some_and(|f| f[i].index == map::TILE_FREEZE)
+            || self.pickup_freeze.get(i).copied().unwrap_or(false)
     }
 
     /// (Re)computes `tile_exists_cache` (the private field [`Collision::tile_exists`] reads) from
@@ -362,6 +486,8 @@ impl<R: Real> Collision<R> {
     pub fn recompute_tile_exists_cache(&mut self) {
         let n = self.game.len();
         self.tile_exists_cache = (0..n as i32).map(|i| self.tile_exists_uncached(i)).collect();
+        // The derived tables that read the cache are stale until `recompute_derived` runs again.
+        self.derived_ok = false;
     }
 
     /// The map's width, in tiles.
@@ -426,13 +552,13 @@ impl<R: Real> Collision<R> {
         self.solid[(ny * self.width + nx) as usize]
     }
 
-    /// The count of solid cells in the *tile* rectangle `[x0, x1] x [y0, y1]` (both inclusive) —
-    /// `O(1)` via [`Collision::solid_sat`]. `x0`/`y0`/`x1`/`y1` must already be clamped to
-    /// `0..width`/`0..height` with `x0 <= x1` and `y0 <= y1` (the only caller,
-    /// `pixel_box_is_solid_free`, guarantees both).
-    fn solid_count_in_tile_rect(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> u32 {
+    /// The count of flagged cells in the *tile* rectangle `[x0, x1] x [y0, y1]` (both inclusive) —
+    /// `O(1)` via a summed-area table of this map's layout (`solid_sat`, `exists_sat`, `hook_sat`).
+    /// `x0`/`y0`/`x1`/`y1` must already be clamped to `0..width`/`0..height` with `x0 <= x1` and
+    /// `y0 <= y1` (the callers, `pixel_box_is_free_in` and `restrictions_provably_zero`, guarantee both).
+    fn sat_count_in_tile_rect(&self, sat: &[u32], x0: i32, y0: i32, x1: i32, y1: i32) -> u32 {
         let stride = (self.width + 1) as usize;
-        let at = |y: i32, x: i32| self.solid_sat[y as usize * stride + x as usize];
+        let at = |y: i32, x: i32| sat[y as usize * stride + x as usize];
         at(y1 + 1, x1 + 1) + at(y0, x0) - at(y0, x1 + 1) - at(y1 + 1, x0)
     }
 
@@ -448,9 +574,15 @@ impl<R: Real> Collision<R> {
     /// belt-and-braces check, any inverted rectangle. All of those return `false` ("not free"),
     /// so the caller runs the exact loop.
     fn pixel_box_is_solid_free(&self, min_x: R, max_x: R, min_y: R, max_y: R) -> bool {
+        self.pixel_box_is_free_in(&self.solid_sat, min_x, max_x, min_y, max_y)
+    }
+
+    /// [`Collision::pixel_box_is_solid_free`] over any summed-area table `sat` of this map's layout:
+    /// `true` only if the pixel box touches no cell counted in `sat` (same guards, same tile mapping).
+    fn pixel_box_is_free_in(&self, sat: &[u32], min_x: R, max_x: R, min_y: R, max_y: R) -> bool {
         let limit = R::from_f64(EARLY_OUT_COORD_LIMIT);
         let in_range = |v: R| v.is_finite() && v.abs() <= limit;
-        if self.solid_sat.is_empty() || !(in_range(min_x) && in_range(max_x) && in_range(min_y) && in_range(max_y)) {
+        if sat.is_empty() || !(in_range(min_x) && in_range(max_x) && in_range(min_y) && in_range(max_y)) {
             return false;
         }
         let tx0 = (min_x.to_i32_trunc() / 32).clamp(0, self.width - 1);
@@ -460,7 +592,7 @@ impl<R: Real> Collision<R> {
         if tx0 > tx1 || ty0 > ty1 {
             return false;
         }
-        self.solid_count_in_tile_rect(tx0, ty0, tx1, ty1) == 0
+        self.sat_count_in_tile_rect(sat, tx0, ty0, tx1, ty1) == 0
     }
 
     /// `true` if the *tile* rectangle covering the segment `pos0..pos1`, padded by 1 px on every
@@ -652,6 +784,7 @@ impl<R: Real> Collision<R> {
         let ny = (vmath::round_to_int(y) / 32).clamp(0, self.height - 1);
         let i = (ny * self.width + nx) as usize;
         self.game[i].index = index;
+        self.derived_ok = false;
         // Keep the `solid` cache (see its doc comment) in sync — this is the only method that
         // ever mutates `game[..].index` after construction.
         self.solid[i] = index == map::TILE_SOLID || index == map::TILE_NOHOOK;
@@ -675,6 +808,7 @@ impl<R: Real> Collision<R> {
         d.index = kind;
         d.flags = flags;
         d.number = number;
+        self.derived_ok = false;
         // Task 1.10b, finding F1: same reasoning as `set_collision_at` above, for the `door`
         // layer (`switch::place_door_collision`'s only mutation site, called from
         // `World::from_map`'s scan for every `CDoor` fixture — previously relied on that caller
@@ -735,6 +869,9 @@ impl<R: Real> Collision<R> {
             distance >= R::ZERO && distance <= R::from_i32(32),
             "invalid distance {distance:?}"
         );
+        if self.restrictions_provably_zero(pos, distance, override_center_tile_index) {
+            return 0;
+        }
         let directions: [Vec2<R>; NUM_MR_DIRS] = [
             Vec2::new(R::ZERO, R::ZERO),
             Vec2::new(R::ONE, R::ZERO),
@@ -772,6 +909,57 @@ impl<R: Real> Collision<R> {
         restrictions
     }
 
+    /// The tile (as an index into the per-cell tables) the centre of a probe at `pos` falls in, by the
+    /// rule of [`Collision::get_pure_map_index`] / [`Collision::get_tile`] (`round_to_int`, truncating
+    /// `/ 32`, clamp) — `None` for an empty map.
+    fn centre_cell(&self, pos: Vec2<R>) -> Option<usize> {
+        if self.width <= 0 || self.height <= 0 {
+            return None;
+        }
+        let nx = (vmath::round_to_int(pos.x) / 32).clamp(0, self.width - 1);
+        let ny = (vmath::round_to_int(pos.y) / 32).clamp(0, self.height - 1);
+        Some((ny * self.width + nx) as usize)
+    }
+
+    /// `true` only if [`Collision::get_move_restrictions`] is certain to return `0` for these arguments.
+    /// Its five sample points (`pos` and `pos +- distance` on each axis) lie at most one tile from
+    /// `pos`'s own tile when `distance <= 30` (`round_to_int` of `x +- distance` differs from that of `x`
+    /// by at most `distance + 1` even with the float rounding of the sum, and `/ 32` and the clamp are
+    /// monotone, so fewer than 32 px cross at most one tile boundary), so if no cell in the 3x3 block
+    /// around that tile has a restricting game/front/door tile ([`Collision::recompute_derived`]'s
+    /// `restrict_near`), and neither has the overridden centre cell, every term is zero. `false` (run the
+    /// exact code) when the tables are stale, the map is empty, `distance > 30` or the override is out of range.
+    fn restrictions_provably_zero(&self, pos: Vec2<R>, distance: R, override_center: Option<i32>) -> bool {
+        if !self.derived_ok || self.restrict_near.is_empty() || !distance.is_finite() || distance > R::from_i32(30) {
+            return false;
+        }
+        let Some(cell) = self.centre_cell(pos) else {
+            return false;
+        };
+        if let Some(over) = override_center {
+            if over >= self.restrict_cell.len() as i32 {
+                return false;
+            }
+            if over >= 0 && self.restrict_cell[over as usize] {
+                return false;
+            }
+        }
+        !self.restrict_near[cell]
+    }
+
+    /// `false` only if none of `is_on_death_tile`'s eight lookups (the four corners `+-physical_size / 3` of
+    /// `pos`, game and front layer) can see a death tile: they all fall within one tile of `pos`'s own
+    /// tile, and no cell in that 3x3 block holds a death tile. `true` means "maybe": run the lookups.
+    pub fn death_possibly_near(&self, pos: Vec2<R>) -> bool {
+        if !self.derived_ok || self.death_near.is_empty() {
+            return true;
+        }
+        match self.centre_cell(pos) {
+            Some(cell) => self.death_near[cell],
+            None => true,
+        }
+    }
+
     /// The 2-argument overload (`GetMoveRestrictions(vec2, float)`): no switch callback.
     pub fn get_move_restrictions_simple(&self, pos: Vec2<R>, distance: R) -> i32 {
         self.get_move_restrictions::<fn(u8) -> bool>(None, pos, distance, None)
@@ -807,18 +995,37 @@ impl<R: Real> Collision<R> {
         let distance = vmath::distance(pos0, pos1);
         let end = (distance + R::ONE).to_i32_trunc();
         let mut last = pos0;
-        for i in 0..=end {
-            let a = R::from_i32(i) / R::from_i32(end);
-            let pos = vmath::mix(pos0, pos1, a);
-            let (ix, iy) = (vmath::round_to_int(pos.x), vmath::round_to_int(pos.y));
-            if self.is_solid(ix, iy) {
-                return LineHit {
-                    hit: self.get_tile(ix, iy),
-                    collision: pos,
-                    before_collision: last,
-                };
+        // Task 3.6: runs of `LINE_RUN` samples that [`Collision::march_run_is_free`] proves free of
+        // solid cells are jumped over (`last` becomes the run's final sample, what the loop leaves).
+        const LINE_RUN: i32 = 16;
+        let mut i = 0;
+        while i <= end {
+            let mut run_end = i;
+            if allow_early_out && end > LINE_RUN {
+                run_end = i.saturating_add(LINE_RUN - 1).min(end);
+                if self.march_run_is_free(&self.solid_sat, pos0, pos1, end, i, run_end) {
+                    last = vmath::mix(pos0, pos1, R::from_i32(run_end) / R::from_i32(end));
+                    // `end == i32::MAX` (reachable for `R = f64`): `run_end + 1` would overflow.
+                    let Some(next) = run_end.checked_add(1) else { break };
+                    i = next;
+                    continue;
+                }
             }
-            last = pos;
+            for k in i..=run_end {
+                let a = R::from_i32(k) / R::from_i32(end);
+                let pos = vmath::mix(pos0, pos1, a);
+                let (ix, iy) = (vmath::round_to_int(pos.x), vmath::round_to_int(pos.y));
+                if self.is_solid(ix, iy) {
+                    return LineHit {
+                        hit: self.get_tile(ix, iy),
+                        collision: pos,
+                        before_collision: last,
+                    };
+                }
+                last = pos;
+            }
+            let Some(next) = run_end.checked_add(1) else { break };
+            i = next;
         }
         LineHit {
             hit: 0,
@@ -908,48 +1115,131 @@ impl<R: Real> Collision<R> {
     /// `CCollision::IntersectLineTeleHook`. `sv_old_teleport_hook` stands in for
     /// `g_Config.m_SvOldTeleportHook` — pass `false` to match Oracle A's zero-initialized config
     /// (see the module doc comment).
+    ///
+    /// Task 3.6: the march skips what provably cannot hit (see `intersect_line_tele_hook_impl`).
     pub fn intersect_line_tele_hook(&self, pos0: Vec2<R>, pos1: Vec2<R>, sv_old_teleport_hook: bool) -> HookHit<R> {
+        self.intersect_line_tele_hook_impl(pos0, pos1, sv_old_teleport_hook, true)
+    }
+
+    /// Whether every sample `i..=j` of the march `mix(pos0, pos1, k / end)` lands in a cell that
+    /// `sat` does not count: the samples are monotone per axis in `k` (`mix` is `a + (b - a) * t` with
+    /// `t = k / end` non-decreasing, and every float operation in it is monotone), `round_to_int`,
+    /// the truncating `/ 32` and the clamp are monotone too, so every sample's tile lies in the tile
+    /// rectangle spanned by the two end samples; a summed-area table then answers for the whole run.
+    /// `false` (cannot tell) for an empty table, non-finite or out-of-limit coordinates.
+    fn march_run_is_free(&self, sat: &[u32], pos0: Vec2<R>, pos1: Vec2<R>, end: i32, i: i32, j: i32) -> bool {
+        if sat.is_empty() {
+            return false;
+        }
+        let at = |k: i32| vmath::mix(pos0, pos1, R::from_i32(k) / R::from_i32(end));
+        let (a, b) = (at(i), at(j));
+        let limit = R::from_f64(EARLY_OUT_COORD_LIMIT);
+        let in_range = |v: R| v.is_finite() && v.abs() <= limit;
+        if !(in_range(a.x) && in_range(a.y) && in_range(b.x) && in_range(b.y)) {
+            return false;
+        }
+        let tx = |x: R| (vmath::round_to_int(x) / 32).clamp(0, self.width - 1);
+        let ty = |y: R| (vmath::round_to_int(y) / 32).clamp(0, self.height - 1);
+        let (x0, x1) = (tx(a.x.min(b.x)), tx(a.x.max(b.x)));
+        let (y0, y1) = (ty(a.y.min(b.y)), ty(a.y.max(b.y)));
+        if x0 > x1 || y0 > y1 {
+            return false;
+        }
+        self.sat_count_in_tile_rect(sat, x0, y0, x1, y1) == 0
+    }
+
+    /// [`Collision::intersect_line_tele_hook`]'s body; `allow_skip = false` is the plain per-pixel
+    /// loop, the reference the differential tests compare the fast path against.
+    ///
+    /// The fast path (only for the current teleport-hook rule and while the derived tables are
+    /// current): the whole segment's padded bounding box is checked against `hook_sat`, the cells a
+    /// sample can stop at (solid, hook-tele, through-all / through-dir); free means the loop would run
+    /// to its end with no hit. Otherwise the march is cut into runs of `HOOK_RUN` (16) samples and every
+    /// run that [`Collision::march_run_is_free`] proves free is jumped over (`last` becomes its final
+    /// sample, exactly what the loop leaves behind); runs that may hit are walked sample by sample.
+    fn intersect_line_tele_hook_impl(
+        &self,
+        pos0: Vec2<R>,
+        pos1: Vec2<R>,
+        sv_old_teleport_hook: bool,
+        allow_skip: bool,
+    ) -> HookHit<R> {
+        const HOOK_RUN: i32 = 16;
+        let skip = allow_skip && !sv_old_teleport_hook && self.derived_ok;
+        if skip {
+            let pad = R::ONE;
+            if self.pixel_box_is_free_in(
+                &self.hook_sat,
+                pos0.x.min(pos1.x) - pad,
+                pos0.x.max(pos1.x) + pad,
+                pos0.y.min(pos1.y) - pad,
+                pos0.y.max(pos1.y) + pad,
+            ) {
+                return HookHit {
+                    hit: 0,
+                    collision: pos1,
+                    before_collision: pos1,
+                    tele_nr: 0,
+                };
+            }
+        }
         let distance = vmath::distance(pos0, pos1);
         let end = (distance + R::ONE).to_i32_trunc();
         let mut last = pos0;
         let (dx, dy) = Self::through_offset(pos0, pos1);
-        for i in 0..=end {
-            let a = R::from_i32(i) / R::from_i32(end);
-            let pos = vmath::mix(pos0, pos1, a);
-            let (ix, iy) = (vmath::round_to_int(pos.x), vmath::round_to_int(pos.y));
-
-            let index = self.get_pure_map_index_vec(pos) as i32;
-            let tele_nr = if sv_old_teleport_hook {
-                self.is_teleport(index)
-            } else {
-                self.is_teleport_hook(index)
-            };
-            if tele_nr != 0 {
-                return HookHit {
-                    hit: map::TILE_TELEINHOOK as i32,
-                    collision: pos,
-                    before_collision: last,
-                    tele_nr,
-                };
-            }
-
-            let mut hit = 0;
-            if self.is_solid(ix, iy) {
-                if !self.is_through(ix, iy, dx, dy, pos0, pos1) {
-                    hit = self.get_tile(ix, iy);
+        let mut i = 0;
+        while i <= end {
+            let mut run_end = i;
+            if skip && end > HOOK_RUN {
+                run_end = i.saturating_add(HOOK_RUN - 1).min(end);
+                if self.march_run_is_free(&self.hook_sat, pos0, pos1, end, i, run_end) {
+                    last = vmath::mix(pos0, pos1, R::from_i32(run_end) / R::from_i32(end));
+                    // `end == i32::MAX` (reachable for `R = f64`): `run_end + 1` would overflow.
+                    let Some(next) = run_end.checked_add(1) else { break };
+                    i = next;
+                    continue;
                 }
-            } else if self.is_hook_blocker(ix, iy, pos0, pos1) {
-                hit = map::TILE_NOHOOK as i32;
             }
-            if hit != 0 {
-                return HookHit {
-                    hit,
-                    collision: pos,
-                    before_collision: last,
-                    tele_nr: 0,
+            for k in i..=run_end {
+                let a = R::from_i32(k) / R::from_i32(end);
+                let pos = vmath::mix(pos0, pos1, a);
+                let (ix, iy) = (vmath::round_to_int(pos.x), vmath::round_to_int(pos.y));
+
+                let index = self.get_pure_map_index_vec(pos) as i32;
+                let tele_nr = if sv_old_teleport_hook {
+                    self.is_teleport(index)
+                } else {
+                    self.is_teleport_hook(index)
                 };
+                if tele_nr != 0 {
+                    return HookHit {
+                        hit: map::TILE_TELEINHOOK as i32,
+                        collision: pos,
+                        before_collision: last,
+                        tele_nr,
+                    };
+                }
+
+                let mut hit = 0;
+                if self.is_solid(ix, iy) {
+                    if !self.is_through(ix, iy, dx, dy, pos0, pos1) {
+                        hit = self.get_tile(ix, iy);
+                    }
+                } else if self.is_hook_blocker(ix, iy, pos0, pos1) {
+                    hit = map::TILE_NOHOOK as i32;
+                }
+                if hit != 0 {
+                    return HookHit {
+                        hit,
+                        collision: pos,
+                        before_collision: last,
+                        tele_nr: 0,
+                    };
+                }
+                last = pos;
             }
-            last = pos;
+            let Some(next) = run_end.checked_add(1) else { break };
+            i = next;
         }
         HookHit {
             hit: 0,
@@ -1692,6 +1982,24 @@ impl<R: Real> Collision<R> {
             return;
         }
         let end = (d + R::ONE).to_i32_trunc();
+        // Task 3.6: every sample below lies in the bounding box of `prev_pos..pos` (`mix` is monotone per
+        // axis, as are the truncation, `/ 32` and the clamp that turn a sample into a cell), so if no cell
+        // in that box's tile rectangle exists as a `tile_exists` cell the loop pushes nothing.
+        if self.derived_ok && !self.exists_sat.is_empty() {
+            let limit = R::from_f64(EARLY_OUT_COORD_LIMIT);
+            let ok = |v: R| v.is_finite() && v.abs() <= limit;
+            if ok(prev_pos.x) && ok(prev_pos.y) && ok(pos.x) && ok(pos.y) {
+                // 1 px of padding: the last sample's `i / d` can exceed 1 by a float ulp when `d + 1` rounds up.
+                let pad = R::ONE;
+                let tx = |x: R| (x.to_i32_trunc() / 32).clamp(0, self.width - 1);
+                let ty = |y: R| (y.to_i32_trunc() / 32).clamp(0, self.height - 1);
+                let (x0, x1) = (tx(prev_pos.x.min(pos.x) - pad), tx(prev_pos.x.max(pos.x) + pad));
+                let (y0, y1) = (ty(prev_pos.y.min(pos.y) - pad), ty(prev_pos.y.max(pos.y) + pad));
+                if x0 <= x1 && y0 <= y1 && self.sat_count_in_tile_rect(&self.exists_sat, x0, y0, x1, y1) == 0 {
+                    return;
+                }
+            }
+        }
         let mut last_index = 0;
         for i in 0..end {
             let a = R::from_i32(i) / d;
@@ -2588,6 +2896,286 @@ mod tests {
             free * 20 > total,
             "the fuzz must actually exercise the early-out ({free}/{total})"
         );
+    }
+
+    /// A 60x40 map of sparse random features for the task-3.6 differential tests: solid blocks, hook
+    /// through tiles (`THROUGH_ALL`/`THROUGH_DIR`, in both layers), hook-tele entrances, stoppers and
+    /// freeze/death tiles, so every table the fast paths read has something in it.
+    fn feature_map(seed: u64) -> MapData {
+        let (w, h) = (60i32, 40i32);
+        let mut rng = Rng(seed);
+        let mut game = vec![tile(map::TILE_AIR); (w * h) as usize];
+        let mut front = vec![tile(map::TILE_AIR); (w * h) as usize];
+        let mut tele = vec![map::TeleTile { number: 0, kind: 0 }; (w * h) as usize];
+        for i in 0..(w * h) as usize {
+            match rng.next() % 64 {
+                0..=3 => game[i] = tile(map::TILE_SOLID),
+                4 => game[i] = tile(map::TILE_NOHOOK),
+                5 => game[i] = tile(map::TILE_THROUGH_ALL),
+                6 => {
+                    game[i] = Tile {
+                        index: map::TILE_THROUGH_DIR,
+                        flags: (rng.next() % 4) as u8,
+                        skip: 0,
+                        reserved: 0,
+                    }
+                }
+                7 => front[i] = tile(map::TILE_THROUGH_ALL),
+                8 => {
+                    front[i] = Tile {
+                        index: map::TILE_THROUGH_DIR,
+                        flags: (rng.next() % 4) as u8,
+                        skip: 0,
+                        reserved: 0,
+                    }
+                }
+                9 => {
+                    tele[i] = map::TeleTile {
+                        number: 1 + (rng.next() % 3) as u8,
+                        kind: map::TILE_TELEINHOOK,
+                    }
+                }
+                10 => game[i] = tile(map::TILE_FREEZE),
+                11 => game[i] = tile(map::TILE_DEATH),
+                12 => front[i] = tile(map::TILE_FREEZE),
+                13 => {
+                    game[i] = Tile {
+                        index: map::TILE_STOP,
+                        flags: (rng.next() % 4) as u8,
+                        skip: 0,
+                        reserved: 0,
+                    }
+                }
+                14 => front[i] = tile(map::TILE_STOPA),
+                15 => game[i] = tile(map::TILE_THROUGH),
+                _ => {}
+            }
+        }
+        MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: Some(front),
+            tele: Some(tele),
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        }
+    }
+
+    /// Task 3.6: the hook ray's skipping march (whole-box early-out plus runs of free samples) must
+    /// return exactly what the plain per-pixel loop returns, bit for bit, on random segments of every
+    /// length over a map with every kind of tile that can stop or alter a hook, and the fast path must
+    /// actually take both branches. Run lengths straddle the 16-sample run size.
+    #[test]
+    fn hook_ray_skipping_matches_the_plain_loop_on_random_segments() {
+        for seed in 1..=4u64 {
+            let map = feature_map(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut c: Collision<f32> = Collision::new(&map);
+            let mut rng = Rng(0x5EED_0000 + seed);
+            let (w, h) = (60.0f32 * 32.0, 40.0 * 32.0);
+            let (mut hits, mut free, total) = (0u32, 0u32, 30_000u32);
+            for k in 0..total {
+                let p0 = Vec2::new(rng.range(-0.05, 1.05) * w, rng.range(-0.05, 1.05) * h);
+                let len = [20.0f32, 38.0, 100.0, 380.0, 900.0][(rng.next() % 5) as usize];
+                let ang = rng.range(0.0, std::f32::consts::TAU);
+                let p1 = Vec2::new(p0.x + ang.cos() * len, p0.y + ang.sin() * len);
+                let fast = c.intersect_line_tele_hook(p0, p1, false);
+                let exact = c.intersect_line_tele_hook_impl(p0, p1, false, false);
+                assert_eq!(fast, exact, "seed {seed} case {k}: {p0:?} -> {p1:?}");
+                let line_fast = c.intersect_line(p0, p1);
+                let line_exact = c.intersect_line_impl(p0, p1, false);
+                assert_eq!(
+                    line_fast, line_exact,
+                    "intersect_line seed {seed} case {k}: {p0:?} -> {p1:?}"
+                );
+                hits += u32::from(exact.hit != 0);
+                free += u32::from(exact.hit == 0);
+            }
+            assert!(
+                hits * 10 > total && free * 10 > total,
+                "both outcomes must occur ({hits} hits, {free} free)"
+            );
+            // With the tables stale (a layer changed after they were built) the answer is still exact.
+            c.set_collision_at(100.0, 100.0, map::TILE_SOLID);
+            for k in 0..2_000u32 {
+                let p0 = Vec2::new(rng.range(0.0, 1.0) * w, rng.range(0.0, 1.0) * h);
+                let p1 = Vec2::new(p0.x + rng.range(-300.0, 300.0), p0.y + rng.range(-300.0, 300.0));
+                assert_eq!(
+                    c.intersect_line_tele_hook(p0, p1, false),
+                    c.intersect_line_tele_hook_impl(p0, p1, false, false),
+                    "stale tables, case {k}"
+                );
+            }
+        }
+    }
+
+    /// Task 3.6: `get_move_restrictions` with the provably-zero shortcut equals the full computation
+    /// (compared against a fresh `Collision` whose derived tables are forced stale, which always takes
+    /// the exact code), at random positions incl. off-map, with and without a centre-tile override.
+    #[test]
+    fn move_restrictions_shortcut_matches_the_full_computation() {
+        for seed in 1..=4u64 {
+            let map = feature_map(seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
+            let fast: Collision<f32> = Collision::new(&map);
+            let mut slow: Collision<f32> = Collision::new(&map);
+            slow.derived_ok = false;
+            let mut rng = Rng(0xAB00_0000 + seed);
+            let (w, h) = (60.0f32 * 32.0, 40.0 * 32.0);
+            let (mut zero, mut nonzero) = (0u32, 0u32);
+            for k in 0..60_000u32 {
+                let pos = Vec2::new(rng.range(-0.1, 1.1) * w, rng.range(-0.1, 1.1) * h);
+                let dist = [18.0f32, 0.0, 32.0, 7.5, 30.0, 29.99][(rng.next() % 6) as usize];
+                let over = match rng.next() % 3 {
+                    0 => None,
+                    1 => Some(-1),
+                    _ => Some((rng.next() % 2400) as i32),
+                };
+                let a = fast.get_move_restrictions::<fn(u8) -> bool>(None, pos, dist, over);
+                let b = slow.get_move_restrictions::<fn(u8) -> bool>(None, pos, dist, over);
+                assert_eq!(a, b, "seed {seed} case {k}: {pos:?} {dist} {over:?}");
+                if b == 0 {
+                    zero += 1;
+                } else {
+                    nonzero += 1;
+                }
+            }
+            assert!(
+                zero > 1000 && nonzero > 1000,
+                "both outcomes must occur ({zero}, {nonzero})"
+            );
+        }
+    }
+
+    /// Task 3.6: `death_possibly_near` never says "no" when one of `is_on_death_tile`'s eight lookups sees a
+    /// death tile, and `get_map_indices_into` with its empty-rectangle early-out equals the plain loop
+    /// (run on a copy whose derived tables are forced stale), at random positions incl. off-map ones.
+    #[test]
+    fn death_near_and_map_indices_shortcuts_match_the_exact_code() {
+        for seed in 1..=4u64 {
+            let map = feature_map(seed.wrapping_mul(0xC13F_A9A9_02A6_328F));
+            let fast: Collision<f32> = Collision::new(&map);
+            let mut slow: Collision<f32> = Collision::new(&map);
+            slow.derived_ok = false;
+            let mut rng = Rng(0x7E57_0000 + seed);
+            let (w, h) = (60.0f32 * 32.0, 40.0 * 32.0);
+            let r = 28.0f32 / 3.0;
+            let (mut near, mut far, mut empty, mut nonempty) = (0u32, 0u32, 0u32, 0u32);
+            for k in 0..60_000u32 {
+                let pos = Vec2::new(rng.range(-0.1, 1.1) * w, rng.range(-0.1, 1.1) * h);
+                let corners = [(r, -r), (r, r), (-r, -r), (-r, r)];
+                let exact_death = corners.iter().any(|&(dx, dy)| {
+                    slow.get_collision_at(pos.x + dx, pos.y + dy) == i32::from(map::TILE_DEATH)
+                        || slow.get_front_collision_at(pos.x + dx, pos.y + dy) == i32::from(map::TILE_DEATH)
+                });
+                let maybe = fast.death_possibly_near(pos);
+                assert!(maybe || !exact_death, "case {k}: {pos:?} death missed");
+                if maybe {
+                    near += 1;
+                } else {
+                    far += 1;
+                }
+                let prev = Vec2::new(pos.x + rng.range(-14.0, 14.0), pos.y + rng.range(-14.0, 14.0));
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                fast.get_map_indices_into(prev, pos, 0, &mut a);
+                slow.get_map_indices_into(prev, pos, 0, &mut b);
+                assert_eq!(a, b, "case {k}: {prev:?} -> {pos:?}");
+                if a.is_empty() {
+                    empty += 1;
+                } else {
+                    nonempty += 1;
+                }
+            }
+            assert!(
+                near > 500 && far > 500 && empty > 500 && nonempty > 500,
+                "{near} {far} {empty} {nonempty}"
+            );
+        }
+    }
+
+    /// Task 3.6: the per-cell hazard table equals the layers' freeze/death definition, on and off the
+    /// map, and stays right (via the fallback) after the tables go stale.
+    #[test]
+    fn hazard_tile_matches_the_layers() {
+        let map = feature_map(0x4A7A_2D00);
+        let mut c: Collision<f32> = Collision::new(&map);
+        let want = |c: &Collision<f32>, tx: i32, ty: i32| {
+            tx >= 0
+                && ty >= 0
+                && tx < c.width()
+                && ty < c.height()
+                && (c.get_index(tx, ty) == i32::from(map::TILE_FREEZE)
+                    || c.get_index(tx, ty) == i32::from(map::TILE_DEATH)
+                    || c.get_front_index(tx, ty) == i32::from(map::TILE_FREEZE)
+                    || c.pickup_freeze_at(tx, ty))
+        };
+        let mut any = 0;
+        for ty in -3..45 {
+            for tx in -3..65 {
+                assert_eq!(c.hazard_tile(tx, ty), want(&c, tx, ty), "({tx}, {ty})");
+                any += i32::from(c.hazard_tile(tx, ty));
+            }
+        }
+        assert!(any > 50, "the map must contain hazards");
+        c.set_collision_at(100.0, 100.0, map::TILE_FREEZE);
+        assert!(c.hazard_tile(3, 3), "a stale table falls back to the layers");
+        c.recompute_derived();
+        assert!(c.hazard_tile(3, 3));
+        assert_eq!(c.hazard_tile(3, 3), want(&c, 3, 3));
+    }
+
+    /// An all-air map without a border: a ray over it never hits anything.
+    fn open_map(w: i32, h: i32) -> MapData {
+        MapData {
+            width: w as u32,
+            height: h as u32,
+            game: vec![tile(map::TILE_AIR); (w * h) as usize],
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        }
+    }
+
+    /// F4 of the 3.6 review: a march of `i32::MAX` samples (only reachable for `R = f64`, where a segment of
+    /// 2 147 483 646 px gives `end == i32::MAX`) must end after its last sample instead of overflowing `run_end + 1`
+    /// (a panic in debug, an endless loop in release). Walking 2^31 samples takes tens of seconds, so this runs
+    /// with `--ignored` (release: `cargo test -p ddai-physics --release --lib -- --ignored i32_max`).
+    #[test]
+    #[ignore = "walks 2^31 samples: tens of seconds in release"]
+    fn marches_with_i32_max_samples_terminate_for_f64() {
+        let c: Collision<f64> = Collision::new(&open_map(40, 40));
+        let (p0, p1) = (Vec2::new(0.0f64, 0.0), Vec2::new(2_147_483_646.0f64, 0.0));
+        assert_eq!(((vmath::distance(p0, p1) + 1.0).to_i32_trunc()), i32::MAX);
+        let line = c.intersect_line(p0, p1);
+        assert_eq!((line.hit, line.collision, line.before_collision), (0, p1, p1));
+        let hook = c.intersect_line_tele_hook(p0, p1, false);
+        assert_eq!((hook.hit, hook.collision, hook.before_collision), (0, p1, p1));
+    }
+
+    /// The run bookkeeping near the top of the `i32` range, cheaply: the last run of a march that ends at
+    /// `i32::MAX` is cut at `end` and its successor does not exist (the loops `break` on `checked_add`).
+    #[test]
+    fn run_arithmetic_is_safe_at_the_top_of_the_i32_range() {
+        const RUN: i32 = 16;
+        for end in [i32::MAX, i32::MAX - 1, i32::MAX - 15, i32::MAX - 16] {
+            let mut i = end - 40;
+            let mut runs = 0;
+            loop {
+                let run_end = i.saturating_add(RUN - 1).min(end);
+                assert!(run_end >= i && run_end <= end);
+                runs += 1;
+                let Some(next) = run_end.checked_add(1) else { break };
+                if next > end {
+                    break;
+                }
+                i = next;
+            }
+            assert!(runs >= 3, "end {end}: {runs} runs");
+        }
     }
 
     /// R4 regression: past 2^31 `to_i32_trunc` saturates to `i32::MIN`, which used to invert the

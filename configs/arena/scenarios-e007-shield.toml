@@ -9,7 +9,7 @@ trials = 50
 label = "adaptive 3.5"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 }
 
@@ -17,7 +17,7 @@ hybrid = { shield_plan_escape = false, shield_hook_anchors = 0 }
 label = "adaptive plan"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 }
 
@@ -25,7 +25,7 @@ hybrid = { shield_plan_escape = true, shield_hook_anchors = 0 }
 label = "adaptive plan+hooks"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 }
 
@@ -33,7 +33,7 @@ hybrid = { shield_plan_escape = true, shield_hook_anchors = 3 }
 label = "adaptive plan+hooks+timeout"
 brain = "hybrid"
 mode = "deadline"
-clock = "work"
+clock = "work", step_ms = 0.0022
 budget_ms = 4.0
 hybrid = { shield_plan_escape = true, shield_hook_anchors = 3, shield_timeout_danger = true }
 

@@ -25,7 +25,7 @@
 //! being hooked by it, being dragged toward it across a hazard, being launched by its hammer.
 
 use crate::config::PlannerConfig;
-use crate::fields::{drag_crosses_hazard, launch_flight_lands_in_hazard, launch_lands_in_hazard};
+use crate::fields::{LaunchMemo, drag_crosses_hazard, launch_flight_lands_in_hazard_memo, launch_lands_in_hazard};
 use crate::plan_world::PlanWorld;
 use crate::planner::LAUNCH_REACH_PX;
 use crate::tuning::HOOK_LENGTH;
@@ -84,7 +84,13 @@ pub fn threat_radius(decision_ticks: i32, lag_ticks: u32) -> f64 {
 /// The extra per-tick score of the threats in `threat_ids` (never the victim): the exposure terms
 /// of `scoreTick` with each threat as the source. Zero when we are frozen (the fight is already
 /// lost then, the global terms say so) and for threats that are dead or frozen themselves.
-pub(crate) fn threat_terms<W: PlanWorld>(world: &W, self_id: i32, threat_ids: &[i32], cfg: &PlannerConfig) -> f64 {
+pub(crate) fn threat_terms<W: PlanWorld>(
+    world: &W,
+    self_id: i32,
+    threat_ids: &[i32],
+    cfg: &PlannerConfig,
+    mut launch_memo: Option<&mut LaunchMemo>,
+) -> f64 {
     if threat_ids.is_empty() {
         return 0.0;
     }
@@ -114,7 +120,14 @@ pub(crate) fn threat_terms<W: PlanWorld>(world: &W, self_id: i32, threat_ids: &[
                     cfg.launch_exact_weight
                 } else {
                     cfg.launch_exposure
-                }) * launch_flight_lands_in_hazard(col, me.pos, t.pos, separation, me.vel);
+                }) * launch_flight_lands_in_hazard_memo(
+                    launch_memo.as_deref_mut(),
+                    col,
+                    me.pos,
+                    t.pos,
+                    separation,
+                    me.vel,
+                );
             } else {
                 s -= cfg.launch_exposure * launch_lands_in_hazard(col, me.pos, t.pos, separation);
             }

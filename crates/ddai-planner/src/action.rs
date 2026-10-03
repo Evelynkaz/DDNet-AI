@@ -2,6 +2,7 @@
 //! into a `PlayerInput`, with aim smoothing/flick-turn and the fire press-counter convention.
 //! `ACTION_SIZE`/other constants match TS exactly, cited by name.
 
+use crate::trig;
 use crate::types::{PlayerInput, WEAPON_GUN, WEAPON_HAMMER};
 use ddai_jsmath as js;
 
@@ -62,12 +63,12 @@ pub fn decode_action(raw: &[f64; ACTION_SIZE], prev: &PlayerInput, airborne: boo
     let ay = if raw[9].is_finite() { raw[9] } else { 0.0 };
     let len = js::sqrt(ax * ax + ay * ay);
 
-    let wanted = if len < 1e-6 { 0.0 } else { js::atan2(ay, ax) };
+    let wanted = if len < 1e-6 { 0.0 } else { trig::atan2(ay, ax) };
     let prev_len = js::sqrt(prev.target_x * prev.target_x + prev.target_y * prev.target_y);
     let current = if prev_len < 1e-6 {
         wanted
     } else {
-        js::atan2(prev.target_y, prev.target_x)
+        trig::atan2(prev.target_y, prev.target_x)
     };
 
     let mut delta = wanted - current;
@@ -91,8 +92,8 @@ pub fn decode_action(raw: &[f64; ACTION_SIZE], prev: &PlayerInput, airborne: boo
     }
     let angle = current + delta;
 
-    let mut tx = js::round(js::cos(angle) * AIM_RADIUS);
-    let mut ty = js::round(js::sin(angle) * AIM_RADIUS);
+    let mut tx = js::round(trig::cos(angle) * AIM_RADIUS);
+    let mut ty = js::round(trig::sin(angle) * AIM_RADIUS);
     if tx == 0.0 && ty == 0.0 {
         tx = AIM_RADIUS;
         ty = 0.0;

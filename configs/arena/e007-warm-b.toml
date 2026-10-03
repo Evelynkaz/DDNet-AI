@@ -8,14 +8,14 @@ games = 400
 [[condition]]
 name = "1v1 warm bonus 0.0"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.0 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.0 } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "1v1 warm bonus 0.3"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.3 } }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "1v1 warm bonus 0.7"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.7 } }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0, hybrid = { adaptive = false, warm_bonus = 0.7 } }, { brain = "planner", mode = "fixed" }]

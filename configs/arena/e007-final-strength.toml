@@ -8,7 +8,7 @@ games = 200
 [[condition]]
 name = "clb-left: hybrid 4 ms vs scripted"
 arena = "clb-left"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
 
 [[condition]]
 name = "clb-left: hybrid fixed vs scripted"
@@ -24,7 +24,7 @@ players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted" }]
 name = "clb-left: hybrid 4 ms vs planner fixed"
 arena = "clb-left"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-left: hybrid fixed vs planner fixed"
@@ -35,7 +35,7 @@ players = [{ brain = "hybrid", mode = "fixed" }, { brain = "planner", mode = "fi
 [[condition]]
 name = "clb-right: hybrid 4 ms vs scripted"
 arena = "clb-right"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
 
 [[condition]]
 name = "clb-right: hybrid fixed vs scripted"
@@ -51,7 +51,7 @@ players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted" }]
 name = "clb-right: hybrid 4 ms vs planner fixed"
 arena = "clb-right"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "clb-right: hybrid fixed vs planner fixed"
@@ -62,7 +62,7 @@ players = [{ brain = "hybrid", mode = "fixed" }, { brain = "planner", mode = "fi
 [[condition]]
 name = "chillblock5-ruler: hybrid 4 ms vs scripted"
 arena = "chillblock5-ruler"
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "scripted" }]
 
 [[condition]]
 name = "chillblock5-ruler: hybrid fixed vs scripted"
@@ -78,7 +78,7 @@ players = [{ brain = "planner", mode = "fixed" }, { brain = "scripted" }]
 name = "chillblock5-ruler: hybrid 4 ms vs planner fixed"
 arena = "chillblock5-ruler"
 games = 400
-players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", step_ms = 0.0022, budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
 
 [[condition]]
 name = "chillblock5-ruler: hybrid fixed vs planner fixed"

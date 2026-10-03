@@ -154,6 +154,7 @@ impl Worker {
         let mut planner = Box::new(Planner::new(cfg.planner));
         planner.deterministic_thaw = true;
         planner.track_rollout = true;
+        planner.launch_memo = Some(Box::default());
         Worker {
             base_bias: cfg.planner.self_freeze_bias,
             planner,
@@ -164,6 +165,10 @@ impl Worker {
     }
 
     fn load(&mut self, ctx: &Ctx) {
+        // A new decision (and possibly a new map): nothing memoised before may be reused.
+        if let Some(m) = &mut self.planner.launch_memo {
+            m.new_epoch();
+        }
         self.world.restore_state(&ctx.saved);
         match &mut self.planner.saved {
             Some(s) => s.assign_from(&ctx.saved),
