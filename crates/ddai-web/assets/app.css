@@ -980,3 +980,499 @@ button.danger {
   cursor: pointer;
   font-weight: 600;
 }
+
+/* ---------------------------------------------------------------------------------------------
+   Task 5.8: the «Обучение» tab (training runs, read-only). The site is dark; the series colours are the
+   categorical slots of the fly panel's palette (validated on the dark surface: lightness band, chroma, adjacent CVD
+   separation >= 8, contrast >= 3:1), in the same fixed order, plus dash patterns so a series is never told apart by
+   colour alone (the compare view uses colour + dash per run). Colour follows the entity, never its rank: the
+   same loss head / eval set / arena has the same slot in every chart.
+   --------------------------------------------------------------------------------------------- */
+
+.train-view[hidden] {
+  display: none;
+}
+
+.train-view {
+  --tr-s1: #3987e5;
+  --tr-s2: #d95926;
+  --tr-s3: #199e70;
+  --tr-s4: #c98500;
+  --tr-s5: #d55181;
+  --tr-s6: #9085e9;
+  --tr-s7: #e66767;
+  --tr-neutral: #e8ebf0;
+  --tr-grid: #262d3b;
+  --tr-axis: #8a93a3;
+  --tr-ok: #3ecf6f;
+  --tr-warn: #e0b04a;
+
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 16px 16px calc(80px + env(safe-area-inset-bottom, 0));
+}
+
+.train-view h1 {
+  font-size: 1.3rem;
+  margin: 8px 0 12px;
+}
+
+.train-view h2 {
+  font-size: 1.05rem;
+  margin: 0 0 12px;
+}
+
+.train-view h3 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 14px 0 4px;
+}
+
+.train-view code {
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.85em;
+}
+
+.train-view select {
+  background: var(--bg);
+  border: 1px solid #2a3040;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.95rem;
+  min-height: 40px;
+}
+
+.train-view button {
+  min-height: 40px;
+}
+
+.train-view button:disabled {
+  opacity: 0.45;
+}
+
+.tr-toolbar {
+  margin-bottom: 10px;
+}
+
+/* --- experiments and runs ---------------------------------------------------------------- */
+
+.tr-exp {
+  border-top: 1px solid #232a38;
+}
+
+.tr-exp > summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-weight: 600;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+}
+
+.tr-exp > summary small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.tr-run {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "pick name state"
+    ". meta meta";
+  gap: 2px 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-top: 1px solid #1e2430;
+}
+
+.tr-run.current {
+  background: #1c2230;
+  margin: 0 -8px;
+  padding-left: 8px;
+  padding-right: 8px;
+  border-radius: 8px;
+}
+
+.tr-pick {
+  grid-area: pick;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+}
+
+.tr-pick input {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.train-view button.tr-name {
+  grid-area: name;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 6px 4px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+}
+
+.train-view button.tr-name:hover,
+.train-view button.tr-name:focus-visible {
+  background: #28324a;
+}
+
+.tr-state {
+  grid-area: state;
+  white-space: nowrap;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.tr-state.running {
+  color: var(--tr-ok);
+}
+
+.tr-state.done {
+  color: var(--muted);
+}
+
+.tr-state.stalled {
+  color: var(--tr-warn);
+}
+
+.tr-state.unknown {
+  color: var(--muted);
+}
+
+.tr-meta {
+  grid-area: meta;
+  color: var(--muted);
+  font-size: 0.8rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  align-items: center;
+}
+
+.train-view progress {
+  width: 90px;
+  height: 8px;
+  accent-color: var(--accent);
+}
+
+.tr-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #28324a;
+  color: var(--text);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* --- detail ------------------------------------------------------------------------------ */
+
+.tr-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tr-head h2 {
+  overflow-wrap: anywhere;
+}
+
+.tr-live {
+  color: var(--tr-ok);
+  font-size: 0.85rem;
+}
+
+.tr-note {
+  color: var(--tr-warn);
+  font-size: 0.8rem;
+  margin: 4px 0;
+}
+
+.tr-chart {
+  margin: 4px 0 14px;
+}
+
+.tr-plot {
+  position: relative;
+  width: 100%;
+}
+
+.tr-svg {
+  display: block;
+  width: 100%;
+  touch-action: pan-y;
+}
+
+.tr-svg text {
+  fill: var(--tr-axis);
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.tr-svg .tr-end {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tr-svg .tr-grid {
+  stroke: var(--tr-grid);
+  stroke-width: 1;
+}
+
+.tr-svg .tr-axis {
+  stroke: var(--tr-axis);
+  stroke-width: 1;
+}
+
+.tr-svg .tr-mark {
+  stroke: var(--tr-axis);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.7;
+}
+
+.tr-svg .tr-cross {
+  stroke: var(--text);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.tr-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.tr-dot {
+  stroke: var(--panel);
+  stroke-width: 2;
+}
+
+.s1 { stroke: var(--tr-s1); }
+.s2 { stroke: var(--tr-s2); }
+.s3 { stroke: var(--tr-s3); }
+.s4 { stroke: var(--tr-s4); }
+.s5 { stroke: var(--tr-s5); }
+.s6 { stroke: var(--tr-s6); }
+.s7 { stroke: var(--tr-s7); }
+.s0 { stroke: var(--tr-neutral); }
+.tr-dot.s1 { fill: var(--tr-s1); }
+.tr-dot.s2 { fill: var(--tr-s2); }
+.tr-dot.s3 { fill: var(--tr-s3); }
+.tr-dot.s4 { fill: var(--tr-s4); }
+.tr-dot.s5 { fill: var(--tr-s5); }
+.tr-dot.s6 { fill: var(--tr-s6); }
+.tr-dot.s7 { fill: var(--tr-s7); }
+.tr-dot.s0 { fill: var(--tr-neutral); }
+.d1 { stroke-dasharray: 7 4; }
+.d2 { stroke-dasharray: 2 3; }
+.d3 { stroke-dasharray: 9 3 2 3; }
+
+.tr-tip {
+  position: absolute;
+  z-index: 5;
+  background: var(--bg);
+  border: 1px solid #2a3040;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 0.75rem;
+  pointer-events: none;
+  min-width: 120px;
+  max-width: 260px;
+}
+
+.tr-tip[hidden] {
+  display: none;
+}
+
+.tr-tip .tr-tip-head {
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+
+.tr-tip .tr-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: space-between;
+}
+
+.tr-tip .tr-tip-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tr-tip .tr-tip-val {
+  color: var(--text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.tr-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.tr-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tr-key {
+  width: 26px;
+  height: 8px;
+  flex: none;
+}
+
+.tr-empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 4px 0 10px;
+}
+
+.tr-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.tr-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.tr-table th,
+.tr-table td {
+  text-align: right;
+  padding: 5px 8px;
+  border-top: 1px solid #232a38;
+  white-space: nowrap;
+}
+
+.tr-table th:first-child,
+.tr-table td:first-child {
+  text-align: left;
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+}
+
+.tr-table th {
+  color: var(--muted);
+  font-weight: 600;
+  border-top: none;
+  white-space: normal;
+  vertical-align: bottom;
+  min-width: 4.5rem;
+}
+
+.tr-table .ci-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.tr-ci svg {
+  display: block;
+}
+
+.tr-ci .ci-track {
+  stroke: var(--tr-grid);
+  stroke-width: 1;
+}
+
+.tr-ci .ci-whisker {
+  stroke: var(--tr-s1);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.tr-ci .ci-dot {
+  fill: var(--tr-s1);
+  stroke: var(--panel);
+  stroke-width: 2;
+}
+
+details.tr-tbl {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+}
+
+details.tr-tbl > summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: 4px 0;
+}
+
+.tr-sub {
+  border-top: 1px solid #232a38;
+  margin-top: 12px;
+  padding-top: 4px;
+}
+
+.tr-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.tr-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (min-width: 640px) {
+  .tr-run {
+    grid-template-columns: 28px minmax(0, 1.3fr) minmax(0, 1.6fr) auto;
+    grid-template-areas: "pick name meta state";
+  }
+
+  .tr-meta {
+    justify-content: flex-start;
+  }
+}
+
+/* The tab bar has five tabs now: a little tighter on a phone so «Обучение» fits at 360 px. */
+.tabbar button {
+  padding-left: 2px;
+  padding-right: 2px;
+  font-size: 0.85rem;
+}
+
+@media (min-width: 640px) {
+  .tabbar button {
+    font-size: 1rem;
+  }
+}

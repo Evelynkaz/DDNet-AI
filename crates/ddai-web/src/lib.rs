@@ -25,6 +25,7 @@ pub mod server;
 pub mod session_guard;
 pub mod state;
 pub mod toml_kv;
+pub mod training;
 pub mod ws;
 
 pub use config::WebConfig;

@@ -10,6 +10,7 @@ const INDEX_HTML: &str = include_str!("../../assets/index.html");
 const APP_CSS: &str = include_str!("../../assets/app.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
 const FLY_JS: &str = include_str!("../../assets/fly.js");
+const TRAIN_JS: &str = include_str!("../../assets/train.js");
 
 pub async fn page() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX_HTML)
@@ -26,4 +27,9 @@ pub async fn js() -> impl IntoResponse {
 /// Task 7.4: the fly panel's script (the «Муха» tab), loaded before `app.js`.
 pub async fn fly_js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], FLY_JS)
+}
+
+/// Task 5.8: the training panel's script (the «Обучение» tab), loaded before `app.js`.
+pub async fn train_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], TRAIN_JS)
 }

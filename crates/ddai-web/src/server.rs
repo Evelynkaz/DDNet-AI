@@ -56,6 +56,9 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/bot/relations",
             get(http::bot::relations_get).post(http::bot::relations_post),
         )
+        // Task 5.8: the read-only training panel (session only; plain GETs, nothing is written anywhere).
+        .route("/api/train/runs", get(http::train::runs))
+        .route("/api/train/run", get(http::train::run))
         .route("/ws", get(ws::ws_handler))
         .route_layer(axum::middleware::from_fn(headers::no_store));
 
@@ -70,7 +73,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/", get(http::assets::page))
         .route("/app.css", get(http::assets::css))
         .route("/app.js", get(http::assets::js))
-        .route("/fly.js", get(http::assets::fly_js));
+        .route("/fly.js", get(http::assets::fly_js))
+        .route("/train.js", get(http::assets::train_js));
 
     let app: Router<SharedState> = Router::new().merge(api_and_ws).merge(map_route).merge(assets);
     // Order matters (review finding F5): `tower::Layer::layer` wraps the *current* service, so

@@ -5,3 +5,4 @@ pub mod assets;
 pub mod bot;
 pub mod login;
 pub mod map;
+pub mod train;

@@ -48,6 +48,10 @@ ddai-botctl = { path = "../ddai-botctl" }
 # Pure-Rust zlib deflate (no C dependency, same choice `ddai-map` already made) for the
 # compressed `/api/map/<sha256>` scene payload.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Task 5.8: `config.toml` of a training run (already a dependency of the workspace).
+toml = "1.1.6"
+# Task 5.8: the `O_NOFOLLOW` / `O_NONBLOCK` constants for `OpenOptionsExt::custom_flags` when opening run files (a transitive dependency already).
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.14"

@@ -24,6 +24,8 @@
   var botViewEl = document.getElementById("bot-view");
   var tabFlyButton = document.getElementById("tab-fly");
   var flyViewEl = document.getElementById("fly-view");
+  var tabTrainButton = document.getElementById("tab-train");
+  var trainViewEl = document.getElementById("train-view");
 
   var csrfToken = null;
   var socket = null;
@@ -40,8 +42,10 @@
     gameViewEl.hidden = true;
     botViewEl.hidden = true;
     flyViewEl.hidden = true;
+    trainViewEl.hidden = true;
     BotPanel.onHidden();
     FlyPanel.onHidden();
+    TrainPanel.onHidden();
     setConnected(false);
   }
 
@@ -52,6 +56,8 @@
     gameViewEl.hidden = name !== "game";
     botViewEl.hidden = name !== "bot";
     flyViewEl.hidden = name !== "fly";
+    trainViewEl.hidden = name !== "train";
+    tabTrainButton.classList.toggle("active", name === "train");
     tabFlyButton.classList.toggle("active", name === "fly");
     tabStatusButton.classList.toggle("active", name === "status");
     tabGameButton.classList.toggle("active", name === "game");
@@ -69,11 +75,18 @@
     } else {
       FlyPanel.onHidden();
     }
+    if (name === "train") {
+      TrainPanel.onShown();
+    } else {
+      TrainPanel.onHidden();
+    }
   }
 
   function showAuthenticated() {
     tabbar.hidden = false;
-    showTab(currentTab === "game" || currentTab === "bot" || currentTab === "fly" ? currentTab : "status");
+    showTab(
+      currentTab === "game" || currentTab === "bot" || currentTab === "fly" || currentTab === "train" ? currentTab : "status",
+    );
   }
 
   function setConnected(on) {
@@ -337,6 +350,9 @@
   });
   tabFlyButton.addEventListener("click", function () {
     showTab("fly");
+  });
+  tabTrainButton.addEventListener("click", function () {
+    showTab("train");
   });
   FlyPanel.attach(sendJson);
 

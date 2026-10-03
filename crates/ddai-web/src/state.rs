@@ -14,6 +14,7 @@ use crate::control::client::ControlClient;
 use crate::control::relations::RelationsStore;
 use crate::live::hub::LiveHub;
 use crate::secrets::SecretsPaths;
+use crate::training::{Limits, TrainingStore};
 
 /// Everything handlers need, wrapped once in an `Arc` and cloned cheaply per request.
 pub type SharedState = Arc<AppState>;
@@ -61,6 +62,8 @@ pub struct AppState {
     pub control: ControlClient,
     /// Task 5.6: the friend / war / ignore lists file.
     pub relations: RelationsStore,
+    /// Task 5.8: the read-only view of the training runs directory.
+    pub training: Arc<TrainingStore>,
 }
 
 impl AppState {
@@ -82,6 +85,7 @@ impl AppState {
         let (session_invalidated, _rx) = broadcast::channel(SESSION_INVALIDATED_CHANNEL_CAPACITY);
         let control = ControlClient::new(config.control_socket.clone());
         let relations = RelationsStore::new(config.relations_path.clone());
+        let training = Arc::new(TrainingStore::new(config.runs_dir.clone(), Limits::default()));
         Self {
             config,
             secrets_paths,
@@ -96,6 +100,7 @@ impl AppState {
             live_hub,
             control,
             relations,
+            training,
         }
     }
 

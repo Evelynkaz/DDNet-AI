@@ -337,6 +337,29 @@
       </div>
     </section>
 
+    <!-- Task 5.8: the training panel (owner only, read-only): the runs under `<data-dir>/runs`, their curves, DAgger rounds, arena
+         results with confidence intervals and checkpoints. Outside `.shell` like the other tabs; everything dynamic is built with
+         `textContent` and SVG nodes (never `innerHTML`), colours come from the `--tr-*` tokens (the CSP forbids inline styles). -->
+    <section id="train-view" class="train-view" hidden>
+      <h1>Обучение</h1>
+      <p class="hint">Только чтение: сайт показывает файлы запусков (<code>status.json</code>, <code>metrics.jsonl</code>, конфиг, сводки арены) и список чекпоинтов (имя, размер, хэш). Весов он не отдаёт и ничего не меняет.</p>
+      <p class="bot-conn"><span id="train-dot" class="dot dot-off" aria-hidden="true"></span> <span id="train-state" role="status">загрузка…</span></p>
+
+      <section class="card" aria-labelledby="train-list-title">
+        <h2 id="train-list-title">Эксперименты и запуски</h2>
+        <p class="hint">Нажмите на имя запуска, чтобы открыть его. Отметьте от 2 до 4 запусков, чтобы сравнить их на одних графиках.</p>
+        <div class="inline-form tr-toolbar">
+          <button type="button" class="alt" id="train-compare-btn" disabled>Сравнить</button>
+          <button type="button" class="alt" id="train-compare-clear" hidden>Снять выбор</button>
+          <span id="train-pick-note" class="hint"></span>
+        </div>
+        <div id="train-list" class="tr-list"></div>
+      </section>
+
+      <div id="train-compare" hidden></div>
+      <div id="train-detail" hidden></div>
+    </section>
+
     <!-- Always `position: fixed` (see app.css) — must stay clickable, and above `#game-view`,
          at every viewport width (review round 1, finding F4: a previous version switched this to
          `position: static` on wide screens, which let the fixed, full-viewport `#game-view`
@@ -346,9 +369,11 @@
       <button id="tab-game" type="button">Игра</button>
       <button id="tab-bot" type="button">Бот</button>
       <button id="tab-fly" type="button">Муха</button>
+      <button id="tab-train" type="button">Обучение</button>
     </nav>
 
     <script src="/fly.js"></script>
+    <script src="/train.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

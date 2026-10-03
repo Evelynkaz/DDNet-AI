@@ -319,3 +319,13 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
 
 Откат: `sudo systemctl disable --now ddnet-ai-flydemo` и `git checkout <старый коммит> -- deploy/systemd/ddnet-ai-web.service && deploy/install.sh --skip-build` (веб без `--demo-socket`: вкладки снова пишут, что бота нет). Новый
 бинарник веба с `--demo-socket` без юнита демо работает как раньше (источник «нет», пока сокета нет).
+
+## Вкладка «Обучение»: юнит не меняется (задача 5.8, D-077)
+
+Сайт читает `~/aiddnet/data/runs` (`--runs-dir`, по умолчанию `<data-dir>/runs`, то есть тот же путь; в `ExecStart` флаг не нужен). Изменений `ddnet-ai-web.service` и Caddy **нет**:
+
+- `ProtectHome=read-only` делает `/home` только читаемым, а читать вкладке и нужно; пишет вкладка **ничего** (`ReadWritePaths` те же: `secrets`, `logs`, `bot`);
+- каталог и файлы запусков принадлежат `ubuntu` (`0775` / `0664`), юнит работает как `ubuntu`;
+- память: чтение с потолками (хвост `metrics.jsonl` 4 МиБ, прочие файлы десятки КиБ, одновременно не больше 4 чтений), намного ниже `MemoryMax=512M`; `MemoryDenyWriteExecute`, `PrivateTmp`, `IPAddressDeny` вкладке не мешают.
+
+После выкладки (`deploy/install.sh`, перезапуск веба делает лид): войти, открыть «Обучение», увидеть `E-005`, `E-008`; в списке «Запусков: N, идёт: M» (при пустом списке и «Каталог запусков не найден» — проверить путь `--runs-dir`).

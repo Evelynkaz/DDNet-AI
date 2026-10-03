@@ -71,6 +71,8 @@ pub struct WebConfig {
     /// Task 5.6: the friend / war / ignore lists file the editor reads and writes. Default
     /// `<data-dir>/bot/relations.json`.
     pub relations_path: PathBuf,
+    /// Task 5.8: the training runs the «Обучение» tab reads (read-only), default `<data-dir>/runs`.
+    pub runs_dir: PathBuf,
 }
 
 impl WebConfig {
@@ -102,6 +104,7 @@ impl WebConfig {
             max_fly_hz: 15.0,
             control_socket: data_dir.join("bot").join("control.sock"),
             relations_path: data_dir.join("bot").join("relations.json"),
+            runs_dir: data_dir.join("runs"),
             data_dir,
         }
     }

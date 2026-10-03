@@ -79,6 +79,9 @@ pub struct WebArgs {
     /// same file as the bot (`ddnet-ai play --relations`).
     #[arg(long = "relations")]
     pub(crate) relations: Option<PathBuf>,
+    /// Task 5.8: the training runs the «Обучение» tab shows, read-only (`docs/formats.md` §29). Default `<data-dir>/runs`.
+    #[arg(long = "runs-dir")]
+    pub(crate) runs_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -161,6 +164,9 @@ pub fn run_web(args: WebArgs) -> ExitCode {
     }
     if let Some(path) = args.relations {
         config.relations_path = path;
+    }
+    if let Some(path) = args.runs_dir {
+        config.runs_dir = path;
     }
     if let Some(socket) = args.bot_socket {
         if config.map_search_dirs.is_empty() {
