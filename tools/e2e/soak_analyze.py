@@ -42,11 +42,14 @@ PRUNED_AUTOCLIP = re.compile(r"^clips/(?!manual-)[^/]+-[0-9]+-s[0-9]+\.clip$")
 # A Cl_Kill must end the life (a new life starts) within this many ticks, or it did nothing (sv_kill_protection, E-011).
 KILL_EFFECT_TICKS = 50
 MAX_DEAD_KILLS_IN_A_ROW = 3
+# Task 4.6 (D-078): the one chat-channel message the bot may send, as the outgoing audit labels it (`ddai_client::session::SERVER_COMMAND_KILL_LABEL`).
+KILL_COMMAND_LABEL = "Cl_Say(/kill)"
 SLOPE_WINDOW_S = 5 * 3600.0
 SLOPE_LIMIT_MIB_WEEK = 50.0
 INGAME_RECONNECT_WINDOW_S = 600
 # What the bot may put on the wire: the join's one-offs plus Cl_Kill / Cl_SetTeam (docs/formats.md 21.6).
 ALLOWED_OUTGOING = {
+    "Cl_Say(/kill)",  # task 4.6, D-078: the typed /kill fallback; every other Cl_Say stays a failure
     "Cl_StartInfo",
     "Cl_IsDDNetLegacy",
     "Cl_ShowDistance",
@@ -137,6 +140,13 @@ class BotLog:
             self.events.append((epoch, "kill", {"tick": as_int(f, "tick"), "reason": f.get("reason", "?")}))
         elif msg.startswith("requesting Cl_Kill"):
             self.count("kill_requested")
+        elif msg.startswith("requesting /kill"):
+            # task 4.6 (D-078): the typed `/kill` fallback after a Cl_Kill that had no effect
+            self.count("kill_command")
+            self.events.append((epoch, "killcmd", {"tick": as_int(f, "tick")}))
+        elif msg.startswith("kill protection: a /kill ended a life"):
+            self.count("kill_protection_learned")
+            self.events.append((epoch, "learned", {"minutes": f.get("life_minutes", "?")}))
         elif msg.startswith("blocked by"):
             self.count("blocked_by")
         elif msg.startswith("block "):
@@ -581,13 +591,16 @@ def analyze_kills(res, log):
 
 
 def analyze_kill_liveness(res, log):
-    """Task 4.5 (review F7): a `Cl_Kill` the server drops is invisible to every other check. DDNet refuses it silently once a life is
+    """Task 4.5 (review F7; task 4.6 adds the `/kill` fallback): a `Cl_Kill` the server drops is invisible to every other check. DDNet refuses it silently once a life is
     older than `sv_kill_protection` minutes (20 by default): the bot then sits frozen and asks every 10 s for hours (the 6 h rehearsal:
     93 minutes, 548 of 677 kills). Each kill must be followed by a new life within KILL_EFFECT_TICKS (the respawn the kill asks for);
+    a kill whose `/kill` fallback (task 4.6) was followed by a new life within the same window took effect too.
     MAX_DEAD_KILLS_IN_A_ROW or more that did nothing in a row fail. The last kill of the log has no later tick to judge by and is not counted."""
     evs = log.events
     judged = dead = longest = run = 0
     runs = []
+    command_effects = 0
+    commands_sent = sum(1 for _, k, _ in evs if k == "killcmd")
     for idx, (epoch, kind, d) in enumerate(evs):
         if kind in ("tick_reset", "map_changing", "disconnected"):
             if run:
@@ -601,11 +614,17 @@ def analyze_kill_liveness(res, log):
             break  # the final kill: the log ended before its effect could show
         t = d["tick"]
         ok = False
+        command_at = None  # a `/kill` after this decision (task 4.6): the life may start within the window of that instead
         for _, k2, d2 in evs[idx + 1 :]:
-            if k2 == "life":
+            if k2 == "killcmd" and command_at is None:
+                command_at = d2["tick"]
+            elif k2 == "life":
                 ok = 0 <= d2["tick"] - t <= KILL_EFFECT_TICKS
+                if not ok and command_at is not None and 0 <= d2["tick"] - command_at <= KILL_EFFECT_TICKS:
+                    ok = True
+                    command_effects += 1
                 break
-            if k2 in ("kill", "tick_reset", "map_changing", "disconnected"):
+            elif k2 in ("kill", "tick_reset", "map_changing", "disconnected"):
                 break
         judged += 1
         if ok:
@@ -621,7 +640,8 @@ def analyze_kill_liveness(res, log):
     res.check(
         f"every Cl_Kill takes effect (a new life within {KILL_EFFECT_TICKS} ticks); fewer than {MAX_DEAD_KILLS_IN_A_ROW} that did nothing in a row",
         longest < MAX_DEAD_KILLS_IN_A_ROW,
-        f"{judged} kills judged, {dead} did nothing, longest run {longest}"
+        f"{judged} kills judged, {dead} did nothing, longest run {longest}; the /kill fallback was sent {commands_sent} time(s), "
+        f"{command_effects} kill(s) took effect only through it (the others at once, by the server's notice)"
         + ("; the bot is stuck where the server will not let it die (sv_kill_protection: a life older than 20 minutes)" if longest >= MAX_DEAD_KILLS_IN_A_ROW else ""),
     )
 
@@ -632,11 +652,11 @@ def analyze_chat(res, log, report, console_text):
         res.check("0 chat in the outgoing audit", False, "no --report: the outgoing audit is missing")
         return
     labels = sorted(out)
-    chat = [k for k in labels if "Say" in k or "Chat" in k]
+    chat = [k for k in labels if ("Say" in k or "Chat" in k) and k != KILL_COMMAND_LABEL]
     unknown = [k for k in labels if k not in ALLOWED_OUTGOING]
     refused = {k: v["refused"] for k, v in out.items() if v["refused"]}
     res.check(
-        "0 chat in the outgoing audit",
+        "0 chat in the outgoing audit except the allowlisted /kill",
         not chat and not unknown and not refused,
         "outgoing: " + ", ".join(f"{k} x{out[k]['accepted']}" for k in labels) + f"; chat {chat}; unknown {unknown}; refused {refused}",
     )
@@ -646,6 +666,16 @@ def analyze_chat(res, log, report, console_text):
         "Cl_Kill on the wire == the bot's own kill decisions",
         kills_sent == len(kill_ticks),
         f"wire {kills_sent}, decisions {len(kill_ticks)}",
+    )
+    cmds_sent = out.get(KILL_COMMAND_LABEL, {}).get("accepted", 0)
+    cmd_ticks = (report or {}).get("kill_command_ticks", [])
+    # Each /kill answers a Cl_Kill decision of the bot's own: one at or before it, no more than the 50-tick wait plus the cooldown
+    # (500) earlier. The counts alone prove nothing (both come from the same place): this is the property.
+    orphans = [c for c in cmd_ticks if not any(0 <= c - k <= KILL_EFFECT_TICKS + KILL_COOLDOWN_TICKS for k in kill_ticks)]
+    res.check(
+        "every /kill on the wire is the bot's own fallback decision (answers a Cl_Kill decision, none refused)",
+        cmds_sent == len(cmd_ticks) and out.get(KILL_COMMAND_LABEL, {}).get("refused", 0) == 0 and not orphans,
+        f"wire {cmds_sent}, decisions {len(cmd_ticks)}, without a Cl_Kill decision before them {orphans[:5]}",
     )
 
 
@@ -978,7 +1008,7 @@ def analyze(run_dir, baseline=None):
 # ------------------------------------------------------------------------------------------------ self test
 
 
-def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99_growth=0.0, bad_kill=False, chat=False, panic=False, clips=10, drops=1, viewer=25, file_growth=0.0, swapped_growth=0.0, prod_dir_ok=True, duration=3600, leak_mib_h=0.0, real_dir=False, dead_kills=0):
+def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99_growth=0.0, bad_kill=False, chat=False, panic=False, clips=10, drops=1, viewer=25, file_growth=0.0, swapped_growth=0.0, prod_dir_ok=True, duration=3600, leak_mib_h=0.0, real_dir=False, dead_kills=0, cmd_kills=0, dead_cmds=False, stray_cmd=False, orphan_cmd=False):
     """A fake run (60 minutes by default; `duration` for a long one) whose numbers we control, to prove that every acceptance check can fail."""
     import random
 
@@ -1072,6 +1102,14 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
     lines.append(f"{ts(130)}  INFO ddai_bot::runner: life started tick=1702")
     for n in range(dead_kills):  # kills the server dropped: no new life follows
         lines.append(f"{ts(200 + 10 * n)}  INFO ddai_bot::runner: unstick: Cl_Kill tick={2300 + 500 * n} reason=Overdue")
+    for n in range(cmd_kills):  # kills the server dropped, ended by the /kill fallback 50 ticks later
+        base = 4000 + 500 * n
+        lines.append(f"{ts(300 + 10 * n)}  INFO ddai_bot::runner: unstick: Cl_Kill tick={base} reason=Overdue")
+        lines.append(f"{ts(301 + 10 * n)}  INFO ddai_bot::runner: requesting /kill (fallback: the protocol Cl_Kill had no effect) tick={base + 50}")
+        lines.append(f"{ts(302 + 10 * n)}  INFO ddai_bot::runner: life started tick={base + 52}")
+    if dead_cmds:  # the server ignored the /kill too
+        for n in range(dead_kills):
+            lines.append(f"{ts(201 + 10 * n)}  INFO ddai_bot::runner: requesting /kill (fallback: the protocol Cl_Kill had no effect) tick={2350 + 500 * n}")
     lines.append(f"{ts(400)}  INFO ddai_bot::runner: life started tick=9000")
     for k in range(drops):
         lines.append(f"{ts(1500 * sc + 30 * k)}  WARN ddai_bot::runner: disconnected reason=ServerShutdown by_peer=true")
@@ -1083,11 +1121,15 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
     if panic:
         lines.append("thread 'ddai-bot' panicked at crates/x.rs:1:1:")
     (run / "bot.log").write_text("\n".join(lines) + "\n")
-    out = {"Cl_StartInfo": {"accepted": 1, "refused": 0}, "Cl_Kill": {"accepted": 3 + dead_kills, "refused": 0}}
+    out = {"Cl_StartInfo": {"accepted": 1, "refused": 0}, "Cl_Kill": {"accepted": 3 + dead_kills + cmd_kills, "refused": 0}}
+    n_cmds = cmd_kills + (dead_kills if dead_cmds else 0)
+    if n_cmds or stray_cmd or orphan_cmd:
+        out["Cl_Say(/kill)"] = {"accepted": n_cmds + int(stray_cmd) + int(orphan_cmd), "refused": 0}
     if chat:
         out["Cl_Say"] = {"accepted": 1, "refused": 0}
     (run / "bot-report.json").write_text(
-        json.dumps({"exit_code": 0, "gave_up": None, "outgoing_game_messages": out, "kill_ticks": [1000, 1600, 1700] + [2300 + 500 * n for n in range(dead_kills)]})
+        json.dumps({"exit_code": 0, "gave_up": None, "outgoing_game_messages": out, "kill_ticks": [1000, 1600, 1700] + [2300 + 500 * n for n in range(dead_kills)] + [4000 + 500 * n for n in range(cmd_kills)],
+                    "kill_command_ticks": [4050 + 500 * n for n in range(cmd_kills)] + ([2350 + 500 * n for n in range(dead_kills)] if dead_cmds else []) + ([99_999] if orphan_cmd else [])})
     )
     return run
 
@@ -1113,6 +1155,10 @@ def selftest():
         ("kill cooldown fails", {"bad_kill": True}, "Cl_Kill within"),
         ("two kills the server dropped pass", {"dead_kills": 2}, None),
         ("three kills the server dropped in a row fail (sv_kill_protection)", {"dead_kills": 3}, "takes effect"),
+        ("three kills the /kill fallback ended pass (task 4.6)", {"cmd_kills": 3}, None),
+        ("three kills whose /kill the server ignored too fail", {"dead_kills": 3, "dead_cmds": True}, "takes effect"),
+        ("a /kill on the wire the bot never decided on fails", {"stray_cmd": True}, "/kill on the wire"),
+        ("a /kill with no Cl_Kill decision before it fails (counts equal, tick orphaned)", {"orphan_cmd": True}, "/kill on the wire"),
         ("chat fails", {"chat": True}, "0 chat"),
         ("panic fails", {"panic": True}, "no panic"),
         ("unbounded clips fail", {"clips": 60}, "clips bounded"),

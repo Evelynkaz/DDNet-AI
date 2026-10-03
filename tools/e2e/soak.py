@@ -411,6 +411,7 @@ class Soak:
         self.memory_dir = self.bot_state / "memory"
         self.prod_bot_before = None
         self.relations_before = None
+        self.kp_before = None
 
     # ---- small helpers
     def t(self):
@@ -741,7 +742,26 @@ class Soak:
         t = time.monotonic()
         sh(["sudo", "systemctl", "restart", SERVER_UNIT], timeout=90)
         self.ev("server_restarted", seconds=round(time.monotonic() - t, 1))
+        if self.a.kill_protection is not None:
+            self.set_kill_protection(self.a.kill_protection)  # a restart forgets what econ set
         threading.Timer(60, self.churn_pause.clear).start()
+
+    def kill_protection(self):
+        rc, out = self.econ("sv_kill_protection")
+        m = re.search(r"Value: (.+)", out)
+        return m.group(1).strip() if m else None
+
+    def set_kill_protection(self, value):
+        """Task 4.6: `sv_kill_protection` through econ (runtime only, so a server restart resets it), retried until it reads back."""
+        for _ in range(20):
+            self.econ("sv_kill_protection", str(value))
+            time.sleep(1)
+            if self.kill_protection() == str(value):
+                self.ev("kill_protection_set", value=value)
+                return True
+            time.sleep(2)
+        self.ev("kill_protection_set_failed", value=value)
+        return False
 
     def map_change(self, name):
         rc, out = self.econ("change_map", name)
@@ -825,11 +845,15 @@ class Soak:
             "label": a.label, "mode": "real-data unit" if self.real else ("unit" if a.unit else "process"), "wb": a.wb, "brain": "hybrid", "duration": a.duration,
             "sample_s": a.sample, "baseline_s": WARMUP_S, "home_map": HOME_MAP, "other_map": a.other_map,
             "binary": self.bin(), "others_names": self.others + (["Muha"] if self.real else []), "name_logs": ["bot.log"], "extra_logs": ["web.log"],
-            "memory": True, "real_data": self.real, "fly_bundle": bool(a.fly_bundle), "started": now_iso(), "bot_died_early": False, "git_head": sh(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"]).stdout.strip(),
+            "memory": True, "kill_protection": a.kill_protection, "real_data": self.real, "fly_bundle": bool(a.fly_bundle), "started": now_iso(), "bot_died_early": False, "git_head": sh(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"]).stdout.strip(),
         }
         (self.run / "meta.json").write_text(json.dumps(self.meta, indent=1))
         bridge = viewer = None
         try:
+            if a.kill_protection is not None:
+                self.kp_before = self.kill_protection()
+                if not self.set_kill_protection(a.kill_protection):
+                    raise SystemExit("could not set sv_kill_protection through econ")
             self.start_web()
             self.start_bot()
             for _ in range(240):  # the bot must be in game within a minute
@@ -934,6 +958,11 @@ class Soak:
         got = self.server_map()
         self.meta["server_map_after"] = got
         self.ev("server_map_restored", sv_map=got, ok=got == HOME_MAP)
+        if self.a.kill_protection is not None:
+            # put it back to what it was (20 on the local server) and read it back
+            self.set_kill_protection(self.kp_before or "20")
+            self.meta["kill_protection_after"] = self.kill_protection()
+            self.ev("kill_protection_restored", value=self.meta["kill_protection_after"], ok=self.meta["kill_protection_after"] == (self.kp_before or "20"))
         (self.run / "meta.json").write_text(json.dumps(self.meta, indent=1))
         self.events_fh.close()
         if self.meta.get("t0_epoch"):
@@ -1181,6 +1210,8 @@ def main():
     ap.add_argument("--bot-name", default="soak-bot")
     ap.add_argument("--seed", default="44")
     ap.add_argument("--no-restart", action="store_true")
+    ap.add_argument("--kill-protection", type=int, default=None,
+                    help="task 4.6: set the local server's sv_kill_protection (minutes) for the run (restored and read back at the end), so lives longer than that drop Cl_Kill and the /kill fallback is exercised")
     ap.add_argument("--no-mapchange", action="store_true")
     ap.add_argument("--out", default=str(DATA / "logs" / "4.4"))
     a = ap.parse_args()

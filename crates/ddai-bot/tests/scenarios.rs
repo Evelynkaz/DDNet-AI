@@ -445,6 +445,93 @@ fn frozen_in_a_freeze_tile_asks_for_a_kill_after_200_ticks_and_respects_the_cool
     });
 }
 
+// --- the /kill fallback (task 4.6, D-078) -------------------------------------------------------------
+
+/// A bot frozen in a freeze tile that the scenario never respawns (the server drops its `Cl_Kill`, like kill protection does).
+fn frozen_bot_forever(notice_after_first_kill: bool) -> (Vec<(i32, bool, bool)>, Vec<BotEvent>) {
+    let (mut bot, mut sc, _) = setup_on(
+        room(&[(35, 38, FREEZE), (35, 37, FREEZE)]),
+        vec![tee(0, 35 * 32 + 16), tee(1, 2000)],
+        Relations::new(),
+        BrainKind::Planner,
+    );
+    sc.tee_mut(0).y = 37 * 32 + 16;
+    run_active(&mut bot, &mut sc, &[1], 3);
+    let mut log = Vec::new();
+    let mut noticed = false;
+    for _ in 0..1700 {
+        sc.tee_mut(0).frozen = true;
+        wiggle(&mut sc, 1);
+        let t = sc.tick;
+        let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+        if out.kill || out.kill_command {
+            log.push((t, out.kill, out.kill_command));
+        }
+        if notice_after_first_kill && out.kill && !noticed {
+            noticed = true;
+            bot.on_kill_protection_notice();
+        }
+    }
+    (log, bot.drain_events().collect())
+}
+
+#[test]
+fn a_cl_kill_without_effect_is_followed_by_exactly_one_slash_kill_per_decision() {
+    support::big_stack(|| {
+        let (log, events) = frozen_bot_forever(false);
+        let kills: Vec<i32> = log.iter().filter(|e| e.1).map(|e| e.0).collect();
+        let commands: Vec<i32> = log.iter().filter(|e| e.2).map(|e| e.0).collect();
+        assert!(kills.len() >= 2, "{log:?}");
+        // one /kill per decision, and no more than 3 in a life that never ends (the bot then stops asking: no spam)
+        assert_eq!(commands.len(), kills.len().min(3), "{log:?}");
+        assert!(kills.len() > 3, "the scenario outlasts the limit: {log:?}");
+        for (k, c) in kills.iter().zip(&commands) {
+            assert!(
+                c - k >= 50 && c - k <= 54,
+                "the /kill comes 50 ticks after its Cl_Kill: {log:?}"
+            );
+        }
+        for w in commands.windows(2) {
+            assert!(w[1] - w[0] >= 500, "KILL_COOLDOWN_TICKS between /kill: {commands:?}");
+        }
+        // never in the same output as a protocol kill (that would be a notice-driven case)
+        assert!(log.iter().all(|e| !(e.1 && e.2)), "{log:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, BotEvent::KillFallback { noticed: false, .. }))
+                .count(),
+            commands.len()
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, BotEvent::KillFallbackGaveUp { .. })),
+            "{events:?}"
+        );
+    });
+}
+
+#[test]
+fn the_servers_notice_sends_the_slash_kill_at_once() {
+    support::big_stack(|| {
+        let (log, events) = frozen_bot_forever(true);
+        let kills: Vec<i32> = log.iter().filter(|e| e.1).map(|e| e.0).collect();
+        let commands: Vec<i32> = log.iter().filter(|e| e.2).map(|e| e.0).collect();
+        assert!(kills.len() >= 2 && commands.len() >= 2, "{log:?}");
+        // the first decision: the notice came a snapshot later, the /kill follows at once (well before 50 ticks)
+        assert!(commands[0] - kills[0] <= 6, "{log:?}");
+        // the next decisions of this life: nothing to wait for, only the 500-tick cooldown since the last /kill (2 ticks here)
+        assert!(commands[1] - kills[1] <= 4, "{log:?}");
+        for w in commands.windows(2) {
+            assert!(w[1] - w[0] >= 500, "{commands:?}");
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, BotEvent::KillFallback { noticed: true, .. }))
+        );
+    });
+}
+
 #[test]
 fn a_free_bot_standing_still_with_a_target_gets_unstuck_but_not_without_one() {
     support::big_stack(|| {
@@ -1108,11 +1195,12 @@ fn the_output_type_has_no_chat_and_events_carry_only_tags() {
             let s = format!("{e:?}");
             assert!(!s.contains("\"p1\"") && !s.contains("name"), "{s}");
         }
-        // `Output` is the whole surface the shell can act on: input, kill, set_team. There is no field
-        // that could carry text (asserted structurally by destructuring it exhaustively).
+        // `Output` is the whole surface the shell can act on: input, kill, kill_command (a bool: the typed `/kill`, D-078), set_team.
+        // There is no field that could carry text (asserted structurally by destructuring it exhaustively).
         let ddai_bot::Output {
             input: _,
             kill: _,
+            kill_command: _,
             set_team: _,
             tag: _,
         } = ddai_bot::Output::default();

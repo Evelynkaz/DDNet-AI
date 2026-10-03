@@ -4676,7 +4676,7 @@ FrameStore ──проход 2: Timeline (кэш 8 страниц) ──► с
 
 ### 21.4 Аддитивные изменения `ddai-client` / `ddai-world`
 
-- `Client::kill()` — сообщение протокола **`Cl_Kill`** (`NETMSGTYPE_CL_KILL`, в белом списке с 2.3); чата `/kill` нет.
+- `Client::kill()` — сообщение протокола **`Cl_Kill`** (`NETMSGTYPE_CL_KILL`, в белом списке с 2.3). **Задача 4.6 (D-078): единственное исключение из «чата нет» — `Client::server_command(ServerCommand::Kill)`**, строка чата `/kill` (см. §21.8).
   `Client::show_distance(x, y)` — `Cl_ShowDistance` на лету (по умолчанию после входа, `ClientConfig::show_distance`).
 - `ClientConfig::emit_outgoing_audit` -> `SessionEvent::OutgoingGame { label, accepted }` на каждое исходящее игровое
   сообщение (по умолчанию выключено; e2e-аудит «нет чата»: ни одного `Cl_Say`, ни принятого, ни отказанного).
@@ -4883,6 +4883,18 @@ late_fraction=… margin_ms=… adaptive=… changes=… min_ms=… p50_ms=… p
 траектории margin, ≈ 45 мкс и 30-100 КиБ на вызов, без накопления); события: `unstick: Cl_Kill tick=… reason=Overdue|WayBlockLying|Stuck`, `block`,
 `blocked by`, `life started`, `clip saved`, `map changing map=…`, `map ready map=… w=… h=…`, `in game`, `disconnected`, `reconnecting`, `game tick went backwards`.
 Другие игроки только тегами `c<id>-<хэш>`. Разбор — `tools/e2e/soak_analyze.py` (`BotLog`).
+
+### 21.8 Исходящий чат: ровно `/kill` (задача 4.6, D-078)
+
+**Зачем.** DDNet 20.1 при `sv_kill_protection` (по умолчанию 20, минуты; `gamecontext.cpp:2977`, `Cl_SetTeam` защищён так же, стр. 2701) молча отбрасывает `Cl_Kill`, если жизнь старше порога и таймер забега запущен; в репетиции 4.5 бот просидел замороженным 93 минуты (E-011 §3). Серверная команда `/kill` (`ConProtectedKill`) защитой не затрагивается. Владелец разрешил **ровно эту строку** (D-078); D-007 («бот не пишет в чат») во всём остальном стоит.
+
+**Гарантия в типе (`ddai-net::server_command`).** `ServerCommand` — перечисление с одним вариантом `Kill`; `payload()` строит `Cl_Say` с константным текстом `/kill` и флагом команды `team = 0`; другого пути из строки в `Cl_Say` нет: `encode_cl_say` остаётся `pub(crate)` и вызывается только отсюда. API клиента — `Session::request_server_command(ServerCommand, now)` и `Client::server_command(ServerCommand)`; аргумента-строки нет.
+
+**Список разрешённых (`ddai-client::allowlist::check`).** `Cl_Say` проходит **только** если сырой payload **байт в байт** равен `ServerCommand::Kill.payload()` (`ServerCommand::recognise`); отказ — как раньше, `NumberedIdNotAllowed`. Тесты: другие тексты, `/kill ` с пробелом после и перед, `/KILL`, `/Kill`, NUL внутри, `/kills`, `/kill /kill`, пустая строка, 300 байт, командный чат (`team` 1, 2, −1), лишний и недостающий байт, бит `sys`.
+
+**Аудит.** Метка `Cl_Say(/kill)` (`SERVER_COMMAND_KILL_LABEL`) считается отдельно от `Cl_Kill`; в отчёте бота `kill_command_ticks` — тики решений. Прежнее «0 чата» в e2e и в `soak_analyze.py` теперь «0 чата, кроме разрешённого `/kill`»; проверка стенда «каждый `/kill` на проводе — решение самого бота».
+
+**Когда бот шлёт `/kill` (`ddai-bot::killfallback`).** Только после того, как бот сам решил убить (анстик, навигация, вейблок, консоль или сайт: всё это кончается `Output::kill`, то есть `Cl_Kill`), и: нет ни смерти, ни новой жизни в течение 50 тиков; **или** сразу, если за эту жизнь видна системная строка сервера «Kill Protection enabled…» (`Sv_Chat` с `client_id` −1; читается только она, текст нигде не хранится и не пишется в лог, остальной чат отбрасывается не читая). Не больше одного `/kill` на решение, не чаще `KILL_COOLDOWN_TICKS` (500 тиков); три `/kill` за жизнь без смерти — больше не просим до новой жизни (сервер, игнорирующий и `/kill`, не заспамить; в журнал `kill fallback: three /kill…`). Смерть или новая жизнь сбрасывают всё; смена карты и переподключение тоже. Консольный и сайтовый `!kill` идут тем же путём: сначала протокол, потом `/kill`. Если `/kill` завершил жизнь, в журнал пишется, на какой минуте жизни (`kill protection: a /kill ended a life of N minutes`: порог сервера не выше). Строки журнала для стенда: `requesting /kill (fallback: …) tick=…`; проверка живости `soak_analyze.py` засчитывает `Cl_Kill`, за которым в 50 тиков `/kill` началась новая жизнь.
 
 ## 22. Обучение мухи: датасет учителя и чекпоинты (задача 8.2, `crates/ddai-train`, `ddai-fly::bundle`, `ddai-controls`)
 

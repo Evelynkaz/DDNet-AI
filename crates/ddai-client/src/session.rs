@@ -78,6 +78,7 @@ use ddai_net::generated::{enums::playerflagflag, messages as msgs, objects};
 use ddai_net::huffman::Huffman;
 use ddai_net::message::{self, ExSysMsg, Msg, Registry};
 use ddai_net::packer::Packer;
+use ddai_net::server_command::ServerCommand;
 use ddai_net::sysmsg::{self, SysMsg};
 use ddai_net::tuning::{DEFAULT_TUNE_PARAMS, TeamsState, TuneParams};
 use ddai_net::uuid::{self, MsgId};
@@ -462,6 +463,9 @@ pub enum SessionEvent {
     OutgoingGame { label: &'static str, accepted: bool },
 }
 
+/// The audit label of the one chat-channel message the bot may send, `/kill` (task 4.6, D-078).
+pub const SERVER_COMMAND_KILL_LABEL: &str = "Cl_Say(/kill)";
+
 /// Why [`Session::supply_cached_map`] refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SupplyCachedMapError {
@@ -729,8 +733,8 @@ impl Session {
         self.send_game_chunk(payload, true, now, "Cl_SetTeam");
     }
 
-    /// Sends `Cl_Kill` (task 4.1) — the protocol message behind the bot's unstick; chat `/kill`
-    /// has no builder anywhere in this crate (D-007). `NETMSGTYPE_CL_KILL` has been on
+    /// Sends `Cl_Kill` (task 4.1) — the protocol message behind the bot's unstick; the chat `/kill` fallback is
+    /// [`Session::request_server_command`] (D-078), the only chat builder here. `NETMSGTYPE_CL_KILL` has been on
     /// [`crate::allowlist`]'s allow-list since task 2.3. The caller owns the cooldown
     /// (`ddai-bot`'s unstick: 500 ticks, `bot.ts` `KILL_COOLDOWN_TICKS`); the server applies its
     /// own `sv_kill_delay`/kill-protection either way (`gamecontext.cpp` `OnKillNetMessage`).
@@ -739,6 +743,18 @@ impl Session {
             msgs::encode_cl_kill(&msgs::ClKill {}, p);
         });
         self.send_game_chunk(payload, true, now, "Cl_Kill");
+    }
+
+    /// Sends a server command (task 4.6, D-078): today only [`ServerCommand::Kill`], the chat line `/kill`, the fallback for the
+    /// protocol `Cl_Kill` that DDNet drops silently once a life is older than `sv_kill_protection`. This is the **only** way
+    /// this crate ever builds a `Cl_Say`: the payload comes from the typed command (a constant text, never a caller's
+    /// string), and [`crate::allowlist`] lets a `Cl_Say` through only when it is byte-identical to that payload. The audit
+    /// label is [`SERVER_COMMAND_KILL_LABEL`], counted apart from `Cl_Kill`. The caller owns the cooldown.
+    pub fn request_server_command(&mut self, command: ServerCommand, now: Duration) {
+        let label = match command {
+            ServerCommand::Kill => SERVER_COMMAND_KILL_LABEL,
+        };
+        self.send_game_chunk(command.payload(), true, now, label);
     }
 
     /// Sends `Cl_ShowDistance(x, y)` (task 4.1) — the same message [`Session::send_post_enter_extras`]
@@ -2149,6 +2165,24 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(!entries[0].accepted, "the guard must refuse the hand-built Cl_Say");
         assert_eq!(entries[0].label, "Cl_Say(test-only)");
+    }
+
+    /// Task 4.6 (D-078): the typed `/kill` is accepted and audited under its own label; a hand-built `Cl_Say` still is not.
+    #[test]
+    fn the_typed_slash_kill_is_accepted_under_its_own_label_and_nothing_else_is() {
+        let mut session = Session::new(ClientConfig::default());
+        session.request_server_command(ServerCommand::Kill, secs(0));
+        session.request_kill(secs(0));
+        session.try_send_hand_built_cl_say_for_testing(secs(0));
+        let entries: Vec<_> = session.recent_outgoing().map(|e| (e.label, e.accepted)).collect();
+        assert_eq!(
+            entries,
+            vec![
+                (SERVER_COMMAND_KILL_LABEL, true),
+                ("Cl_Kill", true),
+                ("Cl_Say(test-only)", false)
+            ]
+        );
     }
 
     #[test]

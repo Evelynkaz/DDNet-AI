@@ -187,6 +187,9 @@ pub struct Output {
     pub input: Option<NetInput>,
     /// Send `Cl_Kill` (`Client::kill`), already cooldown-checked.
     pub kill: bool,
+    /// Send the chat command `/kill` (`Client::server_command(ServerCommand::Kill)`, D-078): a protocol `Cl_Kill` had no effect
+    /// (kill protection) and the cooldown and the per-decision limit of [`crate::killfallback`] allow it.
+    pub kill_command: bool,
     /// Send `Cl_SetTeam(team)` (`Client::set_team`): `Some(0)` = join the game.
     pub set_team: Option<i32>,
     /// What this decision was aimed at, for the slot statistics (`Client::set_input_for_snapshot`).
@@ -213,6 +216,21 @@ pub enum BotEvent {
         to: Option<String>,
     },
     Respawned {
+        tick: i32,
+    },
+    /// The `/kill` fallback was sent (D-078): `noticed` says the server's "Kill Protection enabled" line was seen, else the
+    /// protocol `Cl_Kill` simply had no effect within 50 ticks.
+    KillFallback {
+        tick: i32,
+        noticed: bool,
+    },
+    /// A `/kill` ended a life after this many seconds: the server's kill-protection threshold is not above it (tags only, no names).
+    KillProtectionLearned {
+        tick: i32,
+        life_secs: u32,
+    },
+    /// Three `/kill`s in one life without a death: the bot stops asking for this life.
+    KillFallbackGaveUp {
         tick: i32,
     },
     Joining {
@@ -355,6 +373,10 @@ pub struct Bot {
     pending_team: Option<i32>,
     /// A `Cl_Kill` the next `on_snapshot` sends (`!kill`).
     pending_kill: bool,
+    /// The `/kill` fallback after a `Cl_Kill` that had no effect (task 4.6, D-078).
+    killfb: crate::killfallback::KillFallback,
+    /// `lives` as the fallback last saw it (a change is a new life).
+    fb_lives: u64,
     quit: bool,
     /// The session is in the game (`SessionEvent::InGame` seen, no disconnect since): for the web status.
     connected: bool,
@@ -430,6 +452,8 @@ impl Bot {
             join_grace_until: None,
             pending_team: None,
             pending_kill: false,
+            killfb: crate::killfallback::KillFallback::new(),
+            fb_lives: 0,
             connected: false,
             quit: false,
             map: None,
@@ -691,6 +715,8 @@ impl Bot {
     /// The connection dropped (the driver may bring it back): in-flight knowledge is void.
     pub fn on_disconnected(&mut self) {
         self.connected = false;
+        self.killfb.reset();
+        self.fb_lives = self.lives;
         self.clipper.reset();
         self.sent.clear();
         self.was_alive = false;
@@ -707,6 +733,8 @@ impl Bot {
         self.encoder.reset_edges();
         self.was_alive = false;
         self.last_tick = -1;
+        self.killfb.reset();
+        self.fb_lives = self.lives;
         // `join` is deliberately kept: its cap is per run.
         self.played_on_map = false;
     }
@@ -727,6 +755,42 @@ impl Bot {
             return 0;
         }
         (KILL_COOLDOWN_TICKS - (self.last_tick - self.unstick.last_kill_tick())).clamp(0, KILL_COOLDOWN_TICKS)
+    }
+
+    /// The server's system line "Kill Protection enabled ..." (read by the runner; nothing else of the chat is looked at): this
+    /// life's `Cl_Kill`s are dropped, so a decision to kill sends `/kill` at once (D-078).
+    pub fn on_kill_protection_notice(&mut self) {
+        self.killfb.on_notice();
+    }
+
+    /// The `/kill` fallback's step of one snapshot: a new life or a dead tee settles an awaited kill, a protocol kill of this
+    /// snapshot is awaited, and [`Output::kill_command`] is set when the fallback is due.
+    fn kill_fallback_step(&mut self, tick: i32, out: &mut Output) {
+        if self.lives != self.fb_lives {
+            self.fb_lives = self.lives;
+            if let Some(l) = self.killfb.on_life_started(tick) {
+                push_event(
+                    &mut self.events,
+                    BotEvent::KillProtectionLearned {
+                        tick,
+                        life_secs: (l.life_minutes * 60.0).round().max(0.0) as u32,
+                    },
+                );
+            }
+        } else if !self.was_alive {
+            self.killfb.on_dead(tick);
+        }
+        if out.kill {
+            self.killfb.on_protocol_kill(tick);
+        }
+        let was_giving_up = self.killfb.gave_up();
+        if self.killfb.poll(tick) {
+            out.kill_command = true;
+            let noticed = self.killfb.noticed();
+            push_event(&mut self.events, BotEvent::KillFallback { tick, noticed });
+        } else if !was_giving_up && self.killfb.gave_up() {
+            push_event(&mut self.events, BotEvent::KillFallbackGaveUp { tick });
+        }
     }
 
     /// `SessionEvent::InputSent`.
@@ -800,6 +864,7 @@ impl Bot {
         let mut out = self.decide(snap, &mut brain_time);
         self.viz_fresh = self.stats.brain_decisions > before.brain_decisions;
         self.apply_pending(snap, &mut out);
+        self.kill_fallback_step(snap.tick, &mut out);
         if out.kill {
             let why = self.kill_why.take().unwrap_or(KillWhy::Unstick);
             self.clipper.push_event(ClipEvent::KillSent { why: why as u8 });

@@ -545,6 +545,7 @@ pub fn report_json(r: &RunReport) -> serde_json::Value {
         },
         "blocks": {"blocks": r.block_stats.blocks, "blocked_by": r.block_stats.blocked_by},
         "kill_ticks": r.kill_ticks,
+        "kill_command_ticks": r.kill_command_ticks,
         "outgoing_game_messages": outgoing,
         "latency_us": {
             "total": sum_json(r.latency.total.summary()),

@@ -30,6 +30,7 @@ pub mod delta;
 pub mod generated;
 pub mod intstr;
 pub mod message;
+pub mod server_command;
 pub mod serverinfo;
 pub mod snapshot;
 pub mod sysmsg;

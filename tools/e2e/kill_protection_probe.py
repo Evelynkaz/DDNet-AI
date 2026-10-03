@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Task 4.5: does DDNet's `sv_kill_protection` make the bot's `Cl_Kill` do nothing after 20 minutes of a life?
+"""Task 4.5: does DDNet's `sv_kill_protection` make the bot's `Cl_Kill` do nothing after 20 minutes of a life? (Task 4.6: and does the
+`/kill` fallback then rescue it?)
 
 Evidence from the 6 h rehearsal: the bot froze itself 22.8 minutes into a life, sent `Cl_Kill` every 10 s for 93 minutes and was never
 killed (docs/EXPERIMENTS.md E-011). DDNet 20.1 `CGameContext::OnKillNetMessage` (~/aiddnet/build/ddnet-20.1/src/src/game/server/gamecontext.cpp:2977; `Cl_SetTeam`, line 2701, is
@@ -8,6 +9,11 @@ protected the same way, so going to the spectators and back is no way out) drops
 race state is STARTED. This probe reproduces it on the LOCAL server: it sets `sv_kill_protection 1` (one minute, restored to the value it
 had at the end), lets a bot play for 75 s without dying, sends the console `!kill` and sees whether a new life starts; then the same with
 `sv_kill_protection 0`. Loopback only, one bot, the server must be empty (it is yours for the duration).
+
+What the verdict says depends on the binary under test. With `sv_kill_protection 1` the protocol `Cl_Kill` is dropped either way (the bot's log then
+shows the server's notice, "the server dropped a Cl_Kill"). A bot **without** the 4.6 fallback then stays alive: "REPRODUCED (no fallback in this
+binary)". A 4.6 bot sends `/kill` ("requesting /kill") and dies: "REPRODUCED, /kill RESCUED". With `sv_kill_protection 0` the kill must work at once,
+with no notice and no `/kill`. Anything else is "NOT REPRODUCED" (exit 1); both reproduced verdicts exit 0.
 
     tools/e2e/kill_protection_probe.py [--bin <ddnet-ai>] [--trials 2]
 """
@@ -37,7 +43,8 @@ def current(var):
 
 
 def trial(binary, protection):
-    """One bot, `!kill` after 75 s of an unbroken life; True when the kill took effect (a new life started within 6 s)."""
+    """One bot, `!kill` after 75 s of an unbroken life: `(effect, notice, fallback)`: a new life started within 6 s, the server's "dropped a
+    Cl_Kill" line was seen, a `/kill` was requested; `None` when no 75 s life came."""
     econ("sv_kill_protection", str(protection))
     data = Path(tempfile.mkdtemp(prefix="kp-probe-"))
     (data / "maps").symlink_to(soak.DATA / "maps")
@@ -46,13 +53,18 @@ def trial(binary, protection):
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                          env=dict(os.environ, **soak.BOT_ENV), start_new_session=True)
     lives = []  # monotonic times of "life started"
+    seen = {"notice": 0, "fallback": 0}
     lock = threading.Lock()
 
     def tail():
         for raw in iter(p.stderr.readline, b""):
-            if b"life started" in raw:
-                with lock:
+            with lock:
+                if b"life started" in raw:
                     lives.append(time.monotonic())
+                elif b"the server dropped a Cl_Kill" in raw:
+                    seen["notice"] += 1
+                elif b"requesting /kill" in raw:
+                    seen["fallback"] += 1
 
     threading.Thread(target=tail, daemon=True).start()
     try:
@@ -67,12 +79,12 @@ def trial(binary, protection):
         else:
             return None
         with lock:
-            before = len(lives)
+            before, notice0, fallback0 = len(lives), seen["notice"], seen["fallback"]
         p.stdin.write(b"!kill\n")
         p.stdin.flush()
         time.sleep(6)
         with lock:
-            return len(lives) > before
+            return len(lives) > before, seen["notice"] > notice0, seen["fallback"] > fallback0
     finally:
         try:
             p.stdin.write(b"!quit\n")
@@ -96,14 +108,23 @@ def main():
     try:
         for value in (1, 0):
             results[value] = [trial(a.bin, value) for _ in range(a.trials)]
-            print(f"sv_kill_protection {value}: kill took effect after 75 s of life -> {results[value]}", flush=True)
+            print(f"sv_kill_protection {value}: (took effect, notice seen, /kill sent) after 75 s of life -> {results[value]}", flush=True)
     finally:
         if original is not None:
             econ("sv_kill_protection", original)
         print("sv_kill_protection restored to", current("sv_kill_protection"))
-    ok = all(r is False for r in results[1]) and all(r is True for r in results[0])
-    print("REPRODUCED" if ok else "NOT REPRODUCED (or a trial timed out)")
-    sys.exit(0 if ok else 1)
+    protected, free = results[1], results[0]
+    no_fallback = all(r == (False, False, False) or r == (False, True, False) for r in protected if r)
+    rescued = all(r == (True, True, True) for r in protected if r)
+    free_ok = all(r == (True, False, False) for r in free if r)
+    complete = all(r is not None for r in protected + free)
+    if complete and free_ok and rescued:
+        print("REPRODUCED, /kill RESCUED: protection dropped the Cl_Kill (the server's notice was seen) and the /kill fallback killed the bot")
+    elif complete and free_ok and no_fallback:
+        print("REPRODUCED (no fallback in this binary): the Cl_Kill was dropped and the bot stayed alive")
+    else:
+        print("NOT REPRODUCED (or a trial timed out)")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

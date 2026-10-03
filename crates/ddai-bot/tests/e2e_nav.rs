@@ -54,6 +54,7 @@ const ALLOWED_LABELS: &[&str] = &[
     "Cl_CameraInfo",
     "Cl_Kill",
     "Cl_SetTeam",
+    "Cl_Say(/kill)", // D-078: the typed /kill fallback, the one chat-channel message allowed
 ];
 
 fn config(
@@ -135,7 +136,9 @@ fn audit(name: &str, r: &RunReport) {
         assert!(*accepted > 0);
     }
     assert!(
-        !r.outgoing.keys().any(|k| k.contains("Say") || k.contains("Chat")),
+        !r.outgoing
+            .keys()
+            .any(|k| (k.contains("Say") || k.contains("Chat")) && k != ddai_client::session::SERVER_COMMAND_KILL_LABEL),
         "{name}: chat on the wire"
     );
     let sent_kills = r.outgoing.get("Cl_Kill").map_or(0, |(ok, _)| *ok) as usize;

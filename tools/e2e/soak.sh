@@ -8,6 +8,7 @@
 #   tools/e2e/soak.sh --label rehearsal-6h --real-data --duration 21600 --out ~/aiddnet/data/logs/4.5   # task 4.5: the production layout
 #                                                                  # (unmodified unit, REAL ~/aiddnet/data/bot; never moves or deletes anything there)
 #   tools/e2e/soak.sh --label rehearsal-fly --real-data --duration 1500 --fly-bundle <bundle> --out ...   # the same with hybrid:fly
+#   tools/e2e/soak.sh --label kfb --unit --kill-protection 2 --duration 2400   # task 4.6: sv_kill_protection 2 for the run (restored to 20, read back), the /kill fallback exercised
 #   tools/e2e/soak.sh --analyze ~/aiddnet/data/logs/4.4/<run>       # re-run the analysis of a finished run
 #   tools/e2e/soak.sh --selftest                                    # the analysis can fail (synthetic runs)
 #

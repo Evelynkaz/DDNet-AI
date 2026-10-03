@@ -51,6 +51,7 @@ const ALLOWED_LABELS: &[&str] = &[
     "Cl_CameraInfo",
     "Cl_Kill",
     "Cl_SetTeam",
+    "Cl_Say(/kill)", // D-078: the typed /kill fallback, the one chat-channel message allowed
 ];
 
 fn secs() -> u64 {
@@ -327,7 +328,10 @@ fn console_commands_drive_the_bot_and_its_clips_replay_bit_for_bit() {
         assert!(*accepted > 0);
     }
     assert!(
-        !report.outgoing.keys().any(|k| k.contains("Say") || k.contains("Chat")),
+        !report
+            .outgoing
+            .keys()
+            .any(|k| (k.contains("Say") || k.contains("Chat")) && k != ddai_client::session::SERVER_COMMAND_KILL_LABEL),
         "chat on the wire"
     );
     let sent_kills = report.outgoing.get("Cl_Kill").map_or(0, |(ok, _)| *ok) as usize;
@@ -339,7 +343,9 @@ fn console_commands_drive_the_bot_and_its_clips_replay_bit_for_bit() {
     assert!(sent_kills >= 1, "the console kill went out");
     for r in &others {
         assert!(
-            !r.outgoing.keys().any(|k| k.contains("Say")),
+            !r.outgoing
+                .keys()
+                .any(|k| k.contains("Say") && k != ddai_client::session::SERVER_COMMAND_KILL_LABEL),
             "chat from a scripted bot"
         );
     }

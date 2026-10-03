@@ -853,11 +853,14 @@ enum Control {
     /// since a team change is a one-off request, not a per-tick value to keep resending.
     SetTeam(i32),
     /// Task 4.1: requests `Cl_Kill` ([`crate::session::Session::request_kill`]) — the protocol
-    /// message, never a chat `/kill` (D-007). The bot's unstick path is its only caller.
+    /// message (the chat `/kill` fallback is [`Control::ServerCommand`], D-078). The bot's kill decisions are its callers.
     Kill,
     /// Task 4.1: requests `Cl_ShowDistance(x, y)` on the current connection
     /// ([`crate::session::Session::request_show_distance`]).
     ShowDistance(i32, i32),
+    /// Task 4.6 (D-078): a typed server command (only `/kill` exists), see
+    /// [`crate::session::Session::request_server_command`].
+    ServerCommand(ddai_net::server_command::ServerCommand),
 }
 
 /// Task 4.1: what the caller expected of a decision, echoed back in [`ClientEvent::InputLatency`] so
@@ -1096,11 +1099,18 @@ impl Client {
         });
     }
 
-    /// Requests `Cl_Kill` (task 4.1) — the protocol message, the only way this crate ever lets a
-    /// caller kill the tee (chat `/kill` does not exist here, D-007). Best-effort like
+    /// Requests `Cl_Kill` (task 4.1) — the protocol message; the chat `/kill` fallback is [`Client::server_command`] (D-078). Best-effort like
     /// [`Client::set_team`]; the caller owns the cooldown policy.
     pub fn kill(&self) {
         let _ = self.control_tx.send(Control::Kill);
+    }
+
+    /// Sends the server command `/kill` as chat (task 4.6, D-078): the fallback when the protocol `Cl_Kill` had no effect
+    /// (DDNet's `sv_kill_protection`). The only chat-channel message this crate can send: the argument is the typed
+    /// [`ddai_net::server_command::ServerCommand`], which has one variant and a constant text, and the outgoing allow-list
+    /// refuses any other `Cl_Say`. Best-effort like [`Client::kill`]; the caller owns the cooldown.
+    pub fn server_command(&self, command: ddai_net::server_command::ServerCommand) {
+        let _ = self.control_tx.send(Control::ServerCommand(command));
     }
 
     /// Requests `Cl_ShowDistance(x, y)` (task 4.1; D-007's replacement for `/showall`).
@@ -1411,6 +1421,11 @@ fn run_one_connection(
             Ok(Control::Kill) => {
                 let now = Instant::now().duration_since(start);
                 session.request_kill(now);
+                send_all(socket, session.flush(now));
+            }
+            Ok(Control::ServerCommand(command)) => {
+                let now = Instant::now().duration_since(start);
+                session.request_server_command(command, now);
                 send_all(socket, session.flush(now));
             }
             Ok(Control::ShowDistance(x, y)) => {
@@ -1955,7 +1970,9 @@ fn run(
                             return;
                         }
                         // Between connections there is nothing to send them on: dropped.
-                        Ok(Control::SetTeam(_) | Control::Kill | Control::ShowDistance(..)) => continue,
+                        Ok(
+                            Control::SetTeam(_) | Control::Kill | Control::ShowDistance(..) | Control::ServerCommand(_),
+                        ) => continue,
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     }
                 }

@@ -11,8 +11,9 @@
 //!   rope helpers), [`latency`], [`brains`], [`hooks`] (the navigation / wayblock / trek hook traits) and [`nav_hooks`] (their real bodies over
 //!   `ddai-nav`, task 4.2: goto, follow, seek, home, the Copy Love Box wayblock, the freeze memory).
 //!
-//! The bot never writes chat (D-007): the client API has no way to, and the unstick kill is the
-//! `Cl_Kill` protocol message. It never evades a kick or ban (D-016/D-037): the runner stops.
+//! The bot never writes chat (D-007): the client API has no call that takes text, and the unstick kill is the
+//! `Cl_Kill` protocol message. The one exception, allowed by the owner (D-078, task 4.6, [`killfallback`]): the typed server
+//! command `/kill`, sent only when a `Cl_Kill` had no effect (DDNet's `sv_kill_protection`). It never evades a kick or ban (D-016/D-037): the runner stops.
 
 pub mod activity;
 pub mod bot;
@@ -26,6 +27,7 @@ pub mod control;
 pub mod hooks;
 pub mod identity;
 pub mod input;
+pub mod killfallback;
 pub mod latency;
 pub mod mapgrid;
 pub mod nav_hooks;

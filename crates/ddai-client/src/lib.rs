@@ -6,7 +6,8 @@
 //! - [`session`]: [`session::Session`], a sans-IO state machine over `ddai-net`'s low-level
 //!   connection ([`ddai_net::conn::Connection`]) and message/snapshot layer — the join sequence,
 //!   snapshot dispatch, `Sv_TuneParams`, and the guarded single outgoing path
-//!   ([`allowlist`]) that keeps `Cl_Say` off the wire (decision D-007). No sockets, no wall
+//!   ([`allowlist`]) that keeps `Cl_Say` off the wire (decision D-007) except the one typed server
+//!   command `/kill` (D-078, task 4.6; `ddai_net::server_command`). No sockets, no wall
 //!   clock; every method takes an explicit `now: Duration` and returns bytes to send rather than
 //!   sending them.
 //! - [`driver`]: the real-time layer — [`driver::Client`], a background thread that owns a real

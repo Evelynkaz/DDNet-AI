@@ -22,6 +22,7 @@
 
 use ddai_net::message::Registry;
 use ddai_net::packer::Unpacker;
+use ddai_net::server_command::ServerCommand;
 use ddai_net::uuid::{MsgId, unpack_msg_id};
 
 /// Numbered (non-UUID) game message ids this session is allowed to ever send —
@@ -59,7 +60,9 @@ pub enum GuardError {
     Undecodable,
     #[error("refused a system message on the game guard path (should never happen: sys messages bypass this guard)")]
     UnexpectedSystemMessage,
-    #[error("outgoing numbered game message id {0} is not on the allow-list (D-007: the bot never sends chat)")]
+    #[error(
+        "outgoing numbered game message id {0} is not on the allow-list (D-007: the bot never sends chat; D-078: only `/kill`, byte for byte)"
+    )]
     NumberedIdNotAllowed(i32),
     #[error("outgoing ex game message '{0}' is not on the allow-list (D-007: the bot never sends chat)")]
     ExNameNotAllowed(String),
@@ -90,6 +93,15 @@ pub fn check(payload: &[u8], registry: &Registry) -> Result<(), GuardError> {
     }
     match id {
         MsgId::Numbered(numbered) => {
+            // D-078: `Cl_Say` is allowed for exactly one payload, the typed `/kill` command, byte for byte (no other text, no
+            // other case, no trailing byte, no team chat). Everything else with this id is chat and stays refused.
+            if numbered == ddai_net::generated::messages::id::NETMSGTYPE_CL_SAY {
+                return if ServerCommand::recognise(payload) == Some(ServerCommand::Kill) {
+                    Ok(())
+                } else {
+                    Err(GuardError::NumberedIdNotAllowed(numbered))
+                };
+            }
             if ALLOWED_NUMBERED_IDS.contains(&numbered) {
                 Ok(())
             } else {
@@ -151,6 +163,60 @@ mod tests {
         packer.add_string("hi", 0, true); // message
         let err = check(packer.data(), &registry).unwrap_err();
         assert_eq!(err, GuardError::NumberedIdNotAllowed(msgs::id::NETMSGTYPE_CL_SAY));
+    }
+
+    /// D-078: the typed `/kill` is the one `Cl_Say` the guard lets through.
+    #[test]
+    fn the_typed_slash_kill_is_the_only_cl_say_allowed() {
+        let registry = Registry::new();
+        assert!(check(&ServerCommand::Kill.payload(), &registry).is_ok());
+        let say = |team: i32, text: &str| {
+            let mut buf = [0u8; 2048];
+            let mut packer = Packer::new(&mut buf);
+            pack_msg_id(&mut packer, MsgId::Numbered(msgs::id::NETMSGTYPE_CL_SAY), false);
+            packer.add_int(team);
+            packer.add_string(text, 0, true);
+            packer.data().to_vec()
+        };
+        let long = "x".repeat(300);
+        for (team, text) in [
+            (0, "hi"),
+            (0, "/kill "),
+            (0, " /kill"),
+            (0, "/KILL"),
+            (0, "/Kill"),
+            (0, "/kill\0x"),
+            (0, "/kills"),
+            (0, "/kill /kill"),
+            (0, "/help"),
+            (0, ""),
+            (0, long.as_str()),
+            (1, "/kill"),
+            (1, "hi"),
+            (2, "/kill"),
+        ] {
+            assert_eq!(
+                check(&say(team, text), &registry).unwrap_err(),
+                GuardError::NumberedIdNotAllowed(msgs::id::NETMSGTYPE_CL_SAY),
+                "team {team} text {text:?}"
+            );
+        }
+        // the right text with trailing garbage, or cut short
+        let mut longer = ServerCommand::Kill.payload();
+        longer.extend_from_slice(b"x");
+        assert!(check(&longer, &registry).is_err());
+        let mut shorter = ServerCommand::Kill.payload();
+        shorter.pop();
+        assert!(check(&shorter, &registry).is_err());
+        // a NUL inside the text: `add_string` stops at it, so build the bytes by hand
+        let mut nul = ServerCommand::Kill.payload();
+        let n = nul.len();
+        nul[n - 2] = 0; // "/kil\0\0"
+        assert!(check(&nul, &registry).is_err());
+        // the same id as a *system* message is refused by the sys check, never a way around it
+        let mut sys = ServerCommand::Kill.payload();
+        sys[0] |= 1;
+        assert!(check(&sys, &registry).is_err());
     }
 
     #[test]

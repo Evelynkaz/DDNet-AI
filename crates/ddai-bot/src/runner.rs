@@ -130,6 +130,9 @@ pub struct RunReport {
     pub outgoing: BTreeMap<String, (u64, u64)>,
     /// `Cl_Kill`s the bot requested, as game ticks.
     pub kill_ticks: Vec<i32>,
+    /// The ticks of the snapshots whose decision sent the `/kill` fallback (D-078); each is also in the audit under
+    /// `Cl_Say(/kill)`, never under `Cl_Kill`.
+    pub kill_command_ticks: Vec<i32>,
     pub gave_up: Option<(String, GaveUpCategory)>,
     pub map_name: Option<String>,
     pub events: Vec<BotEvent>,
@@ -226,6 +229,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         block_stats: Default::default(),
         outgoing: BTreeMap::new(),
         kill_ticks: Vec::new(),
+        kill_command_ticks: Vec::new(),
         gave_up: None,
         map_name: None,
         events: Vec::new(),
@@ -476,6 +480,14 @@ fn handle_event(
                 }
             },
             SessionEvent::GameMessage(GameMsg::SvKillMsg(k)) => bot.on_kill_message(k.killer, k.victim, k.weapon),
+            // The one chat line the bot reads: the server's own "Kill Protection enabled" (a system line, `client_id` -1). The text
+            // is neither kept nor logged; every other chat line is dropped unread.
+            SessionEvent::GameMessage(GameMsg::SvChat(c)) => {
+                if crate::killfallback::is_kill_protection_notice(c.client_id, &c.message) {
+                    tracing::info!("the server dropped a Cl_Kill: kill protection");
+                    bot.on_kill_protection_notice();
+                }
+            }
             SessionEvent::OutgoingGame { label, accepted } => count_outgoing(report, label, accepted),
             SessionEvent::InGame => {
                 tracing::info!("in game");
@@ -535,6 +547,14 @@ fn apply_output(client: &Client, out: &Output, snap: &LiveWorldSnapshot, report:
         report.kill_ticks.push(snap.tick);
         client.kill();
     }
+    if out.kill_command {
+        tracing::info!(
+            tick = snap.tick,
+            "requesting /kill (fallback: the protocol Cl_Kill had no effect)"
+        );
+        report.kill_command_ticks.push(snap.tick);
+        client.server_command(ddai_net::server_command::ServerCommand::Kill);
+    }
     if let Some(team) = out.set_team {
         client.set_team(team);
     }
@@ -547,6 +567,22 @@ fn log_event(e: &BotEvent) {
         BotEvent::BlockedBy { tick, by } => tracing::info!(tick, by, "blocked by"),
         BotEvent::TargetChanged { tick, to } => tracing::info!(tick, target = ?to, "target"),
         BotEvent::Respawned { tick } => tracing::info!(tick, "life started"),
+        BotEvent::KillFallback { tick, noticed } => {
+            tracing::info!(
+                tick,
+                noticed,
+                "kill fallback: /kill sent, the protocol Cl_Kill had no effect"
+            )
+        }
+        BotEvent::KillProtectionLearned { tick, life_secs } => tracing::info!(
+            tick,
+            life_minutes = f64::from(*life_secs) / 60.0,
+            "kill protection: a /kill ended a life of this many minutes (the server's threshold is not above it)"
+        ),
+        BotEvent::KillFallbackGaveUp { tick } => tracing::warn!(
+            tick,
+            "kill fallback: three /kill in one life without a death; not asking again for this life"
+        ),
         BotEvent::Joining { tick } => tracing::info!(tick, "in the spectators: asking to join"),
         BotEvent::JoinGaveUp { tick } => tracing::warn!(tick, "still a spectator after all tries: not asking again"),
         BotEvent::MovedToSpectators { tick } => tracing::error!(tick, "moved to the spectators after having played"),
