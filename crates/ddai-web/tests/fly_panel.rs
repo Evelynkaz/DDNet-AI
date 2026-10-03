@@ -116,7 +116,7 @@ async fn connect(server: &TestServer) -> Ws {
     ws
 }
 
-/// The next text message that is not the 1 Hz `status`.
+/// The next text message that is not the 1 Hz `status` or the `source` badge message (task 5.7; `tests/demo_fallback.rs` covers it).
 async fn next_text(ws: &mut Ws) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -131,7 +131,7 @@ async fn next_text(ws: &mut Ws) -> serde_json::Value {
         {
             Message::Text(t) => {
                 let v: serde_json::Value = serde_json::from_str(&t).unwrap();
-                if v["type"] != "status" {
+                if v["type"] != "status" && v["type"] != "source" {
                     return v;
                 }
             }
@@ -218,11 +218,12 @@ async fn the_route_is_behind_the_session_and_the_origin_check() {
 async fn a_browser_that_watches_makes_the_web_unit_subscribe_and_gets_the_layout_and_frames() {
     let (server, log, task, _dir) = bot_server(40, 0, |_| {}).await;
     let mut ws = connect(&server).await;
-    // Nobody watches yet: the bot has been told nothing and sends nothing.
+    // Nobody watches the fly yet: the bot has been told only that the site is open (bit 1, task 5.7), and sends no fly frame.
     tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(
-        log.lock().unwrap().masks.is_empty(),
-        "no subscription before a browser asks"
+    assert_eq!(
+        log.lock().unwrap().masks,
+        [2],
+        "no fly subscription before a browser asks"
     );
     assert!(binaries_for(&mut ws, Duration::from_millis(200)).await.is_empty());
 
@@ -237,7 +238,7 @@ async fn a_browser_that_watches_makes_the_web_unit_subscribe_and_gets_the_layout
     assert_eq!(meta["type"], "fly_meta");
     assert_eq!(meta["meta"]["name"], "fly-test");
     assert_eq!(meta["meta"]["bundle"]["name"], "run/final");
-    wait_for(|| log.lock().unwrap().masks == [1]).await;
+    wait_for(|| log.lock().unwrap().masks == [2, 3]).await;
     let frames = binaries_for(&mut ws, Duration::from_millis(600)).await;
     assert!(frames.len() >= 5, "{} frames", frames.len());
     assert!(
@@ -252,14 +253,15 @@ async fn a_browser_that_watches_makes_the_web_unit_subscribe_and_gets_the_layout
 
     // Stopping stops the demand; the frames stop.
     ws.send(Message::Text(r#"{"type":"fly","hz":0}"#.into())).await.unwrap();
-    wait_for(|| log.lock().unwrap().masks == [1, 0]).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for(|| log.lock().unwrap().masks == [2, 3, 2]).await;
+    // Frames already on their way when the stop was read still arrive: drain them, then none may follow.
+    let _ = binaries_for(&mut ws, Duration::from_millis(300)).await;
     assert!(binaries_for(&mut ws, Duration::from_millis(300)).await.is_empty());
     // And again.
     ws.send(Message::Text(r#"{"type":"fly","hz":10}"#.into()))
         .await
         .unwrap();
-    wait_for(|| log.lock().unwrap().masks == [1, 0, 1]).await;
+    wait_for(|| log.lock().unwrap().masks == [2, 3, 2, 3]).await;
     assert_eq!(log.lock().unwrap().junk, 0);
     task.abort();
 }
@@ -271,16 +273,21 @@ async fn the_demand_follows_the_connections_and_ends_when_the_last_one_closes() 
     let mut b = connect(&server).await;
     a.send(Message::Text(r#"{"type":"fly","hz":10}"#.into())).await.unwrap();
     b.send(Message::Text(r#"{"type":"fly","hz":10}"#.into())).await.unwrap();
-    wait_for(|| log.lock().unwrap().masks == [1]).await;
+    wait_for(|| log.lock().unwrap().masks == [2, 3]).await;
     // Both get frames; one leaving does not stop the other's.
     assert!(!binaries_for(&mut a, Duration::from_millis(500)).await.is_empty());
     drop(a);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(log.lock().unwrap().masks, [1], "one left, one still watches");
+    assert_eq!(log.lock().unwrap().masks, [2, 3], "one left, one still watches");
     assert!(!binaries_for(&mut b, Duration::from_millis(500)).await.is_empty());
     // Closing the page (no unsubscribe message) ends the demand.
     drop(b);
-    wait_for(|| log.lock().unwrap().masks == [1, 0]).await;
+    // (the fly subscription and the open page end one after the other: the mask may pass through 2 on its way to 0)
+    wait_for(|| {
+        let m = log.lock().unwrap().masks.clone();
+        m.starts_with(&[2, 3]) && m.last() == Some(&0)
+    })
+    .await;
     task.abort();
 }
 

@@ -80,6 +80,9 @@
     connDot.classList.toggle("dot-on", on);
     connDot.classList.toggle("dot-off", !on);
     wsStateEl.textContent = on ? "подключено" : "не подключено";
+    if (!on) {
+      SourceBadge.hide();
+    }
     GameView.onConnectionChanged(on);
     FlyPanel.onConnectionChanged(on);
   }
@@ -198,6 +201,9 @@
           break;
         case "fly_meta":
           FlyPanel.onMeta(msg.meta);
+          break;
+        case "source":
+          onSource(msg);
           break;
         case "live_error":
           GameView.onLiveError(msg.message);
@@ -335,6 +341,95 @@
   FlyPanel.attach(sendJson);
 
   // -----------------------------------------------------------------------------------------
+  // Task 5.7: what the site shows. The live bot has priority; while it is not running the offline demo (the fly playing an
+  // arena, not a real game) stands in, and the server says which one is on show (`{"type":"source","kind":...}`). The badge
+  // is on the «Игра», «Бот» and «Муха» tabs; every string is set with `textContent`.
+  // -----------------------------------------------------------------------------------------
+
+  var SourceBadge = (function () {
+    var TITLES = {
+      live: "Живой бот",
+      demo: "Показ: муха на арене (не настоящая игра)",
+      none: "Нет источника: бот не запущен",
+    };
+    var badges = ["game-source", "bot-source", "fly-source"]
+      .map(function (id) {
+        return document.getElementById(id);
+      })
+      .filter(Boolean);
+    var kind = null;
+    var info = null;
+    var mapName = null;
+
+    function detail() {
+      var parts = [];
+      if (kind === "live" || kind === "demo") {
+        if (mapName) {
+          parts.push("карта: " + mapName);
+        }
+      }
+      if (kind === "demo" && info) {
+        if (info.arena) {
+          parts.push("арена: " + info.arena);
+        }
+        if (info.bundle) {
+          parts.push("веса: " + info.bundle);
+        }
+      }
+      return parts.join(" · ");
+    }
+
+    function render() {
+      badges.forEach(function (el) {
+        if (!kind || !TITLES[kind]) {
+          el.hidden = true;
+          return;
+        }
+        el.hidden = false;
+        el.className = "source-badge source-" + kind;
+        el.querySelector(".source-title").textContent = TITLES[kind];
+        el.querySelector(".source-detail").textContent = detail();
+      });
+    }
+
+    return {
+      set: function (newKind, newInfo) {
+        kind = newKind;
+        info = newInfo && typeof newInfo === "object" ? newInfo : null;
+        render();
+      },
+      setMap: function (name) {
+        mapName = name || null;
+        render();
+      },
+      // The connection to the site dropped: nothing is known about what is shown until it is back.
+      hide: function () {
+        kind = null;
+        render();
+      },
+    };
+  })();
+
+  // What the server last said is on show (`live` / `demo` / `none`), kept across a reconnect so that a change that happened
+  // while the connection was down still clears the previous source's drawing.
+  var currentSource = null;
+
+  function onSource(msg) {
+    var kind = typeof msg.kind === "string" ? msg.kind : null;
+    if (kind !== "live" && kind !== "demo" && kind !== "none") {
+      return;
+    }
+    if (currentSource !== null && currentSource !== kind) {
+      // Another source: what was drawn of the previous one (map, players, frames) is not this one's.
+      GameView.reset();
+    }
+    currentSource = kind;
+    GameView.setDemo(kind === "demo");
+    SourceBadge.set(kind, msg.info);
+    BotPanel.setDemo(kind === "demo");
+  }
+
+  // -----------------------------------------------------------------------------------------
   // Task 5.2a: the live map view.
   // -----------------------------------------------------------------------------------------
 
@@ -405,6 +500,10 @@
     var latestFrame = null;
     var lastEventLog = []; // small ring of recent events, for a future log view / debugging
     var followId = null;
+    // Task 5.7: while the offline demo is on show, the camera starts on the fly (the arena's halls are small next to the whole
+    // map) instead of on the whole map; once per scene, and a drag or the fit button takes it over like any follow.
+    var demoFraming = false;
+    var pendingDemoFrame = false;
     var namesOn = true;
     // True when a scene just finished loading while `#game-view` was still `hidden` — see
     // `loadScene`'s completion handler and `onShown` below.
@@ -506,6 +605,7 @@
             return; // superseded by a newer `onMap` before this fetch finished — drop it
           }
           scene = built;
+          pendingDemoFrame = demoFraming;
           buildChunks();
           renderLegend();
           // Fitting the camera needs the canvas's REAL on-screen size
@@ -931,7 +1031,29 @@
 
     var TEAM_RING_COLORS = ["#8a93a3", "#f97316", "#22d3ee", "#a3e635", "#e879f9", "#facc15", "#60a5fa", "#fb7185"];
 
+    var DEMO_TILES_ACROSS = 36; // the arena's two halls are about 26 tiles wide
+
+    // Puts the camera on the fly (slot 0 of the demo) at a zoom where the hall fills the view, and follows it.
+    function frameDemo() {
+      if (!pendingDemoFrame || !scene || !latestFrame || gameViewEl.hidden) {
+        return;
+      }
+      var fly = latestFrame.characters.filter(function (c) {
+        return c.id === 0;
+      })[0];
+      var rect = canvas.getBoundingClientRect();
+      if (!fly || !rect.width || !rect.height) {
+        return;
+      }
+      pendingDemoFrame = false;
+      camera.scale = clamp(Math.min(rect.width, rect.height) / (DEMO_TILES_ACROSS * TILE_UNITS), 0.02, 20);
+      camera.x = fly.x;
+      camera.y = fly.y;
+      setFollow(0);
+    }
+
     function draw(now, dtMs) {
+      frameDemo();
       resizeCanvasIfNeeded();
       var dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1155,11 +1277,42 @@
       var changed = !mapMeta || mapMeta.sha256 !== msg.sha256;
       mapMeta = msg;
       hudMapName.textContent = msg.name;
+      SourceBadge.setMap(msg.name);
       if (changed) {
         scene = null;
         chunks = null;
         loadScene(msg.sha256);
       }
+    }
+
+    // Task 5.7: another source is on show; nothing of the previous one's game stays (its map, players and frames).
+    function reset() {
+      if (sceneAbortController) {
+        sceneAbortController.abort();
+      }
+      sceneRequestSha256 = null;
+      mapMeta = null;
+      scene = null;
+      chunks = null;
+      pendingFit = false;
+      players = {};
+      prevFrame = null;
+      latestFrame = null;
+      followId = null;
+      lastEventLog = [];
+      receivedFrameTimestamps = [];
+      hudMapName.textContent = "—";
+      document.getElementById("hud-bot").hidden = true;
+      replayBar.hidden = true;
+      SourceBadge.setMap(null);
+      renderLegend();
+      renderPlayerList();
+    }
+
+    // Task 5.7: the offline demo is (not) on show: whether the camera frames the fly when a scene is drawn.
+    function setDemo(on) {
+      demoFraming = !!on;
+      pendingDemoFrame = demoFraming && !!scene;
     }
 
     function onPlayers(list) {
@@ -1282,6 +1435,8 @@
     };
 
     return {
+      reset: reset,
+      setDemo: setDemo,
       onMap: onMap,
       onPlayers: onPlayers,
       onEvents: onEvents,
@@ -1309,6 +1464,11 @@
     var shown = false;
     var lastStatus = null;
     var busy = false;
+    // Task 5.7: the site shows the offline demo, not a bot. The status is then "not running"; and when no bot's control socket
+    // is there either, the commands are off (the server refuses them as well: `demo_only`). Nothing is ever sent to the demo.
+    // A bot that runs without a bridge keeps its control socket, so it stays commandable under the demo's badge.
+    var demoShown = false;
+    var controlUp = false;
 
     var KIND_LABELS = {
       friend: "Друзья",
@@ -1337,6 +1497,7 @@
       missing_csrf: "Нет токена защиты: обновите страницу.",
       bad_csrf: "Токен защиты не подошёл: обновите страницу.",
       bot_unavailable: "Бот не запущен (нет сокета управления).",
+      demo_only: "Бот не запущен: сейчас на сайте показ, команды отключены.",
       bot_timeout: "Бот не ответил вовремя.",
       bot_protocol: "Ответ бота не понят.",
       bad_request: "Некорректный запрос.",
@@ -1424,7 +1585,10 @@
       return us >= 1000 ? (us / 1000).toFixed(2) + " мс" : us + " мкс";
     }
 
+    var lastInfo = null;
+
     function renderStatus(info) {
+      lastInfo = info;
       var dot = el("bot-conn-dot");
       var s = info && info.live ? info.status : null;
       lastStatus = s;
@@ -1436,7 +1600,11 @@
           ? "нет связи с сервером"
           : !info.bridge
             ? "мост к боту не подключён (сайт запущен без --bot-socket)"
-            : "бот не запущен (нет живого статуса)";
+            : demoShown && controlUp
+              ? "живого статуса нет (моста бота не видно), на сайте показ; сокет управления на месте, команды идут боту"
+              : demoShown
+                ? "бот не запущен: сейчас на сайте показ (муха на арене), настоящей игры нет"
+                : "бот не запущен (нет живого статуса)";
         setText("bot-conn-text", why);
         ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-target", "bs-wb", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
           setText(id, "—");
@@ -1482,12 +1650,53 @@
       if (s && s.brain && document.activeElement !== brain) {
         brain.value = s.brain;
       }
-      el("cmd-kill").disabled = busy || !s || (s.kill_cooldown_ticks | 0) > 0;
+      el("cmd-kill").disabled = locked() || busy || !s || (s.kill_cooldown_ticks | 0) > 0;
+    }
+
+    // No bot to command: the demo is on show and no control socket is there.
+    function locked() {
+      return demoShown && !controlUp;
+    }
+
+    // The commands are on only while there is a bot to take them (and while no command is in flight).
+    function applyDemoLock() {
+      el("cmd-demo-note").hidden = !locked();
+      document.querySelectorAll("#bot-cmd-card button, #bot-cmd-card input, #bot-cmd-card select").forEach(function (c) {
+        c.disabled = locked() || busy;
+      });
+      // "Перечитать списки в боте" is a command to the bot; the lists editor itself is a file and stays.
+      el("rel-reload").disabled = locked() || busy;
+      updateButtons();
+    }
+
+    function setControl(up) {
+      up = !!up;
+      if (up === controlUp) {
+        return;
+      }
+      controlUp = up;
+      applyDemoLock();
+    }
+
+    function setDemo(on) {
+      on = !!on;
+      if (on === demoShown) {
+        return;
+      }
+      demoShown = on;
+      applyDemoLock();
+      if (shown && !lastStatus) {
+        renderStatus(lastInfo);
+      }
     }
 
     function pollStatus() {
       api("GET", "/api/bot/status")
         .then(function (res) {
+          if (res.status === 200 && res.data && typeof res.data.source === "string") {
+            setDemo(res.data.source === "demo"); // the same answer as the WebSocket's, for when that is down
+            setControl(res.data.control_socket);
+          }
           if (shown) {
             renderStatus(res.status === 200 ? res.data : null);
           }
@@ -1508,10 +1717,14 @@
           b.disabled = on;
         }
       });
-      updateButtons();
+      applyDemoLock();
     }
 
     function sendCommand(body, label) {
+      if (locked()) {
+        show("cmd-result", label + ": бот не запущен, на сайте показ — команды отключены.", false);
+        return Promise.resolve();
+      }
       setBusy(true);
       show("cmd-result", label + "…", null);
       return api("POST", "/api/bot/command", body)
@@ -1705,7 +1918,7 @@
 
     bindCommands();
     bindRelations();
-    return { onShown: onShown, onHidden: onHidden };
+    return { onShown: onShown, onHidden: onHidden, setDemo: setDemo };
   })();
 
   refresh();

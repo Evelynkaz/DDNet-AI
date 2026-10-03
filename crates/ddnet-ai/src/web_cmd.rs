@@ -65,6 +65,12 @@ pub struct WebArgs {
     /// (`<data-dir>/maps/cache`) is searched.
     #[arg(long = "bot-socket", conflicts_with = "replay")]
     pub(crate) bot_socket: Option<PathBuf>,
+    /// Task 5.7: the offline demo's bridge socket (`ddnet-ai fly watch --bridge <it>`, `docs/formats.md` §28): while the live bot
+    /// (`--bot-socket`) is not there the site shows the fly playing an arena from this socket, with a badge saying it is not a
+    /// real game, and switches to the bot the moment it is up. Needs `--bot-socket`, and must be another path (never the live
+    /// socket). Commands never go to the demo: the bot panel is for the live bot only.
+    #[arg(long = "demo-socket", requires = "bot_socket")]
+    pub(crate) demo_socket: Option<PathBuf>,
     /// Task 5.6: the bot's control socket (`ddnet-ai play` serves `<data-dir>/bot/control.sock`, `docs/formats.md` §26),
     /// where the owner's commands from the site go. The web only connects to it. Default `<data-dir>/bot/control.sock`.
     #[arg(long = "control-socket")]
@@ -148,6 +154,7 @@ pub fn run_web(args: WebArgs) -> ExitCode {
     config.i_know_this_is_public = args.i_know_this_is_public;
     config.cookie_secure = args.cookie_secure;
     config.replay_source = args.replay;
+    config.demo_socket = args.demo_socket;
     config.map_search_dirs = args.maps_dir;
     if let Some(socket) = args.control_socket {
         config.control_socket = socket;

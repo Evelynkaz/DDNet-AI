@@ -260,6 +260,75 @@ button:active {
   color: var(--text);
 }
 
+/* Task 5.7: what is on show — the live bot, or the offline demo (which is not a real game). The pair of colours is chosen
+   so that the two states differ by more than hue: the demo is the amber, dashed one and says so in words. */
+.source-badge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 0.85rem;
+  line-height: 1.3;
+  background: rgba(24, 28, 36, 0.92);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.source-badge[hidden] {
+  display: none;
+}
+
+.source-badge .source-title {
+  font-weight: 700;
+}
+
+.source-badge .source-detail {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.source-badge.source-live {
+  border-color: var(--ok);
+}
+
+.source-badge.source-live .source-title {
+  color: var(--ok);
+}
+
+.source-badge.source-demo {
+  border: 1px dashed #e0a526;
+  background: rgba(60, 44, 8, 0.92);
+}
+
+.source-badge.source-demo .source-title {
+  color: #f2c14e;
+}
+
+.source-badge.source-none {
+  border-color: #2a3040;
+}
+
+.source-badge.source-none .source-title {
+  color: var(--muted);
+}
+
+/* Inside the map's HUD: a full row of its own, clear of the round buttons at the right edge. */
+.hud-top .source-badge {
+  flex: 1 0 calc(100% - 52px);
+  max-width: calc(100% - 52px);
+  margin: 0 52px 2px 0;
+}
+
+.bot-view .source-badge,
+.fly-view .source-badge {
+  margin: 0 0 16px;
+}
+
 .view-controls {
   position: absolute;
   right: 8px;
@@ -484,7 +553,8 @@ button:active {
   margin: 4px 0 8px;
 }
 
-.hint.warn {
+.hint.warn,
+.hint.demo-note {
   color: #e0b04a;
 }
 

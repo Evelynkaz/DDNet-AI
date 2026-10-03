@@ -48,12 +48,18 @@
       <div class="canvas-area">
         <canvas id="game-canvas" aria-label="Карта игры"></canvas>
 
-        <div class="hud-top" id="game-hud" aria-hidden="true">
-          <span>тик <strong id="hud-tick">—</strong></span>
-          <span>FPS <strong id="hud-fps">—</strong></span>
-          <span>кадры/с <strong id="hud-frame-rate">—</strong></span>
-          <span>карта <strong id="hud-map-name">—</strong></span>
-          <span id="hud-bot" hidden>бот <strong id="hud-bot-text">—</strong></span>
+        <!-- Task 5.7: the badge says what this is: the live bot, or the offline demo (not a real game). It is the one
+             readable item of the HUD (the numbers beside it change every frame and stay `aria-hidden`). -->
+        <div class="hud-top" id="game-hud">
+          <div class="source-badge" id="game-source" role="status" hidden>
+            <strong class="source-title"></strong>
+            <span class="source-detail"></span>
+          </div>
+          <span aria-hidden="true">тик <strong id="hud-tick">—</strong></span>
+          <span aria-hidden="true">FPS <strong id="hud-fps">—</strong></span>
+          <span aria-hidden="true">кадры/с <strong id="hud-frame-rate">—</strong></span>
+          <span aria-hidden="true">карта <strong id="hud-map-name">—</strong></span>
+          <span id="hud-bot" aria-hidden="true" hidden>бот <strong id="hud-bot-text">—</strong></span>
         </div>
 
         <div class="view-controls">
@@ -92,6 +98,10 @@
          like the game view, scrolls on its own; everything dynamic is set with `textContent` (never `innerHTML`). -->
     <section id="bot-view" class="bot-view" hidden>
       <h1>Бот</h1>
+      <div class="source-badge" id="bot-source" role="status" hidden>
+        <strong class="source-title"></strong>
+        <span class="source-detail"></span>
+      </div>
 
       <section class="card" aria-labelledby="bot-status-title">
         <h2 id="bot-status-title">Состояние</h2>
@@ -113,9 +123,13 @@
         </dl>
       </section>
 
-      <section class="card" aria-labelledby="bot-cmd-title">
+      <section class="card" id="bot-cmd-card" aria-labelledby="bot-cmd-title">
         <h2 id="bot-cmd-title">Команды</h2>
         <p class="hint">Бот никогда не пишет в игровой чат: здесь нет ни одной команды, которая могла бы это сделать.</p>
+        <p id="cmd-demo-note" class="hint demo-note" hidden>
+          Команды отключены: сейчас на сайте показ (муха на арене), настоящего бота нет. Команды идут только живому боту и никогда не
+          уходят в показ.
+        </p>
 
         <div class="cmd-row">
           <span class="cmd-label">Режим</span>
@@ -219,6 +233,10 @@
          bot tab. Everything dynamic is set with `textContent`; the drawings are canvases (the CSP forbids inline styles). -->
     <section id="fly-view" class="fly-view" hidden>
       <h1>Муха</h1>
+      <div class="source-badge" id="fly-source" role="status" hidden>
+        <strong class="source-title"></strong>
+        <span class="source-detail"></span>
+      </div>
 
       <section class="card" aria-labelledby="fly-head-title">
         <h2 id="fly-head-title">Состояние</h2>

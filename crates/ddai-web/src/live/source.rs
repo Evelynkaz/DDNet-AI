@@ -86,6 +86,26 @@ pub enum GameEvent {
     HookGrab { id: u8, target: Option<u8> },
 }
 
+/// Which producer feeds the hub (task 5.7): the live bot, the offline demo that stands in while there is no bot, or
+/// nothing at all. Set by [`crate::live::mux::MuxSource`]; the page shows it as a badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Live,
+    Demo,
+    None,
+}
+
+impl SourceKind {
+    /// The word on the wire (`{"type":"source","kind":...}`, `GET /api/bot/status`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourceKind::Live => "live",
+            SourceKind::Demo => "demo",
+            SourceKind::None => "none",
+        }
+    }
+}
+
 /// Something a [`FrameSource`] reports as it runs. The hub (`crate::live::hub`) turns each of
 /// these into the matching WS message(s) — see that module for the mapping.
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +133,15 @@ pub enum SourceEvent {
     FlyMeta(Option<String>),
     /// Task 7.4: one `DFLY` frame (`docs/formats.md` §27.1), already checked by [`crate::live::fly::validate_frame`].
     FlyFrame(Vec<u8>),
+    /// Task 5.7: the source's producer is connected and speaks the protocol (`true`, sent after a valid greeting) or has
+    /// gone (`false`, after everything it had sent). Read by the multiplexer to choose the source; the hub ignores it.
+    Link(bool),
+    /// Task 5.7: from the multiplexer only. This source now feeds the hub: everything the hub kept of the previous one
+    /// (map, roster, bot status, fly layout, demo description) is stale and is dropped; the new source's own state follows.
+    Active(SourceKind),
+    /// Task 5.7: from the multiplexer only. What the demo says about itself (one JSON object, `docs/formats.md` §28),
+    /// rebuilt from the fields it is allowed to carry. Never the bot's status.
+    DemoInfo(String),
     /// Something went wrong that the source can recover from (acceptance criterion 2: "parsing
     /// is bounded, and a malformed trace gives an error event, not a panic") — reported to the
     /// client, never a panic or a silently-dropped frame stream.
@@ -168,6 +197,13 @@ pub trait FrameSource: Send + 'static {
     /// [`FrameSource::spawn`]; a source that has a fly stream (the bot's) tells the bot when the value changes, so the
     /// fly builds frames only while someone looks. The default ignores it (a replay has no fly).
     fn attach_fly_demand(&mut self, demand: tokio::sync::watch::Receiver<bool>) {
+        let _ = demand;
+    }
+
+    /// Task 5.7: whether some browser is connected at all (`true`) or none is. Like [`FrameSource::attach_fly_demand`],
+    /// called once by the hub before [`FrameSource::spawn`]; the bot source passes it on as bit 1 of its subscription so
+    /// the offline demo can pause while nobody looks. The default ignores it.
+    fn attach_view_demand(&mut self, demand: tokio::sync::watch::Receiver<bool>) {
         let _ = demand;
     }
 }

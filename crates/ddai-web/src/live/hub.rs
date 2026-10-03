@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use super::map_resolve::MapCache;
-use super::source::{FrameSource, GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus, SourceEvent};
+use super::source::{
+    FrameSource, GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus, SourceEvent, SourceKind,
+};
 
 /// Capacity of the `mpsc` channel a [`FrameSource`] sends [`SourceEvent`]s into. Small: the hub's
 /// pump task drains it essentially immediately (its own work per event is cheap — encode a frame,
@@ -46,7 +48,7 @@ const LIVE_FRAME_BROADCAST_CAPACITY: usize = 64;
 /// Capacity of the `map`/`players`/`events`/`replay-status`/`error` broadcast channel — much
 /// larger than the live-frame one because these are comparatively rare (a map change roughly
 /// once a minute, a roster change on connect, an events batch on a small fraction of ticks).
-const EVENT_BROADCAST_CAPACITY: usize = 512;
+pub const DEFAULT_EVENT_BROADCAST_CAPACITY: usize = 512;
 /// Minimum real time between two [`SourceEvent::ReplayStatus`] updates actually broadcast — a
 /// source may report one every tick (this task's [`super::replay::ReplaySource`] does, so the
 /// client's tick counter stays live), but the client only needs this a few times a second, and
@@ -71,6 +73,9 @@ pub enum HubEvent {
     BotStatus(String),
     /// Task 7.4: the layout of the fly's stream changed (`None`: no stream any more).
     FlyMeta(Option<String>),
+    /// Task 5.7: the source on show changed, or the demo described itself (`info`: the demo's JSON description). The last
+    /// field is the source generation (see [`TaggedFrame`]) from which this is true.
+    Source(SourceKind, Option<String>, u64),
     Error(String),
 }
 
@@ -82,38 +87,96 @@ struct Latest {
     bot_status: Option<(Instant, String)>,
     /// Task 7.4: the newest fly stream layout (a viewer that connects later is handed it).
     fly_meta: Option<String>,
+    /// Task 5.7: which source is on show (`None` until a multiplexer says; a plain replay or a lone bot source never does).
+    source: Option<SourceKind>,
+    /// Task 5.7: the demo's description while it is the source on show.
+    demo_info: Option<String>,
+    /// Task 5.7: the source generation (bumped at every switch; frames are tagged with it).
+    generation: u64,
+}
+
+/// A binary frame as it travels to the browser connections, tagged with the **source generation** it was made in (task 5.7):
+/// the hub bumps the generation at every source switch ([`SourceEvent::Active`]), and a connection forwards only frames of the
+/// generation of the `source` message it last sent, so a frame of the previous source (or a first frame of the next one, before
+/// the badge changed) is never drawn under the wrong badge.
+#[derive(Debug, Clone)]
+pub struct TaggedFrame {
+    pub generation: u64,
+    pub bytes: Arc<Vec<u8>>,
 }
 
 /// Capacity of the lossy fly-frame broadcast channel: ~5 s of frames at the bot's 12.5 Hz.
 const FLY_FRAME_BROADCAST_CAPACITY: usize = 64;
 
-/// Who watches the fly. The count and the demand flag change together, under one lock (an increment racing
-/// a decrement must not leave the flag false with a watcher present).
-struct FlyDemand {
+/// Who watches something (the fly, or the page at all). The count and the demand flag change together, under one lock (an
+/// increment racing a decrement must not leave the flag false with a watcher present).
+struct Demand {
     watchers: Mutex<usize>,
     tx: watch::Sender<bool>,
+}
+
+impl Demand {
+    fn new() -> (Arc<Demand>, watch::Receiver<bool>) {
+        let (tx, rx) = watch::channel(false);
+        (
+            Arc::new(Demand {
+                watchers: Mutex::new(0),
+                tx,
+            }),
+            rx,
+        )
+    }
+
+    /// One more watcher; `before` runs under the lock, ahead of the announcement.
+    fn join(&self, before: impl FnOnce()) {
+        let mut n = self.watchers.lock().expect("demand mutex poisoned");
+        *n += 1;
+        before();
+        self.tx.send_if_modified(|v| !std::mem::replace(v, true));
+    }
+
+    fn leave(&self) {
+        let mut n = self.watchers.lock().expect("demand mutex poisoned");
+        *n = n.saturating_sub(1);
+        let want = *n > 0;
+        self.tx.send_if_modified(|v| std::mem::replace(v, want) != want);
+    }
+
+    fn count(&self) -> usize {
+        *self.watchers.lock().expect("demand mutex poisoned")
+    }
 }
 
 /// A browser connection's subscription to the fly stream: dropping it ends the demand.
 pub struct FlySubscription {
     /// Pre-validated `DFLY` frames, lossy under load like the live ones.
-    pub rx: broadcast::Receiver<Arc<Vec<u8>>>,
-    demand: Arc<FlyDemand>,
+    pub rx: broadcast::Receiver<TaggedFrame>,
+    demand: Arc<Demand>,
 }
 
 impl Drop for FlySubscription {
     fn drop(&mut self) {
-        let mut n = self.demand.watchers.lock().expect("fly demand mutex poisoned");
-        *n = n.saturating_sub(1);
-        let want = *n > 0;
-        self.demand.tx.send_if_modified(|v| std::mem::replace(v, want) != want);
+        self.demand.leave();
+    }
+}
+
+/// Task 5.7: a browser connection exists. While at least one does, the source is told the page is open (the offline demo
+/// pauses itself otherwise); dropping the last one tells it so.
+pub struct ViewerGuard {
+    demand: Arc<Demand>,
+}
+
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        self.demand.leave();
     }
 }
 
 pub struct LiveHub {
-    live_tx: broadcast::Sender<Arc<Vec<u8>>>,
-    fly_tx: broadcast::Sender<Arc<Vec<u8>>>,
-    fly_demand: Arc<FlyDemand>,
+    live_tx: broadcast::Sender<TaggedFrame>,
+    fly_tx: broadcast::Sender<TaggedFrame>,
+    fly_demand: Arc<Demand>,
+    view_demand: Arc<Demand>,
     event_tx: broadcast::Sender<Arc<HubEvent>>,
     latest: Arc<Mutex<Latest>>,
     control_tx: mpsc::Sender<ReplayControl>,
@@ -133,16 +196,28 @@ impl LiveHub {
     /// constructs one run inside `#[tokio::main]`/`#[tokio::test]`). `map_cache` should be the
     /// same instance `source` itself was built with (see `crate::live::replay::ReplaySource::new`)
     /// so `GET /api/map/<sha256>` can serve scenes the source has already resolved.
-    pub fn start(mut source: Box<dyn FrameSource>, map_cache: Arc<MapCache>) -> Self {
+    pub fn start(source: Box<dyn FrameSource>, map_cache: Arc<MapCache>) -> Self {
+        Self::start_with_event_capacity(source, map_cache, DEFAULT_EVENT_BROADCAST_CAPACITY)
+    }
+
+    /// [`LiveHub::start`] with the capacity of the event channel given (a connection that falls further behind than this loses
+    /// events and is re-told the state, see `ws.rs`); tests make it small to force that.
+    pub fn start_with_event_capacity(
+        mut source: Box<dyn FrameSource>,
+        map_cache: Arc<MapCache>,
+        event_capacity: usize,
+    ) -> Self {
         let (events_tx, events_rx) = mpsc::channel(SOURCE_EVENTS_CHANNEL_CAPACITY);
         let (control_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
-        let (demand_tx, demand_rx) = watch::channel(false);
-        source.attach_fly_demand(demand_rx);
+        let (fly_demand, fly_rx) = Demand::new();
+        let (view_demand, view_rx) = Demand::new();
+        source.attach_fly_demand(fly_rx);
+        source.attach_view_demand(view_rx);
         let source_task = source.spawn(events_tx, control_rx);
 
         let (live_tx, _) = broadcast::channel(LIVE_FRAME_BROADCAST_CAPACITY);
         let (fly_tx, _) = broadcast::channel(FLY_FRAME_BROADCAST_CAPACITY);
-        let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        let (event_tx, _) = broadcast::channel(event_capacity.max(1));
         let latest = Arc::new(Mutex::new(Latest::default()));
 
         let pump_task = tokio::spawn(Self::pump(
@@ -156,10 +231,8 @@ impl LiveHub {
         LiveHub {
             live_tx,
             fly_tx,
-            fly_demand: Arc::new(FlyDemand {
-                watchers: Mutex::new(0),
-                tx: demand_tx,
-            }),
+            fly_demand,
+            view_demand,
             event_tx,
             latest,
             control_tx,
@@ -171,14 +244,16 @@ impl LiveHub {
 
     async fn pump(
         mut events_rx: mpsc::Receiver<SourceEvent>,
-        live_tx: broadcast::Sender<Arc<Vec<u8>>>,
-        fly_tx: broadcast::Sender<Arc<Vec<u8>>>,
+        live_tx: broadcast::Sender<TaggedFrame>,
+        fly_tx: broadcast::Sender<TaggedFrame>,
         event_tx: broadcast::Sender<Arc<HubEvent>>,
         latest: Arc<Mutex<Latest>>,
     ) {
         // Not `Instant::now()`: the very first status update should always go out immediately,
         // not wait a full `STATUS_THROTTLE` after the hub starts.
         let mut last_status_sent = Instant::now().checked_sub(STATUS_THROTTLE).unwrap_or_else(Instant::now);
+        // Bumped at every source switch; the frames made after it carry the new number.
+        let mut generation: u64 = 0;
         while let Some(event) = events_rx.recv().await {
             match event {
                 SourceEvent::MapChanged(meta) => {
@@ -191,7 +266,10 @@ impl LiveHub {
                 }
                 SourceEvent::Frame(frame) => {
                     let bytes = super::frame::encode(&frame);
-                    let _ = live_tx.send(Arc::new(bytes));
+                    let _ = live_tx.send(TaggedFrame {
+                        generation,
+                        bytes: Arc::new(bytes),
+                    });
                 }
                 SourceEvent::Events { tick, events } => {
                     if !events.is_empty() {
@@ -214,7 +292,38 @@ impl LiveHub {
                     let _ = event_tx.send(Arc::new(HubEvent::FlyMeta(meta)));
                 }
                 SourceEvent::FlyFrame(bytes) => {
-                    let _ = fly_tx.send(Arc::new(bytes));
+                    let _ = fly_tx.send(TaggedFrame {
+                        generation,
+                        bytes: Arc::new(bytes),
+                    });
+                }
+                SourceEvent::Link(_) => {} // the multiplexer's business (`super::mux`)
+                SourceEvent::Active(kind) => {
+                    // Everything kept of the previous source is stale now; the new one's state follows.
+                    generation += 1;
+                    *latest.lock().expect("live hub mutex poisoned") = Latest {
+                        source: Some(kind),
+                        generation,
+                        ..Latest::default()
+                    };
+                    let _ = event_tx.send(Arc::new(HubEvent::Source(kind, None, generation)));
+                    // A page watching the fly must not keep the layout of the previous source.
+                    let _ = event_tx.send(Arc::new(HubEvent::FlyMeta(None)));
+                }
+                SourceEvent::DemoInfo(info) => {
+                    // Only while the demo is on show, and only when it says something new.
+                    let changed = {
+                        let mut l = latest.lock().expect("live hub mutex poisoned");
+                        if l.source != Some(SourceKind::Demo) || l.demo_info.as_deref() == Some(info.as_str()) {
+                            false
+                        } else {
+                            l.demo_info = Some(info.clone());
+                            true
+                        }
+                    };
+                    if changed {
+                        let _ = event_tx.send(Arc::new(HubEvent::Source(SourceKind::Demo, Some(info), generation)));
+                    }
                 }
                 SourceEvent::Error(message) => {
                     let _ = event_tx.send(Arc::new(HubEvent::Error(message)));
@@ -226,14 +335,20 @@ impl LiveHub {
     /// Task 7.4: subscribes a browser connection to the fly stream. While at least one subscription lives, the source
     /// is told that somebody watches (the bot then builds frames); dropping the last one tells it to stop.
     pub fn subscribe_fly(&self) -> FlySubscription {
-        let mut n = self.fly_demand.watchers.lock().expect("fly demand mutex poisoned");
-        *n += 1;
         // Subscribe to the frames before announcing the demand, so the first frame cannot be missed.
-        let rx = self.fly_tx.subscribe();
-        self.fly_demand.tx.send_if_modified(|v| !std::mem::replace(v, true));
+        let mut rx = None;
+        self.fly_demand.join(|| rx = Some(self.fly_tx.subscribe()));
         FlySubscription {
-            rx,
+            rx: rx.expect("the closure ran"),
             demand: Arc::clone(&self.fly_demand),
+        }
+    }
+
+    /// Task 5.7: a browser connection is open (see [`ViewerGuard`]).
+    pub fn viewer(&self) -> ViewerGuard {
+        self.view_demand.join(|| {});
+        ViewerGuard {
+            demand: Arc::clone(&self.view_demand),
         }
     }
 
@@ -244,10 +359,27 @@ impl LiveHub {
 
     /// How many browser connections watch the fly now.
     pub fn fly_watchers(&self) -> usize {
-        *self.fly_demand.watchers.lock().expect("fly demand mutex poisoned")
+        self.fly_demand.count()
     }
 
-    pub fn subscribe_live(&self) -> broadcast::Receiver<Arc<Vec<u8>>> {
+    /// How many browser connections are open now.
+    pub fn viewers(&self) -> usize {
+        self.view_demand.count()
+    }
+
+    /// Task 5.7: which source is on show and, for the demo, its description; `None` when no multiplexer feeds this hub.
+    pub fn latest_source(&self) -> Option<(SourceKind, Option<String>)> {
+        self.latest_source_tagged().map(|(k, info, _)| (k, info))
+    }
+
+    /// [`LiveHub::latest_source`] with the source generation it belongs to, read together (see [`TaggedFrame`]); a hub with no
+    /// multiplexer has none, and its frames are all generation 0.
+    pub fn latest_source_tagged(&self) -> Option<(SourceKind, Option<String>, u64)> {
+        let l = self.latest.lock().expect("live hub mutex poisoned");
+        l.source.map(|k| (k, l.demo_info.clone(), l.generation))
+    }
+
+    pub fn subscribe_live(&self) -> broadcast::Receiver<TaggedFrame> {
         self.live_tx.subscribe()
     }
 
@@ -377,7 +509,7 @@ mod tests {
         let hub = LiveHub::start(Box::new(source), Arc::new(MapCache::new()));
         let mut live = hub.subscribe_live();
         let bytes = live.recv().await.expect("live frame");
-        let decoded = super::super::frame::decode(&bytes).expect("decode");
+        let decoded = super::super::frame::decode(&bytes.bytes).expect("decode");
         assert_eq!(decoded.tick, 7);
     }
 
@@ -548,6 +680,181 @@ mod tests {
         let second = events.recv().await.unwrap();
         assert!(matches!(&*second, HubEvent::FlyMeta(None)));
         assert_eq!(hub.latest_fly_meta(), None);
+    }
+
+    #[tokio::test]
+    async fn a_source_switch_drops_what_was_kept_of_the_previous_one_and_is_announced() {
+        let map = MapMeta {
+            sha256: [2; 32],
+            name: "Arena".to_string(),
+            width: 4,
+            height: 4,
+        };
+        let source = ScriptedSource {
+            events: vec![
+                SourceEvent::Active(SourceKind::Live),
+                SourceEvent::MapChanged(map.clone()),
+                SourceEvent::Players(vec![PlayerMeta {
+                    id: 1,
+                    name: "c1-aaaaaaaa".to_string(),
+                    team: 0,
+                }]),
+                SourceEvent::BotStatus(r#"{"tick":1}"#.to_string()),
+                SourceEvent::FlyMeta(Some(r#"{"v":1}"#.to_string())),
+                // The demo takes over: nothing of the bot is kept.
+                SourceEvent::Active(SourceKind::Demo),
+                SourceEvent::DemoInfo(r#"{"arena":"a","bundle":"b"}"#.to_string()),
+                // The same description again is not news.
+                SourceEvent::DemoInfo(r#"{"arena":"a","bundle":"b"}"#.to_string()),
+                SourceEvent::Link(true),
+            ],
+        };
+        let hub = LiveHub::start(Box::new(source), Arc::new(MapCache::new()));
+        let mut events = hub.subscribe_events();
+        let mut seen = Vec::new();
+        // Source, FlyMeta(None) for each Active; Map, Players, BotStatus, FlyMeta in between; one demo description.
+        while seen.len() < 9 {
+            let e = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .expect("events")
+                .unwrap();
+            seen.push(e);
+        }
+        assert!(matches!(&*seen[0], HubEvent::Source(SourceKind::Live, None, 1)));
+        assert!(matches!(&*seen[1], HubEvent::FlyMeta(None)));
+        assert!(matches!(&*seen[2], HubEvent::Map(_)));
+        assert!(matches!(&*seen[5], HubEvent::FlyMeta(Some(_))));
+        assert!(matches!(&*seen[6], HubEvent::Source(SourceKind::Demo, None, 2)));
+        assert!(matches!(&*seen[7], HubEvent::FlyMeta(None)));
+        assert!(matches!(&*seen[8], HubEvent::Source(SourceKind::Demo, Some(i), 2) if i.contains("\"a\"")));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            events.try_recv().is_err(),
+            "the repeated description and the link are not events"
+        );
+        assert_eq!(hub.latest_map(), None, "the live bot's map is gone");
+        assert!(hub.latest_players().is_empty());
+        assert!(hub.latest_bot_status().is_none(), "the demo is not a bot with a status");
+        assert_eq!(hub.latest_fly_meta(), None);
+        let (kind, info) = hub.latest_source().expect("a source was announced");
+        assert_eq!(kind, SourceKind::Demo);
+        assert!(info.unwrap().contains("bundle"));
+    }
+
+    /// Task 5.7: a frame carries the generation of the switch it was made after, and the `source` event of that switch carries
+    /// the same number, so a connection can tell which frames belong under which badge.
+    #[tokio::test]
+    async fn frames_carry_the_generation_of_the_switch_they_were_made_after() {
+        let source = ScriptedSource {
+            events: vec![
+                SourceEvent::Frame(sample_frame(1)),
+                SourceEvent::Active(SourceKind::Live),
+                SourceEvent::Frame(sample_frame(2)),
+                SourceEvent::Active(SourceKind::Demo),
+                SourceEvent::Frame(sample_frame(3)),
+            ],
+        };
+        let hub = LiveHub::start(Box::new(source), Arc::new(MapCache::new()));
+        let mut live = hub.subscribe_live();
+        let mut events = hub.subscribe_events();
+        let mut frames = Vec::new();
+        for _ in 0..3 {
+            let f = tokio::time::timeout(Duration::from_secs(2), live.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            frames.push((super::super::frame::decode(&f.bytes).unwrap().tick, f.generation));
+        }
+        assert_eq!(frames, [(1, 0), (2, 1), (3, 2)]);
+        let mut gens = Vec::new();
+        while gens.len() < 2 {
+            let e = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let HubEvent::Source(kind, _, generation) = &*e {
+                gens.push((*kind, *generation));
+            }
+        }
+        assert_eq!(gens, [(SourceKind::Live, 1), (SourceKind::Demo, 2)]);
+        assert_eq!(
+            hub.latest_source_tagged().map(|(k, _, g)| (k, g)),
+            Some((SourceKind::Demo, 2))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_demo_description_is_ignored_unless_the_demo_is_on_show() {
+        let source = ScriptedSource {
+            events: vec![
+                SourceEvent::Active(SourceKind::Live),
+                SourceEvent::DemoInfo(r#"{"arena":"a","bundle":"b"}"#.to_string()),
+            ],
+        };
+        let hub = LiveHub::start(Box::new(source), Arc::new(MapCache::new()));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(hub.latest_source(), Some((SourceKind::Live, None)));
+    }
+
+    #[tokio::test]
+    async fn a_hub_without_a_multiplexer_names_no_source() {
+        let hub = LiveHub::start(Box::new(ScriptedSource { events: vec![] }), Arc::new(MapCache::new()));
+        assert_eq!(hub.latest_source(), None);
+    }
+
+    #[tokio::test]
+    async fn the_source_is_told_while_a_browser_is_connected_and_only_then() {
+        struct ViewSource {
+            demand: Option<watch::Receiver<bool>>,
+            seen: Arc<Mutex<Vec<bool>>>,
+        }
+        impl FrameSource for ViewSource {
+            fn attach_view_demand(&mut self, demand: watch::Receiver<bool>) {
+                self.demand = Some(demand);
+            }
+            fn spawn(
+                mut self: Box<Self>,
+                _events_tx: mpsc::Sender<SourceEvent>,
+                mut control_rx: mpsc::Receiver<ReplayControl>,
+            ) -> tokio::task::JoinHandle<()> {
+                tokio::spawn(async move {
+                    let mut demand = self.demand.take().expect("the hub attached the demand");
+                    loop {
+                        tokio::select! {
+                            changed = demand.changed() => {
+                                if changed.is_err() { return; }
+                                self.seen.lock().unwrap().push(*demand.borrow_and_update());
+                            }
+                            c = control_rx.recv() => if c.is_none() { return; },
+                        }
+                    }
+                })
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hub = LiveHub::start(
+            Box::new(ViewSource {
+                demand: None,
+                seen: Arc::clone(&seen),
+            }),
+            Arc::new(MapCache::new()),
+        );
+        let settle = || tokio::time::sleep(Duration::from_millis(60));
+        settle().await;
+        assert!(seen.lock().unwrap().is_empty(), "nobody connected: nothing announced");
+        let a = hub.viewer();
+        let b = hub.viewer();
+        settle().await;
+        assert_eq!(hub.viewers(), 2);
+        assert_eq!(*seen.lock().unwrap(), [true], "one announcement for two browsers");
+        drop(a);
+        settle().await;
+        assert_eq!(*seen.lock().unwrap(), [true]);
+        drop(b);
+        settle().await;
+        assert_eq!(hub.viewers(), 0);
+        assert_eq!(*seen.lock().unwrap(), [true, false]);
+        assert_eq!(hub.fly_watchers(), 0, "a viewer is not a fly watcher");
     }
 
     #[tokio::test]

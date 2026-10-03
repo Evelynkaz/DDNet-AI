@@ -142,6 +142,22 @@ pub fn play_game_observed(
     players: Vec<PlayerSetup>,
     observe: &mut dyn FnMut(&mut [PlayerSetup], i32) -> bool,
 ) -> Result<GameReport, EnvError> {
+    play_game_watched(arena, rules, seed, layout, players, &mut |sim, tick| {
+        observe(&mut sim.players, tick)
+    })
+}
+
+/// [`play_game_observed`] whose observer gets the whole [`Sim`] (its physics world included, read-only by convention),
+/// so a viewer can draw the game itself and not only a brain's frame (task 5.7: the web's demo shows the arena). The
+/// same contract: the observer must not change the game, and returns `false` to stop it early.
+pub fn play_game_watched(
+    arena: &Arena,
+    rules: &Rules,
+    seed: u64,
+    layout: Layout,
+    players: Vec<PlayerSetup>,
+    observe: &mut dyn FnMut(&mut Sim, i32) -> bool,
+) -> Result<GameReport, EnvError> {
     let n = players.len();
     if n < 2 {
         return Err(EnvError::new("a game needs at least two players"));
@@ -193,7 +209,7 @@ pub fn play_game_observed(
     for _ in 0..limit {
         let events = sim.step(&default_target);
         let now = sim.tick();
-        if !observe(&mut sim.players, now) {
+        if !observe(&mut sim, now) {
             break;
         }
         for e in events {

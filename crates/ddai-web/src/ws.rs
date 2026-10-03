@@ -14,8 +14,8 @@ use tokio::sync::broadcast;
 use tokio::time::{interval, interval_at};
 
 use crate::auth::session::SessionId;
-use crate::live::hub::{FlySubscription, HubEvent};
-use crate::live::source::{GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus};
+use crate::live::hub::{FlySubscription, HubEvent, LiveHub};
+use crate::live::source::{GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus, SourceKind};
 use crate::session_guard::{current_session, request_is_same_origin};
 use crate::state::SharedState;
 
@@ -157,6 +157,12 @@ enum ServerMessage {
     FlyMeta {
         meta: serde_json::Value,
     },
+    /// Task 5.7: what the site shows, `kind` `live` / `demo` / `none` (`docs/formats.md` §28). Sent on connect and whenever it
+    /// changes; the page then drops what it drew of the previous source. `info` (demo only): `{"arena","bundle"}` or `null`.
+    Source {
+        kind: &'static str,
+        info: serde_json::Value,
+    },
     /// A live-source problem (acceptance criterion 2: "a malformed trace gives an error event,
     /// not a panic") — reported to the client, distinct from any HTTP-level error.
     LiveError {
@@ -181,9 +187,19 @@ fn hub_event_to_server_message(event: &HubEvent) -> ServerMessage {
         HubEvent::FlyMeta(meta) => ServerMessage::FlyMeta {
             meta: fly_meta_value(meta.as_deref()),
         },
+        HubEvent::Source(kind, info, _) => source_message(*kind, info.as_deref()),
         HubEvent::Error(message) => ServerMessage::LiveError {
             message: message.clone(),
         },
+    }
+}
+
+fn source_message(kind: SourceKind, info: Option<&str>) -> ServerMessage {
+    ServerMessage::Source {
+        kind: kind.as_str(),
+        info: info
+            .and_then(|i| serde_json::from_str(i).ok())
+            .unwrap_or(serde_json::Value::Null),
     }
 }
 
@@ -285,6 +301,31 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
     socket.send(Message::Text(text.into())).await.map_err(|_| ())
 }
 
+/// What a connection is told about the state of the hub: the source on show (setting `shown_generation` to its generation, so the
+/// frames of that source are let through), then the map and the roster. Sent when the connection starts, and again when it has
+/// lagged behind the event channel and may have missed any of it (a missed `source` would otherwise leave every frame dropped).
+async fn send_snapshot(socket: &mut WebSocket, hub: &LiveHub, shown_generation: &mut u64) -> Result<(), ()> {
+    // What is on show comes first: the page drops what it drew of another source when this changes it.
+    if let Some((kind, info, generation)) = hub.latest_source_tagged() {
+        *shown_generation = generation;
+        send_json(socket, &source_message(kind, info.as_deref())).await?;
+    }
+    if let Some(map) = hub.latest_map() {
+        send_json(socket, &ServerMessage::Map(map.into())).await?;
+    }
+    let players = hub.latest_players();
+    if !players.is_empty() {
+        send_json(
+            socket,
+            &ServerMessage::Players {
+                list: players.into_iter().map(PlayerMsg::from).collect(),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: SessionId) {
     let _slot_guard = WsSlotGuard {
         state: state.clone(),
@@ -310,27 +351,17 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
     // than waiting for the next change to be broadcast — see `LiveHub`'s doc comment on why the
     // broadcast channel alone can't guarantee that for a connection that joins between two
     // (rare) map-change events.
+    // Task 5.7: a browser is connected: the source is told (the offline demo plays only while somebody is here).
+    let _viewer = state.live_hub.as_ref().map(|hub| hub.viewer());
     let mut live_rx = state.live_hub.as_ref().map(|hub| hub.subscribe_live());
     let mut event_rx = state.live_hub.as_ref().map(|hub| hub.subscribe_events());
-    if let Some(hub) = &state.live_hub {
-        if let Some(map) = hub.latest_map()
-            && send_json(&mut socket, &ServerMessage::Map(map.into())).await.is_err()
-        {
-            return;
-        }
-        let players = hub.latest_players();
-        if !players.is_empty()
-            && send_json(
-                &mut socket,
-                &ServerMessage::Players {
-                    list: players.into_iter().map(PlayerMsg::from).collect(),
-                },
-            )
-            .await
-            .is_err()
-        {
-            return;
-        }
+    // Task 5.7: the source generation of the `source` message this connection sent last. Binary frames of any other generation
+    // (the previous source's last ones still queued, or the next one's first before its badge went out) are not forwarded.
+    let mut shown_generation: u64 = 0;
+    if let Some(hub) = &state.live_hub
+        && send_snapshot(&mut socket, hub, &mut shown_generation).await.is_err()
+    {
+        return;
     }
     // Live frames flow at this rate by default (acceptance criterion 1: "default 25 Hz") until
     // the client sends its own `sub{live: hz}` — clamped to `config.max_live_hz` either way.
@@ -421,7 +452,9 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
                 }
             }, if live_hz > 0.0 => {
                 match live_bytes {
-                    Ok(bytes) => {
+                    Ok(frame) if frame.generation != shown_generation => {} // another source's: not under this badge
+                    Ok(frame) => {
+                        let bytes = frame.bytes;
                         // Per-connection downsampling to this connection's own requested rate —
                         // independent of the hub's own (much higher) production rate and of any
                         // other connection's rate. `live_hz` is already bounded to
@@ -451,7 +484,9 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
                 }
             } => {
                 match fly_bytes {
-                    Ok(bytes) => {
+                    Ok(frame) if frame.generation != shown_generation => {} // another source's: not under this badge
+                    Ok(frame) => {
+                        let bytes = frame.bytes;
                         // An average-rate limiter, not a minimum gap: a source at 12.5 Hz asked for 12 must not lose
                         // every other frame to gaps of 80 ms against 83 ms. The schedule advances by one period per
                         // frame sent (and restarts from now after a pause), so the long-run rate is the requested one.
@@ -485,14 +520,31 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
                         if matches!(&*event, HubEvent::FlyMeta(_)) && fly_sub.is_none() {
                             continue;
                         }
+                        if let HubEvent::Source(_, _, generation) = &*event {
+                            shown_generation = *generation;
+                        }
                         let message = hub_event_to_server_message(&event);
                         if send_json(&mut socket, &message).await.is_err() {
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // See `LiveHub`'s doc comment: rare, mitigated but not eliminated —
-                        // nothing better to do here than continue with whatever arrives next.
+                        // Events were lost. Rare, and mostly harmless (see `LiveHub`'s doc comment), except that a lost `source`
+                        // would leave `shown_generation` stale and every frame dropped: say again what is on show, the map and
+                        // the roster (idempotent for the page), and the fly's layout to a connection that watches the fly.
+                        if let Some(hub) = &state.live_hub {
+                            if send_snapshot(&mut socket, hub, &mut shown_generation).await.is_err() {
+                                break;
+                            }
+                            if fly_sub.is_some() {
+                                let message = ServerMessage::FlyMeta {
+                                    meta: fly_meta_value(hub.latest_fly_meta().as_deref()),
+                                };
+                                if send_json(&mut socket, &message).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => {}
                 }

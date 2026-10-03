@@ -48,6 +48,12 @@ pub struct WebConfig {
     /// Task 4.1: the live bot's Unix socket (`ddai_bot::bridge`, `docs/formats.md` §21) as the live
     /// view's data source instead of a replay. Mutually exclusive with `replay_source`.
     pub bot_socket: Option<PathBuf>,
+    /// Capacity of the hub's event channel (map, roster, source, status ...), in messages. A browser connection that falls further
+    /// behind loses events and is told the state again. The default is generous; tests make it tiny to force that.
+    pub event_broadcast_capacity: usize,
+    /// Task 5.7: the offline demo's bridge socket (`ddnet-ai fly watch --bridge`, `docs/formats.md` §28): shown while the
+    /// live bot (`bot_socket`) is not there, and given up the moment it is. Needs `bot_socket`, and must be another socket.
+    pub demo_socket: Option<PathBuf>,
     /// Task 5.2a: directories `crate::live::map_resolve` may read a real `.map` file's bytes
     /// from, by filename, when resolving a real-map replay trace's map (never any path taken
     /// from request or trace content directly — see that module's doc comment). Typically
@@ -89,6 +95,8 @@ impl WebConfig {
             trusted_device_ttl: Duration::from_secs(90 * 24 * 3600),
             replay_source: None,
             bot_socket: None,
+            demo_socket: None,
+            event_broadcast_capacity: crate::live::hub::DEFAULT_EVENT_BROADCAST_CAPACITY,
             map_search_dirs: Vec::new(),
             max_live_hz: 50.0,
             max_fly_hz: 15.0,
@@ -101,6 +109,12 @@ impl WebConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
+    #[error(
+        "a demo socket needs the live bot's socket to stand in for (--demo-socket goes with --bot-socket, not --replay)"
+    )]
+    DemoNeedsBot,
+    #[error("the demo socket and the live bot's socket are the same path: the demo must never be the live socket")]
+    DemoIsLive,
     #[error(
         "refusing to bind to non-loopback address {addr}: pass --i-know-this-is-public to override \
          (and don't — this server has no TLS of its own; Caddy is meant to be the only public-facing hop)"
@@ -115,6 +129,18 @@ pub fn validate_listen_addr(listen: SocketAddr, i_know_this_is_public: bool) -> 
         Ok(())
     } else {
         Err(ConfigError::NonLoopbackBind { addr: listen })
+    }
+}
+
+/// Checks how the sources fit together (task 5.7): a demo stands in for a live bot, on a socket of its own.
+pub fn validate_sources(config: &WebConfig) -> Result<(), ConfigError> {
+    let Some(demo) = &config.demo_socket else {
+        return Ok(());
+    };
+    match &config.bot_socket {
+        None => Err(ConfigError::DemoNeedsBot),
+        Some(live) if live == demo => Err(ConfigError::DemoIsLive),
+        Some(_) => Ok(()),
     }
 }
 
@@ -172,5 +198,20 @@ mod tests {
         assert!(!cfg.i_know_this_is_public);
         assert_eq!(cfg.max_ws_per_session, DEFAULT_MAX_WS_PER_SESSION);
         assert_eq!(cfg.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn a_demo_socket_needs_a_different_live_socket() {
+        let mut cfg = WebConfig::new(addr(Ipv4Addr::LOCALHOST.into(), 7788), PathBuf::from("/tmp/data"));
+        assert_eq!(validate_sources(&cfg), Ok(()), "no demo is fine");
+        cfg.demo_socket = Some(PathBuf::from("/tmp/demo.sock"));
+        assert_eq!(validate_sources(&cfg), Err(ConfigError::DemoNeedsBot));
+        cfg.bot_socket = Some(PathBuf::from("/tmp/demo.sock"));
+        assert_eq!(validate_sources(&cfg), Err(ConfigError::DemoIsLive));
+        cfg.bot_socket = Some(PathBuf::from("/tmp/live.sock"));
+        assert_eq!(validate_sources(&cfg), Ok(()));
+        cfg.replay_source = Some(PathBuf::from("/tmp/replays"));
+        cfg.bot_socket = None;
+        assert_eq!(validate_sources(&cfg), Err(ConfigError::DemoNeedsBot));
     }
 }

@@ -35,6 +35,7 @@ use crate::auth::cookie::audit_tag;
 use crate::auth::csrf;
 use crate::control::client::SendError;
 use crate::control::relations::{MAX_ENTRIES_PER_LIST, MAX_NAME_BYTES, StoreError};
+use crate::live::source::SourceKind;
 use crate::session_guard::{current_session, peek_session, request_is_strict_same_origin};
 use crate::state::SharedState;
 
@@ -52,6 +53,20 @@ fn json_error_detail(status: StatusCode, error: &'static str, detail: &str) -> R
 /// Who asked: the opaque audit tag of the session (never the cookie).
 struct Owner {
     tag: String,
+}
+
+/// Task 5.7: the offline demo is what the site shows **and** there is no live bot to command: its control socket is not
+/// there. The demo takes no commands and has no control socket; `control.sock` is the live bot's alone. A bot that is running
+/// but whose bridge is away (started with `--no-bridge`, or the site's bridge connection is reconnecting) still has its control
+/// socket, so it stays commandable while the demo is on show. A stale socket file with nobody behind it is refused later, by
+/// the connection (`bot_unavailable`).
+async fn demo_only(state: &SharedState) -> bool {
+    let demo_on_show = state
+        .live_hub
+        .as_ref()
+        .and_then(|hub| hub.latest_source())
+        .is_some_and(|(kind, _)| kind == SourceKind::Demo);
+    demo_on_show && !state.control.socket_present().await
 }
 
 /// A refusal: the status and the `error` code of the JSON body (small, so `Result` stays small).
@@ -123,9 +138,18 @@ pub async fn status(State(state): State<SharedState>, jar: CookieJar) -> Respons
         }
         None => (false, None, None),
     };
+    let source = state
+        .live_hub
+        .as_ref()
+        .and_then(|hub| hub.latest_source())
+        .map(|(kind, _)| kind.as_str());
     Json(serde_json::json!({
         // Whether this web unit was started with a bot bridge at all (`--bot-socket`).
         "bridge": state.config.bot_socket.is_some(),
+        // Task 5.7: what the site shows (`live`, `demo`, `none`; null without a multiplexer). The status below is only ever
+        // the live bot's: with the demo on show `live` is false and `status` null.
+        "source": source,
+        "demo_configured": state.config.demo_socket.is_some(),
         "live": live,
         "age_ms": age_ms,
         "status": status,
@@ -178,6 +202,10 @@ pub async fn command(State(state): State<SharedState>, headers: HeaderMap, jar: 
         Ok(o) => o,
         Err((status, error)) => return json_error(status, error),
     };
+    // Task 5.7: commands are the live bot's. With the demo on show and no live bot to take them, nothing is sent anywhere.
+    if demo_only(&state).await {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "demo_only");
+    }
     // A closed vocabulary: anything that is not exactly a `ControlCommand` (a `say`, a `quit`, an extra field) is a
     // parse error here, before it could reach the socket.
     let cmd: ControlCommand = match serde_json::from_slice(&body) {
@@ -294,7 +322,10 @@ pub async fn relations_post(
         },
     };
     // Applies to the running bot through the command channel. An edit that changed nothing needs no reload.
-    let (applied, applied_text) = if changed {
+    let (applied, applied_text) = if changed && demo_only(&state).await {
+        // The demo is on show and the bot has no control socket: there is no bot to tell (the lists wait for its next start).
+        ("unavailable", String::new())
+    } else if changed {
         let result = state.control.send(&owner.tag, ControlCommand::ReloadRelations {}).await;
         let text = match &result {
             Ok(r) => r.text.clone(),

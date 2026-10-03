@@ -20,8 +20,10 @@
 //!
 //! **What a client may say (7.4).** The bridge is still read-only in effect: there is no control path. The one
 //! thing the bot reads from a client is a subscription, `u32 LE len | u8 kind 1 | u8 mask` (bit 0: the fly stream),
-//! so that the fly's frames are built only while somebody watches (`Bridge::fly_wanted`). Anything else a client
-//! writes is read and discarded; a message longer than [`MAX_CLIENT_MESSAGE`] drops the client.
+//! so that the fly's frames are built only while somebody watches (`Bridge::fly_wanted`). Since 5.7 bit 1 of the mask
+//! says "the site is open" (`Bridge::watched` is true while any client has any bit set), which the offline demo uses to
+//! pause itself. Anything else a client writes is read and discarded; a message longer than [`MAX_CLIENT_MESSAGE`]
+//! drops the client.
 //!
 //! **Names.** `PLAYERS.name` is the salted-hash tag (`c12-9f3a01bc`) unless the bot was started with
 //! `--web-names`; real nicknames never leave the process otherwise (D-040, `CLAUDE.md`).
@@ -57,6 +59,10 @@ pub mod client_kind {
 
 /// Bit of the `SUBSCRIBE` mask for the fly stream.
 pub const SUBSCRIBE_FLY: u8 = 1;
+/// Bit of the `SUBSCRIBE` mask (task 5.7): somebody has the site open, so the game itself (map, players, frames) is
+/// being watched. The live bot does nothing with it; the offline demo (`ddnet-ai fly watch --pause-idle`) pauses its
+/// game while no client says either bit.
+pub const SUBSCRIBE_VIEW: u8 = 2;
 /// Longest client message (kind + payload) the bot reads; a longer one drops the client.
 pub const MAX_CLIENT_MESSAGE: usize = 16;
 
@@ -245,6 +251,8 @@ struct Client {
     inbox: Vec<u8>,
     /// Subscribed to the fly stream.
     fly: bool,
+    /// The site is open (task 5.7).
+    view: bool,
 }
 
 /// The publisher.
@@ -313,6 +321,7 @@ impl Bridge {
                         pending: Vec::new(),
                         inbox: Vec::new(),
                         fly: false,
+                        view: false,
                     };
                     let mut hello = MAGIC_HELLO.to_vec();
                     hello.push(VERSION);
@@ -337,6 +346,12 @@ impl Bridge {
     /// Whether some client is subscribed to the fly stream: the brain builds frames only then.
     pub fn fly_wanted(&self) -> bool {
         self.clients.iter().any(|c| c.fly)
+    }
+
+    /// Whether some client has subscribed to anything (the fly stream or the plain "the site is open"): somebody may be
+    /// looking. A client that is connected but has said nothing (a web unit with no browser open) does not count.
+    pub fn watched(&self) -> bool {
+        self.clients.iter().any(|c| c.fly || c.view)
     }
 
     /// Reads (non-blocking, bounded) what the clients said: subscriptions. A subscriber gets the current `FLYMETA` at once.
@@ -453,7 +468,16 @@ impl Bridge {
             return;
         }
         let Ok(json) = serde_json::to_vec(s) else { return };
-        let msg = message(kind::STATUS, &json);
+        self.send_status_json(&json);
+    }
+
+    /// A `STATUS` message with a payload the caller has already built (a JSON object): the offline demo describes
+    /// itself with its own small object (`docs/formats.md` §28) instead of the bot's [`StatusMessage`].
+    pub fn send_status_json(&mut self, json: &[u8]) {
+        if self.clients.is_empty() || json.len() + 1 > MAX_MESSAGE {
+            return;
+        }
+        let msg = message(kind::STATUS, json);
         self.broadcast(&msg);
     }
 }
@@ -505,6 +529,7 @@ fn apply_messages(c: &mut Client, fly_meta: Option<&[u8]>) -> bool {
         let mask = c.inbox.get(5).copied().unwrap_or(0);
         c.inbox.drain(..4 + len);
         if kind == client_kind::SUBSCRIBE && payload_is_one_byte {
+            c.view = mask & SUBSCRIBE_VIEW != 0;
             let want = mask & SUBSCRIBE_FLY != 0;
             if want && !c.fly {
                 // A new subscriber learns the layout before its first frame.
@@ -780,6 +805,55 @@ mod tests {
         assert!(!bridge.fly_wanted());
         bridge.send_fly(b"DFLYlate");
         assert!(bridge.clients.iter().all(|c| c.pending.is_empty()));
+    }
+
+    /// Task 5.7: `watched` is true while any client has any subscription bit set; the view bit alone does not subscribe the
+    /// client to the fly stream, and a client that is only connected does not count.
+    #[test]
+    fn watched_means_some_client_said_it_is_looking_and_the_view_bit_is_not_the_fly_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        let mut web = connect(&mut bridge, &path);
+        assert!(!bridge.watched(), "connected but silent: nobody is looking");
+        write_client(&mut web, client_kind::SUBSCRIBE, &[SUBSCRIBE_VIEW]);
+        settle(&mut bridge);
+        assert!(bridge.watched());
+        assert!(!bridge.fly_wanted(), "the view bit is not the fly stream");
+        bridge.send_fly(b"DFLYxx");
+        assert!(
+            bridge.clients.iter().all(|c| c.pending.is_empty()),
+            "no fly frame for it"
+        );
+        write_client(&mut web, client_kind::SUBSCRIBE, &[SUBSCRIBE_VIEW | SUBSCRIBE_FLY]);
+        settle(&mut bridge);
+        assert!(bridge.watched() && bridge.fly_wanted());
+        write_client(&mut web, client_kind::SUBSCRIBE, &[SUBSCRIBE_FLY]);
+        settle(&mut bridge);
+        assert!(bridge.watched(), "the fly alone is watching too");
+        write_client(&mut web, client_kind::SUBSCRIBE, &[0]);
+        settle(&mut bridge);
+        assert!(!bridge.watched());
+        // A closed client stops counting.
+        write_client(&mut web, client_kind::SUBSCRIBE, &[SUBSCRIBE_VIEW]);
+        settle(&mut bridge);
+        assert!(bridge.watched());
+        drop(web);
+        settle(&mut bridge);
+        assert!(!bridge.watched());
+    }
+
+    /// Task 5.7: the demo's own status object goes out as a plain `STATUS` message, and nothing is queued without a client.
+    #[test]
+    fn a_prebuilt_status_object_is_sent_as_a_status_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        bridge.send_status_json(b"{\"demo\":true}");
+        let mut c = connect(&mut bridge, &path);
+        bridge.send_status_json(b"{\"demo\":true}");
+        let (k, p) = read_message(&mut c);
+        assert_eq!((k, p.as_slice()), (kind::STATUS, &b"{\"demo\":true}"[..]));
     }
 
     #[test]

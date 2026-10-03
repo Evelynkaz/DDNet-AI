@@ -27,8 +27,11 @@ ExecStartPre=/usr/bin/test -x /home/ubuntu/aiddnet/bin/ddnet-ai
 # `data/bot/relations.json` (both defaults under --data-dir). `--replay` (the Oracle B corpus shown while there was no
 # bot, task 5.2a) conflicts with `--bot-socket` and is dropped: until the bot runs, the "Игра" tab says it is not
 # running. To get the replays back, swap `--bot-socket ...` for `--replay <dir>` (the "Бот" tab then has no status).
-# Read-only map directories under ProtectHome.
-ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure --bot-socket /home/ubuntu/aiddnet/data/bot/live.sock --maps-dir /home/ubuntu/aiddnet/data/ddnet-server/maps --maps-dir /home/ubuntu/aiddnet/data/maps/copy-love-box --maps-dir /home/ubuntu/aiddnet/data/maps/cache
+# Task 5.7: `--demo-socket` is the offline demo (ddnet-ai-flydemo.service, the fly playing an arena): while the live bot is not
+# there the «Игра» and «Муха» tabs show it under a badge that says it is not a real game, and the site switches to the bot the
+# moment it is up. Commands never go to the demo. The demo's socket lives in data/flydemo, apart from the bot's data/bot (the demo unit cannot see data/bot). The socket need not exist (the web retries; without the demo unit the tabs say
+# the bot is not running, as before). Read-only map directories under ProtectHome (the demo's arena is on Copy Love Box).
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure --bot-socket /home/ubuntu/aiddnet/data/bot/live.sock --demo-socket /home/ubuntu/aiddnet/data/flydemo/fly-demo.sock --maps-dir /home/ubuntu/aiddnet/data/ddnet-server/maps --maps-dir /home/ubuntu/aiddnet/data/maps/copy-love-box --maps-dir /home/ubuntu/aiddnet/data/maps/cache
 Restart=on-failure
 RestartSec=2
 

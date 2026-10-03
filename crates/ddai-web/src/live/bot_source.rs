@@ -4,8 +4,13 @@
 //!
 //! **Read-only, with one exception (task 7.4).** The web control path is a separate socket; this one carries nothing
 //! but the bot's output, and the only thing this source ever writes to it is a **subscription**
-//! (`u32 LE len | u8 1 | u8 mask`, bit 0: the fly stream) so that the bot builds the fly's frames only while a browser
-//! watches them (`docs/formats.md` §21.2, §27). The `replay{...}` commands of the page are drained and ignored.
+//! (`u32 LE len | u8 1 | u8 mask`, bit 0: the fly stream; bit 1, task 5.7: a browser is connected at all) so that the bot
+//! builds the fly's frames only while a browser watches them and the offline demo can pause while nobody looks
+//! (`docs/formats.md` §21.2, §27, §28). The `replay{...}` commands of the page are drained and ignored.
+//!
+//! **Link (task 5.7).** The source tells whoever reads it (the multiplexer that puts the demo behind the live bot,
+//! [`super::mux`]) when the connection is *usable*: [`SourceEvent::Link`]`(true)` after a valid greeting, `false` when the
+//! connection ends. A socket that connects but does not speak the protocol never counts as a bot.
 //!
 //! **Trust.** The socket is a `0600` file in a `0700` directory of the same user, but the bytes are
 //! still parsed defensively: message length capped at [`MAX_MESSAGE`], unknown kinds skipped, a bad
@@ -54,6 +59,7 @@ mod kind {
 /// What this source says to the bot: a subscription (`ddai_bot::bridge::client_kind::SUBSCRIBE`).
 const SUBSCRIBE: u8 = 1;
 const SUBSCRIBE_FLY: u8 = 1;
+const SUBSCRIBE_VIEW: u8 = 2;
 /// A write of a few bytes to the bot must not hang the source.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -86,6 +92,8 @@ pub struct BotSource {
     map_cache: Arc<MapCache>,
     /// Whether a browser watches the fly (set by the hub).
     fly_demand: Option<watch::Receiver<bool>>,
+    /// Whether a browser is connected at all (set by the hub).
+    view_demand: Option<watch::Receiver<bool>>,
 }
 
 impl BotSource {
@@ -95,13 +103,16 @@ impl BotSource {
             search_dirs,
             map_cache,
             fly_demand: None,
+            view_demand: None,
         }
     }
 }
 
-/// Per-connection bookkeeping of the fly stream.
+/// Per-connection bookkeeping: the greeting and the fly stream.
 #[derive(Default)]
-struct FlyState {
+struct ConnState {
+    /// A valid greeting was seen and [`SourceEvent::Link`]`(true)` sent (so `false` is sent when the connection ends).
+    linked: bool,
     /// A layout was passed on (so the page is told when it ends).
     meta_told: bool,
     /// A bad frame or layout was reported (one report per connection, not one per frame).
@@ -132,6 +143,10 @@ async fn read_message(mut rd: OwnedReadHalf) -> (OwnedReadHalf, std::io::Result<
 impl FrameSource for BotSource {
     fn attach_fly_demand(&mut self, demand: watch::Receiver<bool>) {
         self.fly_demand = Some(demand);
+    }
+
+    fn attach_view_demand(&mut self, demand: watch::Receiver<bool>) {
+        self.view_demand = Some(demand);
     }
 
     fn spawn(
@@ -219,10 +234,13 @@ impl BotSource {
         events_tx: &mpsc::Sender<SourceEvent>,
         control_rx: &mut mpsc::Receiver<ReplayControl>,
     ) -> End {
-        let mut fly = FlyState::default();
+        let mut fly = ConnState::default();
         let end = self.session_inner(stream, events_tx, control_rx, &mut fly).await;
         // The stream ended with the connection: a page showing it is told there is none.
         if fly.meta_told && events_tx.send(SourceEvent::FlyMeta(None)).await.is_err() {
+            return End::HubClosed;
+        }
+        if fly.linked && events_tx.send(SourceEvent::Link(false)).await.is_err() {
             return End::HubClosed;
         }
         end
@@ -233,21 +251,28 @@ impl BotSource {
         stream: UnixStream,
         events_tx: &mpsc::Sender<SourceEvent>,
         control_rx: &mut mpsc::Receiver<ReplayControl>,
-        fly: &mut FlyState,
+        fly: &mut ConnState,
     ) -> End {
         let mut prev: HashMap<u8, CharacterState> = HashMap::new();
         let (rd, mut wr) = stream.into_split();
         let mut reader = Box::pin(read_message(rd));
-        let mut demand = self.fly_demand.clone();
+        let mut fly_demand = self.fly_demand.clone();
+        let mut view_demand = self.view_demand.clone();
+        let mut want = Want::default();
+        if let Some(d) = fly_demand.as_mut() {
+            want.fly = *d.borrow_and_update();
+        }
+        if let Some(d) = view_demand.as_mut() {
+            want.view = *d.borrow_and_update();
+        }
         // Whoever already watches (a page open before the bot started, or a reconnect) is announced at once.
-        if let Some(d) = demand.as_mut() {
-            let want = *d.borrow_and_update();
-            if want && let Err(e) = write_subscription(&mut wr, true).await {
-                return End::Lost(e);
-            }
+        if want.any()
+            && let Err(e) = write_subscription(&mut wr, want).await
+        {
+            return End::Lost(e);
         }
         loop {
-            // One message: the bot's next, raced against the page's commands and the demand for the fly.
+            // One message: the bot's next, raced against the page's commands and the demand for the fly and the view.
             tokio::select! {
                 (rd, result) = &mut reader => {
                     let body = match result {
@@ -268,19 +293,24 @@ impl BotSource {
                     }
                     // read-only: commands are ignored
                 }
-                changed = async {
-                    match demand.as_mut() {
-                        Some(d) => d.changed().await.is_ok(),
-                        None => std::future::pending().await,
-                    }
-                } => {
+                changed = demand_changed(&mut fly_demand) => {
                     if changed {
-                        let want = *demand.as_mut().expect("it just changed").borrow_and_update();
+                        want.fly = *fly_demand.as_mut().expect("it just changed").borrow_and_update();
                         if let Err(e) = write_subscription(&mut wr, want).await {
                             return End::Lost(e);
                         }
                     } else {
-                        demand = None; // the hub is going away; nothing more will change
+                        fly_demand = None; // the hub is going away; nothing more will change
+                    }
+                }
+                changed = demand_changed(&mut view_demand) => {
+                    if changed {
+                        want.view = *view_demand.as_mut().expect("it just changed").borrow_and_update();
+                        if let Err(e) = write_subscription(&mut wr, want).await {
+                            return End::Lost(e);
+                        }
+                    } else {
+                        view_demand = None;
                     }
                 }
             }
@@ -293,7 +323,7 @@ impl BotSource {
         payload: &[u8],
         prev: &mut HashMap<u8, CharacterState>,
         events_tx: &mpsc::Sender<SourceEvent>,
-        fly: &mut FlyState,
+        fly: &mut ConnState,
     ) -> Result<(), End> {
         let send = |e: SourceEvent| async move { events_tx.send(e).await.map_err(|_| End::HubClosed) };
         match kind {
@@ -302,6 +332,10 @@ impl BotSource {
                     return Err(End::Lost(format!(
                         "unsupported bot protocol (expected DDBL v{VERSION})"
                     )));
+                }
+                if !fly.linked {
+                    fly.linked = true;
+                    send(SourceEvent::Link(true)).await?;
                 }
             }
             kind::MAP => match serde_json::from_slice::<MapMsg>(payload) {
@@ -394,7 +428,7 @@ impl BotSource {
 }
 
 /// Tells the page once per connection that the bot's fly stream is malformed (the frame itself is dropped).
-async fn report_bad_fly<F, Fut>(fly: &mut FlyState, send: &F, why: String) -> Result<(), End>
+async fn report_bad_fly<F, Fut>(fly: &mut ConnState, send: &F, why: String) -> Result<(), End>
 where
     F: Fn(SourceEvent) -> Fut,
     Fut: std::future::Future<Output = Result<(), End>>,
@@ -406,9 +440,34 @@ where
     send(SourceEvent::Error(format!("the bot's fly stream is malformed: {why}"))).await
 }
 
+/// What the page wants from the bot right now (the bits of the subscription mask).
+#[derive(Clone, Copy, Default)]
+struct Want {
+    fly: bool,
+    view: bool,
+}
+
+impl Want {
+    fn any(self) -> bool {
+        self.fly || self.view
+    }
+
+    fn mask(self) -> u8 {
+        (if self.fly { SUBSCRIBE_FLY } else { 0 }) | (if self.view { SUBSCRIBE_VIEW } else { 0 })
+    }
+}
+
+/// Resolves `true` when the demand changed, `false` when its sender is gone; never resolves without a demand.
+pub(super) async fn demand_changed(demand: &mut Option<watch::Receiver<bool>>) -> bool {
+    match demand.as_mut() {
+        Some(d) => d.changed().await.is_ok(),
+        None => std::future::pending().await,
+    }
+}
+
 /// `u32 LE len | u8 SUBSCRIBE | u8 mask`.
-async fn write_subscription(wr: &mut tokio::net::unix::OwnedWriteHalf, fly: bool) -> Result<(), String> {
-    let msg = [2, 0, 0, 0, SUBSCRIBE, if fly { SUBSCRIBE_FLY } else { 0 }];
+async fn write_subscription(wr: &mut tokio::net::unix::OwnedWriteHalf, want: Want) -> Result<(), String> {
+    let msg = [2, 0, 0, 0, SUBSCRIBE, want.mask()];
     match tokio::time::timeout(WRITE_TIMEOUT, wr.write_all(&msg)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e.to_string()),
@@ -633,6 +692,99 @@ mod tests {
         assert_eq!(frames, vec![10, 12]);
         assert_eq!(events, vec![(12, vec![GameEvent::Freeze { id: 1 }])]);
         assert!(status.unwrap().contains("fight"));
+    }
+
+    /// Task 5.7: the link is up only after a valid greeting and down when the connection ends; a socket that connects and
+    /// says something else never links, whatever it goes on to send.
+    #[tokio::test]
+    async fn the_link_follows_a_valid_greeting_and_a_bad_one_never_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("live.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        listener.set_nonblocking(false).unwrap();
+        let server = std::thread::spawn(move || {
+            // First connection: not the protocol (wrong magic), then plausible messages.
+            let (mut s, _) = listener.accept().unwrap();
+            s.write_all(&message(kind::HELLO, b"NOPE\x01")).unwrap();
+            s.write_all(&message(kind::STATUS, br#"{"mode":"fight"}"#)).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            drop(s);
+            // Second connection: a valid greeting, a status, then it goes away.
+            let (mut s, _) = listener.accept().unwrap();
+            s.write_all(&message(kind::HELLO, b"DDBL\x01")).unwrap();
+            s.write_all(&message(kind::HELLO, b"DDBL\x01")).unwrap(); // a second greeting is not a second link
+            s.write_all(&message(kind::STATUS, br#"{"mode":"fight"}"#)).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        });
+        let source = Box::new(BotSource::new(sock, vec![], Arc::new(MapCache::new())));
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_ctl, ctl_rx) = mpsc::channel(4);
+        let handle = source.spawn(tx, ctl_rx);
+        let mut seen: Vec<String> = Vec::new();
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+            let tag = match &ev {
+                SourceEvent::Link(up) => format!("link {up}"),
+                SourceEvent::BotStatus(_) => "status".to_string(),
+                SourceEvent::Error(e) if e.contains("unsupported bot protocol") => "bad greeting".to_string(),
+                SourceEvent::Error(e) if e.contains("connection ended") => "ended".to_string(),
+                _ => continue,
+            };
+            seen.push(tag);
+            if seen.last().is_some_and(|t| t == "ended") && seen.iter().any(|t| t == "link false") {
+                break;
+            }
+        }
+        handle.abort();
+        server.join().unwrap();
+        assert_eq!(
+            seen,
+            ["bad greeting", "link true", "status", "link false", "ended"],
+            "the first connection never linked; the second linked once, and unlinked before its end was reported"
+        );
+    }
+
+    /// Task 5.7: the subscription carries the fly bit and the view bit, and is re-sent when either changes.
+    // Multi-threaded: the test blocks on a std channel while the source runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_subscription_carries_the_fly_and_view_bits() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("demo.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (got_tx, got_rx) = std::sync::mpsc::channel::<u8>();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.write_all(&message(kind::HELLO, b"DDBL\x01")).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut buf = [0u8; 6];
+            while s.read_exact(&mut buf).is_ok() {
+                assert_eq!(buf[..5], [2, 0, 0, 0, 1], "a subscription message");
+                got_tx.send(buf[5]).unwrap();
+            }
+        });
+        let mut source = Box::new(BotSource::new(sock, vec![], Arc::new(MapCache::new())));
+        let (fly_tx, fly_rx) = watch::channel(false);
+        let (view_tx, view_rx) = watch::channel(true); // a browser was there before the bot
+        source.attach_fly_demand(fly_rx);
+        source.attach_view_demand(view_rx);
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_ctl, ctl_rx) = mpsc::channel(4);
+        let handle = source.spawn(tx, ctl_rx);
+        let next = |what: &str| {
+            got_rx
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap_or_else(|e| panic!("no subscription for {what}: {e}"))
+        };
+        assert_eq!(next("connect"), SUBSCRIBE_VIEW, "announced at once on connect");
+        fly_tx.send(true).unwrap();
+        assert_eq!(next("fly on"), SUBSCRIBE_VIEW | SUBSCRIBE_FLY);
+        view_tx.send(false).unwrap();
+        assert_eq!(next("view off"), SUBSCRIBE_FLY);
+        fly_tx.send(false).unwrap();
+        assert_eq!(next("fly off"), 0, "nobody: unsubscribed");
+        while rx.try_recv().is_ok() {}
+        handle.abort();
+        drop(server); // detached: it ends when the connection closes
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ pub mod fly;
 pub mod frame;
 pub mod hub;
 pub mod map_resolve;
+pub mod mux;
 pub mod replay;
 pub mod scene;
 pub mod source;

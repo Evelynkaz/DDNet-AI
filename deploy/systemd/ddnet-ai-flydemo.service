@@ -1,0 +1,93 @@
+# The offline demo (task 5.7, D-075): `ddnet-ai fly watch`, the trained fly playing an arena (clb-left) against a scripted opponent,
+# on its OWN bridge socket in its OWN directory (data/flydemo/fly-demo.sock; never live.sock, and not even in data/bot). While the live bot is not running, the site (`ddnet-ai web
+# --demo-socket`, ddnet-ai-web.service) shows this game on the «Игра» and «Муха» tabs under the badge «Показ: муха на арене (не
+# настоящая игра)», and switches to the live bot the moment it is up. This is NOT a game on any server: no network at all.
+# Install and start: deploy/README.md, section "Показ: муха на арене".
+#
+# Cost: the game is paused while no browser is open (--pause-idle: the web unit tells the bridge that somebody looks, bit 1 of the
+# subscription, docs/formats.md 28), so it costs ~0 with nobody watching, and about 2.6% of one core (2.9% with the «Муха» tab open;
+# release build, nice 10, 18 MiB, 2 threads; D-075 has the numbers) while a browser is open and the live bot is not up. With the live
+# bot up the web does not ask the demo for anything.
+#
+# The weights are configurable without touching this file: FLYDEMO_BUNDLE below is the default (E-005's final); put
+# `FLYDEMO_BUNDLE=/path/to/another.bundle` in ~/aiddnet/data/flydemo.env (optional file, read after the line below and
+# overriding it) when a better one exists, and `sudo systemctl restart ddnet-ai-flydemo`.
+#
+# Exit codes: 0 = stopped on request; anything else is a crash or a bad setup (missing bundle/arena/map/socket directory) and is
+# restarted after 10 s, at most 5 times in 10 minutes (the demo is a convenience; it never gets in the live bot's way).
+
+[Unit]
+Description=DDNet-AI offline demo (the fly playing an arena; not a real game; no network)
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+After=network.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/aiddnet/data
+Environment=FLYDEMO_BUNDLE=/home/ubuntu/aiddnet/data/runs/E-005/e005-fly/checkpoints/final.bundle
+EnvironmentFile=-/home/ubuntu/aiddnet/data/flydemo.env
+# Fail closed (and say why in the journal) if the binary or the weights are missing.
+ExecStartPre=/usr/bin/test -x /home/ubuntu/aiddnet/bin/ddnet-ai
+ExecStartPre=/usr/bin/test -r ${FLYDEMO_BUNDLE}
+# --pause-idle: rest while no browser is open. --bridge: the demo's own socket (a different file from the bot's live.sock; the web
+# refuses a demo socket equal to the live one). The arena definitions and the maps are read-only data of the owner.
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai fly watch --bundle ${FLYDEMO_BUNDLE} --arena clb-left --bridge /home/ubuntu/aiddnet/data/flydemo/fly-demo.sock --arenas-dir /home/ubuntu/aiddnet/DDNet-AI/configs/arenas --map-dir /home/ubuntu/aiddnet/data/maps --pause-idle
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+# glibc keeps big buffers in the heap once its dynamic mmap threshold has grown (D-074, the bot's unit): a fixed 128 KiB threshold
+# returns them to the system at once.
+Environment=MALLOC_MMAP_THRESHOLD_=131072
+# Ctrl-C handling in `fly watch` (SIGINT/SIGTERM) ends the game loop and removes the socket.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=10
+# The demo yields to everything else on this shared machine; it still runs in real time (50 ticks a second).
+Nice=10
+IOSchedulingClass=idle
+
+# --- Hardening (as for ddnet-ai-web.service and ddnet-ai-bot.service, and stricter: this one needs no network at all) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The only thing it writes is its socket, in a directory of its own (which must exist before the first start: `mkdir -p -m 700
+# ~/aiddnet/data/flydemo`; without it the unit fails with 226/NAMESPACE). The live bot's directory is not visible to this unit at all:
+# `InaccessiblePaths` on the WHOLE of data/bot (it always exists, hence no leading "-"; a mask over single sockets would not hold:
+# they come and go, and a path that is absent at start is not masked), so the demo can neither connect to nor replace live.sock or
+# control.sock, whether they exist or not. The web unit only connects to fly-demo.sock, which works on a read-only mount.
+ReadWritePaths=/home/ubuntu/aiddnet/data/flydemo
+InaccessiblePaths=/home/ubuntu/aiddnet/data/bot
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+# No network: its own empty network namespace (the socket is a file, so the web unit still reaches it) and, belt and braces, only
+# AF_UNIX and no IP traffic at all.
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+LimitCORE=0
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

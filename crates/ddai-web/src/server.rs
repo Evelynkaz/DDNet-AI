@@ -17,7 +17,9 @@ use crate::config::{ConfigError, WebConfig};
 use crate::live::bot_source::BotSource;
 use crate::live::hub::LiveHub;
 use crate::live::map_resolve::MapCache;
+use crate::live::mux::MuxSource;
 use crate::live::replay::ReplaySource;
+use crate::live::source::FrameSource;
 use crate::secrets::{self, SecretsError};
 use crate::state::{AppState, SharedState};
 use crate::{headers, http, ws};
@@ -103,6 +105,7 @@ pub struct Bound {
 /// Does not start serving — call [`run`] with the result for that.
 pub async fn bind(config: WebConfig) -> Result<Bound, BindError> {
     crate::config::validate_listen_addr(config.listen, config.i_know_this_is_public)?;
+    crate::config::validate_sources(&config)?;
 
     let secrets_paths = secrets::SecretsPaths::new(&config.data_dir);
     let session_key = secrets::load_or_create_session_key(&secrets_paths)?;
@@ -130,10 +133,23 @@ pub async fn bind(config: WebConfig) -> Result<Bound, BindError> {
         }
         None => match &config.bot_socket {
             // Task 4.1: the live bot. The socket need not exist yet: the source retries.
+            // Task 5.7: with a demo socket the offline demo stands in while the bot is not there (`live::mux`).
             Some(socket) => {
                 let map_cache = Arc::new(MapCache::new());
-                let source = BotSource::new(socket.clone(), config.map_search_dirs.clone(), map_cache.clone());
-                Some(Arc::new(LiveHub::start(Box::new(source), map_cache)))
+                let live = BotSource::new(socket.clone(), config.map_search_dirs.clone(), map_cache.clone());
+                let demo = config.demo_socket.as_ref().map(|socket| {
+                    Box::new(BotSource::new(
+                        socket.clone(),
+                        config.map_search_dirs.clone(),
+                        map_cache.clone(),
+                    )) as Box<dyn FrameSource>
+                });
+                let source = MuxSource::new(Box::new(live), demo);
+                Some(Arc::new(LiveHub::start_with_event_capacity(
+                    Box::new(source),
+                    map_cache,
+                    config.event_broadcast_capacity,
+                )))
             }
             None => None,
         },
