@@ -83,6 +83,12 @@ impl WorkMeter {
         }
     }
 
+    /// Puts the finished-work counter back to a value read from [`WorkMeter::ticks`] while the shield was idle (the loss
+    /// diagnosis scores extra plans and must leave the clock as it found it).
+    pub fn rewind_to(&self, ticks: u64) {
+        self.done.store(ticks, Ordering::Relaxed);
+    }
+
     pub fn ticks(&self) -> u64 {
         let base = self.shield_base.load(Ordering::Relaxed);
         let live = if base == u64::MAX {

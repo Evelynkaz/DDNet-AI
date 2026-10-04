@@ -1,0 +1,25 @@
+# work-clock: default-rate
+# Task 3.7b (D-090, E-017): the games the loss diagnosis starts from -- the hybrid of `main` (4 ms of work, the 5 ms cap, no proposer)
+# against the fixed planner on the three D-059 halls, 400 games each. Game g of hall h is seed 1+g and layout g (the same seeds
+# and layouts as E-010, whose NEW arm (48,2 / 51,5 / 50,5%) this reproduces game for game).
+# Run it with the binary of `main` (ed150cb) for the games of the diagnosis (E-017 section 1: the opponent model did not exist), and with the binary
+# of this task for the same games with the new default (the `new` arm of the proof): one config, the games pair up for McNemar.
+#   ddnet-ai arena run --config configs/arena/e017-diagnosis.toml --out ~/aiddnet/data/runs/E-017/diag --threads 3
+name = "E-017: hybrid (main) vs fixed planner, diagnosis games"
+base_seed = 1
+games = 400
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]

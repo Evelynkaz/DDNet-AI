@@ -8,7 +8,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ddai_web::launch::{Action, Brain, DurationChoice, parse_request};
+use ddai_web::launch::{Action, Brain, DurationChoice, Mirror, parse_request};
 use support::{Req, TestServer, send};
 
 struct Login {
@@ -182,6 +182,42 @@ async fn a_start_writes_one_request_file_atomically_with_the_chosen_values() {
     assert_eq!(req.server.as_deref(), Some("local"));
     assert_eq!(req.duration, Some(DurationChoice::M15));
     assert_eq!(req.sparring, Some(2));
+    assert_eq!(
+        req.mirror, None,
+        "no `mirror` in the form: none in the request (the helper then keeps the model on)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_opponent_model_switch_reaches_the_request_and_only_as_on_or_off() {
+    // Task 3.7b F9 (D-090).
+    let server = deployed().await;
+    let l = login(&server);
+    let mut body = start_body();
+    body["mirror"] = serde_json::json!("off");
+    let r = post(&server, &l, &body);
+    assert_eq!(r.status, 202, "{r:?}");
+    let req = parse_request(&fs::read(request_file(&server)).unwrap()).unwrap();
+    assert_eq!(req.mirror, Some(Mirror::Off));
+    fs::remove_file(request_file(&server)).unwrap();
+    for bad in [
+        serde_json::json!("maybe"),
+        serde_json::json!("OFF"),
+        serde_json::json!(false),
+    ] {
+        let mut body = start_body();
+        body["mirror"] = bad.clone();
+        let r = post(&server, &l, &body);
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{bad}"
+        );
+    }
+    assert!(
+        files_in(&launch_dir(&server)).is_empty(),
+        "a refused call writes nothing"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -66,6 +66,36 @@ enum Lens {
     Reduced,
 }
 
+/// The opponent model's own planner (task 3.7b): the live `preset_normal` search as the victim would run it, in the victim's seat.
+struct MirrorState {
+    planner: Box<Planner<PhysicsWorld>>,
+    /// The plan it chose last time (the victim's own warm start), in relative aims.
+    warm: Option<Vec<PlanStep>>,
+    /// Scratch for the plans of one prediction.
+    plans: Vec<Vec<PlanStep>>,
+    /// The decision snapshot with only us and the victim in it, when something else (a frozen body, a spared tee) is in the decision world.
+    saved_pair: Option<PhysicsSavedState>,
+}
+
+impl MirrorState {
+    fn new(steps_cfg: crate::config::PlannerConfig) -> MirrorState {
+        let mut planner = Box::new(Planner::new(steps_cfg));
+        planner.deterministic_thaw = true;
+        MirrorState {
+            planner,
+            warm: None,
+            plans: Vec::new(),
+            saved_pair: None,
+        }
+    }
+}
+
+/// The opponent model is skipped for a victim that has kept its direction neutral and its hook in for this many decisions in a row.
+const PASSIVE_DECISIONS: u32 = 6;
+
+/// The opponent model's search is cut after this long at most (ms, task 3.7b review F2); the cap can shorten it.
+const MIRROR_MAX_MS: f64 = 2.0;
+
 /// The search never gets less than this under the decision cap (ms).
 const MIN_SEARCH_MS: f64 = 1.0;
 
@@ -134,6 +164,8 @@ pub struct WorkCounters {
     pub lag: u64,
     /// The proposer's own simulation (the scripted proposer; a fly is measured in wall time).
     pub proposal: u64,
+    /// The opponent model's search from the victim's seat (`HybridConfig::mirror_samples`).
+    pub mirror: u64,
     /// The nominal cost of a proposer that does not simulate physics (the fly), in tee-tick
     /// equivalents (task 3.7a): charged to the work clock, not part of [`WorkCounters::total_ticks`].
     pub proposal_units: u64,
@@ -153,12 +185,13 @@ pub struct WorkCounters {
 impl WorkCounters {
     /// Physics ticks of the whole decision.
     pub fn total_ticks(&self) -> u64 {
-        self.lag + self.proposal + self.stage1 + self.stage2 + self.extension + self.shield
+        self.lag + self.proposal + self.mirror + self.stage1 + self.stage2 + self.extension + self.shield
     }
 
     pub fn add(&mut self, o: &WorkCounters) {
         self.lag += o.lag;
         self.proposal += o.proposal;
+        self.mirror += o.mirror;
         self.proposal_units += o.proposal_units;
         self.stage1 += o.stage1;
         self.stage2 += o.stage2;
@@ -225,6 +258,54 @@ pub struct DecisionTelemetry {
     /// `HybridConfig::debug_dump`: the best candidates by cheap score: `(label, cheap score,
     /// per-combination scores, first step)`.
     pub dump: Vec<(String, f64, Vec<f64>, String)>,
+    /// `HybridConfig::debug_pool` (task 3.7b): the whole pool with its scores, the indices re-scored under every
+    /// combination (`top`), the index of the pick, and what the robust choice weighed (`weights` by combination,
+    /// `lambda`). Empty/`None` unless the flag is on.
+    pub pool: Vec<PoolRec>,
+    /// `HybridConfig::mirror`: the victim's predicted input for the first plan step (`None` = the hold model was used).
+    pub mirror_first: Option<PlayerInput>,
+    /// Time the opponent model took (ms on the decision's clock; 0 when it did not run) and whether its deadline cut it short.
+    pub mirror_ms: f64,
+    pub mirror_cut: bool,
+    pub pick: Option<usize>,
+    pub top: Vec<usize>,
+    pub weights: Vec<f64>,
+    pub lambda: f64,
+}
+
+/// One candidate of a decision's pool, for the loss diagnosis (`HybridConfig::debug_pool`).
+#[derive(Debug, Clone)]
+pub struct PoolRec {
+    pub src: Source,
+    pub plan: Vec<PlanStep>,
+    /// The score that ranked the pool (stage 1), `None` if the deadline cut it before its rollout.
+    pub cheap: Option<f64>,
+    /// Full-model scores by combination (`None` = not re-scored) and the ticks we were out in each.
+    pub scores: [Option<f64>; MAX_COMBOS],
+    pub self_out: [Option<i32>; MAX_COMBOS],
+}
+
+/// A plan scored after the fact by a decision's own evaluator (`HybridSearch::debug_score`).
+#[derive(Debug, Clone)]
+pub struct DebugScore {
+    /// Score under every model combination of the decision, and the robust value (what `choose` ranks by,
+    /// without the warm bonus).
+    pub combos: Vec<f64>,
+    pub robust: f64,
+    pub self_out: i32,
+}
+
+/// What a plan did in the true world (`HybridSearch::debug_truth`): ticks (from the plan's start) at which we
+/// and the victim first were out (frozen or dead), `-1` = never within the plan; how close to a freeze we came.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TruthOutcome {
+    pub me_out_tick: i32,
+    pub enemy_out_tick: i32,
+    /// The last tick at which we hooked the victim or hit it with the hammer, `-1` = never.
+    pub touch_tick: i32,
+    pub min_gap_px: f64,
+    pub end_gap_enemy_px: f64,
+    pub end_dist_px: f64,
 }
 
 impl DecisionTelemetry {
@@ -270,9 +351,9 @@ impl DecisionTelemetry {
         };
         format!(
             "{{\"chosen\":\"{}\",\"plan\":[{}],\"victim\":{},\"threats\":[{}],\"danger\":\"{}\",\"combos\":{},\
-\"generated\":{{{}}},\"evaluated\":{{{}}},\"budget_ms\":{},\"search_ms\":{:.3},\"proposal_ms\":{:.3},\"rollout_ms\":{:.3},\"shield_ms\":{:.3},\
+\"generated\":{{{}}},\"evaluated\":{{{}}},\"budget_ms\":{},\"search_ms\":{:.3},\"proposal_ms\":{:.3},\"mirror_ms\":{:.3},\"rollout_ms\":{:.3},\"shield_ms\":{:.3},\
 \"extended\":{},\"shielded\":{},\"shield_incomplete\":{},\"shield_plan_ok\":{},\"sim_tees\":{},\"dropped_tees\":{},\"pruned\":{},\"out_of_time\":{},\"unsafe\":{},\"best_score\":{:.4},\"robust\":{:.4},\"react_belief\":{:.3},\
-\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"proposal_units\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{}}}{}}}",
+\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"proposal_units\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{}{}}}{}}}",
             self.chosen.map_or("none", Source::label),
             plan,
             self.victim_id,
@@ -284,6 +365,7 @@ impl DecisionTelemetry {
             self.budget_ms,
             self.search_ms,
             self.proposal_ms,
+            self.mirror_ms,
             self.rollout_ms,
             self.shield_ms,
             self.extended,
@@ -307,7 +389,16 @@ impl DecisionTelemetry {
             w.extension,
             w.shield,
             w.rays,
-            dump,
+            if w.mirror > 0 {
+                format!(",\"mirror\":{}", w.mirror)
+            } else {
+                String::new()
+            },
+            if self.mirror_cut {
+                format!("{dump},\"mirror_cut\":true")
+            } else {
+                dump
+            },
         )
     }
 }
@@ -421,6 +512,19 @@ pub struct HybridSearch {
     batch: Batch,
     outs: Vec<EvalOut>,
     last_prop_ticks: u64,
+    /// Task 3.7b diagnostics (`debug_score`): the last full decision left the engine's context ready, and the worst-case
+    /// weight it chose with.
+    diag_ready: bool,
+    last_lambda: f64,
+    /// Task 3.7b (`HybridConfig::mirror`): the planner that plays the victim's seat and what it last chose.
+    mirror: Option<Box<MirrorState>>,
+    /// The victim's predicted inputs of the current decision, one per plan step (empty = the victim holds its input).
+    mirror_inputs: Vec<PlayerInput>,
+    /// The victim that has kept its direction neutral and its hook in for `.1` decisions in a row (an idle or camping opponent,
+    /// for which "it keeps its input" is the right model and the opponent model has nothing to add).
+    passive: (i32, u32),
+    /// What the last decision's proposer cost against the cap (ms): the opponent model's deadline leaves room for it.
+    last_proposal_ms: f64,
     /// Two-world search: the decision snapshot without the threats, the threat set to switch back to, and
     /// the world the engine currently scores in.
     saved_red: Box<PhysicsSavedState>,
@@ -454,6 +558,7 @@ impl HybridSearch {
             victim_id: 1,
             prev: crate::types::empty_input(),
             victim_input: crate::types::empty_input(),
+            victim_plan: Vec::new(),
             opp_seed: 1,
             field: Arc::new(HazardField {
                 width: 0,
@@ -494,6 +599,12 @@ impl HybridSearch {
             batch: Batch::default(),
             outs: Vec::new(),
             last_prop_ticks: 0,
+            diag_ready: false,
+            last_lambda: 0.0,
+            mirror: None,
+            mirror_inputs: Vec::new(),
+            passive: (-1, 0),
+            last_proposal_ms: 0.0,
             saved_red,
             lens_threats: None,
             lens: Lens::Full,
@@ -570,6 +681,8 @@ impl HybridSearch {
     pub fn reset(&mut self, ctx: &ddai_brain::ResetContext) {
         self.planner.set_search_seed(ctx.seed as u32);
         self.planner.warm = None;
+        self.mirror = None;
+        self.passive = (-1, 0);
         self.beliefs.clear();
         self.prev_predictions.clear();
         self.proposer.reset(ctx);
@@ -670,6 +783,353 @@ impl HybridSearch {
         });
     }
 
+    /// Task 3.7b (`HybridConfig::mirror`): what would the victim do? A small `preset_normal` search from the victim's
+    /// seat against what we keep doing -- its book seeds, its last plan one step on, a few CEM samples -- with the planner's flip
+    /// hysteresis; the inputs of its best plan, one per plan step, land in `self.mirror_inputs`.
+    ///
+    /// On the wall clock the search has a deadline (`deadline_ms`, a reading of `clock`): rollouts after it are not started, one that
+    /// is running is cut, and the best plan found so far is used -- or none (the rollouts then keep "the victim holds its input").
+    /// Returns the physics ticks simulated (already charged to the work meter) and whether the deadline cut it short.
+    #[allow(clippy::too_many_arguments)]
+    fn mirror_predict(
+        &mut self,
+        clock: &dyn Clock,
+        deadline_ms: Option<f64>,
+        self_id: i32,
+        victim_id: i32,
+        me: &TeeState,
+        victim: &TeeState,
+        field: &crate::fields::HazardField,
+        unfreeze: &crate::fields::HazardField,
+    ) -> (u64, bool) {
+        let samples = self.cfg.mirror_samples;
+        let m = self.mirror.get_or_insert_with(|| {
+            // The live `preset_normal` search, on the step layout of the hybrid's own plans (`predicted[s]` is indexed by step).
+            let own = self.cfg.planner;
+            Box::new(MirrorState::new(crate::config::PlannerConfig {
+                steps: own.steps,
+                plan_step: own.plan_step,
+                front_steps: own.front_steps,
+                front_step: own.front_step,
+                ..crate::config::preset_normal()
+            }))
+        });
+        let MirrorState {
+            planner,
+            warm,
+            plans,
+            saved_pair,
+        } = &mut **m;
+        // The model plays the two tees alone: whatever else is in the decision world (a frozen body, a spared tee) is taken out for
+        // its rollouts and put back afterwards.
+        let others: Vec<i32> = self
+            .world
+            .all_tees()
+            .iter()
+            .map(|t| t.id)
+            .filter(|&id| id != self_id && id != victim_id)
+            .collect();
+        for id in &others {
+            self.world.remove_tee(*id);
+        }
+        let snapshot: &PhysicsSavedState = if others.is_empty() {
+            &self.saved
+        } else {
+            match saved_pair {
+                Some(s) => self.world.save_state_into(s),
+                None => *saved_pair = Some(self.world.save_state()),
+            }
+            saved_pair.as_ref().expect("just saved")
+        };
+        match &mut planner.saved {
+            Some(saved) => saved.assign_from(snapshot),
+            None => planner.saved = Some(snapshot.clone()),
+        }
+        planner.opp_seed = self.planner.opp_seed;
+        planner.rng = Rng::new(self.planner.opp_seed ^ 0x9e37_79b9);
+        let hold_us = crate::brains::enemy_input_from_tee(me);
+        let victim_prev = crate::brains::enemy_input_from_tee(victim);
+        let aim_v = js::atan2(me.pos.y - victim.pos.y, me.pos.x - victim.pos.x);
+        let before = planner.eval_ticks;
+        plans.clear();
+        plans.extend(planner.seed_plans(&*self.world, victim_id, self_id, field, aim_v));
+        planner.warm.clone_from(warm);
+        planner.warm_shift_steps = 1;
+        if let Some(w) = warm.as_ref() {
+            plans.push(
+                w[1..]
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(*w.last().unwrap()))
+                    .collect(),
+            );
+        }
+        let dist = planner.build_dist(0.0);
+        for _ in 0..samples {
+            plans.push(planner.sample_plan(&dist));
+        }
+        let mut scores: Vec<f64> = Vec::with_capacity(plans.len());
+        let mut charged = before;
+        let mut cut = false;
+        for plan in plans.iter() {
+            if !scores.is_empty() && deadline_ms.is_some_and(|d| clock.now_ms() >= d) {
+                cut = true;
+                break;
+            }
+            let r = planner.evaluate_impl(
+                &mut *self.world,
+                victim_id,
+                self_id,
+                victim_prev,
+                plan,
+                hold_us,
+                field,
+                unfreeze,
+                deadline_ms.map(|d| (clock, d)),
+            );
+            if let Some(m) = &self.meter {
+                m.add_units(2 * (planner.eval_ticks - charged));
+            }
+            charged = planner.eval_ticks;
+            match r {
+                Some(score) => scores.push(score),
+                None => {
+                    cut = true;
+                    break;
+                }
+            }
+        }
+        let mut best: Option<usize> = None;
+        let mut best_stay: Option<usize> = None;
+        let (mut best_score, mut stay_score) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for (i, &score) in scores.iter().enumerate() {
+            let plan = &plans[i];
+            if plan[0].dir == victim_prev.direction && score > stay_score {
+                stay_score = score;
+                best_stay = Some(i);
+            }
+            if score > best_score {
+                best_score = score;
+                best = Some(i);
+            }
+        }
+        let Some(mut bi) = best else {
+            self.mirror_inputs.clear();
+            if !others.is_empty() {
+                self.world.restore_state(&self.saved);
+            }
+            return (planner.eval_ticks - before, cut);
+        };
+        let flip_margin = planner.config().flip_margin;
+        if let Some(si) = best_stay
+            && flip_margin > 0.0
+            && plans[bi][0].dir != victim_prev.direction
+            && best_score - stay_score < flip_margin
+        {
+            bi = si;
+        }
+        // The best plan once more, recording the inputs it sends (not once the deadline has passed: then the victim holds its input).
+        if deadline_ms.is_some_and(|d| clock.now_ms() >= d) {
+            cut = true;
+            self.mirror_inputs.clear();
+        } else {
+            let mut rec = std::mem::take(&mut self.mirror_inputs);
+            rec.clear();
+            planner.record_inputs = Some(rec);
+            let _ = planner.evaluate_impl(
+                &mut *self.world,
+                victim_id,
+                self_id,
+                victim_prev,
+                &plans[bi],
+                hold_us,
+                field,
+                unfreeze,
+                None,
+            );
+            self.mirror_inputs = planner.record_inputs.take().unwrap_or_default();
+            *warm = Some(plans[bi].clone());
+            if let Some(m) = &self.meter {
+                m.add_units(2 * (planner.eval_ticks - charged));
+            }
+        }
+        if !others.is_empty() {
+            self.world.restore_state(&self.saved);
+        }
+        (planner.eval_ticks - before, cut)
+    }
+
+    /// Task 3.7b: scores `plans` with the evaluator of the decision just made -- the same snapshot, threats and model
+    /// combinations -- without touching anything the next decision reads (the work meter moves, which only the
+    /// relative budget of the next decision would notice, and it starts from a fresh reading). `None` when the last
+    /// decision did not get as far as a pick. Diagnostics only: allocates.
+    pub fn debug_score(&mut self, clock: &dyn Clock, plans: &[Vec<PlanStep>]) -> Option<Vec<DebugScore>> {
+        if !self.diag_ready || self.lens != Lens::Full {
+            return None;
+        }
+        let ncombos = self.masks.len();
+        let mut cands: Vec<Cand> = plans
+            .iter()
+            .map(|p| Cand::new(sanitize(p.clone(), self.cfg.planner.steps as usize), Source::Warm))
+            .collect();
+        let jobs: Vec<(usize, u32)> = (0..cands.len())
+            .flat_map(|ci| (0..ncombos as u32).map(move |co| (ci, co)))
+            .collect();
+        let (mut ticks, mut rolls) = (0u64, 0u32);
+        let was_timed = self.timed;
+        self.timed = false;
+        let meter_before = self.meter.as_ref().map(|m| m.ticks());
+        let cut = self.run_jobs(clock, &mut cands, &jobs, None, &mut ticks, &mut rolls);
+        if let (Some(m), Some(t)) = (&self.meter, meter_before) {
+            m.rewind_to(t);
+        }
+        self.timed = was_timed;
+        debug_assert!(!cut);
+        Some(
+            cands
+                .iter()
+                .map(|c| {
+                    let combos = scores_of(c, ncombos);
+                    let robust = if combos.len() == ncombos && ncombos > 1 {
+                        robust_value_weighted(&combos, &self.mask_weights[..ncombos], self.last_lambda)
+                    } else {
+                        combos.first().copied().unwrap_or(f64::NAN)
+                    };
+                    DebugScore {
+                        combos,
+                        robust,
+                        self_out: c.worst_self_out(ncombos),
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// Task 3.7b: the context of the last decision, if it got as far as a pick (`debug_oracle` scores plans in it later).
+    pub fn debug_ctx(&self) -> Option<Arc<Ctx>> {
+        self.diag_ready.then(|| self.engine.debug_ctx())
+    }
+
+    /// Task 3.7b: scores `plans` in a kept decision context with the opponent's actual inputs per plan step.
+    pub fn debug_oracle(&mut self, ctx: &Ctx, plans: &[&[PlanStep]], predicted: &[PlayerInput]) -> Vec<Option<f64>> {
+        let n = self.cfg.planner.steps as usize;
+        let sane: Vec<Vec<PlanStep>> = plans.iter().map(|p| sanitize(p.to_vec(), n)).collect();
+        let refs: Vec<&[PlanStep]> = sane.iter().map(Vec::as_slice).collect();
+        self.engine
+            .debug_eval_predicted(ctx, &refs, predicted)
+            .into_iter()
+            .map(|r| r.map(|e| e.score))
+            .collect()
+    }
+
+    /// Task 3.7b: rolls `plan` out from the planning world as it stands (the caller synced it to the true world and
+    /// rolled it through the input lag) against the opponent's *recorded* inputs, `opp(t)` for the plan's tick `t`,
+    /// and reports what happened. The world is put back. Diagnostics only: allocates.
+    pub fn debug_truth(
+        &mut self,
+        self_id: i32,
+        victim_id: i32,
+        prev: PlayerInput,
+        plan: &[PlanStep],
+        opp: &dyn Fn(usize) -> PlayerInput,
+        mut inputs_out: Option<&mut Vec<PlayerInput>>,
+    ) -> TruthOutcome {
+        let saved = self.world.save_state();
+        let track_aim = self.cfg.planner.track_aim;
+        let mut out = TruthOutcome {
+            me_out_tick: -1,
+            enemy_out_tick: -1,
+            touch_tick: -1,
+            min_gap_px: f64::INFINITY,
+            end_gap_enemy_px: f64::INFINITY,
+            end_dist_px: f64::INFINITY,
+        };
+        let mut events = Vec::new();
+        let mut input = prev;
+        let mut t = 0usize;
+        for (s, st) in plan.iter().enumerate() {
+            let me_now = self.world.get_tee(self_id);
+            let en_now = self.world.get_tee(victim_id);
+            let enemy_dist = match (me_now, en_now) {
+                (Some(m), Some(e)) => vdistance(m.pos, e.pos),
+                _ => 0.0,
+            };
+            let mut aim = st.aim;
+            if is_abs_aim(aim) {
+                aim -= ABS_AIM;
+            } else if track_aim && let (Some(m), Some(e)) = (me_now, en_now) {
+                aim += crate::trig::atan2(e.pos.y - m.pos.y, e.pos.x - m.pos.x);
+            }
+            self.planner.swing_target_frozen = en_now.is_some_and(|e| e.frozen);
+            self.planner.swing_rope_on = me_now.is_some_and(|m| m.hooked_player == victim_id);
+            self.planner.swing_target = en_now;
+            let hook_ok = st.hook == 0
+                || self.planner.hook_already_out(&*self.world, self_id)
+                || self
+                    .planner
+                    .hook_allowed(&*self.world, self_id, victim_id, *st, input, aim);
+            input = self.planner.step_to_input(
+                &*self.world,
+                *st,
+                input,
+                enemy_dist,
+                hook_ok,
+                me_now.map(|m| m.pos),
+                en_now.map(|e| e.pos),
+                en_now.map(|e| e.vel),
+                aim,
+            );
+            if let Some(v) = inputs_out.as_deref_mut() {
+                v.push(input);
+            }
+            for _ in 0..self.planner.step_ticks[s] {
+                self.world.set_input(self_id, input);
+                self.world.set_input(victim_id, opp(t));
+                self.world.step_into(&mut events);
+                t += 1;
+                let tick = t as i32;
+                for e in &events {
+                    if let crate::types::WorldEvent::HammerHit { from, to } = e
+                        && *from == self_id
+                        && *to == victim_id
+                    {
+                        out.touch_tick = tick;
+                    }
+                }
+                if let Some(m) = self.world.get_tee(self_id) {
+                    if m.hooked_player == victim_id {
+                        out.touch_tick = tick;
+                    }
+                    if (m.frozen || !m.alive) && out.me_out_tick < 0 {
+                        out.me_out_tick = tick;
+                    }
+                    let gap = if m.frozen || !m.alive {
+                        0.0
+                    } else {
+                        freeze_gap_px(self.world.collision(), m.pos.x, m.pos.y)
+                    };
+                    out.min_gap_px = out.min_gap_px.min(gap);
+                }
+                if let Some(e) = self.world.get_tee(victim_id)
+                    && (e.frozen || !e.alive)
+                    && out.enemy_out_tick < 0
+                {
+                    out.enemy_out_tick = tick;
+                }
+            }
+        }
+        if let (Some(m), Some(e)) = (self.world.get_tee(self_id), self.world.get_tee(victim_id)) {
+            out.end_dist_px = vdistance(m.pos, e.pos);
+            out.end_gap_enemy_px = if e.frozen || !e.alive {
+                0.0
+            } else {
+                freeze_gap_px(self.world.collision(), e.pos.x, e.pos.y)
+            };
+        }
+        self.world.restore_state(&saved);
+        out
+    }
+
     /// Points the engine's workers at the reduced world (us and the victim) or the full one (the local
     /// tees with the threats). A no-op unless the decision runs the two-world search.
     fn set_lens(&mut self, lens: Lens) {
@@ -729,6 +1189,7 @@ impl HybridSearch {
         let timed = matches!(self.cfg.mode, HybridMode::Deadline { .. });
         self.timed = timed;
         self.rollout_ms = 0.0;
+        self.diag_ready = false;
         let now = |c: &dyn Clock| if timed { c.now_ms() } else { 0.0 };
         let mut tel = DecisionTelemetry {
             victim_id: inp.victim_id,
@@ -979,6 +1440,7 @@ impl HybridSearch {
                 c.victim_id = victim_id;
                 c.prev = prev;
                 c.victim_input = victim_input;
+                c.victim_plan.clear();
                 c.opp_seed = opp_seed;
                 c.field = f;
                 c.unfreeze = u;
@@ -1027,6 +1489,58 @@ impl HybridSearch {
             false
         };
 
+        // ---- the opponent model (task 3.7b): the victim's predicted plan replaces "it holds its input" ----
+        // A duel only: with other free opponents in the radius the decision is a defence against several and the model's share of the
+        // budget (and its two-tee view of a many-tee fight) costs more than it gives (E-017 section 4: 1vN and crowds lost 4 points with it).
+        // Not for a victim that has done nothing for a while (neutral direction, no hook out: an idle or camping opponent): "it keeps
+        // its input" is right for it, and a model that expects an attack makes us play away from a victim that never comes.
+        self.passive = if self.passive.0 == victim_id && victim.direction == 0 && victim.hook_state <= 0 {
+            (victim_id, self.passive.1.saturating_add(1))
+        } else {
+            (victim_id, u32::from(victim.direction == 0 && victim.hook_state <= 0))
+        };
+        self.mirror_inputs.clear();
+        // The clock is read only when the model runs: a step clock (tests) advances on every read.
+        let (mut t_mirror, mut mirror_ms) = (0.0, 0.0);
+        if cfg.mirror
+            && victim_in_radius
+            && threats_in_radius == 0
+            && !victim.frozen
+            && !me.frozen
+            && self.passive.1 < PASSIVE_DECISIONS
+        {
+            t_mirror = now(clock);
+            // Under a cap on a real (or injected) clock the model is time-limited: what the shield, the search's minimum and the last
+            // proposal leave of the cap, at most `MIRROR_MAX_MS`. Never on the work clock: the arena's games stay a pure function of the
+            // state (its decisions of 2 tees take 1.35 ms of work on average, but some run over 2 ms).
+            let reserve = cfg.shield_reserve_ms_per_tee * js::max(1.0, f64::from(tel.sim_tees));
+            let deadline = if timed && self.meter.is_none() {
+                cfg.decision_cap_ms.map(|cap| {
+                    t_mirror
+                        + js::min(
+                            MIRROR_MAX_MS,
+                            js::max(cap - reserve - MIN_SEARCH_MS - self.last_proposal_ms, 0.0),
+                        )
+                })
+            } else {
+                None
+            };
+            // The model's world is the two tees alone: its ticks cost two tee-ticks each (charged to the meter inside), whatever the
+            // decision world's tee count (a frozen body or a spared tee may be in it); `work.mirror` counts them in ticks of the
+            // decision world.
+            let (ticks, cut) =
+                self.mirror_predict(clock, deadline, self_id, victim_id, &me, &victim, &field, &unfreeze);
+            tel.work.mirror = (2 * ticks).div_ceil(u64::from(tel.sim_tees.max(1)));
+            tel.mirror_cut = cut;
+            if let Some(first) = self.mirror_inputs.first() {
+                tel.mirror_first = Some(*first);
+                let plan_inputs = &self.mirror_inputs;
+                self.engine.with_ctx(|c| c.victim_plan.clone_from(plan_inputs));
+            }
+            mirror_ms = now(clock) - t_mirror;
+            tel.mirror_ms = mirror_ms;
+        }
+
         let t_prop = now(clock);
         let mut props: Vec<Vec<PlanStep>> = Vec::new();
         if cfg.proposals > 0 {
@@ -1069,8 +1583,15 @@ impl HybridSearch {
         let t_search = now(clock);
         let proposal_counts = cfg.proposal_in_cap && proposer_costs;
         let counted_proposal_ms = if proposal_counts { tel.proposal_ms } else { 0.0 };
+        self.last_proposal_ms = counted_proposal_ms;
         // Where the decision's time began as far as the extension of D-042 is concerned.
-        let t_decision = if proposal_counts { t_prop } else { t_search };
+        let t_decision = if tel.work.mirror > 0 {
+            t_mirror
+        } else if proposal_counts {
+            t_prop
+        } else {
+            t_search
+        };
         let mut prop_c: Vec<Cand> = Vec::new();
         for p in props.into_iter().take(cfg.proposals) {
             push(&mut prop_c, &mut tel, sanitize(p, n), Source::Proposal);
@@ -1155,7 +1676,7 @@ impl HybridSearch {
                 let budget_ms = match cfg.decision_cap_ms {
                     Some(cap) => js::min(
                         budget_ms,
-                        js::max(cap - shield_reserve - counted_proposal_ms, MIN_SEARCH_MS),
+                        js::max(cap - shield_reserve - counted_proposal_ms - mirror_ms, MIN_SEARCH_MS),
                     ),
                     None => budget_ms,
                 };
@@ -1661,6 +2182,24 @@ impl HybridSearch {
             }
         }
         tel.out_of_time = out_of_time;
+        if cfg.debug_pool {
+            tel.pool = cands
+                .iter()
+                .map(|c| PoolRec {
+                    src: c.src,
+                    plan: c.plan.clone(),
+                    cheap: c.cheap(),
+                    scores: c.res.map(|r| r.map(|e| e.score)),
+                    self_out: c.res.map(|r| r.map(|e| e.self_out)),
+                })
+                .collect();
+            tel.pick = pick;
+            tel.top.clone_from(&top);
+            tel.weights.clone_from(&self.mask_weights);
+            tel.lambda = lambda;
+        }
+        self.last_lambda = lambda;
+        self.diag_ready = pick.is_some();
         let (computed1, hits1) = self.engine.spec_stats();
         tel.spec_prefetched = (computed1 - spec0.0) as u32;
         tel.spec_used = (hits1 - spec0.1) as u32;

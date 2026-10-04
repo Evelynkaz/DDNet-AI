@@ -1,0 +1,37 @@
+# work-clock: default-rate
+# Task 3.7b (E-017 section 4): no regression of the opponent model against the scripted bot and the idle baseline (D-059), the
+# same games with the binary of `main` and the new one (the config has no knob: the new default is the arm), 200 games per hall.
+#   ddnet-ai arena run --config configs/arena/e017-regress.toml --out ~/aiddnet/data/runs/E-017/regress-{main,new} --threads 3
+name = "E-017: regression vs scripted and idle"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK vs scripted"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK vs idle"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "idle" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK vs idle"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "idle" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK vs idle"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "idle" }]

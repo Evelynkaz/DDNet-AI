@@ -59,6 +59,11 @@ pub struct BotOpts {
     /// (the A/B of E-012). The default counts it.
     #[arg(long)]
     pub no_proposal_in_cap: bool,
+    /// The hybrid brain's opponent model (task 3.7b, D-090): `on` (the default) predicts the victim's plan by a small search from
+    /// its seat; `off` = the victim holds its input, as before 3.7b. Measured against planners, scripted and passive tees, not yet
+    /// against people: the way back if the first live session shows it hurts.
+    #[arg(long, default_value = "on", value_parser = parse_on_off, action = clap::ArgAction::Set)]
+    pub hybrid_mirror: bool,
     /// `--brain fly`: the compiled graph.
     #[arg(long)]
     pub fly_flyg: Option<PathBuf>,
@@ -173,6 +178,15 @@ impl Default for SearchThreads {
 }
 
 /// `--search-threads`: `auto` or a number from 1 to 16.
+/// `on` / `off` (any case) for a switch flag.
+fn parse_on_off(s: &str) -> Result<bool, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("expected `on` or `off`, got {s:?}")),
+    }
+}
+
 fn parse_search_threads(s: &str) -> Result<SearchThreads, String> {
     if s.eq_ignore_ascii_case("auto") {
         return Ok(SearchThreads(None));
@@ -327,6 +341,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         .unwrap_or_else(ddai_bot::brains::auto_search_threads_here);
     brain.search_threads = Some(search_threads);
     brain.proposal_in_cap = !o.no_proposal_in_cap;
+    brain.hybrid_mirror = o.hybrid_mirror;
     if kind == BrainKind::Hybrid {
         eprintln!(
             "hybrid search threads: {search_threads} ({})",
@@ -677,5 +692,20 @@ mod search_threads_tests {
         for bad in ["0", "17", "-1", "many", ""] {
             assert!(get(&["--search-threads", bad]).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn hybrid_mirror_is_on_by_default_and_takes_on_or_off() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.hybrid_mirror)
+        };
+        assert!(get(&[]).unwrap(), "the opponent model is on by default");
+        assert!(get(&["--hybrid-mirror", "on"]).unwrap());
+        assert!(get(&["--hybrid-mirror", "ON"]).unwrap());
+        assert!(!get(&["--hybrid-mirror", "off"]).unwrap());
+        assert!(get(&["--hybrid-mirror", "maybe"]).is_err());
+        assert!(get(&["--hybrid-mirror"]).is_err(), "a value is required");
     }
 }

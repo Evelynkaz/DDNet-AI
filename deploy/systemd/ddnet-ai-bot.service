@@ -9,7 +9,8 @@
 # owner has read the log. Restart=on-failure therefore only ever restarts a crash (a panic, a signal, exit 1), and
 # StartLimit* stops a crash loop after 3 starts in 10 minutes.
 #
-# Task 5.9 (D-089), the web launcher: `--server`, `--name`, `--brain`, `--duration` and the optional `--fly-bundle` come from the
+# Task 5.9 (D-089), the web launcher: `--server`, `--name`, `--brain`, `--duration`, `--hybrid-mirror` (D-090: the hybrid's
+# opponent model, on/off) and the optional `--fly-bundle` come from the
 # environment below. The defaults here are today's: local server, hybrid, no time limit. For a launch from the site the root
 # helper (`ddnet-ai launch apply`, ddnet-ai-launch.service) writes /etc/ddnet-ai/bot-launch.env with validated values only (it
 # overrides the defaults) and a cgroup drop-in /etc/systemd/system/ddnet-ai-bot.service.d/50-launch.conf (IPAddressAllow). After a
@@ -42,8 +43,9 @@ Environment=BOT_SERVER=127.0.0.1:8303
 Environment=BOT_NAME=Muha
 Environment=BOT_BRAIN=hybrid
 Environment=BOT_DURATION=0
+Environment=BOT_HYBRID_MIRROR=on
 EnvironmentFile=-/etc/ddnet-ai/bot-launch.env
-ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} $BOT_FLY_ARGS --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} --hybrid-mirror ${BOT_HYBRID_MIRROR} $BOT_FLY_ARGS --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
 # The stop hook runs as root (`+`), and a failure of it never fails the unit (`-`): it records how the bot ended (kick/ban memory
 # for a public server, the status the site shows) and removes the one-run environment file. The binary is the root-owned copy
 # that deploy/install-launcher.sh installs.

@@ -108,6 +108,7 @@ fn worker_scoring_is_allocation_free_in_steady_state() {
         victim_id: 1,
         prev: empty_input(),
         victim_input: empty_input(),
+        victim_plan: vec![],
         opp_seed: 7,
         field: Arc::new(hazard_field(pw.collision())),
         unfreeze: Arc::new(unfreeze_field(pw.collision())),
@@ -242,4 +243,51 @@ fn a_whole_decision_allocates_no_world_sized_buffer() {
             "a decision held {max_bytes} bytes at once: a world (~105 kB) or snapshot was allocated"
         );
     }
+
+    // Two tees and a victim that moves, so that the opponent model runs (a victim idle for six decisions is skipped, and four tees are no duel).
+    let mut pw = scene(&map, 2);
+    let mut inp = empty_input();
+    inp.direction = -1;
+    pw.set_input(1, inp);
+    pw.step();
+    let world = pw.inner().clone();
+    let mut b = HybridBrain::new(
+        {
+            let mut cfg = HybridConfig::fixed();
+            cfg.workers = 1;
+            cfg.mirror = true;
+            cfg
+        },
+        ClockKind::Wall,
+        Box::new(NoProposer),
+    )
+    .unwrap();
+    b.reset(&ResetContext {
+        map: map.clone(),
+        self_id: 0,
+        seed: 3,
+    });
+    let o = obs(&world, &map, &[0, 1]);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    for _ in 0..12 {
+        let _ = b.decide_in(&o, Some(&view));
+    }
+    let (mut max_bytes, mut ran) = (0u64, 0u32);
+    for _ in 0..30 {
+        let info = measure(|| {
+            let _ = b.decide_in(&o, Some(&view));
+        });
+        ran += u32::from(b.last_decision().is_some_and(|t| t.work.mirror > 0));
+        max_bytes = max_bytes.max(info.bytes_max);
+    }
+    assert!(ran > 0, "the opponent model never ran in the 2-tee case");
+    assert!(
+        max_bytes < 90 * 1024,
+        "a decision with the opponent model held {max_bytes} bytes at once: a world (~105 kB) or snapshot was allocated"
+    );
 }

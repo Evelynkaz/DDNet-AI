@@ -1,3 +1,5 @@
+# Task 3.7b (D-090, E-017): the hybrid's default now includes the opponent model (`mirror`), so these games differ from those recorded by 3.6/3.7a on purpose (golden set
+# regenerated: `~/aiddnet/data/runs/E-017/golden-v9-{1,4}`); `hybrid = { mirror = false }` on the hybrid players reproduces the old hashes bit for bit.
 # E-012 (task 3.7a): the same games as `e010-golden.toml` with four search threads on the WORK clock: the per-game hashes, end ticks
 # and work counters must equal the one-thread run (and the binary of 3.6) bit for bit. Condition names are kept so the output files line up.
 #   ddnet-ai arena run --config configs/arena/e012-golden-workers.toml --out <dir> --threads 2

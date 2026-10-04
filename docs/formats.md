@@ -5784,7 +5784,7 @@ IPv6-ретранслятор для IPv4-сервера клиент отвер
 ### 34.1 Запрос `request.json` (пишет сайт; один файл, атомарно: временный файл и `rename`)
 
 ```json
-{"v":1,"id":"0123456789abcdef","ts":1791103000,"action":"start","brain":"hybrid-fly","server":"local","duration":"15m","sparring":2}
+{"v":1,"id":"0123456789abcdef","ts":1791103000,"action":"start","brain":"hybrid-fly","server":"local","duration":"15m","sparring":2,"mirror":"off"}
 {"v":1,"id":"fedcba9876543210","ts":1791103100,"action":"stop"}
 ```
 
@@ -5795,6 +5795,7 @@ IPv6-ретранслятор для IPv4-сервера клиент отвер
 - `duration`: `15m` (900 с) | `60m` (3600 с) | `unlimited` (`--duration 0`).
 - `server`: `"local"` (`127.0.0.1:8303`, ник `Muha`) **или точный `address`** записи `live-servers.toml` с `ready = true`. Свободный адрес не принимается.
 - `sparring`: 0–3, только при `server = "local"`.
+- `mirror` (необязательное, D-090): `on` | `off`, модель соперника гибрида (`ddnet-ai play --hybrid-mirror`); без поля — `on`; другие значения и поле у `stop` — `bad_request`. У мозга `fly` игнорируется.
 - Помощник читает файл и **удаляет его до обработки**; следующий запрос нужен для нового действия.
 
 ### 34.2 Статус `status.json` (пишет root-помощник в **`/run/ddnet-ai/`** (root, `0755`; сайт читает), файл `0644` при любой umask, ≤ 8 КиБ)
@@ -5819,9 +5820,10 @@ BOT_NAME="Muha"
 BOT_BRAIN="hybrid"
 BOT_DURATION="900"
 BOT_FLY_ARGS="--fly-bundle /home/ubuntu/aiddnet/data/runs/E-005/e005-fly/checkpoints/final.bundle"
+BOT_HYBRID_MIRROR="on"
 ```
 
-Значения — только из `[A-Za-z0-9._/:- []]` (то есть и `[`, `]` для IPv6) (до 512 байт), всегда в двойных кавычках; `BOT_FLY_ARGS` пуст для `hybrid`. Юнит: `ExecStart=… --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} $BOT_FLY_ARGS …`.
+Значения — только из `[A-Za-z0-9._/:- []]` (то есть и `[`, `]` для IPv6) (до 512 байт), всегда в двойных кавычках; `BOT_FLY_ARGS` пуст для `hybrid`; `BOT_HYBRID_MIRROR` — только `on` или `off`. Юнит: `ExecStart=… --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} $BOT_FLY_ARGS …`.
 Дроп-ин `/etc/systemd/system/ddnet-ai-bot.service.d/50-launch.conf`: `IPAddressAllow=` (сброс), `IPAddressAllow=127.0.0.0/8 ::1` и, для публичного сервера, IP прокси из файла секретов (без прокси — IP сервера). **Прокси с `relay = "public"`** (задача 2.6b, D-091: его UDP-ретранслятор на другой машине) получает противоположный фильтр (`Filter::DenyServer`): `IPAddressAllow=` (сброс), `IPAddressDeny=` (сброс), `IPAddressDeny=<IP сервера>` на каждый IP игрового сервера (адрес записи и IP из `for_server` файла прокси, без повторов), для сервера только с IPv4 ещё `IPAddressDeny=::/0`, затем частные диапазоны (`10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10`, по строке) и **никакого** разрешающего списка (allow сильнее deny, §33.9): ретранслятор доступен где угодно, игровой сервер напрямую недоступен ядру. После выхода бота дроп-ин возвращается к локальному по умолчанию, как и раньше.
 
 ### 34.4 Память помощника `/var/lib/ddnet-ai/launch-state.json` (root, `0600`, под `flock`)
@@ -5831,4 +5833,4 @@ BOT_FLY_ARGS="--fly-bundle /home/ubuntu/aiddnet/data/runs/E-005/e005-fly/checkpo
 ### 34.5 Маршруты сайта (все за сессией; POST — строгий Origin, CSRF, JSON)
 
 - `GET /api/bot/launch` → `{enabled, servers:[{id,label}], brains, durations, max_sparring, bundle, bundle_present, status, launcher_down, pending, pending_age_s}`; `servers` — `local` и готовые записи списка; `launcher_down` — запрос не взяли за 60 с (его убрали), и помощник с тех пор ничего не писал.
-- `POST /api/bot/launch` с `{action, brain?, server?, duration?, sparring?}` → `202 {ok, id, action}`; `400` (`bad_request`, `server_not_allowed`, `sparring_local_only`, `bundle_missing`), `409 pending`, `429 rate_limited` (не чаще одного в 2 с и не больше 6 в минуту: путь-юнит останавливается после 10 срабатываний в минуту), `503 launcher_unavailable`, `500 launch_write_failed`; `401/403/415` как у остальных.
+- `POST /api/bot/launch` с `{action, brain?, server?, duration?, sparring?, mirror?}` → `202 {ok, id, action}`; `400` (`bad_request`, `server_not_allowed`, `sparring_local_only`, `bundle_missing`), `409 pending`, `429 rate_limited` (не чаще одного в 2 с и не больше 6 в минуту: путь-юнит останавливается после 10 срабатываний в минуту), `503 launcher_unavailable`, `500 launch_write_failed`; `401/403/415` как у остальных.

@@ -78,6 +78,25 @@ impl Brain {
     }
 }
 
+/// The hybrid's opponent model switch (task 3.7b, D-090): a closed list, so the helper writes only `on` or `off` to the unit's environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mirror {
+    #[serde(rename = "on")]
+    On,
+    #[serde(rename = "off")]
+    Off,
+}
+
+impl Mirror {
+    /// The value of `ddnet-ai play --hybrid-mirror`.
+    pub fn flag_value(self) -> &'static str {
+        match self {
+            Mirror::On => "on",
+            Mirror::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurationChoice {
     #[serde(rename = "15m")]
@@ -117,6 +136,9 @@ pub struct LaunchRequest {
     pub duration: Option<DurationChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sparring: Option<u8>,
+    /// The hybrid brains' opponent model (`on` when absent, D-090); other brains ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<Mirror>,
 }
 
 /// Whether a request made at `ts` (and written to a file last modified at `mtime`), seen at `now`, is fresh: neither older than
@@ -161,7 +183,11 @@ pub fn parse_request(bytes: &[u8]) -> Result<LaunchRequest, ParseError> {
         return Err(ParseError::Invalid);
     }
     let complete = req.brain.is_some() && req.server.is_some() && req.duration.is_some();
-    let empty = req.brain.is_none() && req.server.is_none() && req.duration.is_none() && req.sparring.is_none();
+    let empty = req.brain.is_none()
+        && req.server.is_none()
+        && req.duration.is_none()
+        && req.sparring.is_none()
+        && req.mirror.is_none();
     match req.action {
         Action::Start if !complete => Err(ParseError::Invalid),
         Action::Stop if !empty => Err(ParseError::Invalid),
@@ -359,6 +385,10 @@ mod tests {
         assert_eq!(r.brain, Some(Brain::HybridFly));
         assert_eq!(r.duration, Some(DurationChoice::M60));
         assert_eq!(r.sparring, Some(2));
+        assert_eq!(r.mirror, None, "the opponent model is on when the request says nothing");
+        let mut v = start_json();
+        v["mirror"] = serde_json::json!("off");
+        assert_eq!(parse(&v).unwrap().mirror, Some(Mirror::Off));
         let stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
         assert_eq!(parse(&stop).unwrap().action, Action::Stop);
     }
@@ -372,6 +402,9 @@ mod tests {
             ("brain", "planner"),
             ("brain", "Hybrid"),
             ("duration", "2h"),
+            ("mirror", "maybe"),
+            ("mirror", "ON"),
+            ("mirror", "true"),
             ("action", "restart"),
             ("id", "XYZ"),
             ("id", "0123"),
@@ -405,6 +438,9 @@ mod tests {
         }
         let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
         stop["server"] = serde_json::json!("local");
+        assert_eq!(parse(&stop), Err(ParseError::Invalid));
+        let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
+        stop["mirror"] = serde_json::json!("off");
         assert_eq!(parse(&stop), Err(ParseError::Invalid));
     }
 

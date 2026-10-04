@@ -64,22 +64,27 @@ pub fn play_indexed(
         arena,
         rules,
         base_seed.wrapping_add(u64::from(g)),
-        if arena.wb.is_some() {
-            // A wayblock hold has a holder and an intruder: slot 0 stays on the WB spot (a swap would put
-            // the focal player on the intruder's tile and an intruder on the spot), so only the spawn
-            // order alternates (task 4.2, review F7).
-            Layout {
-                swap: false,
-                reverse_order: g % 2 == 1,
-            }
-        } else {
-            Layout {
-                swap: g % 2 == 1,
-                reverse_order: (g / 2) % 2 == 1,
-            }
-        },
+        layout_of(arena, g),
         setups(slots, factory, arena)?,
     )
+}
+
+/// The layout of game number `g` of a condition (see [`play_indexed`]).
+pub fn layout_of(arena: &Arena, g: u32) -> Layout {
+    if arena.wb.is_some() {
+        // A wayblock hold has a holder and an intruder: slot 0 stays on the WB spot (a swap would put
+        // the focal player on the intruder's tile and an intruder on the spot), so only the spawn
+        // order alternates (task 4.2, review F7).
+        Layout {
+            swap: false,
+            reverse_order: g % 2 == 1,
+        }
+    } else {
+        Layout {
+            swap: g % 2 == 1,
+            reverse_order: (g / 2) % 2 == 1,
+        }
+    }
 }
 
 /// The outcome of one condition.
@@ -104,6 +109,8 @@ pub fn run_condition(
     let slots = cond.slots();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads.max(1))
+        // A hybrid decision needs 1.25-1.5 MiB of stack in release and more in debug builds: the 2 MiB default is too tight (3.7b review F1).
+        .stack_size(32 << 20)
         .build()
         .map_err(|e| EnvError::new(format!("thread pool: {e}")))?;
     let t0 = Instant::now();

@@ -31,7 +31,7 @@ use serde::Deserialize;
 use crate::http::bot::{authorize_get, authorize_post, json_error};
 use crate::launch::{
     Action, Brain, DurationChoice, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_SPARRING,
-    MAX_STATUS_BYTES, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, bundle_run_name,
+    MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, bundle_run_name,
     read_regular_nofollow, unix_now, write_atomic,
 };
 use crate::state::SharedState;
@@ -158,6 +158,7 @@ struct LaunchForm {
     server: Option<String>,
     duration: Option<DurationChoice>,
     sparring: Option<u8>,
+    mirror: Option<Mirror>,
 }
 
 fn new_id() -> String {
@@ -172,7 +173,12 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
     let id = new_id();
     match form.action {
         Action::Stop => {
-            if form.brain.is_some() || form.server.is_some() || form.duration.is_some() || form.sparring.is_some() {
+            if form.brain.is_some()
+                || form.server.is_some()
+                || form.duration.is_some()
+                || form.sparring.is_some()
+                || form.mirror.is_some()
+            {
                 return Err("bad_request");
             }
             Ok(LaunchRequest {
@@ -184,6 +190,7 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 server: None,
                 duration: None,
                 sparring: None,
+                mirror: None,
             })
         }
         Action::Start => {
@@ -212,6 +219,7 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 server: Some(server),
                 duration: Some(duration),
                 sparring: Some(sparring),
+                mirror: form.mirror,
             })
         }
     }
@@ -370,6 +378,23 @@ mod tests {
         );
         assert_eq!(
             refused(serde_json::json!({"action":"start","brain":"hybrid"}), &ready, true),
+            "bad_request"
+        );
+        // The opponent-model switch (D-090): `on`, `off` or absent; anything else, or on a stop, is refused.
+        let m = |v: &str| {
+            ok(serde_json::json!({"action":"start","brain":"hybrid","server":"local","duration":"15m","mirror":v}))
+        };
+        assert_eq!(m("off").unwrap().mirror, Some(Mirror::Off));
+        assert_eq!(m("on").unwrap().mirror, Some(Mirror::On));
+        assert_eq!(
+            ok(serde_json::json!({"action":"start","brain":"hybrid","server":"local","duration":"15m"}))
+                .unwrap()
+                .mirror,
+            None
+        );
+        assert!(serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"start","mirror":"maybe"})).is_err());
+        assert_eq!(
+            refused(serde_json::json!({"action":"stop","mirror":"off"}), &ready, true),
             "bad_request"
         );
         assert_eq!(

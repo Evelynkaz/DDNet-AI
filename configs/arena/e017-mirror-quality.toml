@@ -1,0 +1,53 @@
+# work-clock: default-rate
+# Task 3.7b (E-017 section 3): how much does a better opponent prediction buy? 12 ms of work, no decision cap (no arm is cut by time),
+# the opponent model with 4 samples against 40 samples (the default is 12, E-017 section 2) (the planner's own CEM is 20 x 2 + seeds), and with the model off, against
+# the fixed planner; 200 games per hall, seeds 1..200.
+#   ddnet-ai arena run --config configs/arena/e017-mirror-quality.toml --out ~/aiddnet/data/runs/E-017/mirror-quality --threads 3
+name = "E-017: opponent model quality"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: hybrid 12 ms WORK mirror 4 samples vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror_samples = 4 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 12 ms WORK mirror 4 samples vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror_samples = 4 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 12 ms WORK mirror 4 samples vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror_samples = 4 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 12 ms WORK mirror 40 samples vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror_samples = 40 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 12 ms WORK mirror 40 samples vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror_samples = 40 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 12 ms WORK mirror 40 samples vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror_samples = 40 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 12 ms WORK mirror off vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror = false } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 12 ms WORK mirror off vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror = false } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 12 ms WORK mirror off vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, hybrid = { decision_cap_ms = 0, mirror = false } }, { brain = "planner", mode = "fixed" }]

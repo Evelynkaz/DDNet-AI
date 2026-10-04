@@ -160,9 +160,16 @@
         { value: "2", text: "2 спарринг-бота" },
         { value: "3", text: "3 спарринг-бота" },
       ]);
+      ui.mirror = select([
+        { value: "on", text: "вкл" },
+        { value: "off", text: "выкл" },
+      ]);
       var form = el("div", "lc-form");
       form.appendChild(field("Сервер", ui.server));
       form.appendChild(field("Мозг", ui.brain));
+      // The hybrid's opponent model (D-090); the fly brain alone has none, so the toggle is only shown for the hybrid brains.
+      ui.mirrorField = field("Предсказание соперника", ui.mirror);
+      form.appendChild(ui.mirrorField);
       form.appendChild(field("Длительность", ui.duration));
       ui.sparringField = field("Спарринг (только локальный сервер)", ui.sparring);
       form.appendChild(ui.sparringField);
@@ -195,6 +202,8 @@
       root.appendChild(card);
 
       ui.server.addEventListener("change", syncSparring);
+      ui.brain.addEventListener("change", syncMirror);
+      syncMirror();
       ui.start.addEventListener("click", onStart);
       ui.stop.addEventListener("click", onStop);
       ui.watch.addEventListener("click", function () {
@@ -203,6 +212,10 @@
           tab.click();
         }
       });
+    }
+
+    function syncMirror() {
+      ui.mirrorField.hidden = ui.brain.value === "fly";
     }
 
     function syncSparring() {
@@ -247,6 +260,7 @@
       if (!fly && ui.brain.value !== "hybrid") {
         ui.brain.value = "hybrid";
       }
+      syncMirror();
       ui.bundle.textContent = fly
         ? "Муха: " + i.bundle + " (run)."
         : "Муха недоступна: файл bundle (" + i.bundle + ") не найден.";
@@ -332,7 +346,7 @@
       ui.start.disabled = busy || !enabled || info.pending || live;
       ui.stop.disabled = busy || !enabled || info.pending;
       ui.watch.hidden = !live;
-      [ui.server, ui.brain, ui.duration].forEach(function (c) {
+      [ui.server, ui.brain, ui.duration, ui.mirror].forEach(function (c) {
         c.disabled = busy || !enabled;
       });
       syncSparring();
@@ -403,6 +417,9 @@
         duration: ui.duration.value,
         sparring: ui.server.value === "local" ? parseInt(ui.sparring.value, 10) || 0 : 0,
       };
+      if (ui.brain.value !== "fly") {
+        body.mirror = ui.mirror.value === "off" ? "off" : "on";
+      }
       if (body.server !== "local") {
         var ok = window.confirm("Запустить бота на публичном сервере? Бот не пишет в чат и не обходит баны.");
         if (!ok) {

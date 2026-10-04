@@ -10,6 +10,7 @@ pub mod action;
 pub mod brains;
 pub mod clock;
 pub mod config;
+pub mod diag;
 pub mod elite;
 pub mod fields;
 pub mod hybrid;

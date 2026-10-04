@@ -1,0 +1,39 @@
+# work-clock: default-rate
+# Task 3.7b (E-017 section 3): the screening of the opponent model's size (when it was run the model was switched on by `mirror_samples`; since the
+# decision of D-090 it is on by default and the knob only sets the samples). 4 and 12 CEM samples of the search from the victim's seat, each differing
+# from `main` (the diagnosis run: 4 ms of work, the 5 ms cap, no proposer) in that alone; the seeds and layouts of the diagnosis (game g = seed 1 + g,
+# 400 games per hall), so each arm pairs with the diagnosis games for McNemar. All against the fixed planner.
+#   ddnet-ai arena run --config configs/arena/e017-screen.toml --out ~/aiddnet/data/runs/E-017/screen --threads 3
+name = "E-017: opponent model, 4 and 12 samples"
+base_seed = 1
+games = 400
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK mirror4 vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_samples = 4 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK mirror4 vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_samples = 4 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK mirror4 vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_samples = 4 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK mirror12 vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_samples = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK mirror12 vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_samples = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK mirror12 vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_samples = 12 } }, { brain = "planner", mode = "fixed" }]

@@ -1,0 +1,31 @@
+# work-clock: default-rate
+# Task 3.7b (E-017 section 4): 1vN and crowds (the opponent model models the victim only; the threats keep hold/react): the same
+# games with the binary of `main` and the new one, 200 games per condition, the layouts of E-010.
+#   ddnet-ai arena run --config configs/arena/e017-crowd.toml --out ~/aiddnet/data/runs/E-017/crowd-{main,new} --threads 3
+name = "E-017: 1vN and crowds"
+base_seed = 900
+games = 200
+
+[rules]
+crowd_from = 2
+crowd_spacing = 1.0
+
+[[condition]]
+name = "1v3 scripted: hybrid 4 ms WORK"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "1v5 scripted: hybrid 4 ms WORK"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "8 tees scripted crowd: hybrid 4 ms WORK"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 7 }]
+
+[[condition]]
+name = "8 tees idle bystanders: hybrid 4 ms WORK"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]

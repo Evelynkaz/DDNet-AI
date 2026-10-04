@@ -299,6 +299,17 @@ pub struct HybridSpec {
     pub front_steps: Option<f64>,
     #[serde(default)]
     pub front_step: Option<f64>,
+    /// The opponent model of task 3.7b: predict the victim's plan by a small search from its seat (default true; `false` = the victim
+    /// holds its input, as before 3.7b), and how many CEM samples that search draws besides its book seeds and its last plan (default 12).
+    #[serde(default)]
+    pub mirror: Option<bool>,
+    #[serde(default)]
+    pub mirror_samples: Option<usize>,
+    /// Samples per CEM iteration and CEM iterations of the search (planner presets: 20 and 2): a diagnostic knob (task 3.7b).
+    #[serde(default)]
+    pub cem_population: Option<i32>,
+    #[serde(default)]
+    pub cem_iterations: Option<i32>,
     /// Plan steps and ticks per step of the search (default 9 x 3 = 27 ticks ahead): a shorter horizon
     /// makes every rollout cheaper.
     #[serde(default)]
@@ -499,6 +510,18 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         }
         if let Some(v) = h.front_step {
             cfg.planner.front_step = v;
+        }
+        if let Some(v) = h.mirror {
+            cfg.mirror = v;
+        }
+        if let Some(v) = h.mirror_samples {
+            cfg.mirror_samples = v;
+        }
+        if let Some(v) = h.cem_population {
+            cfg.planner.population = v;
+        }
+        if let Some(v) = h.cem_iterations {
+            cfg.planner.iterations = v;
         }
         if let Some(v) = h.plan_steps {
             cfg.planner.steps = v;

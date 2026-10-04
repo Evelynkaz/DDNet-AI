@@ -505,6 +505,9 @@ pub struct Planner<W: PlanWorld> {
     pub(crate) opp_seed: u32,
     seed_offset: u32,
     predicted: Vec<PlayerInput>,
+    /// Task 3.7b: when `Some`, `evaluate_impl` appends the input of every plan step it sends (the hybrid's opponent model turns
+    /// the opponent's predicted plan into open-loop inputs this way). `None` on every other path.
+    pub(crate) record_inputs: Option<Vec<PlayerInput>>,
 
     pub(crate) track_rollout: bool,
     /// Task 3.6: memo of the exact hammer-launch flight check (hybrid workers only; `None` keeps the
@@ -607,6 +610,7 @@ impl<W: PlanWorld> Planner<W> {
             opp_seed: 1,
             seed_offset,
             predicted: Vec::new(),
+            record_inputs: None,
             track_rollout: false,
             launch_memo: None,
             keep_final: false,
@@ -713,6 +717,13 @@ impl<W: PlanWorld> Planner<W> {
 
     pub fn set_dead_zone(&mut self, dead: Option<DeadZoneGrid>) {
         self.dead = dead;
+    }
+
+    /// Task 3.7b: the opponent's input at the start of each plan step, instead of "hold" (the hybrid's opponent model hands its
+    /// prediction over this way, the loss diagnosis its oracle). Empty = the configured model. Never set on the parity path.
+    pub(crate) fn set_predicted(&mut self, inputs: &[PlayerInput]) {
+        self.predicted.clear();
+        self.predicted.extend_from_slice(inputs);
     }
 
     pub fn set_travel_goal(&mut self, goal: Option<Vec2>) {
@@ -2988,6 +2999,9 @@ impl<W: PlanWorld> Planner<W> {
                 en_now.map(|e| e.vel),
                 aim,
             );
+            if let Some(rec) = &mut self.record_inputs {
+                rec.push(input);
+            }
 
             if self.react_this_pass || self.cfg.opponent_model == OpponentModel::React {
                 opp_input = scripted_action(world, enemy_id, self_id, &opp_input, &mut opp_rng);

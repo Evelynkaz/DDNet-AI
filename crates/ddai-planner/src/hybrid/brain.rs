@@ -98,7 +98,7 @@ impl Totals {
             "{{\"decisions\":{},\"extended\":{},\"danger_flagged\":{},\"shielded\":{},\"shield_incomplete\":{},\"shield_ran\":{},\"shield_plan_ok\":{},\"shield_skipped\":{},\
 \"out_of_time\":{},\"unsafe_choices\":{},\"with_threats\":{},\"generated\":{{{}}},\"evaluated\":{{{}}},\"chosen\":{{{}}},\
 \"techniques\":{{{}}},\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"proposal_units\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{},\
-\"rollouts_stage1\":{},\"rollouts_stage2\":{},\"rollouts_extension\":{}}}}}",
+\"rollouts_stage1\":{},\"rollouts_stage2\":{},\"rollouts_extension\":{}{}}}}}",
             self.decisions,
             self.extended,
             self.danger_flagged,
@@ -126,6 +126,11 @@ impl Totals {
             w.rollouts_stage1,
             w.rollouts_stage2,
             w.rollouts_extension,
+            if w.mirror > 0 {
+                format!(",\"mirror\":{}", w.mirror)
+            } else {
+                String::new()
+            },
         )
     }
 }
@@ -284,6 +289,97 @@ impl HybridBrain {
 
     pub fn last_decision(&self) -> Option<&DecisionTelemetry> {
         self.last.as_ref()
+    }
+
+    /// Task 3.7b: scores `plans` with the evaluator of the decision just made (`HybridSearch::debug_score`).
+    pub fn debug_score(
+        &mut self,
+        plans: &[Vec<crate::planner::PlanStep>],
+    ) -> Option<Vec<crate::hybrid::search::DebugScore>> {
+        self.search.as_mut()?.debug_score(&self.clock, plans)
+    }
+
+    /// Task 3.7b: what `plans` do in the true world `world` (the decision's `WorldView`) against the opponent's
+    /// recorded inputs: `opp(k)` is its input at world tick `world.tick + k`. Our own inputs through the lag are
+    /// `in_flight`. One outcome per plan. Diagnostics only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn debug_truth(
+        &mut self,
+        world: &ddai_physics::world::World<f32>,
+        self_id: i32,
+        victim_id: i32,
+        prev: PlayerInput,
+        in_flight: &[ddai_physics::core::PlayerInput],
+        plans: &[&[crate::planner::PlanStep]],
+        opp: &dyn Fn(usize) -> PlayerInput,
+    ) -> Vec<crate::hybrid::search::TruthOutcome> {
+        let Some(search) = self.search.as_mut() else {
+            return Vec::new();
+        };
+        let pw = search.world_mut();
+        pw.sync_from(world);
+        pw.set_held_input(self_id, in_flight.first().map_or(prev, from_ddnet_input));
+        for other in pw.all_tees() {
+            if other.id != self_id {
+                pw.set_held_input(other.id, opp(0));
+            }
+        }
+        for (k, wire) in in_flight.iter().enumerate() {
+            pw.set_input(self_id, from_ddnet_input(wire));
+            pw.set_input(victim_id, opp(k));
+            pw.step();
+        }
+        let lag = in_flight.len();
+        let after = in_flight.last().map_or(prev, from_ddnet_input);
+        plans
+            .iter()
+            .map(|p| search.debug_truth(self_id, victim_id, after, p, &|t| opp(lag + t), None))
+            .collect()
+    }
+
+    /// Task 3.7b: the inputs, one per plan step, that `plan` makes tee `owner` send against `other` holding its input (the
+    /// opponent's predicted plan, turned into the open-loop inputs `debug_oracle` takes). The world is synced from `world`;
+    /// no input lag is rolled in.
+    pub fn debug_plan_inputs(
+        &mut self,
+        world: &ddai_physics::world::World<f32>,
+        owner: i32,
+        other: i32,
+        prev: PlayerInput,
+        plan: &[crate::planner::PlanStep],
+    ) -> Vec<PlayerInput> {
+        let Some(search) = self.search.as_mut() else {
+            return Vec::new();
+        };
+        let pw = search.world_mut();
+        pw.sync_from(world);
+        // What a planner in the owner's seat believes of the other tee: it keeps doing what it does now.
+        let Some(other_tee) = pw.get_tee(other) else {
+            return Vec::new();
+        };
+        let other_input = enemy_input_from_tee(&other_tee);
+        pw.set_held_input(owner, prev);
+        pw.set_held_input(other, other_input);
+        let mut inputs = Vec::new();
+        let _ = search.debug_truth(owner, other, prev, plan, &|_| other_input, Some(&mut inputs));
+        inputs
+    }
+
+    /// Task 3.7b: the engine's context of the decision just made, for `debug_oracle`.
+    pub fn debug_ctx(&self) -> Option<std::sync::Arc<crate::hybrid::engine::Ctx>> {
+        self.search.as_ref()?.debug_ctx()
+    }
+
+    /// Task 3.7b: scores `plans` in a kept context with the opponent's actual inputs per plan step (`predicted`).
+    pub fn debug_oracle(
+        &mut self,
+        ctx: &crate::hybrid::engine::Ctx,
+        plans: &[&[crate::planner::PlanStep]],
+        predicted: &[PlayerInput],
+    ) -> Vec<Option<f64>> {
+        self.search
+            .as_mut()
+            .map_or_else(Vec::new, |s| s.debug_oracle(ctx, plans, predicted))
     }
 
     pub fn config(&self) -> &HybridConfig {

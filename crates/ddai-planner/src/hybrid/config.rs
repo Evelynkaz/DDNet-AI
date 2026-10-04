@@ -234,6 +234,17 @@ pub struct HybridConfig {
     /// Diagnostics: put the best candidates of every decision, with their scores, into the
     /// telemetry (`dump`). Off by default (it allocates and bloats the JSON).
     pub debug_dump: bool,
+    /// Task 3.7b (the opponent model, E-017): predict what the victim does next by a small search *from the victim's seat* -- the
+    /// planner's own pool of book seeds, its last plan one step on, and `mirror_samples` CEM samples, scored against what we keep
+    /// doing -- and let its best plan's inputs replace "the victim holds its input" in every rollout of the cheap model. Runs only
+    /// in a duel (the victim is free and within the threat radius, no other free opponent is), while we are free and the victim has
+    /// not been passive (neutral direction, no hook out) for six decisions; its rollouts count against the decision cap. `false` =
+    /// the 3.5-3.7a behaviour (hold). On by default since task 3.7b (D-090, E-017).
+    pub mirror: bool,
+    pub mirror_samples: usize,
+    /// Diagnostics (task 3.7b, `crate::diag`): keep the whole pool of every decision, plans and scores, in the
+    /// telemetry (`DecisionTelemetry::pool`). Off by default: it allocates and changes nothing else.
+    pub debug_pool: bool,
 }
 
 /// A finite number above zero (a NaN or an infinity from a config file is refused).
@@ -276,6 +287,9 @@ impl Default for HybridConfig {
             work_clock_us_per_tick: None,
             count_work: true,
             debug_dump: false,
+            debug_pool: false,
+            mirror: true,
+            mirror_samples: 12,
         }
     }
 }

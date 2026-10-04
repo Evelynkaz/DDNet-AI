@@ -1,0 +1,24 @@
+# work-clock: default-rate
+# Task 3.7b (D-090, E-017 section 4): FRESH seeds for the final main-vs-new proof -- game g of a hall is seed 1001 + g (1001..1400), none of
+# them used while the fix was designed (the diagnosis and the screening used 1..400). The hybrid (4 ms of work, the 5 ms cap, no proposer)
+# against the fixed planner on the three D-059 halls, 400 games each. The config has no knob: run it with the binary of `main` and with the
+# new one (the new defaults are the arm), the games pair up for McNemar.
+#   ddnet-ai arena run --config configs/arena/e017-fresh.toml --out ~/aiddnet/data/runs/E-017/fresh-{main,new} --threads 3
+name = "E-017: hybrid vs fixed planner, fresh seeds"
+base_seed = 1001
+games = 400
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]

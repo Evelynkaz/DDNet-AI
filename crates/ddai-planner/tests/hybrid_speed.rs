@@ -569,3 +569,85 @@ fn calibration_report() {
         }
     }
 }
+
+/// A proposer that proposes nothing and costs `units` tee-ticks on the work clock: the shape of the fly (an S fly is 500).
+struct Costly {
+    units: u64,
+}
+
+impl Proposer for Costly {
+    fn name(&self) -> &str {
+        "costly"
+    }
+    fn propose(
+        &mut self,
+        _ctx: &ddai_planner::hybrid::ProposeCtx<'_>,
+        _out: &mut Vec<Vec<ddai_planner::planner::PlanStep>>,
+    ) {
+    }
+    fn work_units(&self) -> u64 {
+        self.units
+    }
+}
+
+/// Task 3.7b (D-042): the work of a whole decision with the opponent model on, p99 by tee count, with no proposer and with a
+/// proposer the cost of the S fly (500 tee-ticks) inside the cap, the 15 ms danger extension as shipped. The bound is the spec's:
+/// p99 <= 5 ms of work at 2 tees (work = tee-ticks x 1.25 us, the proposer's units included).
+///
+/// ```text
+/// cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture mirror_work_report
+/// ```
+#[test]
+#[ignore = "heavy; needs the Copy Love Box map"]
+fn mirror_work_report() {
+    let Some(map) = clb() else {
+        eprintln!("no Copy Love Box map; skipping");
+        return;
+    };
+    let n: usize = std::env::var("DDAI_SPEED_DECISIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(800);
+    println!(
+        "\n| tees | opponent model | proposer | work ms p50 / p90 / p99 / max | candidates p50 | extended |\n|---|---|---|---|---|---|"
+    );
+    let mut worst_two_tee_p99 = 0.0f64;
+    for tees in [2usize, 4, 6] {
+        for mirror in [false, true] {
+            for (pname, units) in [("none", 0u64), ("fly-cost 500", 500)] {
+                let mut cfg = deadline(4.0, 1, true, if units > 0 { 3 } else { 0 });
+                cfg.work_clock_us_per_tick = Some(WORK_US_PER_TEE_TICK);
+                cfg.mirror = mirror;
+                let proposer: Box<dyn Proposer> = if units > 0 {
+                    Box::new(Costly { units })
+                } else {
+                    Box::new(NoProposer)
+                };
+                let mut r = run(&map, &cfg, proposer, tees, n);
+                // The proposer's units are work too (`total_ticks` leaves them out): add them to every decision.
+                let extra = units as f64;
+                let work = |v: &Vec<f64>| -> Vec<f64> { v.iter().map(|t| t + extra).collect() };
+                let mut w = work(&r.tee_ticks);
+                let ms = |v: &mut Vec<f64>, p: f64| pct(v, p) * WORK_US_PER_TEE_TICK / 1000.0;
+                let p99 = ms(&mut w, 99.0);
+                if tees == 2 && mirror {
+                    worst_two_tee_p99 = worst_two_tee_p99.max(p99);
+                }
+                println!(
+                    "| {tees} | {} | {pname} | {:.2} / {:.2} / {:.2} / {:.2} | {:.0} | {:.1}% |",
+                    if mirror { "on" } else { "off" },
+                    ms(&mut w, 50.0),
+                    ms(&mut w, 90.0),
+                    p99,
+                    ms(&mut w, 100.0),
+                    pct(&mut r.cands, 50.0),
+                    100.0 * r.extended as f64 / r.decisions.max(1) as f64
+                );
+            }
+        }
+    }
+    assert!(
+        worst_two_tee_p99 <= 5.0,
+        "work p99 at 2 tees with the opponent model is {worst_two_tee_p99:.2} ms, above the 5 ms of D-042"
+    );
+}

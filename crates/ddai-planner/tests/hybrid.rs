@@ -268,6 +268,8 @@ fn an_idle_crowd_outside_the_threat_radius_is_not_simulated() {
         let cfg = HybridConfig {
             proposals: 0,
             max_sim_tees: cap,
+            // The step clock charges every read; the budget arithmetic of this test is about the crowd, not the opponent model.
+            mirror: false,
             ..HybridConfig::default()
         };
         let mut b = HybridBrain::new(cfg, ClockKind::Step { step_ms: 0.01 }, Box::new(NoProposer)).unwrap();
@@ -1064,6 +1066,8 @@ fn the_decision_cap_shortens_the_search_by_the_shield_reserve_of_many_tees() {
             proposals: 0,
             decision_cap_ms: cap,
             shield_reserve_ms_per_tee: reserve,
+            // The arithmetic of the cap, without the opponent model's share of it (task 3.7b: tested apart).
+            mirror: false,
             ..HybridConfig::default()
         };
         let map = hall();
@@ -1147,7 +1151,7 @@ fn work_clock_decisions_are_bit_identical_for_1_2_and_4_workers() {
     // the action, the work counters, the candidate counts, every time the clock reads (it is a
     // counter of finished work) -- must equal the single-thread run, in every mode of the search.
     type Tweak = fn(&mut HybridConfig);
-    let variants: [(&str, Tweak); 5] = [
+    let variants: [(&str, Tweak); 7] = [
         ("plain 4 ms", |_| ()),
         ("12 ms: CEM, stage 2 and the extension", |c| {
             c.mode = HybridMode::Deadline { budget_ms: 12.0 };
@@ -1168,6 +1172,11 @@ fn work_clock_decisions_are_bit_identical_for_1_2_and_4_workers() {
             c.robust.max_relevant = 4;
             c.robust.max_combos = 4;
         }),
+        ("opponent model, 8 samples", |c| {
+            c.mirror = true;
+            c.mirror_samples = 8;
+        }),
+        ("no opponent model (the victim holds its input)", |c| c.mirror = false),
     ];
     let mut hits_total = 0u32;
     for (name, tweak) in variants {
@@ -1276,8 +1285,16 @@ fn a_decision_that_returns_early_leaves_no_verdict_behind() {
 #[test]
 fn the_proposers_time_comes_off_the_search_budget() {
     // 800 tee-ticks x 1.25 us = 1.0 ms of proposal. Four tees: shield reserve 4 x 0.25 = 1.0 ms. Cap 5.
-    let with =
-        |units: u64, in_cap: bool| work_decision(Box::new(Costly { units }), |c| c.proposal_in_cap = in_cap, &FOUR);
+    let with = |units: u64, in_cap: bool| {
+        work_decision(
+            Box::new(Costly { units }),
+            |c| {
+                c.proposal_in_cap = in_cap;
+                c.mirror = false;
+            },
+            &FOUR,
+        )
+    };
     let t = with(800, true);
     assert_eq!(t.work.proposal_units, 800);
     assert_eq!(t.proposal_ms, 1.0, "the work clock charges the proposer's units");
@@ -1298,11 +1315,214 @@ fn the_proposers_time_comes_off_the_search_budget() {
     assert_eq!(with(0, true).budget_ms, 4.0, "a free proposer costs nothing");
     assert_eq!(with(4000, true).budget_ms, 1.0, "never below MIN_SEARCH_MS");
     // `NoProposer` costs nothing and charges nothing, whatever the flag.
-    let none = work_decision(Box::new(NoProposer), |_| (), &FOUR);
+    let none = work_decision(Box::new(NoProposer), |c| c.mirror = false, &FOUR);
     assert_eq!(
         (none.proposal_ms, none.work.proposal_units, none.budget_ms),
         (0.0, 0, 4.0)
     );
+}
+
+#[test]
+fn the_opponent_model_predicts_the_victims_plan_and_its_search_comes_off_the_cap() {
+    // Task 3.7b: `mirror` runs a small search from the victim's seat while it is free and within the threat radius.
+    let off = work_decision(Box::new(NoProposer), |c| c.mirror = false, &TWO);
+    assert_eq!(
+        (off.work.mirror, off.mirror_first),
+        (0, None),
+        "off: no search, no prediction"
+    );
+    let on = work_decision(Box::new(NoProposer), |c| c.mirror = true, &TWO);
+    assert!(
+        on.work.mirror > 0,
+        "the victim's search is charged to the work counters"
+    );
+    assert!(on.mirror_first.is_some(), "a predicted first input");
+    // Its rollouts come off the search budget (cap 5 ms - shield reserve 0.5 ms - the model's time), never below 1 ms.
+    let mirror_ms = on.work.mirror as f64 * 2.0 * 1.25 / 1000.0;
+    assert!(
+        (on.budget_ms - (4.0f64).min(4.5 - mirror_ms)).abs() < 1e-9,
+        "budget {} after {mirror_ms} ms of opponent model",
+        on.budget_ms
+    );
+    assert!(
+        on.work.total_ticks() as f64 * 2.0 * 1.25 / 1000.0 <= 5.0 + 0.6,
+        "the decision, opponent model included, stays under the cap: {} ticks",
+        on.work.total_ticks()
+    );
+    // More samples cost more.
+    let more = work_decision(
+        Box::new(NoProposer),
+        |c| {
+            c.mirror = true;
+            c.mirror_samples = 16;
+        },
+        &TWO,
+    );
+    assert!(more.work.mirror > on.work.mirror);
+    // The telemetry JSON carries the counter only when the model ran.
+    assert!(!off.to_json().contains("\"mirror\""));
+    assert!(on.to_json().contains("\"mirror\":"));
+    // A fight against several (another free opponent within the radius) is a defence, not a duel: no model.
+    let crowd = work_decision(Box::new(NoProposer), |c| c.mirror = true, &FOUR);
+    assert_eq!((crowd.work.mirror, crowd.mirror_first), (0, None));
+    // A victim outside the threat radius is not modelled (nothing it does can reach us within the plan).
+    let far = work_decision(
+        Box::new(NoProposer),
+        |c| c.mirror = true,
+        &[(0, 3.5, 9.5), (1, 36.5, 9.5)],
+    );
+    assert_eq!((far.work.mirror, far.mirror_first), (0, None));
+}
+
+/// Slot 0 = the hybrid, slot 1 = `opponent` (an idle tee or the scripted attacker) on the work clock: per decision the telemetry
+/// of slot 0 (`mirror_first` is `Some` while the opponent model's plan is used).
+fn mirror_use(opponent_idle: bool, decisions: usize) -> Vec<bool> {
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    // Two tees on the safe side of the hall, 7 tiles apart (the freeze pit is at x = 20..25).
+    place(&mut pw, &[(0, 4.5, 9.5), (1, 11.5, 9.5)]);
+    let ids = [0, 1];
+    let cfg = HybridConfig {
+        mode: HybridMode::Deadline { budget_ms: 4.0 },
+        proposals: 0,
+        work_clock_us_per_tick: Some(1.25),
+        ..HybridConfig::default()
+    };
+    let mut hybrid = HybridBrain::new(cfg, ClockKind::Wall, Box::new(NoProposer)).unwrap();
+    reset(&mut hybrid, &map, 0, 7);
+    let mut other: Box<dyn Brain> = if opponent_idle {
+        Box::new(ddai_brain::IdleBrain)
+    } else {
+        Box::new(ScriptedBrain::new())
+    };
+    reset(&mut *other, &map, 1, 100);
+    let mut last = [empty_input(), empty_input()];
+    let mut used = Vec::new();
+    for _ in 0..decisions {
+        let world = pw.inner().clone();
+        for (slot, &id) in ids.iter().enumerate() {
+            let obs = observation(&world, &map, id, &ids, 1 - id);
+            let view = WorldView {
+                world: &world,
+                self_id: id,
+                lag_ticks: 0,
+                in_flight: &[],
+            };
+            let action = if slot == 0 {
+                let a = hybrid.decide_in(&obs, Some(&view));
+                if let Some(t) = hybrid.last_decision() {
+                    used.push(t.mirror_first.is_some());
+                }
+                a
+            } else {
+                other.decide_in(&obs, Some(&view))
+            };
+            last[slot] = input_from_action(&action, &last[slot]);
+        }
+        for _ in 0..2 {
+            for (slot, &id) in ids.iter().enumerate() {
+                pw.set_input(id, last[slot]);
+            }
+            pw.step();
+        }
+    }
+    used
+}
+
+#[test]
+fn the_opponent_model_is_skipped_for_an_idle_opponent_and_kept_for_an_attacker() {
+    // A victim that stands with a neutral direction and no hook out for six decisions in a row is passive: "it keeps its input" is
+    // right for it, and the model that expects an attack would only make us play away from a victim that never comes. It costs
+    // nothing then; an attacker keeps the model in use.
+    let idle = mirror_use(true, 40);
+    assert!(
+        idle[..5].iter().all(|&u| u),
+        "the model is used until the victim has been passive for a while"
+    );
+    assert!(
+        idle[8..].iter().all(|&u| !u),
+        "idle: the plan is not used once the victim has been passive for six decisions: {idle:?}"
+    );
+    let attacker = mirror_use(false, 40);
+    assert!(
+        attacker.iter().filter(|&&u| u).count() * 10 >= attacker.len() * 8,
+        "an attacker keeps the model in use: {attacker:?}"
+    );
+}
+
+/// One decision of slot 0 on a step clock (every clock read costs `step_ms`), the opponent model on, two tees on the safe side.
+fn step_decision(step_ms: f64) -> ddai_planner::hybrid::DecisionTelemetry {
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &[(0, 4.5, 9.5), (1, 11.5, 9.5)]);
+    let world = pw.inner().clone();
+    let cfg = HybridConfig {
+        mode: HybridMode::Deadline { budget_ms: 4.0 },
+        proposals: 0,
+        ..HybridConfig::default()
+    };
+    let mut b = HybridBrain::new(cfg, ClockKind::Step { step_ms }, Box::new(NoProposer)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let obs = observation(&world, &map, 0, &[0, 1], 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let _ = b.decide_in(&obs, Some(&view));
+    b.last_decision().expect("telemetry").clone()
+}
+
+#[test]
+fn the_opponent_models_search_is_cut_by_its_deadline_and_the_decision_still_completes() {
+    // Task 3.7b review F2: under a cap the model's search stops at its deadline (at most 2 ms) and the best plan so far is used.
+    let slow = step_decision(0.05);
+    assert!(slow.mirror_cut, "a slow clock cuts the model's search");
+    assert!(
+        slow.mirror_ms > 0.0 && slow.mirror_ms < 2.5,
+        "it stopped near its deadline: {} ms",
+        slow.mirror_ms
+    );
+    assert!(
+        slow.chosen.is_some(),
+        "the decision completes without or with a partial prediction"
+    );
+    assert!(slow.to_json().contains("\"mirror_cut\":true"));
+    let fast = step_decision(0.0001);
+    assert!(
+        !fast.mirror_cut && fast.mirror_first.is_some(),
+        "a fast clock leaves it alone"
+    );
+    assert!(fast.to_json().contains("\"mirror_ms\":"));
+    // On the work clock the search has no deadline, whatever it costs: the arena's games stay deterministic.
+    let work = work_decision(Box::new(NoProposer), |c| c.mirror_samples = 400, &TWO);
+    assert!(!work.mirror_cut && work.work.mirror > 0);
+    assert!(
+        work.mirror_ms > 2.0,
+        "the model ran past its wall-clock deadline of 2 ms on the work clock: {} ms",
+        work.mirror_ms
+    );
+    assert!((work.mirror_ms - work.work.mirror as f64 * 2.0 * 1.25 / 1000.0).abs() < 1e-9);
+}
+
+#[test]
+fn the_opponent_model_makes_the_same_game_twice() {
+    let run = || {
+        drive(
+            {
+                let mut c = fixed_cfg(1);
+                c.mirror = true;
+                c
+            },
+            ClockKind::Wall,
+            &TWO,
+            20,
+        )
+    };
+    let (a, b) = (run(), run());
+    assert_eq!(a, b, "the same game twice");
+    assert!(a.iter().any(|(_, t)| !t.is_empty()));
 }
 
 #[test]

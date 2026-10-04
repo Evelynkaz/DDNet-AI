@@ -96,6 +96,10 @@ pub struct BrainOptions {
     /// Task 3.7a (D-080): the proposer's time comes off the hybrid's decision cap (`HybridConfig::proposal_in_cap`);
     /// `false` only for the before/after comparison of E-012.
     pub proposal_in_cap: bool,
+    /// Task 3.7b (D-090): the hybrid's opponent model (`HybridConfig::mirror`: a small search from the victim's seat predicts its
+    /// plan). On by default; `--hybrid-mirror off` is the way back to "the victim holds its input" (it was built and measured against
+    /// planners, scripted bots and idle/wandering/hook-spamming tees, not yet against people).
+    pub hybrid_mirror: bool,
     pub seed: u64,
 }
 
@@ -135,6 +139,7 @@ impl Default for BrainOptions {
             fly_bundle: None,
             search_threads: Some(1),
             proposal_in_cap: true,
+            hybrid_mirror: true,
             seed: 1,
         }
     }
@@ -148,6 +153,16 @@ pub enum BrainError {
     Fly(String),
 }
 
+/// The live hybrid's configuration: the library defaults plus what the options set.
+pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
+    HybridConfig {
+        workers: opts.search_threads.unwrap_or_else(auto_search_threads_here).max(1),
+        proposal_in_cap: opts.proposal_in_cap,
+        mirror: opts.hybrid_mirror,
+        ..HybridConfig::default()
+    }
+}
+
 /// Builds the brain. Not `Send`: the planner holds `Rc`s, so build it on the thread that plays.
 pub fn make_brain(kind: BrainKind, opts: &BrainOptions) -> Result<Box<dyn Brain>, BrainError> {
     Ok(match kind {
@@ -156,12 +171,7 @@ pub fn make_brain(kind: BrainKind, opts: &BrainOptions) -> Result<Box<dyn Brain>
                 Some(_) => Box::new(FlyProposer::new(make_bundle_fly(opts)?, opts.seed)),
                 None => Box::new(NoProposer),
             };
-            let cfg = HybridConfig {
-                workers: opts.search_threads.unwrap_or_else(auto_search_threads_here).max(1),
-                proposal_in_cap: opts.proposal_in_cap,
-                ..HybridConfig::default()
-            };
-            Box::new(HybridBrain::new(cfg, ClockKind::Wall, proposer).map_err(BrainError::Hybrid)?)
+            Box::new(HybridBrain::new(hybrid_config(opts), ClockKind::Wall, proposer).map_err(BrainError::Hybrid)?)
         }
         BrainKind::Planner => Box::new(PlannerBrain::new(PlannerBrainConfig {
             preset: opts.planner_preset,
@@ -284,6 +294,20 @@ mod tests {
             Some(1),
             "the library default is one thread"
         );
+    }
+
+    #[test]
+    fn the_hybrid_opponent_model_follows_the_option() {
+        assert!(BrainOptions::default().hybrid_mirror, "on by default");
+        assert!(hybrid_config(&BrainOptions::default()).mirror);
+        for on in [true, false] {
+            let opts = BrainOptions {
+                hybrid_mirror: on,
+                ..BrainOptions::default()
+            };
+            assert_eq!(hybrid_config(&opts).mirror, on);
+            make_brain(BrainKind::Hybrid, &opts).expect("hybrid builds either way");
+        }
     }
 
     #[test]

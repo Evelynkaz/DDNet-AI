@@ -64,6 +64,9 @@ const STEAL_AFTER: Duration = Duration::from_micros(300);
 /// rollout (a rollout checks the deadline every plan step, ~10 us), then leaves them behind (ms).
 const DEADLINE_GRACE_MS: f64 = 0.15;
 
+/// Stack of a helper thread: a rollout keeps world-sized values on it, and the 2 MiB default is close to what one needs.
+const HELPER_STACK_BYTES: usize = 16 << 20;
+
 /// `announce` value that tells spinning helpers to quit.
 const SHUTDOWN: u64 = u64::MAX;
 
@@ -80,6 +83,8 @@ pub struct Ctx {
     pub victim_id: i32,
     pub prev: PlayerInput,
     pub victim_input: PlayerInput,
+    /// Task 3.7b: the victim's predicted input per plan step (`HybridConfig::mirror_samples`); empty = it holds `victim_input`.
+    pub victim_plan: Vec<PlayerInput>,
     pub opp_seed: u32,
     pub field: Arc<HazardField>,
     pub unfreeze: Arc<HazardField>,
@@ -238,6 +243,7 @@ impl Worker {
         sv.clone_from(&ctx.spare_vels);
         self.planner.set_travel_goal(ctx.travel_goal);
         self.planner.threats.clone_from(&ctx.threats);
+        self.planner.set_predicted(&ctx.victim_plan);
         self.planner.cfg_mut().self_freeze_bias = self.base_bias * ctx.self_freeze_bias;
         self.self_id = ctx.self_id;
         self.victim_id = ctx.victim_id;
@@ -660,6 +666,8 @@ impl Engine {
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("hybrid-eval-{}", i + 1))
+                    // A rollout works on a world-sized snapshot; the default 2 MiB leaves little margin (3.7b review F1).
+                    .stack_size(HELPER_STACK_BYTES)
                     .spawn(move || helper_loop(&sh, &mut w))
                     .expect("spawn hybrid worker"),
             );
@@ -730,6 +738,28 @@ impl Engine {
         fresh.generation += 1;
         *slot = Arc::new(fresh);
         r
+    }
+
+    /// Task 3.7b: the context of the decision just made (kept by the loss diagnosis to score its plans later).
+    pub fn debug_ctx(&self) -> Arc<Ctx> {
+        self.shared.ctx()
+    }
+
+    /// Task 3.7b: scores `plans` in the decision `ctx` with the opponent's inputs given per plan step (`predicted`)
+    /// instead of the model combinations: what the evaluator would have said had it known them. The worker is left
+    /// loaded with that older decision, which the next decision's generation replaces.
+    pub fn debug_eval_predicted(
+        &mut self,
+        ctx: &Ctx,
+        plans: &[&[PlanStep]],
+        predicted: &[PlayerInput],
+    ) -> Vec<Option<EvalResult>> {
+        self.worker0.load(ctx);
+        self.worker0.planner.set_predicted(predicted);
+        let out = plans.iter().map(|p| self.worker0.eval(p, 0, None).res).collect();
+        self.worker0.planner.set_predicted(&[]);
+        self.worker0.invalidate();
+        out
     }
 
     /// Scores every job of `batch` into `out` (index-aligned with `batch.jobs`). `clock` and
@@ -1012,6 +1042,7 @@ mod pool_tests {
             victim_id: 1,
             prev: crate::types::empty_input(),
             victim_input: crate::types::empty_input(),
+            victim_plan: vec![],
             opp_seed: 7,
             field: Arc::new(hazard_field(pw.collision())),
             unfreeze: Arc::new(unfreeze_field(pw.collision())),

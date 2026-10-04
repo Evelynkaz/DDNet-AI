@@ -188,6 +188,8 @@ fn a_local_start_with_two_sparring_writes_the_env_the_dropin_and_runs_the_comman
     assert!(env.contains("BOT_NAME=\"Muha\"\n"), "{env}");
     assert!(env.contains("BOT_BRAIN=\"hybrid\"\n"), "{env}");
     assert!(env.contains("BOT_DURATION=\"3600\"\n"), "{env}");
+    // No `mirror` in the request: the opponent model stays on (D-090).
+    assert!(env.contains("BOT_HYBRID_MIRROR=\"on\"\n"), "{env}");
     assert!(
         env.contains(&format!("BOT_FLY_ARGS=\"--fly-bundle {}\"\n", bundle.display())),
         "{env}"
@@ -235,6 +237,42 @@ fn plain_hybrid_has_no_bundle_argument_and_unlimited_means_duration_zero() {
     );
     assert_eq!(rig.actions().last().unwrap(), "start ddnet-ai-bot.service");
     assert_eq!(rig.status()["bundle"], Value::Null);
+}
+
+#[test]
+fn the_opponent_model_switch_is_written_from_a_closed_list() {
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["mirror"] = json!("off");
+    assert!(rig.send(&body).status.success());
+    let env = rig.env_file();
+    assert!(env.contains("BOT_HYBRID_MIRROR=\"off\"\n"), "{env}");
+    // An explicit `on` is written as `on`; a rewritten start replaces the file.
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["mirror"] = json!("on");
+    assert!(rig.send(&body).status.success());
+    assert!(rig.env_file().contains("BOT_HYBRID_MIRROR=\"on\"\n"));
+    // Anything else (or a mirror on a stop) is refused and changes nothing.
+    for bad in [
+        json!("maybe"),
+        json!("ON"),
+        json!(true),
+        json!("off; rm -rf /"),
+        json!(""),
+    ] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["mirror"] = bad.clone();
+        let out = rig.send(&body);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(reason(&rig.status()), "bad_request", "{bad}");
+        assert!(rig.actions().is_empty(), "{bad}: {:?}", rig.actions());
+    }
+    let rig = Rig::new();
+    let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop","mirror":"off"}));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(reason(&rig.status()), "bad_request");
 }
 
 #[test]

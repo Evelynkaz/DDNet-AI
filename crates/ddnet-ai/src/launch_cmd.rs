@@ -28,8 +28,9 @@ use clap::{Args, Subcommand};
 use ddai_client::live_servers::{LiveServers, is_loopback};
 use ddai_web::launch::{
     Action, Brain, DurationChoice, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_REQUEST_BYTES,
-    MAX_SPARRING, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, State as RunState, bundle_run_name,
-    parse_request, read_regular_nofollow, read_regular_nofollow_with_mtime, request_is_fresh, unix_now, write_atomic,
+    MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, State as RunState,
+    bundle_run_name, parse_request, read_regular_nofollow, read_regular_nofollow_with_mtime, request_is_fresh,
+    unix_now, write_atomic,
 };
 use serde::{Deserialize, Serialize};
 
@@ -231,6 +232,8 @@ struct Plan {
     duration: DurationChoice,
     sparring: u8,
     bundle: Option<PathBuf>,
+    /// The hybrid's opponent model (`on` unless the request says `off`, D-090).
+    mirror: Mirror,
 }
 
 fn valid_nick(nick: &str) -> bool {
@@ -362,6 +365,7 @@ fn decide(
         duration,
         sparring,
         bundle,
+        mirror: req.mirror.unwrap_or(Mirror::On),
     })
 }
 
@@ -396,6 +400,7 @@ fn render_env(id: &str, plan: &Plan) -> Result<String, Refuse> {
     out += &env_line("BOT_BRAIN", plan.brain.play_brain())?;
     out += &env_line("BOT_DURATION", &plan.duration.seconds().to_string())?;
     out += &env_line("BOT_FLY_ARGS", &fly_args)?;
+    out += &env_line("BOT_HYBRID_MIRROR", plan.mirror.flag_value())?;
     Ok(out)
 }
 
@@ -952,6 +957,7 @@ mod tests {
             server: Some(server.to_string()),
             duration: Some(DurationChoice::M15),
             sparring: Some(0),
+            mirror: None,
         }
     }
 
@@ -1182,6 +1188,15 @@ mod tests {
         assert!(
             env.contains("BOT_FLY_ARGS=\"\"\n") && env.contains("BOT_DURATION=\"0\"\n"),
             "{env}"
+        );
+        // The opponent model is on unless the request says off (D-090); only `on` / `off` are ever written.
+        assert!(env.contains("BOT_HYBRID_MIRROR=\"on\"\n"), "{env}");
+        r.mirror = Some(Mirror::Off);
+        let plan = decide_with(&r, &LiveServers::default(), Some(&State::default()), 0, 1000).unwrap();
+        assert!(
+            render_env("0123456789abcdef", &plan)
+                .unwrap()
+                .contains("BOT_HYBRID_MIRROR=\"off\"\n")
         );
         // Anything outside the closed character set is refused, never written.
         assert!(env_line("K", "[2001:db8::1]:8308").is_ok());

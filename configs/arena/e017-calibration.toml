@@ -1,0 +1,40 @@
+# work-clock: default-rate
+# Task 3.7b (E-017 section 1): how much does more search buy at all? (a) the hybrid with 20 ms of work, no decision cap and a
+# CEM of 40 samples x 3 iterations (the planner's is 20 x 2: six times the CEM samples, and the pool of E-012's 12 ms row is far
+# exhausted) against the fixed planner; (b) the fixed planner against itself (the seat/layout symmetry check: it must be 50%).
+# 200 games per hall, same seeds and layouts as every E-010/E-012/E-017 arm. The hybrid arms hold the opponent model OFF (`mirror = false`: they were
+# run before it became the default), so the config reproduces them.
+#   ddnet-ai arena run --config configs/arena/e017-calibration.toml --out ~/aiddnet/data/runs/E-017/calib --threads 3
+name = "E-017: search-size calibration"
+base_seed = 1
+games = 200
+
+[[condition]]
+name = "clb-left: hybrid 20 ms WORK cem 40x3 vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 20.0, hybrid = { decision_cap_ms = 0, mirror = false, cem_population = 40, cem_iterations = 3 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 20 ms WORK cem 40x3 vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 20.0, hybrid = { decision_cap_ms = 0, mirror = false, cem_population = 40, cem_iterations = 3 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 20 ms WORK cem 40x3 vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 20.0, hybrid = { decision_cap_ms = 0, mirror = false, cem_population = 40, cem_iterations = 3 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: planner fixed vs planner fixed"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: planner fixed vs planner fixed"
+arena = "clb-right"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: planner fixed vs planner fixed"
+arena = "chillblock5-ruler"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "planner", mode = "fixed" }]

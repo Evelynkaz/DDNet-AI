@@ -66,6 +66,13 @@ impl TeacherPlanner {
         self.brain.set_prev_input(prev);
     }
 
+    /// The plan behind the last label (task 3.7b, the loss diagnosis): the planner's best plan, `None` when the last
+    /// label did not search (no target, a dead tee).
+    pub fn last_plan(&mut self) -> Option<Vec<crate::planner::PlanStep>> {
+        let planner = self.brain.planner_mut();
+        planner.last_info.searched.then(|| planner.warm.clone()).flatten()
+    }
+
     /// Labels the state of `view` (the exact arena world). `obs` supplies the target choice
     /// (`Observation::target_or_nearest`, like `PlannerBrain`). Without a target the label is the
     /// neutral action.
