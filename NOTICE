@@ -45,8 +45,11 @@ The TypeScript files under tools/ts-reference are the retained part of the
 original project (Wranked1/DDNet-AI, GPL-3.0): they are kept unmodified only
 so that the parity tooling in tools/ts-trace can run them. They depend on one
 npm package, teeworlds (MIT), which is installed from the npm registry and
-keeps its own license, found in the package. No DDNet graphics or sounds are
-part of this repository.
+keeps its own license, found in the package. No DDNet graphics or sound files
+are part of this repository. The README screenshots in docs/img/ show fragments
+of DDNet graphics (map tilesets, skins, font) rendered by the bot's web page;
+they are distributed under CC BY-SA 3.0 with attribution to DDNet and
+Teeworlds (ddnet.org), see docs/img/README.md.
 
 ------------------------------------------------------------------------
 crates/ddai-web: the game view (ddmap.js, ddtee.js, game.js) and ddai-map's scene reader
