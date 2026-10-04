@@ -49,6 +49,40 @@ keeps its own license, found in the package. No DDNet graphics or sounds are
 part of this repository.
 
 ------------------------------------------------------------------------
+crates/ddai-web: the game view (ddmap.js, ddtee.js, game.js) and ddai-map's scene reader
+------------------------------------------------------------------------
+
+crates/ddai-web/assets/{ddmap,ddtee,game}.js and crates/ddai-map/src/scene.rs
+draw and read DDNet maps the way the DDNet 20.1 client does (game/map/
+map_renderer.cpp, render_layer.cpp, render_map.cpp, engine/graphics.cpp,
+game/client/components/players.cpp, animstate.cpp, freezebars.cpp, nameplates.cpp,
+datasrc/content.py) and are altered ports of that code (zlib license, the
+DDNet notice above applies; these are not the original software). The camera,
+parallax, animation key frames, sprite grids and the scoreboard and HUD metrics
+also follow src/bot/webView.ts, webDraw.ts and webMap.ts of the original
+project (Wranked1/DDNet-AI, GPL-3.0; the files are altered).
+
+The graphics the page draws with (game.png, hud.png, emoticons.png, extras.png,
+particles.png, arrow.png, the entities tilesets, the skins in skins/, the
+external map images in mapres/, DejaVuSans.ttf) are DDNet's, licensed
+CC BY-SA 3.0 (the DDNet data directory carries its own license files). They
+are NOT part of this repository: the web unit serves them at runtime, after
+login, from a local DDNet 20.1 data directory (--ddnet-data), and the page
+credits DDNet for them.
+
+The small icons inline in crates/ddai-web/assets/index.html (server, gamepad-2,
+sliders-horizontal, star, scroll-text, maximize-2, map, users, user-round) are
+Lucide icons (https://lucide.dev), ISC License, Copyright (c) 2026 Lucide Icons
+and Contributors: Permission to use, copy, modify, and/or distribute this
+software for any purpose with or without fee is hereby granted, provided that
+the above copyright notice and this permission notice appear in all copies.
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. (`server` and `maximize-2` are derived from Feather, MIT License,
+Copyright (c) 2013-present Cole Bemis.) The same set is used by the original
+project's page.
+
+------------------------------------------------------------------------
 crates/ddai-jsmath: V8 / fdlibm
 ------------------------------------------------------------------------
 

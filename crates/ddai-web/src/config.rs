@@ -73,6 +73,10 @@ pub struct WebConfig {
     pub relations_path: PathBuf,
     /// Task 5.8: the training runs the «Обучение» tab reads (read-only), default `<data-dir>/runs`.
     pub runs_dir: PathBuf,
+    /// Task 5.10: the DDNet data directory (`data/` of a DDNet 20.1 install or build) the game view's graphics are served
+    /// from at `/assets/...` (`http::ddnet_assets`), read-only. `None`: the page draws without them (flat tees, no external
+    /// map images). Never copied into the repository.
+    pub ddnet_data_dir: Option<PathBuf>,
     /// Task 5.9: the launcher's directory (D-089): the web writes `request.json` here (the status is in
     /// `status_dir`); the root helper (`ddnet-ai launch apply`) consumes it. Default `<data-dir>/launch`.
     pub launch_dir: PathBuf,
@@ -126,6 +130,7 @@ impl WebConfig {
             control_socket: data_dir.join("bot").join("control.sock"),
             relations_path: data_dir.join("bot").join("relations.json"),
             runs_dir: data_dir.join("runs"),
+            ddnet_data_dir: None,
             launch_dir: data_dir.join("launch"),
             status_dir: PathBuf::from(crate::launch::DEFAULT_STATUS_DIR),
             launch_min_gap: Duration::from_secs(2),

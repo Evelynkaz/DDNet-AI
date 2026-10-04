@@ -5,6 +5,7 @@
 //! for the architecture.
 
 pub mod bot_source;
+pub mod chat;
 pub mod fly;
 pub mod frame;
 pub mod hub;
@@ -13,3 +14,4 @@ pub mod mux;
 pub mod replay;
 pub mod scene;
 pub mod source;
+pub mod visual_scene;

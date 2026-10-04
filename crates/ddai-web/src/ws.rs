@@ -14,6 +14,7 @@ use tokio::sync::broadcast;
 use tokio::time::{interval, interval_at};
 
 use crate::auth::session::SessionId;
+use crate::live::chat::ChatLine;
 use crate::live::hub::{FlySubscription, HubEvent, LiveHub};
 use crate::live::source::{GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus, SourceKind};
 use crate::session_guard::{current_session, request_is_same_origin};
@@ -71,6 +72,15 @@ struct PlayerMsg {
     id: u8,
     name: String,
     team: u8,
+    // Task 5.10 (`docs/formats.md` §35): the clan, the skin, DDNet's packed custom colours, the country, the scoreboard numbers.
+    clan: String,
+    skin: String,
+    cc: bool,
+    cb: i32,
+    cf: i32,
+    country: i32,
+    score: i32,
+    ping: i32,
 }
 
 impl From<PlayerMeta> for PlayerMsg {
@@ -79,6 +89,38 @@ impl From<PlayerMeta> for PlayerMsg {
             id: p.id,
             name: p.name,
             team: p.team,
+            clan: p.clan,
+            skin: p.skin,
+            cc: p.custom_color,
+            cb: p.color_body,
+            cf: p.color_feet,
+            country: p.country,
+            score: p.score,
+            ping: p.ping,
+        }
+    }
+}
+
+/// One chat line on the wire (task 5.10, `docs/formats.md` §35): already sanitised by `live::chat`; the page writes it with
+/// `textContent` only. `id` is the sender's client id (`null` for the server), `kind` one of `all`, `team`, `whisper_to`,
+/// `whisper_from`, `system`, `at` the time the web unit received it (ms since the Unix epoch).
+#[derive(Debug, Serialize)]
+struct ChatLineMsg {
+    kind: &'static str,
+    id: Option<u8>,
+    name: String,
+    text: String,
+    at: u64,
+}
+
+impl From<ChatLine> for ChatLineMsg {
+    fn from(l: ChatLine) -> Self {
+        ChatLineMsg {
+            kind: l.kind.as_str(),
+            id: l.id,
+            name: l.name,
+            text: l.text,
+            at: l.at_ms,
         }
     }
 }
@@ -147,6 +189,14 @@ enum ServerMessage {
         events: Vec<EventMsg>,
     },
     ReplayStatus(ReplayStatusMsg),
+    /// Task 5.10: one new chat line.
+    Chat {
+        line: ChatLineMsg,
+    },
+    /// Task 5.10: the lines the web process remembers (sent on connect and after a lag); the page replaces its list.
+    ChatHistory {
+        lines: Vec<ChatLineMsg>,
+    },
     /// Task 4.1: the live bot's status (`docs/formats.md` §21): target, mode, counters, latency.
     Bot {
         status: serde_json::Value,
@@ -181,6 +231,9 @@ fn hub_event_to_server_message(event: &HubEvent) -> ServerMessage {
             events: events.iter().copied().map(EventMsg::from).collect(),
         },
         HubEvent::ReplayStatus(status) => ServerMessage::ReplayStatus(status.clone().into()),
+        HubEvent::Chat(line) => ServerMessage::Chat {
+            line: line.clone().into(),
+        },
         HubEvent::BotStatus(json) => ServerMessage::Bot {
             status: serde_json::from_str(json).unwrap_or(serde_json::Value::Null),
         },
@@ -319,6 +372,16 @@ async fn send_snapshot(socket: &mut WebSocket, hub: &LiveHub, shown_generation: 
             socket,
             &ServerMessage::Players {
                 list: players.into_iter().map(PlayerMsg::from).collect(),
+            },
+        )
+        .await?;
+    }
+    let chat = hub.latest_chat();
+    if !chat.is_empty() {
+        send_json(
+            socket,
+            &ServerMessage::ChatHistory {
+                lines: chat.into_iter().map(ChatLineMsg::from).collect(),
             },
         )
         .await?;

@@ -32,10 +32,12 @@ mod datafile;
 mod error;
 mod loader;
 mod mapitems;
+pub mod scene;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testutil;
 
 pub use error::MapError;
+pub use scene::{VisualScene, extract_visual_scene, extract_visual_scene_within};
 
 use ddai_physics::map::MapData;
 use sha2::{Digest, Sha256};

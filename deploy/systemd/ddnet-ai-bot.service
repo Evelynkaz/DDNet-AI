@@ -20,6 +20,9 @@
 # The console is off (no stdin, --no-console), but the web control channel is on (control.sock in data/bot, task 5.6): the owner commands the
 # bot from the site's Bot tab (closed command list, rate-limited, audited; the one chat it can carry is a line the owner types there, D-094, switched off with --no-owner-chat, owner_chat = false or the marker file data/bot/owner-chat.off). The bot's logs carry tags `c<id>-<hash>`, never other players'
 # nicknames (D-067); the bot's own nick is not logged either.
+# `--web-names` (D-093, owner's decision under D-040): the bridge to the web unit carries real nicknames, clans and chat text, so the
+# password-protected site shows readable chat and a readable scoreboard. The web keeps them in memory only (never on disk, never
+# logged, chat is cleared when the source changes); this unit's own log and the report still carry tags only.
 
 [Unit]
 Description=DDNet-AI bot (hybrid brain; local server only until the owner opens a public one, D-043)
@@ -45,7 +48,7 @@ Environment=BOT_BRAIN=hybrid
 Environment=BOT_DURATION=0
 Environment=BOT_HYBRID_MIRROR=on
 EnvironmentFile=-/etc/ddnet-ai/bot-launch.env
-ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} --hybrid-mirror ${BOT_HYBRID_MIRROR} $BOT_FLY_ARGS --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} --hybrid-mirror ${BOT_HYBRID_MIRROR} $BOT_FLY_ARGS --no-console --web-names --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
 # The stop hook runs as root (`+`), and a failure of it never fails the unit (`-`): it records how the bot ended (kick/ban memory
 # for a public server, the status the site shows) and removes the one-run environment file. The binary is the root-owned copy
 # that deploy/install-launcher.sh installs.

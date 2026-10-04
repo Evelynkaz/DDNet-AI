@@ -54,6 +54,8 @@ mod kind {
     pub const STATUS: u8 = 5;
     pub const FLYMETA: u8 = 6;
     pub const FLY: u8 = 7;
+    pub const CHAT: u8 = 8;
+    pub const PLAYERINFO: u8 = 9;
 }
 
 /// What this source says to the bot: a subscription (`ddai_bot::bridge::client_kind::SUBSCRIBE`).
@@ -83,6 +85,69 @@ struct PlayerEntry {
 struct PlayersMsg {
     #[serde(default)]
     list: Vec<PlayerEntry>,
+}
+
+/// One `PLAYERINFO` entry (task 5.10): how a player looks and their numbers. Every field but the id may be missing.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct InfoEntry {
+    id: i32,
+    #[serde(default)]
+    clan: String,
+    #[serde(default)]
+    skin: String,
+    #[serde(default)]
+    cc: bool,
+    #[serde(default)]
+    cb: i32,
+    #[serde(default)]
+    cf: i32,
+    #[serde(default)]
+    country: i32,
+    #[serde(default)]
+    score: i32,
+    #[serde(default)]
+    ping: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct InfoMsg {
+    #[serde(default)]
+    list: Vec<InfoEntry>,
+}
+
+/// `CHAT`: one line of the server's chat (task 5.10), display only.
+#[derive(Debug, Deserialize)]
+struct ChatMsg {
+    #[serde(default)]
+    team: i32,
+    #[serde(default = "no_sender")]
+    cid: i32,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    text: String,
+}
+
+fn no_sender() -> i32 {
+    -1
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// A roster entry with the look and numbers of `info` applied (the skin is kept to a plausible length; the page validates the name).
+fn apply_info(meta: &mut PlayerMeta, info: &InfoEntry) {
+    meta.clan = info.clan.chars().take(32).collect();
+    meta.skin = info.skin.chars().take(32).collect();
+    meta.custom_color = info.cc;
+    meta.color_body = info.cb;
+    meta.color_feet = info.cf;
+    meta.country = info.country;
+    meta.score = info.score;
+    meta.ping = info.ping;
 }
 
 /// The bot-socket frame source.
@@ -117,6 +182,10 @@ struct ConnState {
     meta_told: bool,
     /// A bad frame or layout was reported (one report per connection, not one per frame).
     bad_told: bool,
+    /// Task 5.10: the roster as last built from `PLAYERS`, and the newest `PLAYERINFO` per id; the two arrive separately
+    /// and a roster is only ever sent whole (a `PLAYERINFO` for an id that is not on the roster is remembered, not shown).
+    roster: Vec<PlayerMeta>,
+    info: HashMap<u8, InfoEntry>,
 }
 
 /// One message of the bot: its body (kind byte and payload), the read half handed back for the next one.
@@ -341,6 +410,8 @@ impl BotSource {
             kind::MAP => match serde_json::from_slice::<MapMsg>(payload) {
                 Ok(m) => {
                     prev.clear();
+                    fly.roster.clear();
+                    fly.info.clear();
                     let Some(sha) = parse_sha256(&m.sha256) else {
                         return send(SourceEvent::Error("the bot sent a malformed map hash".to_string())).await;
                     };
@@ -351,8 +422,9 @@ impl BotSource {
                     let cache = Arc::clone(&self.map_cache);
                     let resolved = tokio::task::spawn_blocking(move || match cache.get(&sha) {
                         Some(_) => Ok(()),
-                        None => map_resolve::resolve_by_sha256(&dirs, &hint, sha).map(|(_, scene)| {
+                        None => map_resolve::resolve_by_sha256(&dirs, &hint, sha).map(|(path, scene)| {
                             cache.insert(sha, scene);
+                            cache.insert_path(sha, path);
                         }),
                     })
                     .await;
@@ -374,21 +446,55 @@ impl BotSource {
             },
             kind::PLAYERS => match serde_json::from_slice::<PlayersMsg>(payload) {
                 Ok(p) => {
-                    let list = p
+                    let list: Vec<PlayerMeta> = p
                         .list
                         .into_iter()
                         .filter_map(|e| {
-                            Some(PlayerMeta {
-                                id: u8::try_from(e.id).ok()?,
+                            let id = u8::try_from(e.id).ok()?;
+                            let mut meta = PlayerMeta {
+                                id,
                                 name: e.name.chars().take(64).collect(),
                                 team: u8::try_from(e.team.clamp(0, 255)).unwrap_or(0),
-                            })
+                                ..PlayerMeta::default()
+                            };
+                            if let Some(info) = fly.info.get(&id) {
+                                apply_info(&mut meta, info);
+                            }
+                            Some(meta)
                         })
                         .collect();
+                    fly.roster = list.clone();
                     send(SourceEvent::Players(list)).await?;
                 }
                 Err(e) => send(SourceEvent::Error(format!("bad PLAYERS message: {e}"))).await?,
             },
+            kind::PLAYERINFO => match serde_json::from_slice::<InfoMsg>(payload) {
+                Ok(m) => {
+                    let mut changed = false;
+                    for e in m.list {
+                        let Ok(id) = u8::try_from(e.id) else { continue };
+                        if let Some(meta) = fly.roster.iter_mut().find(|r| r.id == id) {
+                            let before = meta.clone();
+                            apply_info(meta, &e);
+                            changed |= *meta != before;
+                        }
+                        fly.info.insert(id, e);
+                    }
+                    if changed {
+                        send(SourceEvent::Players(fly.roster.clone())).await?;
+                    }
+                }
+                Err(e) => send(SourceEvent::Error(format!("bad PLAYERINFO message: {e}"))).await?,
+            },
+            kind::CHAT => {
+                // A bad chat line is dropped without a word: reporting it would put its bytes into an error message.
+                if let Ok(m) = serde_json::from_slice::<ChatMsg>(payload)
+                    // The text is hostile input: cleaned and capped here (`super::chat`), never stored beyond the in-memory ring.
+                    && let Some(line) = super::chat::ChatLine::from_bridge(m.team, m.cid, &m.name, &m.text, unix_ms())
+                {
+                    send(SourceEvent::Chat(line)).await?;
+                }
+            }
             kind::FRAME => match super::frame::decode(payload) {
                 Ok(frame) => {
                     let events = diff_events(prev, &frame);

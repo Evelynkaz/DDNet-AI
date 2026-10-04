@@ -395,7 +395,7 @@ impl ReplaySource {
                 let hint = header.metadata.real_map_path.clone().unwrap_or_default();
                 let sha256 = header.metadata.map_sha256;
                 match tokio::task::spawn_blocking(move || {
-                    map_resolve::resolve_by_sha256(&search_dirs, &hint, sha256).map(|(_, scene)| scene)
+                    map_resolve::resolve_by_sha256(&search_dirs, &hint, sha256).map(|(path, scene)| (Some(path), scene))
                 })
                 .await
                 {
@@ -410,7 +410,9 @@ impl ReplaySource {
                 }
             } else {
                 let path_owned = path.to_path_buf();
-                match tokio::task::spawn_blocking(move || resolve_synthetic_map(&path_owned)).await {
+                match tokio::task::spawn_blocking(move || resolve_synthetic_map(&path_owned).map(|scene| (None, scene)))
+                    .await
+                {
                     Ok(Ok(scene)) => scene,
                     Ok(Err(e)) => return Err(format!("{}: resolving synthetic map: {e}", trace_display_name(path))),
                     Err(_join_error) => {
@@ -421,6 +423,11 @@ impl ReplaySource {
                     }
                 }
             };
+            let (map_path, resolved) = resolved;
+            // Task 5.10: where the real map file is, so the page can be sent its layers (none for a synthetic map).
+            if let Some(map_path) = map_path {
+                self.map_cache.insert_path(header.metadata.map_sha256, map_path);
+            }
             self.map_cache.insert(header.metadata.map_sha256, resolved)
         };
 
@@ -446,6 +453,7 @@ impl ReplaySource {
                 // one that could be mistaken for a real player's name.
                 name: format!("Игрок {slot}"),
                 team: 0, // refined below, once the first tick's real team value is known
+                ..PlayerMeta::default()
             })
             .collect();
         events_tx
@@ -540,6 +548,7 @@ impl ReplaySource {
                         id: slot as u8,
                         name: format!("Игрок {slot}"),
                         team: row.ddrace_team.clamp(0, 255) as u8,
+                        ..PlayerMeta::default()
                     })
                     .collect();
                 if events_tx.send(SourceEvent::Players(players)).await.is_err() {

@@ -17,6 +17,8 @@
 //! | 5 | `STATUS` | JSON, at most ~5 Hz: target, mode, brain, counters, latency percentiles, brain telemetry, and (5.6) connection, server, identity, wayblock, kill cooldown |
 //! | 6 | `FLYMETA` | (7.4) JSON, the layout of the fly's visualisation stream (`docs/formats.md` §27.2); empty: the brain has none. Only to a client subscribed to the fly stream |
 //! | 7 | `FLY` | (7.4) one binary `DFLY` v1 frame (`docs/formats.md` §27.1), decimated by the brain. Only to a client subscribed to the fly stream |
+//! | 8 | `CHAT` | (5.10) JSON `{"team","cid","name","text"}`: one line of the server's chat, for display only (`docs/formats.md` §35). Never stored here |
+//! | 9 | `PLAYERINFO` | (5.10) JSON `{"list":[{"id","clan","skin","cc","cb","cf","country","score","ping"}]}`: how each player looks and their numbers; resent while they change |
 //!
 //! **What a client may say (7.4).** The bridge is still read-only in effect: there is no control path. The one
 //! thing the bot reads from a client is a subscription, `u32 LE len | u8 kind 1 | u8 mask` (bit 0: the fly stream),
@@ -26,7 +28,9 @@
 //! drops the client.
 //!
 //! **Names.** `PLAYERS.name` is the salted-hash tag (`c12-9f3a01bc`) unless the bot was started with
-//! `--web-names`; real nicknames never leave the process otherwise (D-040, `CLAUDE.md`).
+//! `--web-names`; real nicknames never leave the process otherwise (D-040, `CLAUDE.md`). The same holds for `CHAT` (the
+//! sender is the tag, and known names and clans inside the text become tags) and for `PLAYERINFO.clan` (empty without
+//! `--web-names`).
 //!
 //! **Flow control.** Each client has a bounded output buffer; the socket is non-blocking. A client
 //! that cannot keep up — its buffer would pass [`MAX_PENDING`] — is dropped (it reconnects and gets
@@ -49,6 +53,8 @@ pub mod kind {
     pub const STATUS: u8 = 5;
     pub const FLYMETA: u8 = 6;
     pub const FLY: u8 = 7;
+    pub const CHAT: u8 = 8;
+    pub const PLAYERINFO: u8 = 9;
 }
 
 /// What a client may send: `kind`s of its messages.
@@ -167,6 +173,57 @@ pub struct PlayersMessage {
     pub list: Vec<PlayerEntry>,
 }
 
+/// One `PLAYERINFO` entry (task 5.10): how a player looks (skin and colours, from `ClientInfo`) and their live numbers
+/// (`PlayerInfo`). `clan` is empty unless real names are sent.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct PlayerInfoEntry {
+    pub id: i32,
+    pub clan: String,
+    pub skin: String,
+    /// `use_custom_color`.
+    pub cc: bool,
+    /// `color_body`, `color_feet`: DDNet's packed HSL.
+    pub cb: i32,
+    pub cf: i32,
+    pub country: i32,
+    pub score: i32,
+    pub ping: i32,
+}
+
+/// `PLAYERINFO` payload.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct PlayerInfoMessage {
+    pub list: Vec<PlayerInfoEntry>,
+}
+
+/// Most bytes of a chat line's text or name that leave the bot (DDNet's own limit is 256).
+pub const MAX_CHAT_TEXT: usize = 512;
+pub const MAX_CHAT_NAME: usize = 64;
+
+/// `s` cut to at most `max` bytes, at a character boundary.
+pub fn cut_at(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// `CHAT` payload (task 5.10): one line the server's chat showed, for the web unit to display. **Display only**: the bot
+/// never writes chat (D-007; the one exception is the typed `/kill`, D-078), and nothing here is stored or logged.
+/// `team`: 0 all, 1 team, 2 whisper sent, 3 whisper received (`CNetMsg_Sv_Chat::m_Team`); `cid`: the sender's client id,
+/// -1 for the server itself. `name` is the sender's tag (or nickname with `--web-names`), empty for the server.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub team: i32,
+    pub cid: i32,
+    pub name: String,
+    pub text: String,
+}
+
 /// `STATUS` payload.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct StatusMessage {
@@ -262,6 +319,8 @@ pub struct Bridge {
     clients: Vec<Client>,
     map_msg: Option<Vec<u8>>,
     players_msg: Option<Vec<u8>>,
+    /// The last `PLAYERINFO` message (task 5.10), what a client that connects later is greeted with after the roster.
+    player_info_msg: Option<Vec<u8>>,
     /// The `FLYMETA` message (an empty payload when the brain has no stream), sent to a client when it subscribes.
     fly_meta_msg: Option<Vec<u8>>,
     scratch: Vec<u8>,
@@ -289,6 +348,7 @@ impl Bridge {
             clients: Vec::new(),
             map_msg: None,
             players_msg: None,
+            player_info_msg: None,
             fly_meta_msg: None,
             scratch: Vec::with_capacity(8192),
             frame_buf: Vec::with_capacity(8192),
@@ -330,6 +390,9 @@ impl Bridge {
                         client.pending.extend_from_slice(m);
                     }
                     if let Some(p) = &self.players_msg {
+                        client.pending.extend_from_slice(p);
+                    }
+                    if let Some(p) = &self.player_info_msg {
                         client.pending.extend_from_slice(p);
                     }
                     if flush(&mut client) {
@@ -434,6 +497,7 @@ impl Bridge {
         self.map_msg = Some(msg.clone());
         // A new map invalidates the roster message of the old one.
         self.players_msg = None;
+        self.player_info_msg = None;
         self.broadcast(&msg);
     }
 
@@ -442,6 +506,34 @@ impl Bridge {
         let Ok(json) = serde_json::to_vec(p) else { return };
         let msg = message(kind::PLAYERS, &json);
         self.players_msg = Some(msg.clone());
+        self.broadcast(&msg);
+    }
+
+    /// How each player looks and their numbers (task 5.10). The last one is kept for a client that connects later (like the
+    /// roster), since the runner sends it only when something differs.
+    pub fn send_player_info(&mut self, m: &PlayerInfoMessage) {
+        let Ok(json) = serde_json::to_vec(m) else { return };
+        if json.len() + 1 > MAX_MESSAGE {
+            return;
+        }
+        let msg = message(kind::PLAYERINFO, &json);
+        self.player_info_msg = Some(msg.clone());
+        self.broadcast(&msg);
+    }
+
+    /// One chat line of the server's chat, to display (task 5.10). Text and name are cut at the caps; nothing is kept.
+    pub fn send_chat(&mut self, line: &ChatMessage) {
+        if self.clients.is_empty() {
+            return;
+        }
+        let line = ChatMessage {
+            team: line.team,
+            cid: line.cid,
+            name: cut_at(&line.name, MAX_CHAT_NAME).to_string(),
+            text: cut_at(&line.text, MAX_CHAT_TEXT).to_string(),
+        };
+        let Ok(json) = serde_json::to_vec(&line) else { return };
+        let msg = message(kind::CHAT, &json);
         self.broadcast(&msg);
     }
 
@@ -970,6 +1062,89 @@ mod tests {
         let file = dir.path().join("regular");
         std::fs::write(&file, b"x").unwrap();
         assert_eq!(Bridge::bind(&file).err().unwrap().kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    /// Task 5.10: a chat line reaches every client as a `CHAT` message, is cut at the caps (on a character boundary),
+    /// is not remembered for a client that connects later, and is not queued when nobody is connected.
+    #[test]
+    fn chat_lines_are_forwarded_cut_to_the_caps_and_never_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        let line = |text: &str| ChatMessage {
+            team: 1,
+            cid: 4,
+            name: "c4-deadbeef".into(),
+            text: text.into(),
+        };
+        bridge.send_chat(&line("nobody hears this")); // no client: nothing queued, nothing remembered
+        let mut early = connect(&mut bridge, &path);
+        bridge.send_chat(&line("<img src=x onerror=alert(1)> \u{202e}hi"));
+        let (k, p) = read_message(&mut early);
+        assert_eq!(k, kind::CHAT);
+        let v: serde_json::Value = serde_json::from_slice(&p).unwrap();
+        assert_eq!((v["team"].as_i64(), v["cid"].as_i64()), (Some(1), Some(4)));
+        assert_eq!(v["name"], "c4-deadbeef");
+        assert_eq!(
+            v["text"], "<img src=x onerror=alert(1)> \u{202e}hi",
+            "the bridge forwards text as it is"
+        );
+        // Over the cap: cut, and never in the middle of a character (each "я" is 2 bytes; 511 bytes would split one).
+        bridge.send_chat(&line(&"я".repeat(400)));
+        let (_, p) = read_message(&mut early);
+        let v: serde_json::Value = serde_json::from_slice(&p).unwrap();
+        let text = v["text"].as_str().unwrap();
+        assert!(text.len() <= MAX_CHAT_TEXT && text.chars().all(|c| c == 'я') && text.len() >= MAX_CHAT_TEXT - 1);
+        // A late client is greeted with HELLO only: chat is not replayed by the bot.
+        let late = UnixStream::connect(&path).unwrap();
+        late.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        settle(&mut bridge);
+        let mut late = late;
+        let (k, _) = read_message(&mut late);
+        assert_eq!(k, kind::HELLO);
+        let mut one = [0u8; 1];
+        let e = std::io::Read::read(&mut late, &mut one).unwrap_err();
+        assert!(
+            matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn player_info_reaches_clients_as_one_json_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.sock");
+        let mut bridge = Bridge::bind(&path).unwrap();
+        let mut c = connect(&mut bridge, &path);
+        bridge.send_player_info(&PlayerInfoMessage {
+            list: vec![PlayerInfoEntry {
+                id: 3,
+                clan: String::new(),
+                skin: "coala".into(),
+                cc: true,
+                cb: 0x00ff_8040,
+                cf: 7,
+                country: 276,
+                score: -2,
+                ping: 31,
+            }],
+        });
+        let (k, p) = read_message(&mut c);
+        assert_eq!(k, kind::PLAYERINFO);
+        let v: serde_json::Value = serde_json::from_slice(&p).unwrap();
+        assert_eq!(v["list"][0]["skin"], "coala");
+        assert_eq!(v["list"][0]["cc"], true);
+        assert_eq!(v["list"][0]["cb"], 0x00ff_8040);
+        assert_eq!(v["list"][0]["score"], -2);
+        // A client that connects later is greeted with the last one (the runner resends only on a difference).
+        let mut late = connect(&mut bridge, &path);
+        let (k, p) = read_message(&mut late);
+        assert_eq!(k, kind::PLAYERINFO, "after HELLO");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&p).unwrap()["list"][0]["skin"],
+            "coala"
+        );
     }
 
     #[test]

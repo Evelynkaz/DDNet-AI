@@ -34,7 +34,10 @@ use ddai_physics::map::MapData;
 
 use crate::bot::{Bot, BotConfig, BotEvent, BotStats, Output};
 use crate::brains::{BrainError, BrainOptions, make_brain};
-use crate::bridge::{Bridge, FrameChar, MapMessage, PlayerEntry, PlayersMessage, StatusMessage};
+use crate::bridge::{
+    Bridge, ChatMessage, FrameChar, MapMessage, PlayerEntry, PlayerInfoEntry, PlayerInfoMessage, PlayersMessage,
+    StatusMessage,
+};
 use crate::command::{BotCommand, CommandInbox};
 use crate::console::Printer;
 use crate::hooks::MapIdent;
@@ -256,6 +259,9 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     let mut next_status = Instant::now();
     let mut next_log = Instant::now() + LOG_EVERY;
     let mut frame_chars: Vec<FrameChar> = Vec::with_capacity(128);
+    // Task 5.10: the last `PLAYERINFO` sent (serialised), so scores and pings go out again only when one changed.
+    let mut last_player_info: Vec<u8> = Vec::new();
+    let mut next_player_info = Instant::now();
     let mut last_tick = 0;
     // Task 7.4: the fly's visualisation stream. Its layout goes to the bridge at the start and after every brain switch;
     // frames are asked of the brain only while the bridge has a subscriber.
@@ -346,6 +352,9 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
             if let BotEvent::RosterChanged { .. } = &e {
                 if let Some(b) = bridge.as_mut() {
                     b.send_players(&players_message(&bot, cfg.web_names));
+                    let info = player_info_message(&bot, cfg.web_names);
+                    last_player_info = serde_json::to_vec(&info).unwrap_or_default();
+                    b.send_player_info(&info);
                 }
                 if let Some(path) = &cfg.debug_names_log {
                     append_debug_names(path, &bot);
@@ -363,6 +372,16 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
                 && b.clients() > 0
             {
                 b.send_status(&status_message(&bot, last_tick, &cfg));
+                // Scores and pings change without the roster changing: once a second, when something differs.
+                if now >= next_player_info {
+                    next_player_info = now + Duration::from_secs(1);
+                    let info = player_info_message(&bot, cfg.web_names);
+                    let json = serde_json::to_vec(&info).unwrap_or_default();
+                    if json != last_player_info {
+                        last_player_info = json;
+                        b.send_player_info(&info);
+                    }
+                }
             }
         }
         if now >= next_log {
@@ -505,12 +524,25 @@ fn handle_event(
                 }
             },
             SessionEvent::GameMessage(GameMsg::SvKillMsg(k)) => bot.on_kill_message(k.killer, k.victim, k.weapon),
-            // The one chat line the bot reads: the server's own "Kill Protection enabled" (a system line, `client_id` -1). The text
-            // is neither kept nor logged; every other chat line is dropped unread.
+            // Chat is read-only here. The bot itself looks at one line, the server's own "Kill Protection enabled" (a system
+            // line, `client_id` -1). Every line is also handed to the web unit's chat panel (task 5.10) for display, with the
+            // sender and any known name inside the text replaced by tags unless `--web-names`; the text is neither kept
+            // nor logged by the bot, and the bot never answers (D-007).
             SessionEvent::GameMessage(GameMsg::SvChat(c)) => {
                 if crate::killfallback::is_kill_protection_notice(c.client_id, &c.message) {
                     tracing::info!("the server dropped a Cl_Kill: kill protection");
                     bot.on_kill_protection_notice();
+                }
+                if let Some(b) = bridge.as_mut()
+                    && b.clients() > 0
+                {
+                    b.send_chat(&chat_message(
+                        bot.players(),
+                        cfg.web_names,
+                        c.team,
+                        c.client_id,
+                        &c.message,
+                    ));
                 }
             }
             SessionEvent::OutgoingGame { label, accepted } => count_outgoing(report, label, accepted),
@@ -701,6 +733,58 @@ fn players_message(bot: &Bot, web_names: bool) -> PlayersMessage {
     }
 }
 
+/// One chat line for the web unit: the sender as a tag (or the nickname with `--web-names`), and, without `--web-names`,
+/// every known player's name and clan inside the text replaced by that player's tag.
+fn chat_message(
+    players: &crate::players::PlayerTable,
+    web_names: bool,
+    team: i32,
+    cid: i32,
+    text: &str,
+) -> ChatMessage {
+    let name = match players.get(cid).filter(|s| s.present) {
+        _ if cid < 0 => String::new(),
+        Some(slot) if web_names => slot.name.clone(),
+        Some(_) => players.tag(cid).to_string(),
+        // Someone who left before the line arrived: the id is all there is (no name is known, so none is invented).
+        None => format!("c{cid}"),
+    };
+    // Cut first: the redaction below is O(length x names) on the bot's loop thread, so the length it sees stays bounded.
+    let text = crate::bridge::cut_at(text, crate::bridge::MAX_CHAT_TEXT);
+    ChatMessage {
+        team,
+        cid,
+        name,
+        text: if web_names {
+            text.to_string()
+        } else {
+            players.redact(text)
+        },
+    }
+}
+
+/// How each present player looks, with their numbers (`PLAYERINFO`); the clan only with `--web-names`.
+fn player_info_message(bot: &Bot, web_names: bool) -> PlayerInfoMessage {
+    PlayerInfoMessage {
+        list: bot
+            .players()
+            .present()
+            .map(|(id, slot)| PlayerInfoEntry {
+                id,
+                clan: if web_names { slot.clan.clone() } else { String::new() },
+                skin: slot.skin.clone(),
+                cc: slot.use_custom_color,
+                cb: slot.color_body,
+                cf: slot.color_feet,
+                country: slot.country,
+                score: slot.score,
+                // To 10 ms steps: a ping that jitters by a millisecond is not worth a message to every open page.
+                ping: (slot.latency_ms + 5).div_euclid(10) * 10,
+            })
+            .collect(),
+    }
+}
+
 /// One frame to the web unit, from the snapshot and the bot's own tee view.
 fn publish(b: &mut Bridge, bot: &Bot, snap: &LiveWorldSnapshot, chars: &mut Vec<FrameChar>) {
     chars.clear();
@@ -734,6 +818,96 @@ fn publish(b: &mut Bridge, bot: &Bot, snap: &LiveWorldSnapshot, chars: &mut Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table() -> crate::players::PlayerTable {
+        use crate::players::test_support::player;
+        let mut t = crate::players::PlayerTable::new([9; 16]);
+        t.update(
+            &[
+                player(0, "Muha", "Neuroset", true, 0, None),
+                player(3, "Bob", "ХАОС", false, 0, None),
+            ],
+            &crate::relations::Relations::new(),
+        );
+        t
+    }
+
+    /// Task 5.10: the sender of a chat line is a tag, names inside the text become tags, the server is nobody, and a sender who left is
+    /// never invented a name; with `--web-names` the nickname and the text go through as they are.
+    #[test]
+    fn chat_lines_for_the_web_carry_tags_not_nicknames_unless_asked() {
+        let t = table();
+        let bob_tag = t.tag(3).to_string();
+        let m = chat_message(&t, false, 1, 3, "hello Muha, it is bob from ХАОС");
+        assert_eq!((m.team, m.cid), (1, 3));
+        assert_eq!(m.name, bob_tag);
+        assert!(
+            !m.text.contains("Muha") && !m.text.to_lowercase().contains("bob") && !m.text.contains("ХАОС"),
+            "{}",
+            m.text
+        );
+        assert!(m.text.contains(&t.tag(0).to_string()));
+
+        let m = chat_message(&t, false, 0, -1, "Kill Protection enabled. You can use /kill later");
+        assert_eq!((m.cid, m.name.as_str()), (-1, ""));
+        let m = chat_message(&t, false, 0, 77, "who am i");
+        assert_eq!(m.name, "c77", "an id with nobody in the slot: only the id");
+
+        let m = chat_message(&t, true, 0, 3, "hello Muha");
+        assert_eq!((m.name.as_str(), m.text.as_str()), ("Bob", "hello Muha"));
+    }
+
+    #[test]
+    fn a_huge_chat_text_is_cut_before_the_names_are_looked_for() {
+        let t = table();
+        let long = "я".repeat(5000) + " Muha";
+        let m = chat_message(&t, false, 0, 3, &long);
+        assert!(m.text.len() <= crate::bridge::MAX_CHAT_TEXT, "{}", m.text.len());
+        assert!(m.text.chars().all(|c| c == 'я'));
+    }
+
+    #[test]
+    fn player_info_has_the_look_and_the_clan_only_with_real_names() {
+        use crate::players::test_support::player;
+        let mut p = player(3, "Bob", "ХАОС", false, 0, None);
+        let ci = p.client_info.as_mut().unwrap();
+        ci.skin = "coala".into();
+        ci.use_custom_color = 1;
+        ci.color_body = 0x00ff_8040;
+        ci.color_feet = 5;
+        ci.country = 276;
+        p.info.score = 12;
+        let mut t = crate::players::PlayerTable::new([9; 16]);
+        let changed = t.update(&[p.clone()], &crate::relations::Relations::new());
+        assert!(changed);
+        // A new skin alone is not a roster change: the look goes out with the once-a-second PLAYERINFO.
+        p.client_info.as_mut().unwrap().skin = "x_ninja".into();
+        assert!(!t.update(&[p.clone()], &crate::relations::Relations::new()));
+        assert!(!t.update(&[p], &crate::relations::Relations::new()), "nothing changed");
+        let slot = t.get(3).unwrap();
+        assert_eq!(
+            (slot.skin.as_str(), slot.use_custom_color, slot.color_body, slot.country),
+            ("x_ninja", true, 0x00ff_8040, 276)
+        );
+    }
+
+    /// Review F2: a server-side rainbow (DDNet++ `/rainbow`, F-DDrace) changes a player's colour in every snapshot. That is
+    /// never a roster change (which would resend PLAYERS and PLAYERINFO, log, and fill the report's event list at 50 Hz);
+    /// the table still holds the newest colour for the once-a-second PLAYERINFO.
+    #[test]
+    fn a_colour_that_changes_every_tick_is_never_a_roster_change() {
+        use crate::players::test_support::player;
+        let mut p = player(3, "Bob", "ХАОС", false, 0, None);
+        p.client_info.as_mut().unwrap().use_custom_color = 1;
+        let mut t = crate::players::PlayerTable::new([9; 16]);
+        let rel = crate::relations::Relations::new();
+        assert!(t.update(&[p.clone()], &rel), "the first sight is a roster change");
+        for tick in 0..500 {
+            p.client_info.as_mut().unwrap().color_body = (tick * 0x0001_0100) & 0x00ff_ffff;
+            assert!(!t.update(&[p.clone()], &rel), "tick {tick}");
+        }
+        assert_eq!(t.get(3).unwrap().color_body, (499 * 0x0001_0100) & 0x00ff_ffff);
+    }
 
     #[test]
     fn every_way_the_driver_can_stop_has_a_distinct_honest_exit_code() {

@@ -103,6 +103,105 @@ pub async fn get_map(
         .into_response()
 }
 
+/// The browser's view of a map's layers (task 5.10): the visual scene body and the embedded images, built lazily from the
+/// map file the source resolved (`MapCache::path_of`), with the same immutable cache policy as the classified scene above.
+async fn visual_entry(
+    state: &SharedState,
+    jar: &CookieJar,
+    sha256_hex: &str,
+) -> Result<std::sync::Arc<crate::live::visual_scene::VisualEntry>, StatusCode> {
+    if current_session(state, jar).is_none() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let Some(sha256) = decode_hex_sha256(sha256_hex) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(hub) = &state.live_hub else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let cache = std::sync::Arc::clone(&hub.map_cache);
+    if cache.get(&sha256).is_none() || cache.path_of(&sha256).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    use crate::live::visual_scene::VisualError;
+    let built = tokio::task::spawn_blocking(move || {
+        cache.visual_or_build(sha256, |path| {
+            crate::live::visual_scene::VisualEntry::build(path, sha256)
+        })
+    })
+    .await;
+    match built {
+        Ok(Ok(entry)) => Ok(entry),
+        // The reason (a path or an I/O error) stays in the log, not in the response.
+        Ok(Err(VisualError::TooLarge)) => {
+            tracing::warn!("a map's layers and images are too large for the page; it gets the coarse view");
+            Err(StatusCode::PAYLOAD_TOO_LARGE)
+        }
+        Ok(Err(VisualError::Failed(why))) => {
+            tracing::warn!(%why, "could not build the visual scene of a map");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+fn immutable_response(etag: String, body: Vec<u8>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (header::ETAG, etag),
+            (header::CACHE_CONTROL, "private, max-age=604800, immutable".to_string()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn not_modified(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == etag)
+}
+
+/// `GET /api/map/<sha256>/scene`: the compressed visual scene (`docs/formats.md` §35.1).
+pub async fn get_scene(
+    State(state): State<SharedState>,
+    Path(sha256_hex): Path<String>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    let etag = format!("\"{sha256_hex}-scene1\"");
+    if current_session(&state, &jar).is_some() && not_modified(&headers, &etag) {
+        return StatusCode::NOT_MODIFIED.into_response();
+    }
+    match visual_entry(&state, &jar, &sha256_hex).await {
+        Ok(entry) => immutable_response(etag, (*entry.scene_deflated).clone()),
+        Err(status) => status.into_response(),
+    }
+}
+
+/// `GET /api/map/<sha256>/image/<n>`: the pixels of embedded image `n` (`u32 w | u32 h | RGBA`, raw DEFLATE).
+pub async fn get_image(
+    State(state): State<SharedState>,
+    Path((sha256_hex, index)): Path<(String, usize)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    let etag = format!("\"{sha256_hex}-img{index}\"");
+    if current_session(&state, &jar).is_some() && not_modified(&headers, &etag) {
+        return StatusCode::NOT_MODIFIED.into_response();
+    }
+    let entry = match visual_entry(&state, &jar, &sha256_hex).await {
+        Ok(entry) => entry,
+        Err(status) => return status.into_response(),
+    };
+    match entry.image_deflated(index) {
+        Some(bytes) => immutable_response(etag, (*bytes).clone()),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

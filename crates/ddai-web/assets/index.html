@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>DDNet-AI</title>
     <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/game.css" />
     <link rel="stylesheet" href="/launch.css" />
     <link rel="stylesheet" href="/say.css" />
   </head>
@@ -39,59 +40,90 @@
       </section>
     </main>
 
-    <!-- Task 5.2a: live map view — deliberately outside `.shell` (full-viewport, see app.css).
-         `.canvas-area` (canvas + its overlays) and `.bottom-stack` (replay bar + player list) are
-         separate flex children of `.game-view` on purpose (review round 1, finding F4): keeping
-         the canvas's own absolutely-positioned overlays (`.view-controls`/`.legend`/`.hud-top`)
-         scoped to `.canvas-area` alone, rather than the whole `.game-view` box, is what stops
-         them drifting under `.player-sheet` once the desktop layout puts the sheet in a side
-         column next to (not below) the canvas. -->
+    <!-- Task 5.10: the «Игра» tab. The stage (WebGL map and tees, a 2D overlay for names and the HUD, the floating chat, the
+         freeze/unfreeze feed, the scoreboard) and a side column (the bot, the players, the chat). Everything dynamic is
+         set with `textContent`, never `innerHTML`: names and chat lines come from other players. -->
     <section id="game-view" class="game-view" hidden>
-      <div class="canvas-area">
-        <canvas id="game-canvas" aria-label="Карта игры"></canvas>
+      <div class="game-grid">
+        <div class="stage-col">
+          <div class="stage" id="stage">
+            <canvas id="game-canvas" aria-label="Карта игры"></canvas>
+            <canvas id="game-overlay" aria-hidden="true"></canvas>
 
-        <!-- Task 5.7: the badge says what this is: the live bot, or the offline demo (not a real game). It is the one
-             readable item of the HUD (the numbers beside it change every frame and stay `aria-hidden`). -->
-        <div class="hud-top" id="game-hud">
-          <div class="source-badge" id="game-source" role="status" hidden>
-            <strong class="source-title"></strong>
-            <span class="source-detail"></span>
+            <div class="stage-top">
+              <div class="source-badge" id="game-source" role="status" hidden>
+                <strong class="source-title"></strong>
+                <span class="source-detail"></span>
+              </div>
+              <span class="stage-info" id="stage-info" aria-hidden="true"></span>
+            </div>
+            <p class="stage-msg" id="stage-msg" role="status" hidden></p>
+            <ul class="game-feed" id="game-feed" aria-live="off"></ul>
+            <div class="chat-float" id="chat-float" aria-hidden="true"></div>
+
+            <div class="board" id="board" hidden>
+              <h2 id="board-title"></h2>
+              <table>
+                <thead><tr><th class="num">Счёт</th><th>Имя</th><th>Клан</th><th class="num">Пинг</th></tr></thead>
+                <tbody id="board-rows"></tbody>
+              </table>
+            </div>
           </div>
-          <span aria-hidden="true">тик <strong id="hud-tick">—</strong></span>
-          <span aria-hidden="true">FPS <strong id="hud-fps">—</strong></span>
-          <span aria-hidden="true">кадры/с <strong id="hud-frame-rate">—</strong></span>
-          <span aria-hidden="true">карта <strong id="hud-map-name">—</strong></span>
-          <span id="hud-bot" aria-hidden="true" hidden>бот <strong id="hud-bot-text">—</strong></span>
+
+          <div class="viewbar">
+            <label class="vb-field" for="sel-follow"><span>Камера</span>
+              <select id="sel-follow" aria-label="За кем следить"></select>
+            </label>
+            <button id="btn-free" type="button" class="vb-btn" aria-pressed="false" title="Свободная камера: тащите карту мышью или пальцем">Свободно</button>
+            <button id="btn-fit" type="button" class="vb-btn" title="Показать всю карту"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/><path d="M9 21H3v-6"/></svg>Вся карта</button>
+            <input id="rng-zoom" type="range" min="-200" max="395" step="1" value="0" aria-label="Масштаб" title="Масштаб (колесо мыши, щипок)" />
+            <span class="vb-sep" aria-hidden="true"></span>
+            <button id="btn-entities" type="button" class="vb-btn" title="Как «сущности» в клиенте: игровой слой, телепорты, ускорители, переключатели">Вид: карта</button>
+            <button id="btn-names" type="button" class="vb-btn active" aria-pressed="true" title="Ники над тиями"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>Ники</button>
+            <button id="btn-board" type="button" class="vb-btn" aria-pressed="false" title="Таблица игроков (как удержание Tab)"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>Табло</button>
+            <button id="btn-econ" type="button" class="vb-btn" aria-pressed="false" title="Эконом-режим: 10 кадров в секунду вместо 25 (мобильная сеть)">Эконом</button>
+          </div>
+
+          <div class="replay-bar" id="replay-bar" hidden>
+            <button id="replay-play" type="button">▶</button>
+            <button id="replay-pause" type="button">⏸</button>
+            <input id="replay-seek" type="range" min="0" max="1" value="0" step="1" aria-label="Положение в записи" />
+            <select id="replay-speed" aria-label="Скорость">
+              <option value="0.25">×0.25</option>
+              <option value="0.5">×0.5</option>
+              <option value="1" selected>×1</option>
+              <option value="2">×2</option>
+              <option value="4">×4</option>
+            </select>
+            <button id="replay-next" type="button">⏭</button>
+          </div>
         </div>
 
-        <div class="view-controls">
-          <button id="btn-follow" type="button" title="Следить за выбранным">◎</button>
-          <button id="btn-fit" type="button" title="Вся карта">▢</button>
-          <button id="btn-names" type="button" class="active" title="Имена">Aa</button>
-          <button id="btn-econ" type="button" title="Эконом-режим (10 Гц вместо 25)">🐢</button>
-        </div>
+        <aside class="side-col">
+          <section class="card gb-card" aria-labelledby="gb-title">
+            <h2 id="gb-title">Бот</h2>
+            <p class="gb-conn"><span id="gb-dot" class="dot dot-off" aria-hidden="true"></span> <span id="gb-state">загрузка…</span></p>
+            <div class="gb-grid" id="gb-grid"></div>
+            <div class="gb-links">
+              <button type="button" class="alt" id="gb-fly">Муха ▸</button>
+              <button type="button" class="alt" id="gb-bot">Управление ▸</button>
+            </div>
+          </section>
 
-        <div class="legend" id="game-legend" aria-hidden="true"></div>
-      </div>
+          <section class="card players-card" aria-labelledby="pl-title">
+            <h2 id="pl-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>Игроки <span class="count" id="player-count"></span></h2>
+            <ul id="player-list" class="player-list"></ul>
+          </section>
 
-      <div class="bottom-stack">
-        <div class="replay-bar" id="replay-bar" hidden>
-          <button id="replay-play" type="button">▶</button>
-          <button id="replay-pause" type="button">⏸</button>
-          <input id="replay-seek" type="range" min="0" max="1" value="0" step="1" />
-          <select id="replay-speed">
-            <option value="0.25">×0.25</option>
-            <option value="0.5">×0.5</option>
-            <option value="1" selected>×1</option>
-            <option value="2">×2</option>
-            <option value="4">×4</option>
-          </select>
-          <button id="replay-next" type="button">⏭</button>
-        </div>
+          <section class="card chat-card" aria-labelledby="ch-title">
+            <h2 id="ch-title">Чат <span class="count" id="chat-count"></span></h2>
+            <p class="hint">Только чтение: бот в чат не пишет ничего.</p>
+            <div id="chat-log" class="chat-log" role="log" aria-live="polite" tabindex="0"></div>
+            <p id="chat-empty" class="hint">Пока тихо.</p>
+          </section>
 
-        <div class="player-sheet">
-          <ul id="player-list"></ul>
-        </div>
+          <p class="credits">Графика карты и тий: DDNet (CC BY-SA 3.0, © DDNet и Teeworlds, <span class="nowrap">ddnet.org</span>), берётся с локального клиента, в репозиторий не входит.</p>
+        </aside>
       </div>
     </section>
 
@@ -374,15 +406,18 @@
          `position: static` on wide screens, which let the fixed, full-viewport `#game-view`
          paint over it and made "Статус"/logout unreachable while on the "Игра" tab). -->
     <nav class="tabbar" id="tabbar" hidden>
-      <button id="tab-status" type="button" class="active">Статус</button>
-      <button id="tab-game" type="button">Игра</button>
-      <button id="tab-bot" type="button">Бот</button>
-      <button id="tab-fly" type="button">Муха</button>
-      <button id="tab-train" type="button">Обучение</button>
+      <button id="tab-status" type="button" class="active"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg><span>Статус</span></button>
+      <button id="tab-game" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg><span>Игра</span></button>
+      <button id="tab-bot" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/></svg><span>Бот</span></button>
+      <button id="tab-fly" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/></svg><span>Муха</span></button>
+      <button id="tab-train" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></svg><span>Обучение</span></button>
     </nav>
 
     <script src="/fly.js"></script>
     <script src="/train.js"></script>
+    <script src="/ddmap.js"></script>
+    <script src="/ddtee.js"></script>
+    <script src="/game.js"></script>
     <script src="/launch.js"></script>
     <script src="/say.js"></script>
     <script src="/app.js"></script>

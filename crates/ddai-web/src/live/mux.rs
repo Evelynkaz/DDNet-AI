@@ -276,6 +276,7 @@ impl Mux {
             e @ (SourceEvent::Frame(_)
             | SourceEvent::Events { .. }
             | SourceEvent::ReplayStatus(_)
+            | SourceEvent::Chat(_)
             | SourceEvent::FlyFrame(_)) => {
                 if active {
                     self.send(e).await?;
@@ -571,6 +572,7 @@ mod tests {
             id: 0,
             name: name.to_string(),
             team: 0,
+            ..PlayerMeta::default()
         }]
     }
 

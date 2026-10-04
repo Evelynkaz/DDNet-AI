@@ -82,6 +82,12 @@ pub struct WebArgs {
     /// Task 5.8: the training runs the «Обучение» tab shows, read-only (`docs/formats.md` §29). Default `<data-dir>/runs`.
     #[arg(long = "runs-dir")]
     pub(crate) runs_dir: Option<PathBuf>,
+    /// Task 5.10: the DDNet data directory (the `data/` of a DDNet 20.1 install or build: `game.png`, `skins/`, `mapres/`, ...)
+    /// whose graphics the «Игра» tab draws with, served read-only at `/assets/...` (CC BY-SA 3.0, never copied into git, the page
+    /// credits it). Default: `<data-dir>/../build/ddnet-20.1/build/data` when it exists. Without it tees are flat and external
+    /// map images are missing.
+    #[arg(long = "ddnet-data")]
+    pub(crate) ddnet_data: Option<PathBuf>,
     /// Task 5.9 (D-089): the launcher's directory: the site writes `request.json` here (the status is read from
     /// `--launch-status-dir`); the root helper (`ddnet-ai launch apply`, run by a systemd path unit) consumes it. Default `<data-dir>/launch`.
     #[arg(long = "launch-dir")]
@@ -181,6 +187,17 @@ pub fn run_web(args: WebArgs) -> ExitCode {
     if let Some(path) = args.runs_dir {
         config.runs_dir = path;
     }
+    config.ddnet_data_dir = args.ddnet_data.or_else(|| {
+        // The project layout keeps the DDNet build next to the data directory (`~/aiddnet/{data,build}`).
+        let guess = config
+            .data_dir
+            .join("..")
+            .join("build")
+            .join("ddnet-20.1")
+            .join("build")
+            .join("data");
+        guess.join("game.png").is_file().then_some(guess)
+    });
     if let Some(path) = args.launch_dir {
         config.launch_dir = path;
     }

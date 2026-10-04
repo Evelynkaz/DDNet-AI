@@ -74,7 +74,12 @@ pub fn build_router(state: SharedState) -> Router {
     // `http::map`'s doc comment for the full cache policy): a map's classified scene is immutable
     // for a given sha256, so this route sets its own long-lived, revalidatable cache headers
     // instead of the blanket `no-store` every other `/api/*`/`/ws` route gets.
-    let map_route = Router::new().route("/api/map/{sha256}", get(http::map::get_map));
+    let map_route = Router::new()
+        .route("/api/map/{sha256}", get(http::map::get_map))
+        // Task 5.10: the real layers of the map (same immutable cache policy) and the DDNet graphics from the data directory.
+        .route("/api/map/{sha256}/scene", get(http::map::get_scene))
+        .route("/api/map/{sha256}/image/{index}", get(http::map::get_image))
+        .route("/assets/{*path}", get(http::ddnet_assets::get_asset));
 
     let assets = Router::new()
         .route("/", get(http::assets::page))
@@ -82,6 +87,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/app.js", get(http::assets::js))
         .route("/fly.js", get(http::assets::fly_js))
         .route("/train.js", get(http::assets::train_js))
+        .route("/game.css", get(http::assets::game_css))
+        .route("/ddmap.js", get(http::assets::ddmap_js))
+        .route("/ddtee.js", get(http::assets::ddtee_js))
+        .route("/game.js", get(http::assets::game_js))
         .route("/launch.js", get(http::assets::launch_js))
         .route("/launch.css", get(http::assets::launch_css))
         .route("/say.js", get(http::assets::say_js))

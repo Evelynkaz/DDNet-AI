@@ -242,15 +242,9 @@ async function openTab(page: Page, tab: "game" | "bot" | "fly") {
 
 const gameState = (page: Page) => page.evaluate(() => (window as any).__ddaiDebug.getState());
 
-/** Canvas pixels that differ from the "air" background: the map and the tees are drawn. */
-async function drawnPixels(page: Page): Promise<number> {
-  return page.evaluate(() => {
-    const c = document.getElementById("game-canvas") as HTMLCanvasElement;
-    const d = c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data;
-    let n = 0;
-    for (let i = 0; i < d.length; i += 4) if (d[i + 3] !== 0 && (d[i] > 40 || d[i + 1] > 40 || d[i + 2] > 40)) n++;
-    return n;
-  });
+/** Task 5.10: the map is drawn with WebGL, so a 2D read is not possible; the page's own hook reads a grid of pixels back from a frame it draws now. */
+async function drawnShare(page: Page): Promise<number> {
+  return page.evaluate(() => (window as any).__ddaiDebug.snapshotStats()?.nonBlack ?? 0);
 }
 
 async function expectDemoOnGameTab(page: Page) {
@@ -269,11 +263,11 @@ async function expectDemoOnGameTab(page: Page) {
   const tick1 = s.latestFrame.tick;
   await page.waitForTimeout(1_000);
   expect((await gameState(page)).latestFrame.tick).toBeGreaterThan(tick1);
-  expect(await drawnPixels(page), "the map is drawn").toBeGreaterThan(2_000);
+  expect(await drawnShare(page), "the map is drawn").toBeGreaterThan(0.3);
   // The camera is on the fly (slot 0), close enough to see the hall, not on the whole map.
   await expect.poll(async () => (await gameState(page)).followId, { timeout: 10_000 }).toBe(0);
   // The player list names slots, never nicknames.
-  await expect(page.locator("#player-list .name")).toHaveText(["муха", "соперник 1"]);
+  await expect(page.locator("#player-list .pr-name")).toHaveText(["муха", "соперник 1"]);
 }
 
 async function expectLiveOnGameTab(page: Page) {
@@ -285,9 +279,9 @@ async function expectLiveOnGameTab(page: Page) {
   await expect.poll(async () => (await gameState(page)).mapMeta?.name, { timeout: 15_000 }).toBe("ChillBlock5");
   // Only the live bot's frames (ticks from 100000), none of the demo's.
   await expect.poll(async () => (await gameState(page)).latestFrame?.tick ?? 0, { timeout: 15_000 }).toBeGreaterThan(100_000);
-  await expect(page.locator("#player-list .name")).toHaveText(["c0-aaaaaaaa", "c1-0a1b2c3d"]);
-  // The demo's framing does not carry over: the live view starts on the whole map.
-  expect((await gameState(page)).followId).toBeNull();
+  await expect(page.locator("#player-list .pr-name")).toHaveText(["c0-aaaaaaaa", "c1-0a1b2c3d"]);
+  // Task 5.10: the camera follows the owner's bot by default (the demo's slot 0 is the fly; the live bot says which slot is its own).
+  expect((await gameState(page)).follow).toBe("bot");
 }
 
 // ---- the tests ----------------------------------------------------------------------------------------------------------
@@ -383,11 +377,10 @@ test("phone: demo and live, readable, no horizontal scroll", async ({ page }) =>
 
   await openTab(page, "game");
   await expectDemoOnGameTab(page);
-  // The badge is wholly inside the screen and does not run under the round buttons at the right edge.
+  // The badge is wholly inside the screen (task 5.10: it sits over the map, left of the FPS readout, and wraps on a phone).
   const box = await page.locator("#game-source").boundingBox();
-  const buttons = await page.locator(".view-controls").boundingBox();
   expect(box!.x).toBeGreaterThanOrEqual(0);
-  expect(box!.x + box!.width).toBeLessThanOrEqual(buttons!.x);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   await noOverflow();
   await page.screenshot({ path: path.join(SCREENSHOT_DIR, "5.7-demo-phone.png") });
 

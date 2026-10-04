@@ -27,11 +27,21 @@ pub struct MapMeta {
 /// A player slot's display metadata (acceptance criterion 1: "players (id, name, team)"). Sent
 /// as its own WS message only when it changes, not on every frame (acceptance criterion "Binary
 /// frame format ... Names/teams go in a separate JSON `players` message on change").
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlayerMeta {
     pub id: u8,
     pub name: String,
     pub team: u8,
+    /// Task 5.10 (from the bridge's `PLAYERINFO`; empty / zero until the bot says): the clan (only when the bot sends real
+    /// names), the skin name, DDNet's packed custom colours, the country code, and the scoreboard numbers.
+    pub clan: String,
+    pub skin: String,
+    pub custom_color: bool,
+    pub color_body: i32,
+    pub color_feet: i32,
+    pub country: i32,
+    pub score: i32,
+    pub ping: i32,
 }
 
 /// One character's rendering-relevant state for one tick (acceptance criterion 1). Field
@@ -128,6 +138,8 @@ pub enum SourceEvent {
     /// object — only the bot-socket source produces it (`docs/formats.md` §21, `STATUS`). Opaque to
     /// the hub: forwarded to browsers as the `bot` WS message.
     BotStatus(String),
+    /// Task 5.10: one line of the game server's chat, already sanitised (`crate::live::chat`). Display only.
+    Chat(super::chat::ChatLine),
     /// Task 7.4: the layout of the fly's visualisation stream (one JSON object, `docs/formats.md` §27.2), or `None`
     /// when the bot's brain has none (or the bot is gone). Validated by the source.
     FlyMeta(Option<String>),

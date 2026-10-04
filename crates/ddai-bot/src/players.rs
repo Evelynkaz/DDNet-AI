@@ -52,6 +52,12 @@ pub struct PlayerSlot {
     pub team: i32,
     pub latency_ms: i32,
     pub score: i32,
+    /// How the tee looks (`ClientInfo`): skin name, custom colours (DDNet's packed HSL), country. For the web view only.
+    pub skin: String,
+    pub use_custom_color: bool,
+    pub color_body: i32,
+    pub color_feet: i32,
+    pub country: i32,
     /// `DDNetPlayer::flags` (`AFK`/`PAUSED`/`SPEC`); 0 when the server sent none.
     pub ex_flags: i32,
     pub flags: RelationFlags,
@@ -164,6 +170,24 @@ impl PlayerTable {
                 .as_ref()
                 .map_or(("", ""), |c| (c.name.as_str(), c.clan.as_str()));
             let slot = &mut self.slots[idx];
+            // The look is not part of who someone is: it is kept for the web's `PLAYERINFO` (which the runner resends once a second
+            // when something differs) and is never a roster change. A server-side rainbow changes the colour in every snapshot.
+            if let Some(ci) = &p.client_info {
+                let use_cc = ci.use_custom_color != 0;
+                if slot.skin != ci.skin
+                    || slot.use_custom_color != use_cc
+                    || slot.color_body != ci.color_body
+                    || slot.color_feet != ci.color_feet
+                    || slot.country != ci.country
+                {
+                    slot.skin.clear();
+                    slot.skin.push_str(&ci.skin);
+                    slot.use_custom_color = use_cc;
+                    slot.color_body = ci.color_body;
+                    slot.color_feet = ci.color_feet;
+                    slot.country = ci.country;
+                }
+            }
             let new_person = !slot.present || slot.name != name || slot.clan != clan;
             if new_person {
                 slot.name.clear();

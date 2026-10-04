@@ -69,6 +69,8 @@ pub enum HubEvent {
         events: Vec<GameEvent>,
     },
     ReplayStatus(ReplayStatus),
+    /// Task 5.10: one line of the game server's chat (also kept in the in-memory ring, see [`LiveHub::latest_chat`]).
+    Chat(super::chat::ChatLine),
     /// Task 4.1: the live bot's status JSON (see [`SourceEvent::BotStatus`]).
     BotStatus(String),
     /// Task 7.4: the layout of the fly's stream changed (`None`: no stream any more).
@@ -93,6 +95,8 @@ struct Latest {
     demo_info: Option<String>,
     /// Task 5.7: the source generation (bumped at every switch; frames are tagged with it).
     generation: u64,
+    /// Task 5.10: the last chat lines, in memory only (`super::chat`); emptied when the source changes.
+    chat: super::chat::ChatRing,
 }
 
 /// A binary frame as it travels to the browser connections, tagged with the **source generation** it was made in (task 5.7):
@@ -283,6 +287,10 @@ impl LiveHub {
                         let _ = event_tx.send(Arc::new(HubEvent::ReplayStatus(status)));
                     }
                 }
+                SourceEvent::Chat(line) => {
+                    latest.lock().expect("live hub mutex poisoned").chat.push(line.clone());
+                    let _ = event_tx.send(Arc::new(HubEvent::Chat(line)));
+                }
                 SourceEvent::BotStatus(json) => {
                     latest.lock().expect("live hub mutex poisoned").bot_status = Some((Instant::now(), json.clone()));
                     let _ = event_tx.send(Arc::new(HubEvent::BotStatus(json)));
@@ -391,6 +399,11 @@ impl LiveHub {
         self.latest.lock().expect("live hub mutex poisoned").map.clone()
     }
 
+    /// The chat lines the web process still remembers (at most [`super::chat::RING_LINES`]), oldest first.
+    pub fn latest_chat(&self) -> Vec<super::chat::ChatLine> {
+        self.latest.lock().expect("live hub mutex poisoned").chat.snapshot()
+    }
+
     pub fn latest_players(&self) -> Vec<PlayerMeta> {
         self.latest.lock().expect("live hub mutex poisoned").players.clone()
     }
@@ -456,6 +469,7 @@ mod tests {
             id: 0,
             name: "Игрок 0".to_string(),
             team: 0,
+            ..PlayerMeta::default()
         }];
         let source = ScriptedSource {
             events: vec![
@@ -698,6 +712,7 @@ mod tests {
                     id: 1,
                     name: "c1-aaaaaaaa".to_string(),
                     team: 0,
+                    ..PlayerMeta::default()
                 }]),
                 SourceEvent::BotStatus(r#"{"tick":1}"#.to_string()),
                 SourceEvent::FlyMeta(Some(r#"{"v":1}"#.to_string())),

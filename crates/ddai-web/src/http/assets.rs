@@ -11,6 +11,10 @@ const APP_CSS: &str = include_str!("../../assets/app.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
 const FLY_JS: &str = include_str!("../../assets/fly.js");
 const TRAIN_JS: &str = include_str!("../../assets/train.js");
+const GAME_CSS: &str = include_str!("../../assets/game.css");
+const DDMAP_JS: &str = include_str!("../../assets/ddmap.js");
+const DDTEE_JS: &str = include_str!("../../assets/ddtee.js");
+const GAME_JS: &str = include_str!("../../assets/game.js");
 const LAUNCH_JS: &str = include_str!("../../assets/launch.js");
 const LAUNCH_CSS: &str = include_str!("../../assets/launch.css");
 const SAY_JS: &str = include_str!("../../assets/say.js");
@@ -36,6 +40,25 @@ pub async fn fly_js() -> impl IntoResponse {
 /// Task 5.8: the training panel's script (the «Обучение» tab), loaded before `app.js`.
 pub async fn train_js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], TRAIN_JS)
+}
+
+/// Task 5.10: the «Игра» tab's styles.
+pub async fn game_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], GAME_CSS)
+}
+
+/// Task 5.10: the WebGL map renderer (`ddmap.js`), the tee and sprite drawing (`ddtee.js`) and the tab itself (`game.js`),
+/// loaded before `app.js`.
+pub async fn ddmap_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], DDMAP_JS)
+}
+
+pub async fn ddtee_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], DDTEE_JS)
+}
+
+pub async fn game_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], GAME_JS)
 }
 
 /// Task 5.9: the «Запуск» card's script (the «Бот» tab), loaded before `app.js`.

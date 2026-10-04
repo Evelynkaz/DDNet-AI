@@ -174,7 +174,21 @@ pub struct MapCache {
     /// never fetched over HTTP (nothing currently does this, but nothing rules it out either)
     /// should not pay a compression cost nobody asked for.
     compressed_by_sha256: Mutex<std::collections::HashMap<[u8; 32], std::sync::Arc<Vec<u8>>>>,
+    /// Task 5.10: where each resolved map's file is (set by the sources that resolved it; the visual scene is read from
+    /// the file again, hash-checked, when a browser first asks — the classified scene above keeps no bytes). A path comes
+    /// only from `resolve_by_sha256`, never from a request.
+    paths: Mutex<std::collections::HashMap<[u8; 32], PathBuf>>,
+    /// Task 5.10: the visual scenes' wire bodies (`super::visual_scene`), at most [`MAX_VISUAL_BYTES`] of them together,
+    /// oldest dropped.
+    visual: Mutex<Vec<([u8; 32], std::sync::Arc<super::visual_scene::VisualEntry>)>>,
+    /// Maps whose visual scene was refused as too large: not built again (a build is the expensive part).
+    visual_refused: Mutex<std::collections::HashSet<[u8; 32]>>,
+    /// Held while a visual scene is built, so two browsers asking for the same new map at once build it once.
+    visual_build: Mutex<()>,
 }
+
+/// Bytes of compressed visual scenes (and their embedded images) kept at once; a real map is under 2 MiB.
+pub const MAX_VISUAL_BYTES: usize = 48 * 1024 * 1024;
 
 impl MapCache {
     pub fn new() -> Self {
@@ -196,6 +210,88 @@ impl MapCache {
             .expect("map cache mutex poisoned")
             .insert(sha256, scene.clone());
         scene
+    }
+
+    /// Remembers where the map `sha256` was resolved from (task 5.10).
+    pub fn insert_path(&self, sha256: [u8; 32], path: PathBuf) {
+        self.paths
+            .lock()
+            .expect("map cache mutex poisoned")
+            .insert(sha256, path);
+    }
+
+    pub fn path_of(&self, sha256: &[u8; 32]) -> Option<PathBuf> {
+        self.paths
+            .lock()
+            .expect("map cache mutex poisoned")
+            .get(sha256)
+            .cloned()
+    }
+
+    /// The extracted visual scene of `sha256`, if one was built.
+    pub fn visual(&self, sha256: &[u8; 32]) -> Option<std::sync::Arc<super::visual_scene::VisualEntry>> {
+        self.visual
+            .lock()
+            .expect("map cache mutex poisoned")
+            .iter()
+            .find(|(k, _)| k == sha256)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// Keeps `entry` as the visual scene of `sha256` (the oldest are dropped while the kept bytes pass [`MAX_VISUAL_BYTES`];
+    /// the newest always stays).
+    pub fn insert_visual(
+        &self,
+        sha256: [u8; 32],
+        entry: super::visual_scene::VisualEntry,
+    ) -> std::sync::Arc<super::visual_scene::VisualEntry> {
+        let entry = std::sync::Arc::new(entry);
+        let mut all = self.visual.lock().expect("map cache mutex poisoned");
+        all.retain(|(k, _)| *k != sha256);
+        all.push((sha256, entry.clone()));
+        while all.len() > 1 && all.iter().map(|(_, e)| e.size_bytes()).sum::<usize>() > MAX_VISUAL_BYTES {
+            all.remove(0);
+        }
+        entry
+    }
+
+    /// The visual scene of `sha256`: the cached one, or the one `build` makes (once, however many callers ask at the same time).
+    /// Blocking: call it from the blocking pool.
+    pub fn visual_or_build(
+        &self,
+        sha256: [u8; 32],
+        build: impl FnOnce(&Path) -> Result<super::visual_scene::VisualEntry, super::visual_scene::VisualError>,
+    ) -> Result<std::sync::Arc<super::visual_scene::VisualEntry>, super::visual_scene::VisualError> {
+        use super::visual_scene::VisualError;
+        if let Some(hit) = self.visual(&sha256) {
+            return Ok(hit);
+        }
+        let _one_builder = self.visual_build.lock().expect("map cache mutex poisoned");
+        if let Some(hit) = self.visual(&sha256) {
+            return Ok(hit);
+        }
+        if self
+            .visual_refused
+            .lock()
+            .expect("map cache mutex poisoned")
+            .contains(&sha256)
+        {
+            return Err(VisualError::TooLarge);
+        }
+        let path = self
+            .path_of(&sha256)
+            .ok_or_else(|| VisualError::Failed("this map has no file the page may be sent".to_string()))?;
+        match build(&path) {
+            Ok(entry) => Ok(self.insert_visual(sha256, entry)),
+            Err(VisualError::TooLarge) => {
+                self.visual_refused
+                    .lock()
+                    .expect("map cache mutex poisoned")
+                    .insert(sha256);
+                Err(VisualError::TooLarge)
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// The cached compressed bytes for `sha256`, if `GET /api/map/<sha256>` has already computed

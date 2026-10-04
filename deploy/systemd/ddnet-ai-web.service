@@ -31,7 +31,9 @@ ExecStartPre=/usr/bin/test -x /home/ubuntu/aiddnet/bin/ddnet-ai
 # there the «Игра» and «Муха» tabs show it under a badge that says it is not a real game, and the site switches to the bot the
 # moment it is up. Commands never go to the demo. The demo's socket lives in data/flydemo, apart from the bot's data/bot (the demo unit cannot see data/bot). The socket need not exist (the web retries; without the demo unit the tabs say
 # the bot is not running, as before). Read-only map directories under ProtectHome (the demo's arena is on Copy Love Box).
-ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure --bot-socket /home/ubuntu/aiddnet/data/bot/live.sock --demo-socket /home/ubuntu/aiddnet/data/flydemo/fly-demo.sock --maps-dir /home/ubuntu/aiddnet/data/ddnet-server/maps --maps-dir /home/ubuntu/aiddnet/data/maps/copy-love-box --maps-dir /home/ubuntu/aiddnet/data/maps/cache
+# Task 5.10: `--ddnet-data` is the DDNet 20.1 data directory whose graphics (game.png, skins/, mapres/, ...) the «Игра» tab draws with, served
+# at runtime after login and never copied into git (CC BY-SA 3.0). Read-only under ProtectHome; nothing in ReadWritePaths changes.
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai web --listen 127.0.0.1:7788 --data-dir /home/ubuntu/aiddnet/data --trust-proxy --cookie-secure --bot-socket /home/ubuntu/aiddnet/data/bot/live.sock --demo-socket /home/ubuntu/aiddnet/data/flydemo/fly-demo.sock --maps-dir /home/ubuntu/aiddnet/data/ddnet-server/maps --maps-dir /home/ubuntu/aiddnet/data/maps/copy-love-box --maps-dir /home/ubuntu/aiddnet/data/maps/cache --ddnet-data /home/ubuntu/aiddnet/build/ddnet-20.1/build/data
 Restart=on-failure
 RestartSec=2
 

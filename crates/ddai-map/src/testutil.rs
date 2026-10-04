@@ -18,9 +18,13 @@ use std::io::Write;
 
 pub const MAPITEMTYPE_VERSION: u16 = 0;
 pub const MAPITEMTYPE_INFO: u16 = 1;
+pub const MAPITEMTYPE_IMAGE: u16 = 2;
+pub const MAPITEMTYPE_ENVELOPE: u16 = 3;
 pub const MAPITEMTYPE_GROUP: u16 = 4;
 pub const MAPITEMTYPE_LAYER: u16 = 5;
+pub const MAPITEMTYPE_ENVPOINTS: u16 = 6;
 pub const LAYERTYPE_TILES: i32 = 2;
+pub const LAYERTYPE_QUADS: i32 = 3;
 
 pub const TILESLAYERFLAG_GAME: u32 = 1 << 0;
 pub const TILESLAYERFLAG_TELE: u32 = 1 << 1;
@@ -134,6 +138,45 @@ pub struct MapWriter {
     layer_count: i32,
     next_group_id: u16,
     next_layer_id: u16,
+    next_image_id: u16,
+    next_envelope_id: u16,
+    /// The one `MAPITEMTYPE_ENVPOINTS` item: every envelope's points, back to back (24 bytes each).
+    env_points: Vec<u8>,
+    env_point_count: i32,
+}
+
+/// Extra fields of a tiles layer (a design layer's look): what [`TileLayerSpec`] leaves at its defaults.
+#[derive(Clone, Copy)]
+pub struct TileLayerLook {
+    pub detail: bool,
+    pub image: i32,
+    pub color: [i32; 4],
+    pub color_env: i32,
+    pub color_env_offset: i32,
+}
+
+impl Default for TileLayerLook {
+    fn default() -> Self {
+        TileLayerLook {
+            detail: false,
+            image: -1,
+            color: [255; 4],
+            color_env: -1,
+            color_env_offset: 0,
+        }
+    }
+}
+
+/// One quad of [`MapWriter::add_quad_layer`], in the file's own fixed-point units.
+#[derive(Clone, Copy)]
+pub struct QuadSpec {
+    pub points: [[i32; 2]; 5],
+    pub colors: [[i32; 4]; 4],
+    pub texcoords: [[i32; 2]; 4],
+    pub pos_env: i32,
+    pub pos_env_offset: i32,
+    pub color_env: i32,
+    pub color_env_offset: i32,
 }
 
 impl MapWriter {
@@ -145,6 +188,10 @@ impl MapWriter {
             layer_count: 0,
             next_group_id: 0,
             next_layer_id: 0,
+            next_image_id: 0,
+            next_envelope_id: 0,
+            env_points: Vec::new(),
+            env_point_count: 0,
         }
     }
 
@@ -258,6 +305,15 @@ impl MapWriter {
     /// decode to valid UTF-8, which [`encode_name`] (by construction, since it only ever encodes
     /// an already-valid `&str`) cannot produce.
     pub fn add_tile_layer_with_name_bytes(&mut self, spec: &TileLayerSpec, name_bytes: [u8; 12]) -> i32 {
+        self.add_tile_layer_full(spec, name_bytes, TileLayerLook::default())
+    }
+
+    /// A tiles layer with a design layer's look (detail flag, image, colour and colour envelope).
+    pub fn add_tile_layer_look(&mut self, spec: &TileLayerSpec, look: TileLayerLook) -> i32 {
+        self.add_tile_layer_full(spec, encode_name(""), look)
+    }
+
+    fn add_tile_layer_full(&mut self, spec: &TileLayerSpec, name_bytes: [u8; 12], look: TileLayerLook) -> i32 {
         let data_index = self.add_data_auto(spec.data) as i32;
         let role_data_index = |flag: u32| -> i32 { if spec.flags == flag { data_index } else { -1 } };
         // `m_Data` is the GAME role's data index too (mapitems.h has no separate `m_Game` field —
@@ -272,17 +328,17 @@ impl MapWriter {
         let mut p = Vec::with_capacity(92);
         p.extend_from_slice(&0i32.to_le_bytes()); // m_Layer.m_Version (unused)
         p.extend_from_slice(&LAYERTYPE_TILES.to_le_bytes());
-        p.extend_from_slice(&0i32.to_le_bytes()); // m_Layer.m_Flags
+        p.extend_from_slice(&i32::from(look.detail).to_le_bytes()); // m_Layer.m_Flags (LAYERFLAG_DETAIL)
         p.extend_from_slice(&spec.item_version.to_le_bytes());
         p.extend_from_slice(&spec.width.to_le_bytes());
         p.extend_from_slice(&spec.height.to_le_bytes());
         p.extend_from_slice(&spec.flags.to_le_bytes());
-        for _ in 0..4 {
-            p.extend_from_slice(&255i32.to_le_bytes()); // CColor r,g,b,a
+        for c in look.color {
+            p.extend_from_slice(&c.to_le_bytes()); // CColor r,g,b,a
         }
-        p.extend_from_slice(&(-1i32).to_le_bytes()); // m_ColorEnv
-        p.extend_from_slice(&0i32.to_le_bytes()); // m_ColorEnvOffset
-        p.extend_from_slice(&(-1i32).to_le_bytes()); // m_Image
+        p.extend_from_slice(&look.color_env.to_le_bytes()); // m_ColorEnv
+        p.extend_from_slice(&look.color_env_offset.to_le_bytes()); // m_ColorEnvOffset
+        p.extend_from_slice(&look.image.to_le_bytes()); // m_Image
         p.extend_from_slice(&plain_data.to_le_bytes()); // m_Data
         debug_assert_eq!(p.len(), 60);
 
@@ -316,6 +372,122 @@ impl MapWriter {
         index_in_layers
     }
 
+    /// `CMapItemImage`: an embedded image (`rgba` is its pixels) or an external one (`rgba` is `None`, `name` the mapres
+    /// file stem). `version` 1 is the plain item, 2 adds `m_MustBe1`. Returns the image's index.
+    pub fn add_image(&mut self, name: &str, width: i32, height: i32, rgba: Option<&[u8]>, version: i32) -> i32 {
+        let mut name_bytes = name.as_bytes().to_vec();
+        name_bytes.push(0);
+        let name_idx = self.add_data_auto(&name_bytes) as i32;
+        let data_idx = rgba.map_or(-1, |d| self.add_data_auto(d) as i32);
+        let mut p = Vec::new();
+        for v in [version, width, height, i32::from(rgba.is_none()), name_idx, data_idx] {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        if version >= 2 {
+            p.extend_from_slice(&1i32.to_le_bytes()); // m_MustBe1
+        }
+        let id = self.next_image_id;
+        self.next_image_id += 1;
+        self.add_item(MAPITEMTYPE_IMAGE, id, &p);
+        i32::from(id)
+    }
+
+    /// `CMapItemEnvelope` plus its points (`(time ms, curve type, 4 values in 22.10 fixed point)`), which are appended to
+    /// the map's single `MAPITEMTYPE_ENVPOINTS` item. Returns the envelope's index.
+    pub fn add_envelope(&mut self, channels: i32, points: &[(i32, i32, [i32; 4])]) -> i32 {
+        let mut p = Vec::new();
+        for v in [2, channels, self.env_point_count, points.len() as i32] {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        p.extend_from_slice(&[0u8; 32]); // m_aName[8]
+        p.extend_from_slice(&1i32.to_le_bytes()); // m_Synchronized
+        for (time, curve, values) in points {
+            self.env_points.extend_from_slice(&time.to_le_bytes());
+            self.env_points.extend_from_slice(&curve.to_le_bytes());
+            for v in values {
+                self.env_points.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        self.env_point_count += points.len() as i32;
+        let id = self.next_envelope_id;
+        self.next_envelope_id += 1;
+        self.add_item(MAPITEMTYPE_ENVELOPE, id, &p);
+        i32::from(id)
+    }
+
+    /// A quads layer (`CMapItemLayerQuads`, 40 bytes) with its `CQuad` data. Returns the layer's index within the LAYER type.
+    pub fn add_quad_layer(&mut self, quads: &[QuadSpec], image: i32, detail: bool) -> i32 {
+        self.add_quad_layer_claiming(quads, quads.len() as i32, image, detail)
+    }
+
+    /// Like [`Self::add_quad_layer`] but the layer item says it holds `claimed` quads whatever the blob really has.
+    pub fn add_quad_layer_claiming(&mut self, quads: &[QuadSpec], claimed: i32, image: i32, detail: bool) -> i32 {
+        let mut data = Vec::new();
+        for q in quads {
+            for pt in q.points {
+                data.extend_from_slice(&pt[0].to_le_bytes());
+                data.extend_from_slice(&pt[1].to_le_bytes());
+            }
+            for c in q.colors {
+                for v in c {
+                    data.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            for t in q.texcoords {
+                data.extend_from_slice(&t[0].to_le_bytes());
+                data.extend_from_slice(&t[1].to_le_bytes());
+            }
+            for v in [q.pos_env, q.pos_env_offset, q.color_env, q.color_env_offset] {
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let data_idx = self.add_data_auto(&data) as i32;
+        let mut p = Vec::new();
+        for v in [0, LAYERTYPE_QUADS, i32::from(detail), 2, claimed, data_idx, image] {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        p.extend_from_slice(&encode_name(""));
+        let id = self.next_layer_id;
+        self.next_layer_id += 1;
+        self.add_item(MAPITEMTYPE_LAYER, id, &p);
+        let index = self.layer_count;
+        self.layer_count += 1;
+        index
+    }
+
+    /// A group (`CMapItemGroup`, version 3) with an offset, parallax and an optional clip rectangle `[x, y, w, h]`.
+    pub fn add_group_ext(
+        &mut self,
+        start_layer: i32,
+        num_layers: i32,
+        offset: [i32; 2],
+        parallax: [i32; 2],
+        clip: Option<[i32; 4]>,
+    ) {
+        let mut p = Vec::with_capacity(60);
+        let c = clip.unwrap_or([0; 4]);
+        for v in [
+            3,
+            offset[0],
+            offset[1],
+            parallax[0],
+            parallax[1],
+            start_layer,
+            num_layers,
+            i32::from(clip.is_some()),
+            c[0],
+            c[1],
+            c[2],
+            c[3],
+        ] {
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        p.extend_from_slice(&[0u8; 12]); // m_aName[3]
+        let id = self.next_group_id;
+        self.next_group_id += 1;
+        self.add_item(MAPITEMTYPE_GROUP, id, &p);
+    }
+
     /// `CMapItemGroup_v1` (28 bytes) — sufficient for `CMap::Load`'s own group size check
     /// (`>= sizeof(CMapItemGroup_v1)`); this writer never needs the clip/name fields
     /// `CMapItemGroup` adds, since they don't affect physics-layer selection.
@@ -341,8 +513,13 @@ impl MapWriter {
     /// Assembles the final datafile bytes: header, item-type table, item/data offset tables,
     /// (v4) declared-uncompressed-size table, items (grouped by type, ascending — matching
     /// `CDataFileWriter::Finish`, `datafile.cpp:1228-1368`), then raw data blobs in add order.
-    pub fn finish(self) -> Vec<u8> {
+    pub fn finish(mut self) -> Vec<u8> {
         use std::collections::BTreeMap;
+
+        if !self.env_points.is_empty() {
+            let points = std::mem::take(&mut self.env_points);
+            self.add_item(MAPITEMTYPE_ENVPOINTS, 0, &points);
+        }
 
         let mut by_type: BTreeMap<u16, Vec<(u16, Vec<u8>)>> = BTreeMap::new();
         for (type_, id, payload) in self.items {
