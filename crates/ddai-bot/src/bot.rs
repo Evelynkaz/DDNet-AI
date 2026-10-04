@@ -1083,10 +1083,13 @@ impl Bot {
                     tick,
                     victim: players.tag(victim).to_string(),
                 },
-                BlockEvent::BlockedBy { by } => BotEvent::BlockedBy {
-                    tick,
-                    by: players.tag(by).to_string(),
-                },
+                BlockEvent::BlockedBy { by } => {
+                    hooks.navigator.blocked_by(by, tick);
+                    BotEvent::BlockedBy {
+                        tick,
+                        by: players.tag(by).to_string(),
+                    }
+                }
             };
             push_event(events, e);
         }
@@ -1153,6 +1156,7 @@ impl Bot {
                     world: live.base_world(),
                     lag_ticks,
                     mode: *mode,
+                    fixed_target: picker.fixed().is_some(),
                 }
             };
         }
@@ -1224,8 +1228,17 @@ impl Bot {
         }
         let previous_target = picker.target();
         let t_pick = Instant::now();
+        // The foe of the wayblock walk (a player at the tube who acts against us, or one who froze us on the way)
+        // is the target until the walk is back on.
+        let foe = if navigated.is_none() && *mode == Mode::Fight && picker.fixed().is_none() {
+            hooks.wayblock.foe_target().filter(|&id| tees.get(id).is_some())
+        } else {
+            None
+        };
         let target = if navigated.is_some() || !matches!(*mode, Mode::Fight | Mode::Goto) {
             -1
+        } else if let Some(id) = foe {
+            id
         } else {
             picker.pick(
                 &PickCtx {
@@ -1326,6 +1339,8 @@ impl Bot {
                         prev_aim: *last_aim,
                         anchor_x: hint.map(|h| h.anchor_x),
                         look_at: hint.and_then(|h| h.look_at).map(|(x, y)| Vec2 { x, y }),
+                        still: hint.is_some_and(|h| h.still),
+                        lag_ticks,
                     },
                     &mut env,
                 );

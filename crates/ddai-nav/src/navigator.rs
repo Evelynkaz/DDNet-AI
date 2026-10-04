@@ -38,7 +38,10 @@ const CLIMB_RAY_STEP_PX: f64 = 12.0;
 const CLIMB_GIVE_UP_TICKS: i64 = 120;
 const CLIMB_ARRIVE_PX: f64 = 40.0;
 const CLIMB_BRAKE_TICKS: f64 = 6.0;
-const WALK_BRAKE_TICKS: f64 = 3.0;
+/// `WALK_BRAKE_TICKS`: ticks a walking brake takes to bite.
+pub const WALK_BRAKE_TICKS: f64 = 3.0;
+/// `LAG_MARGIN_TICKS`: ticks of margin on top of the lag when braking in front of the goal.
+pub const LAG_MARGIN_TICKS: f64 = 2.0;
 const HOOK_LENGTH: f64 = 380.0;
 
 /// `NavGoal`.
@@ -269,6 +272,8 @@ pub struct Navigator<W: PlanWorld> {
     crossings: Vec<Crossing>,
     /// Wall-clock budget of the crossing search per step in ms (`crossBudgetMs`; 0 = none).
     pub cross_budget_ms: f64,
+    /// `wallRoute`: the crossing takes route 2 (through the wall of the passage) where the tube has one.
+    pub wall_route: bool,
     to_crossing: Option<usize>,
     crosser: Option<SwingCrosser<W>>,
     cross_tries: i32,
@@ -313,6 +318,7 @@ impl<W: PlanWorld> Navigator<W> {
             kill_wanted: false,
             crossings: if through_freeze { opts.crossings } else { Vec::new() },
             cross_budget_ms: 0.0,
+            wall_route: false,
             to_crossing: None,
             crosser: None,
             cross_tries: 0,
@@ -664,6 +670,14 @@ impl<W: PlanWorld> Navigator<W> {
         if tx == goal.tx && ty == goal.ty {
             if goal.tele.is_none() {
                 self.finish(NavPhase::Arrived, format!("arrived at {}", goal.label));
+                // Arrived at a run: brake against the hazard behind the goal, the lag counted.
+                let dir = js::sign(me.vel.x);
+                let brake_px = 24.0 + js::max(0.0, me.vel.x * dir) * (self.lag as f64 + WALK_BRAKE_TICKS);
+                if dir != 0.0 && me.vel.x.abs() > 0.5 && hazard_within(ctx.col, me, dir as i32, brake_px) {
+                    let mut brake = empty_input();
+                    brake.direction = -(dir as i32);
+                    return brake;
+                }
                 return empty_input();
             }
             if self.probe_until < 0 {
@@ -789,6 +803,22 @@ impl<W: PlanWorld> Navigator<W> {
                 0
             };
             want_up = false;
+        } else if let Some(target) = self.goals.get(self.index)
+            && direction != 0
+            && target.tele.is_none()
+        {
+            // Carried past the goal into a hazard behind it: turn back early (lag and margin counted).
+            let carried = js::max(0.0, me.vel.x * f64::from(direction));
+            let to_goal = (centre_of(target.tx) - me.pos.x) * f64::from(direction);
+            let brake_ticks = self.lag as f64 + WALK_BRAKE_TICKS + LAG_MARGIN_TICKS;
+            if carried > 0.5
+                && to_goal > 0.0
+                && to_goal <= carried * brake_ticks + f64::from(TILE_PX)
+                && hazard_within(col, me, direction, to_goal + 24.0 + carried * brake_ticks)
+            {
+                direction = -direction;
+                want_up = false;
+            }
         }
         let rise_tiles = ty - route[route.len() - 1].1;
         let want_climb = rise_tiles >= CLIMB_MIN_RISE_TILES && !hazard_within(col, me, direction, 24.0);
@@ -906,9 +936,11 @@ impl<W: PlanWorld> Navigator<W> {
         let label = self.crossings[ci].label.clone();
         let lag = self.lag;
         let budget = self.cross_budget_ms;
+        let wall_route = self.wall_route;
         let (out, doing_changed, doing, phase, reason, done) = {
             let crosser = self.crosser.as_mut().expect("crosser");
             crosser.budget_ms = budget;
+            crosser.use_wall = wall_route;
             let was = crosser.doing();
             let out = crosser.step(ctx.col, me, tick, lag);
             let doing = crosser.doing();
@@ -1073,6 +1105,17 @@ impl<W: PlanWorld> Navigator<W> {
         self.crosser.is_some()
     }
 
+    /// `crossingState`: the tube the walk is heading for (or crossing), and whether the swing is thrown.
+    pub fn crossing_state(&self) -> Option<(&Crossing, bool)> {
+        let c = &self.crossings[self.to_crossing?];
+        Some((c, self.crosser.as_ref().is_some_and(SwingCrosser::thrown)))
+    }
+
+    /// `crossFails`: crossings of the current goal that failed so far.
+    pub fn cross_fails(&self) -> i32 {
+        self.cross_tries
+    }
+
     /// A planned freeze lies ahead on the route (`plannedFreeze`): not checked by the guard either.
     pub fn planned_freeze(&self) -> bool {
         !self.crossings.is_empty()
@@ -1163,6 +1206,12 @@ fn find_anchor<C: PlanCollision>(col: &C, me: &TeeState, direction: i32) -> Opti
 }
 
 fn hazard_within<C: PlanCollision>(col: &C, me: &TeeState, direction: i32, px: f64) -> bool {
+    hazard_within_px(col, me.pos.x, me.pos.y, direction, px)
+}
+
+/// `hazardWithinPx(collision, x0, y0, direction, px)`: freeze or death within `px` ahead of `(x0, y0)`
+/// in `direction`, down to four tiles below, before a wall.
+pub fn hazard_within_px(col: &impl PlanCollision, x0: f64, y0: f64, direction: i32, px: f64) -> bool {
     let mut offsets: Vec<f64> = Vec::new();
     let mut a = js::min(24.0, px);
     while a < px {
@@ -1171,12 +1220,12 @@ fn hazard_within<C: PlanCollision>(col: &C, me: &TeeState, direction: i32, px: f
     }
     offsets.push(px);
     for ahead in offsets {
-        let x = me.pos.x + f64::from(direction) * ahead;
-        if col.is_solid(x, me.pos.y) {
+        let x = x0 + f64::from(direction) * ahead;
+        if col.is_solid(x, y0) {
             return false;
         }
         for dy in 0..=4 {
-            let y = me.pos.y + f64::from(dy * TILE_PX);
+            let y = y0 + f64::from(dy * TILE_PX);
             if col.is_freeze(x, y) || col.is_death(x, y) {
                 return true;
             }

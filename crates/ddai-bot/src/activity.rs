@@ -21,7 +21,7 @@ use ddai_physics::vmath::Vec2;
 
 use crate::consts::*;
 use crate::players::{MAX_CLIENTS, PlayerTable};
-use crate::tees::{Tee, TeeSet, dist, input_keys_of};
+use crate::tees::{HELD_MOVE_MIN, Tee, TeeSet, dist, input_keys_of, keys_neutral};
 
 const NEVER: i32 = i32::MIN / 2;
 
@@ -32,6 +32,8 @@ struct Seen {
     angle: i32,
     attack: i32,
     keys: i32,
+    /// Where the tee was at the last snapshot (held keys while it moves are activity too).
+    pos: Vec2<f32>,
     at: i32,
     first_seen: i32,
     changed: i32,
@@ -45,6 +47,7 @@ impl Seen {
         angle: 0,
         attack: 0,
         keys: 0,
+        pos: Vec2 { x: 0.0, y: 0.0 },
         at: 0,
         first_seen: 0,
         changed: -1,
@@ -90,6 +93,8 @@ pub struct ActivityClock {
     last_touch: Box<[Option<Touch>; MAX_CLIENTS]>,
     last_pos: Box<[LastPos; MAX_CLIENTS]>,
     was_alive: Box<[bool; MAX_CLIENTS]>,
+    /// Ids that were out of the game (spectating, paused, team -1) at the last snapshot.
+    out_of_game: Box<[bool; MAX_CLIENTS]>,
     stats: BlockStats,
     events: Vec<BlockEvent>,
 }
@@ -120,6 +125,7 @@ impl ActivityClock {
                 }; MAX_CLIENTS],
             ),
             was_alive: Box::new([false; MAX_CLIENTS]),
+            out_of_game: Box::new([false; MAX_CLIENTS]),
             stats: BlockStats::default(),
             events: Vec::with_capacity(EVENT_CAP),
         }
@@ -191,6 +197,14 @@ impl ActivityClock {
         tick - s.changed > AFK_TICKS
     }
 
+    /// `awayInGame(t)`: AFK while in the game (a spectator or a paused player whose tee is still on the map
+    /// is not "away": it is fought, outside the AFK room; `afk` still counts it).
+    pub fn away_in_game(&self, id: i32, tick: i32, players: &PlayerTable) -> bool {
+        let slot = players.get(id);
+        !slot.is_some_and(|s| s.not_playing())
+            && (slot.is_some_and(|s| s.server_afk()) || self.input_idle(id, tick, false))
+    }
+
     /// `afk` (`bot.ts:3000-3003`): server AFK flag, not playing, or no input for 10 s.
     pub fn afk(&self, id: i32, tick: i32, players: &PlayerTable, strict: bool) -> bool {
         let slot = players.get(id);
@@ -203,10 +217,22 @@ impl ActivityClock {
         let me = tees.get(own_id).copied();
         if roster_known {
             for i in 0..MAX_CLIENTS {
-                if !players.get(i as i32).is_some_and(|s| s.present) {
-                    self.seen[i].valid = false;
-                    self.at_us[i] = NEVER;
-                    self.at_friend[i] = NEVER;
+                match players.get(i as i32).filter(|s| s.present) {
+                    None => {
+                        self.seen[i].valid = false;
+                        self.at_us[i] = NEVER;
+                        self.at_friend[i] = NEVER;
+                        self.out_of_game[i] = false;
+                    }
+                    Some(slot) => {
+                        // A player back from the spectators (or a pause) starts over: its old inputs say
+                        // nothing about whether it is away now (`notPlayingIds`).
+                        let out = slot.not_playing() || slot.team == -1;
+                        if !out && self.out_of_game[i] {
+                            self.seen[i].valid = false;
+                        }
+                        self.out_of_game[i] = out;
+                    }
                 }
             }
         }
@@ -306,6 +332,7 @@ impl ActivityClock {
                     angle: tee.angle,
                     attack: tee.attack_tick,
                     keys,
+                    pos: tee.pos,
                     at: tick,
                     first_seen: tick,
                     changed: -1,
@@ -316,9 +343,12 @@ impl ActivityClock {
             if seen.at == tick {
                 continue;
             }
+            // Held keys count as activity while the tee moves (running, swinging on the hook), even when
+            // the keys themselves did not change.
             let changed = tee.angle != seen.angle
                 || tee.attack_tick != seen.attack
-                || (keys >= 0 && seen.keys >= 0 && keys != seen.keys);
+                || (keys >= 0 && seen.keys >= 0 && keys != seen.keys)
+                || (keys >= 0 && !keys_neutral(keys) && dist(tee.pos, seen.pos) >= HELD_MOVE_MIN);
             if changed && tick >= seen.settle_until {
                 seen.changed = tick;
             }
@@ -346,6 +376,7 @@ impl ActivityClock {
             if keys >= 0 {
                 seen.keys = keys;
             }
+            seen.pos = tee.pos;
             seen.at = tick;
         }
 

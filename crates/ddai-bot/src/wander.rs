@@ -14,6 +14,8 @@
 use ddai_brain::{Action, IVec2};
 use ddai_physics::vmath::Vec2;
 
+use ddai_nav::navigator::{LAG_MARGIN_TICKS, WALK_BRAKE_TICKS};
+
 use crate::consts::*;
 use crate::mapgrid::MapGrid;
 use crate::tees::{HOOK_IDLE, Tee};
@@ -61,6 +63,10 @@ pub struct WanderCtx<'a> {
     pub anchor_x: Option<f32>,
     /// Wayblock mode: look toward this point (`lookAt`; 4.2).
     pub look_at: Option<Vec2<f32>>,
+    /// Wayblock guard on its spot: walk to the anchor and stand there, no random turns (`still`).
+    pub still: bool,
+    /// The input lag in ticks: the braking distance in front of a hazard counts it (`lagTicks()`).
+    pub lag_ticks: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +118,11 @@ impl Wander {
         if let Some(at) = c.look_at {
             self.aim = (at.y - me.pos.y).atan2(at.x - me.pos.x) + self.look * 0.2;
         }
-        if let Some(ax) = c.anchor_x
+        let still_at = c.anchor_x.filter(|_| c.still);
+        if let Some(ax) = still_at {
+            let off = ax - me.pos.x;
+            self.dir = if off.abs() > 16.0 { off.signum() as i32 } else { 0 };
+        } else if let Some(ax) = c.anchor_x
             && self.dir != 0
             && (me.pos.x - ax).abs() > 48.0
             && (ax - me.pos.x).signum() as i32 != self.dir
@@ -121,16 +131,36 @@ impl Wander {
             self.until = tick + 40;
         }
 
+        // The braking distance in front of a hazard grows with the speed and the lag: look that far ahead.
+        let brake_px =
+            |speed: f32| 24.0 + speed * (c.lag_ticks as f32 + WALK_BRAKE_TICKS as f32 + LAG_MARGIN_TICKS as f32);
         if self.dir != 0 {
             let ahead = Vec2::new(me.pos.x + (self.dir * 40) as f32, me.pos.y);
+            let far = 40.0f32.max(brake_px((me.vel.x * self.dir as f32).max(0.0)));
+            let far_x = me.pos.x + self.dir as f32 * far;
             let blocked = c.grid.is_solid(ahead.x, ahead.y)
                 || c.grid.is_freeze(ahead.x, ahead.y)
-                || c.grid.is_death(ahead.x, ahead.y);
+                || c.grid.is_death(ahead.x, ahead.y)
+                || (far > 40.0 && c.grid.hazard_within_px(me.pos.x, me.pos.y, self.dir, far));
             let drop = !c.grid.is_solid(ahead.x, me.pos.y + 40.0) && !c.grid.is_solid(ahead.x, me.pos.y + 80.0);
-            let hazard_below = c.grid.hazard_below(ahead.x, me.pos.y);
-            if blocked || hazard_below || (drop && self.rng.next_f32() < 0.7) {
-                self.dir = -self.dir;
+            let hazard_below =
+                c.grid.hazard_below(ahead.x, me.pos.y) || (far > 40.0 && c.grid.hazard_below(far_x, me.pos.y));
+            if blocked || hazard_below || (drop && (c.still || self.rng.next_f32() < 0.7)) {
+                self.dir = if c.still { 0 } else { -self.dir };
                 self.until = tick + 40;
+            }
+        }
+
+        // Running at a hazard faster than it can be stopped: let go of the key (on the ground), or push back.
+        if me.vel.x.abs() > 0.5 {
+            let going = me.vel.x.signum() as i32;
+            if c.grid
+                .hazard_within_px(me.pos.x, me.pos.y, going, brake_px(me.vel.x.abs()))
+            {
+                let grounded = c.grid.is_solid(me.pos.x + 14.0, me.pos.y + 19.0)
+                    || c.grid.is_solid(me.pos.x - 14.0, me.pos.y + 19.0);
+                self.dir = if grounded { 0 } else { -going };
+                self.until = tick + 25;
             }
         }
 
@@ -250,6 +280,8 @@ mod tests {
                     prev_aim: *prev,
                     anchor_x: None,
                     look_at: None,
+                    still: false,
+                    lag_ticks: 0,
                 },
                 &mut env(false),
             );
@@ -311,6 +343,8 @@ mod tests {
                 prev_aim: (0, -1),
                 anchor_x: None,
                 look_at: None,
+                still: false,
+                lag_ticks: 0,
             },
             &mut env(false),
         );
@@ -331,6 +365,8 @@ mod tests {
                 prev_aim: (0, -1),
                 anchor_x: None,
                 look_at: None,
+                still: false,
+                lag_ticks: 0,
             },
             &mut env(false),
         );
@@ -363,6 +399,8 @@ mod tests {
                 prev_aim: (300, 0),
                 anchor_x: None,
                 look_at: None,
+                still: false,
+                lag_ticks: 0,
             },
             &mut e,
         );
@@ -389,6 +427,8 @@ mod tests {
                 prev_aim: (300, 0),
                 anchor_x: None,
                 look_at: None,
+                still: false,
+                lag_ticks: 0,
             },
             &mut env(true),
         );
@@ -414,6 +454,8 @@ mod tests {
                 prev_aim: (300, 0),
                 anchor_x: None,
                 look_at: None,
+                still: false,
+                lag_ticks: 0,
             },
             &mut env(false),
         );
@@ -439,6 +481,8 @@ mod tests {
                 prev_aim: (300, 0),
                 anchor_x: Some(20.0 * 32.0),
                 look_at: None,
+                still: false,
+                lag_ticks: 0,
             },
             &mut env(false),
         );
@@ -452,10 +496,88 @@ mod tests {
                     prev_aim: (300, 0),
                     anchor_x: Some(60.0 * 32.0),
                     look_at: None,
+                    still: false,
+                    lag_ticks: 0,
                 },
                 &mut env(false),
             );
             assert!(!a.jump && !a.hook, "anchored: no random jumps or hooks (tick {tick})");
         }
+    }
+
+    fn ctx<'a>(
+        own: &'a Tee,
+        grid: &'a MapGrid,
+        tick: i32,
+        anchor: Option<f32>,
+        still: bool,
+        lag: i32,
+    ) -> WanderCtx<'a> {
+        WanderCtx {
+            tick,
+            own,
+            grid,
+            prev_aim: (300, 0),
+            anchor_x: anchor,
+            look_at: None,
+            still,
+            lag_ticks: lag,
+        }
+    }
+
+    #[test]
+    fn a_guard_that_is_still_walks_to_the_anchor_and_stands_there() {
+        // A floor of 40 tiles with a gap: the anchor is on the floor right before the gap.
+        let grid = MapGrid::new(&room(40, 12, &[]));
+        let mut w = Wander::new(5);
+        w.dir = 1;
+        w.until = 100_000;
+        // Far from the anchor (8 tiles to its right): walks toward it, left.
+        let own = tee_at(28.0 * 32.0, 10.0 * 32.0 + 16.0);
+        let a = w.step(
+            &ctx(&own, &grid, 10, Some(20.0 * 32.0 + 16.0), true, 0),
+            &mut env(false),
+        );
+        assert_eq!(a.direction, -1, "toward the anchor");
+        // Within 16 px of it: no direction at all, for as long as it stays there, with no random jumps or hooks.
+        let own = tee_at(20.0 * 32.0 + 16.0 + 10.0, 10.0 * 32.0 + 16.0);
+        for tick in 20..1200 {
+            let a = w.step(
+                &ctx(&own, &grid, tick, Some(20.0 * 32.0 + 16.0), true, 0),
+                &mut env(false),
+            );
+            assert_eq!(a.direction, 0, "standing still on the anchor (tick {tick})");
+            assert!(!a.jump && !a.hook);
+        }
+    }
+
+    #[test]
+    fn running_at_a_freeze_it_cannot_stop_in_front_of_lets_go_on_the_ground_and_pushes_back_in_the_air() {
+        // A solid floor up to tile x = 14, then freeze; the tee runs right on the floor at 8 px/tick.
+        let mut freeze: Vec<(u32, u32, u8)> = (14..30).map(|x| (x, 10, FREEZE)).collect();
+        freeze.extend((1..14).map(|x| (x, 10, SOLID)));
+        let grid = MapGrid::new(&room(40, 12, &freeze));
+        let mut own = tee_at(10.0 * 32.0 + 16.0, 9.0 * 32.0 + 16.0);
+        own.vel.x = 8.0;
+        let mut w = Wander::new(7);
+        w.dir = 1;
+        w.until = 100_000;
+        // Braking distance 24 + 8 * (lag 2 + 3 + 2) = 80 px: the freeze at x = 14 tiles is 4 tiles = 128 px away:
+        // far enough, it keeps running.
+        let a = w.step(&ctx(&own, &grid, 10, None, false, 2), &mut env(false));
+        assert_eq!(a.direction, 1, "still room to stop");
+        // 2 tiles from the freeze (64 px, inside the 80 px): on the ground it lets go of the key...
+        let mut near = own;
+        near.pos.x = 12.0 * 32.0 + 16.0;
+        let a = w.step(&ctx(&near, &grid, 12, None, false, 2), &mut env(false));
+        assert_eq!(a.direction, 0, "on the ground: let go");
+        // ...in the air (nothing under it) it pushes back against the way it goes.
+        let mut air = near;
+        air.pos.y = 5.0 * 32.0;
+        let mut w = Wander::new(7);
+        w.dir = 1;
+        w.until = 100_000;
+        let a = w.step(&ctx(&air, &grid, 12, None, false, 2), &mut env(false));
+        assert_eq!(a.direction, -1, "in the air: push back");
     }
 }

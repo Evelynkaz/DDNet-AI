@@ -42,6 +42,7 @@ pub mod target;
 pub mod tees;
 pub mod unstick;
 pub mod wander;
+pub mod wb_guard;
 
 pub use bot::{Bot, BotConfig, BotEvent, BotStats, Mode, Output, Status};
 pub use brains::{BrainError, BrainKind, BrainOptions, make_brain};

@@ -182,10 +182,17 @@ impl TargetPicker {
             world: ctx.base,
             lag_ticks: ctx.lag_ticks,
             mode: ctx.mode,
+            fixed_target: false,
         };
         self.reach.begin_snapshot();
         self.seal_left = SEAL_CHECKS_PER_SNAPSHOT;
         self.collect_seal_results();
+        if hooks.wayblock.holding() {
+            let (base, tick, target) = (ctx.base, ctx.tick, self.target);
+            hooks
+                .wayblock
+                .begin_pick(&hook_ctx, target, &mut |t: &Tee| self.is_sealed(tick, t, base, plan));
+        }
         let (tick, me) = (ctx.tick, ctx.own);
         let mut best = -1;
         let mut best_score = f32::NEG_INFINITY;
@@ -201,11 +208,18 @@ impl TargetPicker {
                 continue;
             }
             let at_war = flags.at_war();
-            if slot.is_some_and(|s| s.not_playing()) {
+            // A spectator or a paused player whose tee is still on the map is fought like anybody else
+            // (`awayInGame`), except in the AFK room (`wbWalkAllowed`); only a tee that is AFK while it
+            // plays is skipped.
+            if !at_war && ctx.clock.away_in_game(tee.id, tick, ctx.players) {
                 continue;
             }
-            if !at_war && ctx.clock.afk(tee.id, tick, ctx.players, false) {
-                continue;
+            let not_playing = slot.is_some_and(|s| s.not_playing());
+            if !at_war && not_playing {
+                let (tx, ty) = crate::reach::tile_of(tee.pos.x, tee.pos.y);
+                if !hooks.wayblock.walk_allowed(tx, ty) {
+                    continue;
+                }
             }
             let d = dist(me.pos, tee.pos);
             if d > TARGET_MAX_PX {
@@ -234,7 +248,8 @@ impl TargetPicker {
             let finishing_candidate =
                 wb_finish_candidate || (is_current && tee.frozen && frozen_for <= FINISH_BLOCK_TICKS && near_freeze);
             let settled_anyway = frozen_for > SETTLED_FREEZE_TICKS && !finishing_candidate;
-            let sealed = (tee.frozen || (is_current && near_freeze))
+            let sealed = !wb.corridor
+                && (tee.frozen || (is_current && near_freeze))
                 && !settled_anyway
                 && self.is_sealed(tick, tee, ctx.base, plan);
             let finishing = finishing_candidate && !sealed;
@@ -250,6 +265,7 @@ impl TargetPicker {
             let out_of_reach = d >= PATH_NEAR_PX
                 && !at_war
                 && !roped
+                && !wb.corridor
                 && !{
                     let before = self.reach.searches();
                     let t0 = std::time::Instant::now();
@@ -262,6 +278,9 @@ impl TargetPicker {
                     ok
                 };
 
+            if out_of_reach && not_playing && ctx.clock.input_idle(tee.id, tick, false) {
+                continue;
+            }
             let mut score = 0.0f32;
             if at_war {
                 score += 900.0;
@@ -302,6 +321,9 @@ impl TargetPicker {
             }
             if wb.in_zone {
                 score += 300.0;
+            }
+            if wb.corridor {
+                score += crate::wb_guard::WB_CORRIDOR_SCORE;
             }
             self.last_seen[tee.id as usize] = d;
             if score > best_score {
@@ -409,7 +431,7 @@ impl TargetPicker {
 }
 
 /// `spared(t)` (`bot.ts:3009-3018`): tees the hook must never catch and the planner steers around —
-/// ignored; an unfrozen friend / clan-friend; out of game; or (not at war) AFK.
+/// ignored; an unfrozen friend / clan-friend; or (not at war) away in the game (AFK while playing).
 pub fn is_spared(tee: &Tee, tick: i32, players: &PlayerTable, clock: &ActivityClock) -> bool {
     let slot = players.get(tee.id);
     let flags = slot.map_or(RelationFlags::default(), |s| s.flags);
@@ -419,10 +441,7 @@ pub fn is_spared(tee: &Tee, tick: i32, players: &PlayerTable, clock: &ActivityCl
     if !tee.frozen && flags.friendly() {
         return true;
     }
-    if slot.is_some_and(|s| s.not_playing()) {
-        return true;
-    }
-    !flags.at_war() && clock.afk(tee.id, tick, players, false)
+    !flags.at_war() && clock.away_in_game(tee.id, tick, players)
 }
 
 #[cfg(test)]
@@ -789,6 +808,7 @@ mod tests {
                 skip: self.skip.contains(&t.id),
                 in_zone: self.zone.contains(&t.id),
                 finish_zone: false,
+                corridor: false,
             }
         }
     }
@@ -811,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_never_paused_spectating_friends_far_or_dead_and_a_tie_is_the_lowest_id() {
+    fn filters_friends_far_or_dead_and_a_tie_is_the_lowest_id_and_a_paused_tee_on_the_map_is_fought() {
         let mut f = Fx::open();
         f.rel.add(ListKind::Friend, "pal");
         let list = [
@@ -832,11 +852,25 @@ mod tests {
         f.players.update(&list, &f.rel);
         f.put(tee(0, 1000.0));
         f.put(tee(1, 1100.0)); // friend
-        f.put(tee(2, 1100.0)); // paused
+        f.put(tee(2, 1100.0)); // paused, its tee still on the map: fought like anybody (af49dfb)
         f.put(tee(3, 1300.0)); // 300 px right
         f.put(tee(4, 700.0)); // 300 px left: equal score, higher id
         f.put(tee(5, 1000.0 + 1601.0)); // too far
-        assert_eq!(f.pick(), 3, "the lowest id of the tied pair, after every filter");
+        assert_eq!(
+            f.pick(),
+            2,
+            "the paused tee is the nearest foe; friend and far are filtered"
+        );
+        // Without the paused tee: the lowest id of the tied pair, after every filter.
+        let mut g = Fx::open();
+        g.rel.add(ListKind::Friend, "pal");
+        g.players.update(&list, &g.rel);
+        g.put(tee(0, 1000.0));
+        g.put(tee(1, 1100.0));
+        g.put(tee(3, 1300.0));
+        g.put(tee(4, 700.0));
+        g.put(tee(5, 1000.0 + 1601.0));
+        assert_eq!(g.pick(), 3, "the lowest id of the tied pair, after every filter");
     }
 
     #[test]
@@ -858,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn spared_covers_ignore_friends_out_of_game_and_afk_but_not_war() {
+    fn spared_covers_ignore_friends_and_afk_in_the_game_but_not_war_or_the_paused() {
         let mut f = Fx::open();
         f.rel.add(ListKind::Ignore, "ign");
         f.rel.add(ListKind::Friend, "pal");
@@ -901,7 +935,10 @@ mod tests {
         let spared = |id: i32| is_spared(f.tees.get(id).unwrap(), 1000, &f.players, &f.clock);
         assert!(spared(1), "ignored");
         assert!(spared(2), "unfrozen friend");
-        assert!(spared(3), "paused: out of game");
+        assert!(
+            !spared(3),
+            "paused with its tee on the map: no longer spared (af49dfb), only AFK in the game is"
+        );
         assert!(!spared(4), "a plain active player is fair game");
         assert!(!spared(5), "server AFK but at war: AFK does not spare");
         assert!(spared(6), "server AFK, not at war");

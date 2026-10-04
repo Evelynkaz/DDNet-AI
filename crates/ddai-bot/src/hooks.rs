@@ -55,6 +55,8 @@ pub struct HookContext<'a> {
     pub lag_ticks: i32,
     /// The bot's current mode.
     pub mode: Mode,
+    /// A fixed target is set (`--target`, `!target <nick>`): the wayblock walk then fights nobody on the way.
+    pub fixed_target: bool,
 }
 
 /// Which map is loaded: the name decides which wayblock applies, the hash keys the freeze memory.
@@ -93,6 +95,8 @@ pub trait Navigator {
     fn on_map_changing(&mut self) {}
     /// We (re)spawned (`nav.respawned()`).
     fn respawned(&mut self) {}
+    /// `by` froze us at `tick` (`noteWbFreeze`): the walk to the wayblock counts it against him.
+    fn blocked_by(&mut self, _by: i32, _tick: i32) {}
     /// First thing each snapshot while our tee lives: pending commands, the end of a walk, the freeze
     /// memory. Returns a mode change and fresh map knowledge for the brain, if any.
     fn poll(&mut self, _ctx: &HookContext<'_>) -> Poll {
@@ -149,6 +153,10 @@ pub trait WayBlock {
     fn holding(&self) -> bool {
         false
     }
+    /// Once per target selection, before the candidates (while the wayblock is held): the guard's view of the hall
+    /// for this tick. `target` is the current target; `sealed(tee)` asks the target selection whether a frozen
+    /// tee is sealed (`isSealed`, cached there).
+    fn begin_pick(&mut self, _ctx: &HookContext<'_>, _target: i32, _sealed: &mut dyn FnMut(&Tee) -> bool) {}
     /// For each candidate of the target selection: `skip` drops it (the wayblock's own admission
     /// rules), `in_zone` adds the `+300` zone bonus, `finish_zone` marks a frozen tee in the zone that
     /// we hold from inside the hall (`wbFinish`: kept as a finishing target unless sealed).
@@ -167,6 +175,15 @@ pub trait WayBlock {
     fn wander_hint(&mut self, _ctx: &HookContext<'_>) -> Option<WanderHint> {
         None
     }
+    /// `wbWalkAllowed(wbDef, tx, ty)`: false in the zones the walk and the fight stay out of (the AFK room).
+    fn walk_allowed(&self, _tx: i32, _ty: i32) -> bool {
+        true
+    }
+    /// `wbFoe`: while the WB walk deals with somebody first (a player in the way at the tube, or one who
+    /// froze us three times on the way), the target is him, whatever the pick says.
+    fn foe_target(&mut self) -> Option<i32> {
+        None
+    }
 }
 
 /// [`WayBlock::wander_hint`]'s answer, pixels.
@@ -174,6 +191,8 @@ pub trait WayBlock {
 pub struct WanderHint {
     pub anchor_x: f32,
     pub look_at: Option<(f32, f32)>,
+    /// The guard on its spot: stand still on the anchor (`wander(…, still)`).
+    pub still: bool,
 }
 
 /// [`WayBlock::filter`]'s verdict.
@@ -182,6 +201,9 @@ pub struct WbFilter {
     pub skip: bool,
     pub in_zone: bool,
     pub finish_zone: bool,
+    /// The tee in the corridor behind the wall that the guard catches first: never "sealed" or "out of reach"
+    /// and worth `WB_CORRIDOR_SCORE` (`guard.corridor`).
+    pub corridor: bool,
 }
 
 /// Trek / path goals (task 4.2).

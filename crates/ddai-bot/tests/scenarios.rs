@@ -147,7 +147,9 @@ fn an_afk_player_is_skipped_until_it_moves_and_war_ignores_afk() {
 }
 
 #[test]
-fn paused_and_spectating_players_are_out_of_the_game() {
+fn paused_and_spectating_players_with_a_tee_on_the_map_are_fought_like_anybody() {
+    // Upstream af49dfb (2026-10-01): a player in /pause or /spec whose tee is still on the map is a target (it was "out
+    // of the game" before); only a player AFK while it plays is skipped.
     support::big_stack(|| {
         let (mut bot, mut sc, _) = setup(
             vec![tee(0, 1000), tee(1, 1100), tee(2, 1500), tee(3, 1300)],
@@ -156,7 +158,12 @@ fn paused_and_spectating_players_are_out_of_the_game() {
         sc.player_mut(1).ex_flags = explayerflagflag::PAUSED;
         sc.player_mut(3).ex_flags = explayerflagflag::SPEC;
         run_active(&mut bot, &mut sc, &[1, 2, 3], 4);
-        assert_eq!(bot.target_id(), 2);
+        assert_eq!(bot.target_id(), 1, "the paused tee is the nearest foe");
+        // The server's AFK flag still says "away": that one is skipped.
+        let (mut bot, mut sc, _) = setup(vec![tee(0, 1000), tee(1, 1100), tee(2, 1500)], Relations::new());
+        sc.player_mut(1).ex_flags = explayerflagflag::AFK;
+        run_active(&mut bot, &mut sc, &[1, 2], 4);
+        assert_eq!(bot.target_id(), 2, "AFK while playing: not a target");
     });
 }
 

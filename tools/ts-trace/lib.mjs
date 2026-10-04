@@ -11,19 +11,27 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = join(HERE, "..", "..");
-/** Root of the frozen TS reference (`tools/ts-reference`); the generators import `<TS_REF>/src/...`. */
-export const TS_REF = join(REPO_ROOT, "tools", "ts-reference");
+/**
+ * Root of the TS reference; the generators import `<TS_REF>/src/...`. By default the frozen copy in
+ * `tools/ts-reference` (pinned to upstream c3c619d); `DDAI_TS_REF=<dir>` points them at another checkout of
+ * the upstream sources instead (task 4.8: af49dfb, extracted into scratch, see `tools/ts-reference/README.md`).
+ * The directory must have `src/` and, for `bot.ts`, `node_modules/teeworlds`.
+ */
+export const TS_REF = process.env.DDAI_TS_REF ? resolve(process.env.DDAI_TS_REF) : join(REPO_ROOT, "tools", "ts-reference");
 export const CORE_DIR = join(TS_REF, "src", "core");
 
 // --- imports of the REAL tools/ts-reference/src/core/*.ts (never copied, never edited) ---------
-export { SimWorld } from "../ts-reference/src/core/world.ts";
-export { Collision } from "../ts-reference/src/core/collision.ts";
-export { loadMapCollision } from "../ts-reference/src/map/loadMap.ts";
-export * as types from "../ts-reference/src/core/types.ts";
+const worldMod = await import(`${TS_REF}/src/core/world.ts`);
+const collisionMod = await import(`${TS_REF}/src/core/collision.ts`);
+const loadMapMod = await import(`${TS_REF}/src/map/loadMap.ts`);
+export const types = await import(`${TS_REF}/src/core/types.ts`);
+export const SimWorld = worldMod.SimWorld;
+export const Collision = collisionMod.Collision;
+export const loadMapCollision = loadMapMod.loadMapCollision;
 
 // --- f64 <-> hex bit pattern (matches ddai-tsworld's `f64::to_bits`/`from_bits`) ----------------
 

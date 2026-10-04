@@ -43,7 +43,7 @@ use ddai_nav::navigator::{NavCtx, NavGoal, NavOpts, Navigator as TsNavigator, de
 use ddai_nav::route::{RouteOpts, Router, dead_zone, spawn_tiles};
 use ddai_nav::trek::{ACTION_MEMORY_TICKS, CROWD_RADIUS_PX, PathGoal, Trek as TsTrek, game_spot};
 pub use ddai_nav::wayblock::WbMode;
-use ddai_nav::wayblock::{WB_NO_CLIMB_TILES, WB_RETURN_TICKS, WbState, on_wb_spot, wayblock_for, wb_spot};
+use ddai_nav::wayblock::{WB_NO_CLIMB_TILES, WB_RETURN_TICKS, WbState, on_wb_spot, wayblock_for, wb_walk_allowed};
 use ddai_physics::map::MapData;
 use ddai_physics::vmath::Vec2;
 use ddai_planner::brains::action_from_input;
@@ -60,6 +60,8 @@ use crate::hooks::{
 use crate::mapgrid::MapGrid;
 use crate::reach::{RouteFinder, Tile};
 use crate::tees::{HOOK_FLYING, Tee, dist};
+
+mod wb_extra;
 
 /// `TRAVEL_RETRY_TICKS` (`bot.ts:235`).
 const TRAVEL_RETRY_TICKS: i64 = 5 * 50;
@@ -272,6 +274,10 @@ struct Core {
     route_kill_tick: i32,
     last_status_tick: i32,
     seek_enabled: bool,
+    /// The foe of the WB walk, route 2, the guard (`wb_extra`).
+    x: wb_extra::WbExtra,
+    wb_route2_on: bool,
+    wb_route2_crowd_on: bool,
 }
 
 impl Core {
@@ -316,6 +322,9 @@ impl Core {
             route_kill_tick: i32::MIN / 2,
             last_status_tick: i32::MIN / 2,
             seek_enabled,
+            x: wb_extra::WbExtra::default(),
+            wb_route2_on: wb_extra::route2_on(),
+            wb_route2_crowd_on: wb_extra::route2_crowd_on(),
         }
     }
 
@@ -343,7 +352,25 @@ impl Core {
         let dead = (!spawns.is_empty()).then(|| Arc::new(dead_zone(&router.grid, &spawns)));
         let (width, height) = (world.collision().width(), world.collision().height());
         let def = wayblock_for(&ident.name, Some(world.collision()));
-        self.wb.on_map(def);
+        // The same map again (its name and size): the deaths on the way and the pause of the WB stay.
+        let key = format!("{}|{}x{}", ident.name, width, height);
+        let same = key == self.x.pause_key;
+        self.x.reset();
+        self.x.pause_key = key;
+        if let Some(d) = &def {
+            let named = d.name.to_lowercase() == ident.name.trim().to_lowercase();
+            self.log(&format!(
+                "WB: this map has one{}; {}",
+                if named { String::new() } else { format!(" ({})", d.name) },
+                "holding it when there is nobody to fight (!wb off to stop)"
+            ));
+        } else if ddai_nav::wayblock::has_wayblock_named(&ident.name) {
+            self.log(&format!(
+                "WB: '{}' here is another version of the map the WB was measured on (no hall like it in its tiles, or a spot, a rope anchor of the tube, the swing's start or the passage's exit differs); not holding it",
+                ident.name
+            ));
+        }
+        self.wb.on_map_keeping(def, same);
         let template = world.new_scratch();
         self.ms = Some(MapState {
             world,
@@ -569,7 +596,7 @@ impl Core {
                 }
                 let r = if self.wb.def.is_none() {
                     format!(
-                        "{gave}WB: {} (this map has none; it applies on Copy Love Box)",
+                        "{gave}WB: {} (this map has none; it applies on Copy Love Box and its copies with the same hall)",
                         mode.name()
                     )
                 } else if mode == WbMode::Off {
@@ -741,7 +768,7 @@ impl Core {
         (tees, busy)
     }
 
-    fn engaged_now(ctx: &HookContext<'_>) -> bool {
+    fn engaged_now(ctx: &HookContext<'_>, target: i32) -> bool {
         let me = ctx.own;
         if me.frozen || me.hooked_player >= 0 {
             return true;
@@ -751,7 +778,9 @@ impl Core {
                 && (t.hooked_player == me.id
                     || (!t.frozen
                         && dist(me.pos, t.pos) < ENGAGED_PX
-                        && !ctx.clock.afk(t.id, ctx.tick, ctx.players, false)))
+                        // A paused or spectating tee we are fighting (the target) counts as engaged too.
+                        && (!ctx.clock.afk(t.id, ctx.tick, ctx.players, false)
+                            || (t.id == target && ctx.players.get(t.id).is_some_and(|s| s.not_playing())))))
         })
     }
 
@@ -858,7 +887,22 @@ impl Core {
                 self.log(&line);
                 self.idle_since = i64::from(tick) - WB_RETURN_TICKS - 1;
             }
+            // Who froze us on the way (three times: a grudge), then the foe of the walk.
+            for by in std::mem::take(&mut self.x.blocked_by) {
+                self.note_wb_freeze(ctx, by);
+            }
+            self.update_wb_foe(ctx);
+            if (self.wb.walk_fails() > 0 || self.x.route2_crowd)
+                && !own.frozen
+                && self.wb.def.as_ref().is_some_and(|d| {
+                    d.in_hall(ddai_nav::wayblock::WbSide::Left, tile.0, tile.1)
+                        || d.in_hall(ddai_nav::wayblock::WbSide::Right, tile.0, tile.1)
+                })
+            {
+                self.x.route2_crowd = false;
+            }
             self.wb.arrived_in_hall(tile, own.frozen);
+            self.update_wb_route2(ctx);
         }
         // 4. the freeze memory.
         self.note_memory(ctx, tile);
@@ -1198,7 +1242,7 @@ impl Core {
             && self.seek_enabled
             && !holding
             && tick - self.travel_since > TRAVEL_RETRY_TICKS
-            && !Self::engaged_now(ctx)
+            && !Self::engaged_now(ctx, target)
             && !Self::someone_worth_fighting(ctx, SEEK_ARRIVED_PX)
         {
             let here = Self::crowd_at(ctx, ctx.own.pos);
@@ -1302,9 +1346,7 @@ impl Core {
         };
         let (tx, ty) = tile_of(ctx.own.pos);
         let inside = def.in_hall(side, tx, ty);
-        let tees: Vec<TeeState> = ctx.tees.iter().map(|t| self.tee_state_of(t)).collect();
-        let is_friend = |id: i32| ctx.players.get(id).is_some_and(|s| s.flags.friendly());
-        let first = wb_spot(ctx.own.id, &tees, &is_friend, &def, side, Some((tx, ty)));
+        let first = self.wb_spot_for(ctx, &def, side, (tx, ty));
         let spots: Vec<(i32, i32)> = std::iter::once(first)
             .chain(def.side(side).spots.iter().copied())
             .collect();
@@ -1397,34 +1439,7 @@ impl Core {
     // ---- wayblock ------------------------------------------------------------------------------------
 
     fn wb_filter(&self, ctx: &HookContext<'_>, cand: &Tee) -> WbFilter {
-        let (Some(def), Some(side)) = (&self.wb.def, self.wb.side()) else {
-            return WbFilter::default();
-        };
-        let own = ctx.own;
-        let (tx, ty) = tile_of(cand.pos);
-        let me_in_leash = {
-            let (ox, oy) = tile_of(own.pos);
-            def.in_hall(side, ox, oy)
-        };
-        let flags = ctx.players.get(cand.id).map(|s| s.flags).unwrap_or_default();
-        let roped = cand.hooked_player == own.id || own.hooked_player == cand.id;
-        let at_us = ctx.clock.at_us_within(cand.id, ctx.tick, AGGRESSOR_MEMORY_TICKS);
-        let d = dist(own.pos, cand.pos);
-        let in_leash = def.in_leash(side, tx, ty);
-        let counter = me_in_leash && at_us && d <= HOOK_LENGTH_PX + COUNTER_REACH_PX && !in_leash;
-        let skip = !roped && !flags.at_war() && !counter && if me_in_leash { !in_leash } else { !at_us };
-        if skip {
-            return WbFilter {
-                skip: true,
-                ..WbFilter::default()
-            };
-        }
-        let in_zone = def.in_zone(side, tx, ty);
-        WbFilter {
-            skip: false,
-            in_zone,
-            finish_zone: me_in_leash && in_zone,
-        }
+        self.wb_filter_guard(ctx, cand)
     }
 
     fn wb_wants_kill(&self, ctx: &HookContext<'_>, frozen_for: i32) -> bool {
@@ -1461,19 +1476,20 @@ impl Core {
         }
     }
 
-    fn wb_wander_hint(&self, ctx: &HookContext<'_>) -> Option<WanderHint> {
-        let (def, side) = (self.wb.def.as_ref()?, self.wb.side()?);
+    fn wb_wander_hint(&mut self, ctx: &HookContext<'_>) -> Option<WanderHint> {
+        let (def, side) = (self.wb.def.clone()?, self.wb.side()?);
         let (tx, ty) = tile_of(ctx.own.pos);
         if !def.in_hall(side, tx, ty) {
             return None;
         }
-        let tees: Vec<TeeState> = ctx.tees.iter().map(|t| self.tee_state_of(t)).collect();
-        let is_friend = |id: i32| ctx.players.get(id).is_some_and(|s| s.flags.friendly());
-        let spot = wb_spot(ctx.own.id, &tees, &is_friend, def, side, Some((tx, ty)));
+        let spot = self.wb_spot_for(ctx, &def, side, (tx, ty));
         let watch = def.side(side).watch;
+        // The guard on its spot stands still there (`wander(…, still)`).
+        let still = ddai_nav::wayblock::wb_guard() && !self.role_lower(ctx);
         Some(WanderHint {
             anchor_x: (spot.0 * 32 + 16) as f32,
             look_at: Some(((watch.0 * 32 + 16) as f32, (watch.1 * 32 + 16) as f32)),
+            still,
         })
     }
 
@@ -1555,11 +1571,21 @@ impl Navigator for NavHook {
         c.drop_walk();
         c.trek = None;
         c.ms = None;
+        c.x.reset();
     }
     fn respawned(&mut self) {
         let mut c = self.0.borrow_mut();
         if let Some(n) = &mut c.nav {
             n.respawned();
+        }
+        // A new try: route 2 is said (and the crowd judged) again.
+        c.x.route2_crowd = false;
+        c.x.route2_said = false;
+    }
+    fn blocked_by(&mut self, by: i32, _tick: i32) {
+        let mut c = self.0.borrow_mut();
+        if c.x.blocked_by.len() < 16 {
+            c.x.blocked_by.push(by);
         }
     }
     fn poll(&mut self, ctx: &HookContext<'_>) -> Poll {
@@ -1633,7 +1659,16 @@ impl WayBlock for WbHook {
         self.0.borrow().wb_brain_hints(ctx)
     }
     fn wander_hint(&mut self, ctx: &HookContext<'_>) -> Option<WanderHint> {
-        self.0.borrow().wb_wander_hint(ctx)
+        self.0.borrow_mut().wb_wander_hint(ctx)
+    }
+    fn begin_pick(&mut self, ctx: &HookContext<'_>, target: i32, sealed: &mut dyn FnMut(&Tee) -> bool) {
+        self.0.borrow_mut().begin_pick(ctx, target, sealed);
+    }
+    fn walk_allowed(&self, tx: i32, ty: i32) -> bool {
+        wb_walk_allowed(self.0.borrow().wb.def.as_ref(), tx, ty)
+    }
+    fn foe_target(&mut self) -> Option<i32> {
+        self.0.borrow().x.foe.as_ref().map(|f| f.id)
     }
 }
 
@@ -1777,6 +1812,7 @@ mod tests {
                 world: &world,
                 lag_ticks: 0,
                 mode: self.mode,
+                fixed_target: false,
             };
             let poll = self.hooks.navigator.poll(&ctx);
             if let Some(m) = poll.mode {
@@ -1987,6 +2023,7 @@ mod tests {
             world: &world,
             lag_ticks: 0,
             mode: Mode::Fight,
+            fixed_target: false,
         };
         let poll = f.hooks.navigator.poll(&ctx);
         let k = poll.knowledge.expect("knowledge on the first poll");
@@ -2049,6 +2086,7 @@ mod tests {
                 world: &world,
                 lag_ticks: 0,
                 mode: Mode::Fight,
+                fixed_target: false,
             };
             if let Some(k) = f.hooks.navigator.poll(&ctx).knowledge {
                 knowledge_at.push((i, k));
@@ -2095,6 +2133,7 @@ mod tests {
                     world: &world,
                     lag_ticks: 0,
                     mode: Mode::Fight,
+                    fixed_target: false,
                 };
                 let t0 = std::time::Instant::now();
                 let p = f.hooks.navigator.poll(&ctx);
@@ -2116,6 +2155,7 @@ mod tests {
                 world: &world,
                 lag_ticks: 0,
                 mode: Mode::Fight,
+                fixed_target: false,
             };
             let t0 = std::time::Instant::now();
             let p = f.hooks.navigator.poll(&ctx);
@@ -2246,6 +2286,7 @@ mod tests {
             world: &world,
             lag_ticks: 0,
             mode: Mode::Fight,
+            fixed_target: false,
         };
         f.hooks.navigator.poll(&ctx);
         assert!(
@@ -2308,6 +2349,7 @@ mod tests {
             world: &world,
             lag_ticks: 0,
             mode: Mode::Fight,
+            fixed_target: false,
         };
         f.hooks.navigator.poll(&ctx);
         assert!(!f.hooks.wayblock.wants_kill(&ctx, WB_LYING_TICKS - 1), "not yet");
@@ -2325,5 +2367,367 @@ mod tests {
             ..tee_at(0, zone.x0 + 1, zone.y0 + 1)
         };
         assert!(!f.hooks.wayblock.wants_kill(&HookContext { own: &in_zone, ..ctx }, 100));
+    }
+
+    // ---- the WB update of af49dfb: route 2, the foe of the walk, the guard ---------------------------
+
+    /// Runs a test body on a thread with room for the worlds (several copies of a `World` are big).
+    fn on_big_stack(body: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(body)
+            .expect("thread")
+            .join()
+            .expect("the test body");
+    }
+
+    /// A bare `Core` on a map, for the pieces the hooks only expose through a whole bot.
+    struct CoreFx {
+        core: Core,
+        env: CoreEnv,
+    }
+
+    /// What the hooks look at (kept apart from the core so a context can be held while the core changes).
+    struct CoreEnv {
+        map: Arc<MapData>,
+        pw: PhysicsWorld,
+        grid: MapGrid,
+        players: PlayerTable,
+        clock: ActivityClock,
+        tees: TeeSet,
+        mode: Mode,
+    }
+
+    impl CoreFx {
+        fn on(map: MapData, name: &str, relations: &Relations) -> CoreFx {
+            let map = Arc::new(map);
+            let mut core = Core::new(no_memory(), NavHandle::new());
+            core.on_map(
+                &map,
+                &MapIdent {
+                    name: name.to_string(),
+                    sha256: [9; 32],
+                },
+            );
+            core.mode = Mode::Fight;
+            let mut players = PlayerTable::new(SALT);
+            let views = [
+                player(0, "bot", "", true, 0, None),
+                player(1, "foe", "", false, 0, None),
+                player(2, "pal", "", false, 0, None),
+            ];
+            players.update(&views, relations);
+            CoreFx {
+                core,
+                env: CoreEnv {
+                    pw: PhysicsWorld::new(Arc::clone(&map), 1),
+                    grid: MapGrid::new(&map),
+                    map,
+                    players,
+                    clock: ActivityClock::new(),
+                    tees: TeeSet::new(),
+                    mode: Mode::Fight,
+                },
+            }
+        }
+    }
+
+    impl CoreEnv {
+        fn ctx<'a>(&'a self, own: &'a Tee, tick: i32, world: &'a ddai_physics::world::World<f32>) -> HookContext<'a> {
+            HookContext {
+                tick,
+                own,
+                tees: &self.tees,
+                players: &self.players,
+                grid: &self.grid,
+                clock: &self.clock,
+                world,
+                lag_ticks: 0,
+                mode: self.mode,
+                fixed_target: false,
+            }
+        }
+    }
+
+    #[test]
+    fn route_2_comes_after_two_failed_tries_and_not_before_or_without_a_walk() {
+        on_big_stack(|| {
+            use super::wb_extra::wb_route2_why;
+            assert_eq!(wb_route2_why(0, 0, false), None);
+            assert_eq!(wb_route2_why(1, 1, false), None);
+            assert_eq!(
+                wb_route2_why(2, 0, false).as_deref(),
+                Some("the last 2 tries to get in failed")
+            );
+            assert_eq!(
+                wb_route2_why(0, 3, false).as_deref(),
+                Some("the last 3 tries to get in failed")
+            );
+            assert_eq!(wb_route2_why(0, 0, true).as_deref(), Some("a crowd at the tube"));
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let mut f = CoreFx::on(map, "Copy Love Box", &Relations::new());
+            let spawn = ddai_nav::route::spawn_tiles(&f.env.map)[0];
+            let (tx, ty) = ((spawn.0 / 32.0) as i32, (spawn.1 / 32.0) as i32);
+            f.env.tees.set_for_test(tee_at(0, tx, ty));
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 1000, &world);
+            f.core.poll(&ctx);
+            f.core.walk_to_wb(&ctx);
+            assert!(f.core.wb_walk && f.core.nav.is_some(), "the walk to the WB runs");
+            f.core.update_wb_route2(&ctx);
+            assert!(!f.core.nav.as_ref().unwrap().wall_route, "route 1 first");
+            f.core.wb.note_walk_death(0);
+            f.core.wb.note_walk_death(0);
+            f.core.update_wb_route2(&ctx);
+            assert!(
+                f.core.nav.as_ref().unwrap().wall_route,
+                "two deaths on the way: route 2"
+            );
+            // Not on a walk that is not the WB's.
+            f.core.wb_walk = false;
+            f.core.update_wb_route2(&ctx);
+            assert!(!f.core.nav.as_ref().unwrap().wall_route);
+        });
+    }
+
+    #[test]
+    fn outside_the_leash_only_the_war_list_is_fought_and_inside_the_guard_skips_the_ones_falling_past() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let mut rel = Relations::new();
+            rel.add(crate::relations::ListKind::War, "pal");
+            let mut f = CoreFx::on(map, "Copy Love Box", &rel);
+            let def = ddai_nav::wayblock::wayblocks().remove(0);
+            let spawn = ddai_nav::route::spawn_tiles(&f.env.map)[0];
+            let (sx, sy) = ((spawn.0 / 32.0) as i32, (spawn.1 / 32.0) as i32);
+            // On the way in (at the spawn): nobody but the war list, even one that hooks us.
+            let mut hooker = tee_at(1, sx + 3, sy);
+            hooker.hooked_player = 0;
+            f.env.tees.set_for_test(tee_at(0, sx, sy));
+            f.env.tees.set_for_test(hooker);
+            f.env.tees.set_for_test(tee_at(2, sx + 4, sy));
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 1000, &world);
+            f.core.poll(&ctx);
+            assert!(f.core.wb_holding());
+            let wb = |c: &CoreFx, t: &Tee| c.core.wb_filter(&c.env.ctx(&own, 1000, &world), t);
+            assert!(
+                wb(&f, f.env.tees.get(1).unwrap()).skip,
+                "a tee that hooks us on the way is not fought (af49dfb)"
+            );
+            assert!(!wb(&f, f.env.tees.get(2).unwrap()).skip, "the war list is");
+            // In the hall: one that falls past the hall's zone is no target yet; one in it is.
+            let side = f.core.wb.side().expect("a side");
+            let zone = def.side(side).zone[0];
+            let spot = def.side(side).spots[0];
+            let mut f2 = CoreFx::on(clb_map().unwrap(), "Copy Love Box", &Relations::new());
+            let falling_outside = {
+                let b = def.side(side).approach[0];
+                let mut t = tee_at(1, b.x0 + 1, b.y0 + 1);
+                t.vel.y = 6.0;
+                t
+            };
+            let standing_in = tee_at(2, zone.x0 + 3, zone.y0 + 2);
+            f2.env.tees.set_for_test(tee_at(0, spot.0, spot.1));
+            f2.env.tees.set_for_test(falling_outside);
+            f2.env.tees.set_for_test(standing_in);
+            let own2 = *f2.env.tees.get(0).unwrap();
+            let world2 = f2.env.pw.inner().clone();
+            let ctx2 = f2.env.ctx(&own2, 1000, &world2);
+            f2.core.poll(&ctx2);
+            f2.core.wb.chooser.adopt(side);
+            let mut sealed_calls = 0;
+            f2.core.begin_pick(&ctx2, -1, &mut |_| {
+                sealed_calls += 1;
+                false
+            });
+            let in_zone = f2.core.wb_filter(&ctx2, f2.env.tees.get(2).unwrap());
+            assert!(!in_zone.skip && in_zone.in_zone, "{in_zone:?}");
+            let fall = f2.core.wb_filter(&ctx2, f2.env.tees.get(1).unwrap());
+            assert!(
+                fall.skip || !fall.in_zone,
+                "a tee falling past the approach is not a target for the guard: {fall:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_grudge_is_three_freezes_on_the_way_and_the_walk_stops_for_him() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let mut f = CoreFx::on(map, "Copy Love Box", &Relations::new());
+            // The start of the left tube: standable, outside the hall's zones, on the way in.
+            let (sx, sy) = ddai_nav::wayblock::wayblocks().remove(0).left.crossing.start;
+            let foe_x = (1..8)
+                .map(|d| sx + d)
+                .find(|&x| {
+                    !f.env.grid.is_solid(px(x), px(sy)) && !f.env.grid.is_solid(px(x), px(sy) + 32.0 - 16.0 + 3.0)
+                })
+                .expect("an open tile next to the start");
+            f.env.tees.set_for_test(tee_at(0, sx, sy));
+            f.env.tees.set_for_test(tee_at(1, foe_x, sy));
+            // Active (its aim changes), so it is not AFK.
+            f.env.clock.update(990, &f.env.tees, &f.env.players, 0);
+            let mut moved = tee_at(1, foe_x, sy);
+            moved.angle = 100;
+            f.env.tees.set_for_test(moved);
+            f.env.clock.update(995, &f.env.tees, &f.env.players, 0);
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 1000, &world);
+            f.core.poll(&ctx);
+            f.core.walk_to_wb(&ctx);
+            assert!(f.core.wb_walk);
+            // Two freezes are not enough; the third (inside three minutes) is.
+            f.core.note_wb_freeze(&ctx, 1);
+            let ctx = f.env.ctx(&own, 1100, &world);
+            f.core.note_wb_freeze(&ctx, 1);
+            f.core.update_wb_foe(&ctx);
+            assert!(f.core.x.foe.is_none(), "two freezes");
+            let ctx = f.env.ctx(&own, 1200, &world);
+            f.core.note_wb_freeze(&ctx, 1);
+            f.core.update_wb_foe(&ctx);
+            let foe = f.core.x.foe.as_ref().expect("a grudge");
+            assert!(foe.grudge && foe.id == 1);
+            assert!(f.core.nav.is_none(), "the walk is called off while he is dealt with");
+        });
+    }
+
+    #[test]
+    fn the_guard_stands_at_the_job_spot_over_a_frozen_tee_on_the_lower_shelf_and_the_hall_is_found_by_its_tiles() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            // Another name: the hall is found by its tiles.
+            let mut f = CoreFx::on(map, "Some Other Name", &Relations::new());
+            let def = f
+                .core
+                .wb
+                .def
+                .clone()
+                .expect("the WB of a map with the hall, whatever its name");
+            assert_eq!(def.name, "Copy Love Box hall at +0,+0");
+            let side = ddai_nav::wayblock::WbSide::Left;
+            let g = def.guard_geom(side);
+            let first = def.side(side).spots[0];
+            f.env.tees.set_for_test(tee_at(0, first.0, first.1));
+            let mut frozen = tee_at(1, g.shelf.x0 + 3, g.shelf.y0 + 1);
+            frozen.frozen = true;
+            f.env.tees.set_for_test(frozen);
+            // Active (its aim changes): a tee that never moved is AFK and no job.
+            f.env.clock.update(990, &f.env.tees, &f.env.players, 0);
+            frozen.angle = 7;
+            f.env.tees.set_for_test(frozen);
+            f.env.clock.update(995, &f.env.tees, &f.env.players, 0);
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 1000, &world);
+            f.core.poll(&ctx);
+            f.core.wb.chooser.adopt(side);
+            f.core.begin_pick(&ctx, -1, &mut |_| false);
+            assert_eq!(
+                f.core.wb_spot_for(&ctx, &def, side, (first.0, first.1)),
+                g.job,
+                "over the one on the shelf"
+            );
+            // Sealed: no job, the first spot.
+            f.core.begin_pick(&ctx, -1, &mut |_| true);
+            let ctx = f.env.ctx(&own, 1001, &world);
+            f.core.x.memo = None;
+            f.core.begin_pick(&ctx, -1, &mut |_| true);
+            assert_eq!(f.core.wb_spot_for(&ctx, &def, side, (first.0, first.1)), first);
+        });
+    }
+
+    #[test]
+    fn reloading_the_same_map_keeps_the_pause_of_the_wb_and_another_size_forgets_it() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let map = Arc::new(map);
+            let ident = MapIdent {
+                name: "Copy Love Box".to_string(),
+                sha256: [3; 32],
+            };
+            let mut core = Core::new(no_memory(), NavHandle::new());
+            core.on_map(&map, &ident);
+            for _ in 0..ddai_nav::wayblock::WB_WALK_MAX_FAILS {
+                core.wb.note_walk_death(0);
+            }
+            assert!(core.wb.paused_min(0) > 0, "paused after the deaths");
+            core.on_map(&map, &ident);
+            assert!(core.wb.paused_min(0) > 0, "the same map again: the pause stays");
+            let other = Arc::new(room(60, 30, &[]));
+            core.on_map(
+                &other,
+                &MapIdent {
+                    name: "Copy Love Box".to_string(),
+                    sha256: [4; 32],
+                },
+            );
+            assert_eq!(core.wb.paused_min(0), 0, "another size: forgotten");
+        });
+    }
+
+    #[test]
+    fn the_crowd_at_the_tube_counts_awake_foes_in_the_chamber_and_a_foe_acts_when_it_aims_at_us_after_an_action() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let def = ddai_nav::wayblock::wayblocks().remove(0);
+            let tube = def.left.crossing.clone();
+            let mut rel = Relations::new();
+            rel.add(crate::relations::ListKind::Friend, "pal");
+            let mut f = CoreFx::on(map, "Copy Love Box", &rel);
+            // We stand at the tube's start; "foe" (id 1) and "pal" (id 2, a friend) in the chamber next to it.
+            let (sx, sy) = tube.start;
+            let chamber = (tube.chamber.x0 + 3, tube.chamber.y0 + 3);
+            f.env.tees.set_for_test(tee_at(0, sx, sy));
+            f.env.tees.set_for_test(tee_at(1, chamber.0, chamber.1));
+            f.env.tees.set_for_test(tee_at(2, chamber.0 + 1, chamber.1));
+            // Both active (their aim changes), so neither is AFK.
+            f.env.clock.update(990, &f.env.tees, &f.env.players, 0);
+            for id in [1, 2] {
+                let mut t = *f.env.tees.get(id).unwrap();
+                t.angle = 100;
+                f.env.tees.set_for_test(t);
+            }
+            f.env.clock.update(995, &f.env.tees, &f.env.players, 0);
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 1000, &world);
+            let crowd = Core::wb_crowd(&ctx, &tube);
+            assert_eq!(crowd, vec![1], "a friend is no foe: only the one in the chamber counts");
+            // He acts: swung at us just now, aiming at us -> acting; aiming away -> not.
+            let mut him = *f.env.tees.get(1).unwrap();
+            him.attack_tick = 990;
+            let dx = own.pos.x - him.pos.x;
+            let dy = own.pos.y - him.pos.y;
+            him.angle = ((dy.atan2(dx) + std::f32::consts::TAU) % std::f32::consts::TAU * 256.0) as i32;
+            assert!(f.core.foe_acting(&ctx, &him), "aims at us after an action");
+            him.angle =
+                ((dy.atan2(dx) + std::f32::consts::PI + std::f32::consts::TAU) % std::f32::consts::TAU * 256.0) as i32;
+            assert!(!f.core.foe_acting(&ctx, &him), "aims away");
+            him.attack_tick = 0;
+            him.angle = ((dy.atan2(dx) + std::f32::consts::TAU) % std::f32::consts::TAU * 256.0) as i32;
+            assert!(!f.core.foe_acting(&ctx, &him), "no action in the last 2 s");
+        });
     }
 }

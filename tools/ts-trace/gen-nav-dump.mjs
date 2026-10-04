@@ -17,7 +17,11 @@ import { createRequire } from "node:module";
 const { findRoute, deadZone, spawnTiles } = await import(`${TS_REF}/src/plan/route.ts`);
 const { Rng } = await import(`${TS_REF}/src/nn/rng.ts`);
 const { emptyInput } = await import(`${TS_REF}/src/core/types.ts`);
-const { WAYBLOCKS, WbSideChooser, wayblockFor, sideAt, inWbZone, inWbHall, inWbLeash, wbWalkAllowed } = await import(`${TS_REF}/src/bot/wayblock.ts`);
+const wbModule = await import(`${TS_REF}/src/bot/wayblock.ts`);
+const { WAYBLOCKS, WbSideChooser, wayblockFor, sideAt, inWbZone, inWbHall, inWbLeash, wbWalkAllowed } = wbModule;
+// af49dfb and later: the hall search, the guard geometry, route 2 (the wall). c3c619d has none of them.
+const { findHallOffset, wbGuardGeom } = wbModule;
+const hasHall = typeof findHallOffset === "function";
 const { SwingCrosser } = await import(`${TS_REF}/src/bot/crossing.ts`);
 const { Navigator, tileGoal } = await import(`${TS_REF}/src/bot/navigate.ts`);
 // `bot.ts` needs `node_modules` (the `teeworlds` package): run `npm ci` in `tools/ts-reference` first
@@ -64,7 +68,9 @@ const rng = new Rng((seed * 2654435761) >>> 0);
 const pick = (list) => list[Math.floor(rng.nextFloat() * list.length)];
 const centre = (t) => t * 32 + 16;
 const lines = [];
-lines.push(JSON.stringify({ kind: "meta", mapPath, mapSha256, width: W, height: H, seed }));
+// `tsRef` says which TS reference made the dump (`DDAI_TS_REF`, default the frozen `tools/ts-reference`), `hall`
+// whether it has the hall search (af49dfb); the Rust test replays only what that reference can say.
+lines.push(JSON.stringify({ kind: "meta", mapPath, mapSha256, width: W, height: H, seed, tsRef: TS_REF, hall: hasHall }));
 
 function stepJson(s) {
   return { x: s.x, y: s.y, kind: s.kind, ax: s.anchorX ?? -1, ay: s.anchorY ?? -1, freeze: s.freeze === true, tele: s.tele === true, move: s.move ?? -1, leap: s.leap === true };
@@ -165,7 +171,7 @@ if (section === "all" || section === "routes") {
 
 // --- wayblock.ts: `wayblockFor`, the zone predicates, the side chooser, `wbSpot` ---------------------
 if (section === "all" || section === "wb") {
-  const names = ["Copy Love Box", "Copy Love Box JoniTee", "  copy love box ", "COPY LOVE BOX JONITEE", "BlmapChill", "ChillBlock5", ""];
+  const names = ["Copy Love Box", "Copy Love Box JoniTee", "  copy love box ", "COPY LOVE BOX JONITEE", "BlmapChill", "ChillBlock5", "", "Copy Love Box IN", "Some Other Map"];
   lines.push(
     JSON.stringify({
       kind: "wayblockfor",
@@ -177,6 +183,20 @@ if (section === "all" || section === "wb") {
     }),
   );
   const def = WAYBLOCKS[0];
+  // the whole definition `wayblockFor` gives for this map (name, size, every box and tile, both tubes, their
+  // routes through the wall), and the hall offset of the search, bit for bit
+  const tidy = (c) => ({ ...c, directAnchors: c.directAnchors ?? [], wall: c.wall ?? null, hall: c.hall ?? null, hallTile: c.hallTile ?? null });
+  const defJson = (d) => (d === null ? null : { name: d.name, size: d.size, avoid: d.avoid, left: { ...d.left, crossing: tidy(d.left.crossing) }, right: { ...d.right, crossing: tidy(d.right.crossing) }, crossings: d.crossings.map(tidy) });
+  const foundDef = wayblockFor("Copy Love Box", col);
+  if (hasHall) {
+    const h = findHallOffset(col);
+    lines.push(JSON.stringify({ kind: "hall", found: h !== null, dx: h === null ? 0 : h.dx, dy: h === null ? 0 : h.dy, match: h === null ? "" : f64Bits(h.match) }));
+  }
+  // (only from a reference that has the hall search: the c3c619d definitions are not what the Rust port is held to)
+  if (hasHall) for (const n of ["Copy Love Box", "Copy Love Box JoniTee", "BlmapChill"]) lines.push(JSON.stringify({ kind: "wbdef", name: n, def: defJson(wayblockFor(n, col)) }));
+  if (hasHall && foundDef !== null) {
+    for (const sd of ["left", "right"]) lines.push(JSON.stringify({ kind: "wbguard", def: foundDef.name, side: sd, geom: wbGuardGeom(foundDef, sd) }));
+  }
   // zone predicates on tiles in and around both halls and the tubes, plus random ones
   const zr = new Rng((seed * 7919 + 5) >>> 0);
   const tilesWb = [];
@@ -186,7 +206,7 @@ if (section === "all" || section === "wb") {
     const ty = near ? Math.floor(zr.nextFloat() * 100) : Math.floor(zr.nextFloat() * H);
     tilesWb.push([tx, ty]);
   }
-  for (const d of WAYBLOCKS) {
+  for (const d of foundDef !== null && !WAYBLOCKS.some((w) => w.name === foundDef.name) ? [...WAYBLOCKS, foundDef] : WAYBLOCKS) {
     const rows = tilesWb.map(([tx, ty]) => [tx, ty, sideAt(d, tx, ty) ?? "-", inWbZone(d, "left", tx, ty) ? 1 : 0, inWbZone(d, "right", tx, ty) ? 1 : 0, inWbHall(d, "left", tx, ty) ? 1 : 0, inWbHall(d, "right", tx, ty) ? 1 : 0, inWbLeash(d, "left", tx, ty) ? 1 : 0, inWbLeash(d, "right", tx, ty) ? 1 : 0, wbWalkAllowed(d, tx, ty) ? 1 : 0]);
     lines.push(JSON.stringify({ kind: "wbzones", def: d.name, rows }));
   }
@@ -243,7 +263,9 @@ if (section === "all" || section === "wb") {
       here = hr < 0.8 ? { tx: z.x0 + Math.floor(sr.nextFloat() * (z.x1 - z.x0 + 1)), ty: z.y0 + Math.floor(sr.nextFloat() * (z.y1 - z.y0 + 1)) } : { tx: sd.spots[0].tx + Math.floor(sr.nextFloat() * 9) - 4, ty: sd.spots[0].ty + Math.floor(sr.nextFloat() * 14) - 2 };
     }
     const fake = { world: { allTees: () => tees }, isPartnerNow: () => false, isFriendId: (id) => friends.has(id) };
-    const spot = DdnetBot.prototype.wbSpot.call(fake, ownId, def, sideName, here);
+    // the spot choice itself (af49dfb split `wbSpot` into the guard's job and `wbBaseSpot`)
+    const pick = DdnetBot.prototype.wbBaseSpot ?? DdnetBot.prototype.wbSpot;
+    const spot = pick.call(fake, ownId, def, sideName, here);
     lines.push(
       JSON.stringify({
         kind: "wbspot",
@@ -264,6 +286,7 @@ if (section === "all" || section === "cross") {
   else {
     const xr = new Rng((seed * 49979687 + 13) >>> 0);
     const nCross = Number(args.crossings ?? "60");
+    const wallOnly = args.wallonly === "1"; // `--wallonly 1`: every trace starts in the passage with route 2 on
     let arrived = 0;
     let failed = 0;
     for (let q = 0; q < nCross; q++) {
@@ -278,18 +301,38 @@ if (section === "all" || section === "cross") {
         if (col.isSolid(px, py) || col.isFreeze(px, py) || col.isDeath(px, py)) continue;
         if (col.isSolid(px, py + 32)) cands.push({ tx, ty });
       }
+      // route 2 (the wall) from inside the passage: every fourth trace of a reference with the wall starts the tee in the
+      // air of the passage above the wall's last row, so the swing through the wall and the drop from the room floor run
+      if (c.wall !== undefined && (wallOnly || q % 8 >= 6)) {
+        cands.length = 0;
+        for (const b of c.exit) for (let ty = b.y0; ty <= Math.min(b.y1, c.wall.lastRow); ty++) for (let tx = b.x0; tx <= b.x1; tx++) {
+          const px = tx * 32 + 16;
+          const py = ty * 32 + 16;
+          if (!col.isSolid(px, py) && !col.isFreeze(px, py) && !col.isDeath(px, py)) cands.push({ tx, ty });
+        }
+      }
       if (cands.length === 0) continue;
       const st = cands[Math.floor(xr.nextFloat() * cands.length)];
       const world = new SimWorld(col, { svHit: true, respawnDelayTicks: 0, infiniteAmmo: true });
       const pos = { x: st.tx * 32 + 16, y: st.ty * 32 + 16 };
       world.addTee(0, pos);
       const crosser = new SwingCrosser(col, c);
+      // route 2 (the wall) on for half of the traces, when this reference has it
+      const useWall = "useWall" in crosser && (wallOnly || q % 4 >= 2);
+      if (useWall) crosser.useWall = true;
       const trace = [];
+      // every change of what the crosser says it is doing (the description strings are part of the notes of the navigator)
+      const doings = [];
+      let lastDoing = "";
       let tick = 1000;
       let ended = "";
       for (let t = 0; t < 700; t++, tick++) {
         const me = world.getTee(0);
         const inp = crosser.step(me, tick, lag);
+        if (crosser.doing !== lastDoing) {
+          lastDoing = crosser.doing;
+          doings.push([t, lastDoing]);
+        }
         trace.push([inp.direction, f64Bits(inp.targetX), f64Bits(inp.targetY), inp.jump, inp.hook]);
         if (crosser.done) {
           ended = crosser.phase;
@@ -301,7 +344,7 @@ if (section === "all" || section === "cross") {
       if (ended === "arrived") arrived++;
       else failed++;
       lines.push(
-        JSON.stringify({ kind: "crosstrace", crossing: q % 2, lag, start: [pos.x, pos.y], ended, reason: crosser.reason, rollouts: crosser.tried, ticks: trace.length, trace }),
+        JSON.stringify({ kind: "crosstrace", crossing: q % 2, lag, useWall, start: [pos.x, pos.y], ended, reason: crosser.reason, rollouts: crosser.tried, ticks: trace.length, doings, trace }),
       );
     }
     process.stderr.write(`crossings: ${nCross} traces, ${arrived} arrived, ${failed} did not\n`);
@@ -321,13 +364,14 @@ export function respawnState(pos) {
 }
 // `unstick`: like the live bot, a tee frozen for 400 ticks in a row is killed (`Cl_Kill`) and respawned.
 const FROZEN_UNSTICK_TICKS = 400;
-function runNav(startTile, goalTile, throughFreeze, withCrossings, maxTicks, wantTrace, unstick = false) {
+function runNav(startTile, goalTile, throughFreeze, withCrossings, maxTicks, wantTrace, unstick = false, wallRoute = false) {
   const spawns = spawnTiles(col);
   const world = new SimWorld(col, { svHit: true, respawnDelayTicks: 0, infiniteAmmo: true });
   const start = { x: centre(startTile.tx), y: centre(startTile.ty) };
   world.addTee(0, start);
   const def = wayblockFor("Copy Love Box", col);
   const nav = new Navigator(col, [tileGoal(col, goalTile.tx, goalTile.ty)], { throughFreeze, crossings: withCrossings && def !== null ? def.crossings : undefined });
+  if (wallRoute && "wallRoute" in nav) nav.wallRoute = true;
   const trace = [];
   const kills = [];
   const notes = [];
@@ -402,9 +446,12 @@ if (section === "all" || section === "nav") {
     for (const from of sp) {
       for (const side of [wbDef.left, wbDef.right]) {
         for (const to of side.spots) {
-          const res = runNav(from, to, true, true, 4000, true);
-          if (res.phase === "arrived") arrived++;
-          lines.push(JSON.stringify({ kind: "navtrace", from: [from.tx, from.ty], to: [to.tx, to.ty], throughFreeze: true, withCrossings: true, maxTicks: 4000, phase: res.phase, outcome: res.outcome, ticks: res.ticks, kills: res.kills, notes: res.notes, trace: res.trace }));
+          // route 1 as before; with a reference that has route 2 (the wall), the same walk once more with it on
+          for (const wallRoute of "wallRoute" in new Navigator(col, [], {}) ? [false, true] : [false]) {
+            const res = runNav(from, to, true, true, 4000, true, false, wallRoute);
+            if (res.phase === "arrived") arrived++;
+            lines.push(JSON.stringify({ kind: "navtrace", from: [from.tx, from.ty], to: [to.tx, to.ty], throughFreeze: true, withCrossings: true, wallRoute, maxTicks: 4000, phase: res.phase, outcome: res.outcome, ticks: res.ticks, kills: res.kills, notes: res.notes, trace: res.trace }));
+          }
         }
       }
     }
@@ -510,6 +557,8 @@ function runFollow(fromTile, path, dwellAt, speed, dwell, throughFreeze, limit) 
     world: { tick: 1000, collision: col, getTee: (id) => world.getTee(id), notPlaying: () => false, allTees: () => world.allTees() },
     client: { SnapshotUnpacker: { AllObjClientInfo: [{ id: 1, name: "p1", clan: "" }] } },
     afterArrival: () => "",
+    // af49dfb: card names are shown through `localCard` (a partner's name); nobody here is one
+    localCard: (c) => c,
     endNav() {
       this.nav = null;
       this.follow = null;

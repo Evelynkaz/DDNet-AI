@@ -129,6 +129,34 @@ impl MapGrid {
 
     /// `wanderHazardBelow` (`bot.ts:681-689`): walking down from `(x, y)` up to 6 tiles, a freeze or
     /// death tile before any solid one.
+    /// `hazardWithinPx(collision, x0, y0, direction, px)` (`navigate.ts`): freeze or death within `px` ahead of
+    /// `(x0, y0)` in `direction`, down to four tiles below, before a wall.
+    pub fn hazard_within_px(&self, x0: f32, y0: f32, direction: i32, px: f32) -> bool {
+        let mut offsets: Vec<f32> = Vec::new();
+        let mut a = px.min(24.0);
+        while a < px {
+            offsets.push(a);
+            a += 32.0;
+        }
+        offsets.push(px);
+        for ahead in offsets {
+            let x = x0 + direction as f32 * ahead;
+            if self.is_solid(x, y0) {
+                return false;
+            }
+            for dy in 0..=4 {
+                let y = y0 + (dy * 32) as f32;
+                if self.is_freeze(x, y) || self.is_death(x, y) {
+                    return true;
+                }
+                if self.is_solid(x, y) {
+                    break;
+                }
+            }
+        }
+        false
+    }
+
     pub fn hazard_below(&self, x: f32, y: f32) -> bool {
         for k in 1..=6 {
             let yy = y + (k * TILE_PX) as f32;

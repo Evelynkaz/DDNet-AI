@@ -14,9 +14,12 @@
 #![cfg(feature = "ts-parity")]
 
 use ddai_nav::crossing::{CrossPhase, SwingCrosser};
+use ddai_nav::crossing::{Crossing, TileBox, WallRoute};
 use ddai_nav::navigator::{NavCtx, NavOpts, Navigator, tile_goal};
 use ddai_nav::route::{MoveKind, RouteOpts, Router, dead_zone, spawn_tiles};
-use ddai_nav::wayblock::{WbSide, WbSideChooser, has_wayblock_named, wayblock_for, wayblocks, wb_spot};
+use ddai_nav::wayblock::{
+    WbDef, WbSide, WbSideChooser, find_hall_offset, has_wayblock_named, wayblock_for, wayblocks, wb_spot,
+};
 use ddai_planner::plan_world::PlanWorld;
 use ddai_planner::types::{PlayerInput, TeeState};
 use ddai_planner::vmath::Vec2;
@@ -68,6 +71,28 @@ enum Line {
         map_path: String,
         #[serde(rename = "mapSha256")]
         map_sha256: String,
+        /// The TS reference the dump was made with (`DDAI_TS_REF`), for the log.
+        #[serde(rename = "tsRef", default)]
+        ts_ref: String,
+        /// Whether that reference has the hall search (af49dfb) or not (c3c619d, the first corpus).
+        #[serde(default)]
+        hall: bool,
+    },
+    Hall {
+        found: bool,
+        dx: i32,
+        dy: i32,
+        #[serde(rename = "match")]
+        matched: String,
+    },
+    Wbdef {
+        name: String,
+        def: Option<serde_json::Value>,
+    },
+    Wbguard {
+        def: String,
+        side: String,
+        geom: serde_json::Value,
     },
     Spawns {
         tiles: Vec<(f64, f64)>,
@@ -107,6 +132,8 @@ enum Line {
         through_freeze: bool,
         #[serde(rename = "withCrossings")]
         with_crossings: bool,
+        #[serde(rename = "wallRoute", default)]
+        wall_route: bool,
         #[serde(rename = "maxTicks")]
         max_ticks: i64,
         phase: String,
@@ -119,10 +146,15 @@ enum Line {
     Crosstrace {
         crossing: usize,
         lag: i64,
+        #[serde(rename = "useWall", default)]
+        use_wall: bool,
         start: (f64, f64),
         ended: String,
         reason: String,
         ticks: usize,
+        /// `[tick, doing]` at every change of the crosser's description (af49dfb dumps).
+        #[serde(default)]
+        doings: Vec<(usize, String)>,
         trace: Vec<(i32, String, String, i32, i32)>,
     },
 }
@@ -157,6 +189,58 @@ struct SpotTee {
     y: String,
 }
 
+fn boxes_json(v: &[TileBox]) -> serde_json::Value {
+    serde_json::json!(v.iter().map(box_json).collect::<Vec<_>>())
+}
+
+fn box_json(b: &TileBox) -> serde_json::Value {
+    serde_json::json!({"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1})
+}
+
+fn tile_json(t: (i32, i32)) -> serde_json::Value {
+    serde_json::json!({"tx": t.0, "ty": t.1})
+}
+
+fn tiles_json(v: &[(i32, i32)]) -> serde_json::Value {
+    serde_json::json!(v.iter().map(|&t| tile_json(t)).collect::<Vec<_>>())
+}
+
+fn wall_json(w: &Option<WallRoute>) -> serde_json::Value {
+    match w {
+        None => serde_json::Value::Null,
+        Some(w) => serde_json::json!({
+            "anchors": tiles_json(&w.anchors), "shelf": boxes_json(&w.shelf), "room": boxes_json(&w.room),
+            "lastRow": w.last_row, "missRow": w.miss_row,
+        }),
+    }
+}
+
+fn crossing_json(c: &Crossing) -> serde_json::Value {
+    serde_json::json!({
+        "label": c.label, "from": boxes_json(&c.from), "chamber": box_json(&c.chamber), "start": tile_json(c.start),
+        "anchors": tiles_json(&c.anchors), "directAnchors": c.direct_anchors, "landing": boxes_json(&c.landing),
+        "exit": boxes_json(&c.exit), "exitTile": tile_json(c.exit_tile),
+        "hall": c.hall.as_deref().map_or(serde_json::Value::Null, boxes_json),
+        "hallTile": c.hall_tile.map_or(serde_json::Value::Null, tile_json),
+        "toward": c.toward, "wall": wall_json(&c.wall),
+    })
+}
+
+/// The TS `WbDef` JSON of `gen-nav-dump.mjs` (`defJson`).
+fn def_json(d: &WbDef) -> serde_json::Value {
+    let side = |s: &ddai_nav::wayblock::WbSideDef| {
+        serde_json::json!({
+            "zone": boxes_json(&s.zone), "approach": boxes_json(&s.approach), "leash": boxes_json(&s.leash),
+            "spots": tiles_json(&s.spots), "watch": tile_json(s.watch), "crossing": crossing_json(&s.crossing),
+        })
+    };
+    serde_json::json!({
+        "name": d.name, "size": {"w": d.size.0, "h": d.size.1}, "avoid": boxes_json(&d.avoid),
+        "left": side(&d.left), "right": side(&d.right),
+        "crossings": d.crossings.iter().map(crossing_json).collect::<Vec<_>>(),
+    })
+}
+
 fn side_of(s: &str) -> WbSide {
     if s == "left" { WbSide::Left } else { WbSide::Right }
 }
@@ -185,10 +269,28 @@ fn routes_dead_zone_and_spawns_match_ts() {
     let path = std::env::var("DDAI_NAV_DUMP").expect("set DDAI_NAV_DUMP");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let Line::Meta { map_path, map_sha256 } = serde_json::from_str(lines.next().expect("empty dump")).expect("meta")
+    let Line::Meta {
+        map_path,
+        map_sha256,
+        ts_ref,
+        hall: dump_has_hall,
+    } = serde_json::from_str(lines.next().expect("empty dump")).expect("meta")
     else {
         panic!("first line must be meta")
     };
+    // A dump of the first corpus (c3c619d, no hall search) says nothing about what af49dfb changed: the
+    // wayblock lookup, the spots (the guard's order), the crossings and the navigator walks. It still
+    // proves the routes, the dead zone, the spawns, the side chooser and the zone predicates.
+    let legacy = !dump_has_hall;
+    println!(
+        "dump of {map_path} (TS reference {}, {})",
+        if ts_ref.is_empty() { "?" } else { &ts_ref },
+        if legacy {
+            "legacy: routes/deadzone/spawns/chooser/zones only"
+        } else {
+            "af49dfb: everything"
+        }
+    );
     let bytes = std::fs::read(&map_path).unwrap_or_else(|e| panic!("reading map {map_path}: {e}"));
     {
         use sha2::{Digest, Sha256};
@@ -205,6 +307,7 @@ fn routes_dead_zone_and_spawns_match_ts() {
 
     let (mut routes, mut route_bad, mut found, mut hooks, mut freezes, mut kills, mut teles) = (0, 0, 0, 0, 0, 0, 0);
     let (mut wb_checked, mut chooser_n, mut chooser_bad, mut spot_n, mut spot_bad) = (0, 0, 0, 0, 0);
+    let (mut wb_def_bad, mut legacy_skipped) = (0usize, 0usize);
     let (mut cross_n, mut cross_bad, mut cross_arrived) = (0usize, 0usize, 0usize);
     let (mut nav_n, mut nav_bad, mut nav_arrived) = (0usize, 0usize, 0usize);
     let mut dead_checked = false;
@@ -231,6 +334,45 @@ fn routes_dead_zone_and_spawns_match_ts() {
                 assert_eq!(bad, 0, "deadZone differs from TS in {bad} tiles");
                 dead_checked = true;
             }
+            Line::Hall { found, dx, dy, matched } => {
+                let got = find_hall_offset(&ts.collision);
+                assert_eq!(got.is_some(), found, "findHallOffset found / not found");
+                if let Some(g) = got {
+                    assert_eq!((g.dx, g.dy), (dx, dy), "findHallOffset offset");
+                    assert_eq!(
+                        g.matched.to_bits(),
+                        u64::from_str_radix(&matched, 16).expect("match bits"),
+                        "findHallOffset match"
+                    );
+                }
+                println!("findHallOffset: {:?}", got.map(|g| (g.dx, g.dy, g.matched)));
+                wb_checked += 1;
+            }
+            Line::Wbdef { .. } if legacy => {
+                legacy_skipped += 1;
+            }
+            Line::Wbdef { name, def } => {
+                let got = wayblock_for(&name, Some(&ts.collision)).as_ref().map(def_json);
+                if got != def {
+                    wb_def_bad += 1;
+                    eprintln!("wayblockFor({name:?}) differs:\n  rust {got:?}\n  ts   {def:?}");
+                }
+                wb_checked += 1;
+            }
+            Line::Wbguard { def, side, geom } => {
+                let d = wayblock_for("Copy Love Box", Some(&ts.collision)).expect("def");
+                assert_eq!(d.name, def, "the definition the guard geometry was dumped for");
+                let g = d.guard_geom(side_of(&side));
+                let boxj = |b: &TileBox| serde_json::json!({"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1});
+                let got = serde_json::json!({
+                    "shelf": boxj(&g.shelf), "column": boxj(&g.column), "landing": boxj(&g.landing),
+                    "foot": boxj(&g.foot), "passage": boxj(&g.passage), "corridor": boxj(&g.corridor),
+                    "job": {"tx": g.job.0, "ty": g.job.1}, "stepOff": {"tx": g.step_off.0, "ty": g.step_off.1},
+                });
+                assert_eq!(got, geom, "wbGuardGeom({def}, {side})");
+                wb_checked += 1;
+            }
+            Line::Wayblockfor { .. } if legacy => {}
             Line::Wayblockfor { cases } => {
                 for c in cases {
                     let with = wayblock_for(&c.name, Some(&ts.collision)).map(|d| d.name.to_string());
@@ -245,7 +387,11 @@ fn routes_dead_zone_and_spawns_match_ts() {
                 wb_checked += 1;
             }
             Line::Wbzones { def, rows } => {
-                let d = wayblocks().into_iter().find(|d| d.name == def).expect("def");
+                let d = wayblocks()
+                    .into_iter()
+                    .find(|d| d.name == def)
+                    .or_else(|| wayblock_for("Copy Love Box", Some(&ts.collision)).filter(|d| d.name == def))
+                    .expect("def");
                 let mut bad = 0;
                 for (tx, ty, side_at, zl, zr, hl, hr, ll, lr, walk) in &rows {
                     let got_side = d.side_at(*tx, *ty).map_or("-", WbSide::name);
@@ -294,6 +440,9 @@ fn routes_dead_zone_and_spawns_match_ts() {
                     chooser_bad += 1;
                 }
             }
+            Line::Wbspot { .. } | Line::Navtrace { .. } | Line::Crosstrace { .. } if legacy => {
+                legacy_skipped += 1;
+            }
             Line::Wbspot {
                 side,
                 here,
@@ -330,6 +479,7 @@ fn routes_dead_zone_and_spawns_match_ts() {
                 to,
                 through_freeze,
                 with_crossings,
+                wall_route,
                 max_ticks,
                 phase,
                 outcome,
@@ -369,6 +519,7 @@ fn routes_dead_zone_and_spawns_match_ts() {
                         ..NavOpts::default()
                     },
                 );
+                nav.wall_route = wall_route;
                 let mut make = {
                     let template = <ddai_tsworld::SimWorld as PlanWorld>::new_scratch(&world);
                     move || <ddai_tsworld::SimWorld as PlanWorld>::new_scratch(&template)
@@ -476,10 +627,12 @@ fn routes_dead_zone_and_spawns_match_ts() {
             Line::Crosstrace {
                 crossing,
                 lag,
+                use_wall,
                 start,
                 ended,
                 reason,
                 ticks,
+                doings,
                 trace,
             } => {
                 cross_n += 1;
@@ -497,13 +650,19 @@ fn routes_dead_zone_and_spawns_match_ts() {
                 <ddai_tsworld::SimWorld as PlanWorld>::add_tee(&mut world, 0, Vec2 { x: start.0, y: start.1 });
                 let sim = <ddai_tsworld::SimWorld as PlanWorld>::new_scratch(&world);
                 let mut crosser = SwingCrosser::new(sim, def.crossings[crossing].clone());
+                crosser.use_wall = use_wall;
                 let mut ok = true;
                 let mut got_ticks = 0usize;
+                let mut got_doings: Vec<(usize, String)> = Vec::new();
                 for (t, want) in trace.iter().enumerate() {
                     let tick = 1000i64 + t as i64;
                     let me = <ddai_tsworld::SimWorld as PlanWorld>::get_tee(&world, 0).expect("tee");
                     let inp: PlayerInput = crosser.step(world.collision(), &me, tick, lag);
                     got_ticks = t + 1;
+                    let doing = crosser.doing();
+                    if got_doings.last().is_none_or(|(_, d)| *d != doing) {
+                        got_doings.push((t, doing));
+                    }
                     let got = (
                         inp.direction,
                         inp.target_x.to_bits(),
@@ -532,6 +691,12 @@ fn routes_dead_zone_and_spawns_match_ts() {
                     }
                     <ddai_tsworld::SimWorld as PlanWorld>::set_input(&mut world, 0, inp);
                     <ddai_tsworld::SimWorld as PlanWorld>::step(&mut world);
+                }
+                if ok && !doings.is_empty() && got_doings != doings {
+                    ok = false;
+                    eprintln!(
+                        "crosstrace {cross_n}: the descriptions differ:\n  rust {got_doings:?}\n  ts   {doings:?}"
+                    );
                 }
                 let phase = match crosser.phase() {
                     CrossPhase::Arrived => "arrived",
@@ -614,6 +779,10 @@ fn routes_dead_zone_and_spawns_match_ts() {
             "wayblock: {wb_checked} table checks, {chooser_n} chooser sequences ({chooser_bad} mismatches), {spot_n} wbSpot cases ({spot_bad} mismatches); crossings: {cross_n} traces ({cross_arrived} arrived in TS), {cross_bad} mismatches"
         );
     }
+    if legacy_skipped > 0 {
+        println!("legacy dump: {legacy_skipped} wbSpot/navigator/crossing lines not replayed (changed by af49dfb)");
+    }
+    assert_eq!(wb_def_bad, 0, "wayblockFor differs from TS");
     assert_eq!(route_bad, 0, "findRoute differs from TS");
     assert_eq!(chooser_bad, 0, "WbSideChooser differs from TS");
     assert_eq!(spot_bad, 0, "wbSpot differs from TS");

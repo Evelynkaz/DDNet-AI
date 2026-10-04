@@ -1,11 +1,15 @@
-//! `src/bot/wayblock.ts`: the wayblock (WB) of `Copy Love Box` (and its JoniTee variant, shifted by
-//! `(182, 212)` on a 600x600 map): hard-coded zones, spots, watch points, rope anchors and tubes, the
-//! side chooser and the spot choice. All numbers are the TS ones.
+//! `src/bot/wayblock.ts` (upstream `af49dfb`, release 2026-10-02): the wayblock (WB) of `Copy Love Box`:
+//! hard-coded zones, spots, watch points, rope anchors, tubes and the tubes' walls (route 2), the side
+//! chooser and the spot choice. All numbers are the TS ones. `wayblock_for` knows the map by its name
+//! and size (the original, JoniTee shifted by `(182, 212)` on 600x600) **or by its tiles**: the hall is
+//! searched for in any map (`find_hall_offset`) and the whole definition shifted to where it is found
+//! (the Swarfey version is 468x255, `Copy Love Box IN` another).
 
 use ddai_planner::plan_world::PlanCollision;
 use ddai_planner::types::TeeState;
+use std::sync::OnceLock;
 
-use crate::crossing::{Crossing, TileBox, in_any_box};
+use crate::crossing::{Crossing, TileBox, WallRoute, in_any_box, wall_route_ok};
 
 /// `WbSide`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,7 +47,7 @@ pub struct WbSideDef {
 /// `WbDef`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WbDef {
-    pub name: &'static str,
+    pub name: String,
     pub left: WbSideDef,
     pub right: WbSideDef,
     /// Zones the walk and the trek must stay out of.
@@ -62,6 +66,13 @@ pub const WB_SWITCH_TICKS: i64 = 5 * 50;
 pub const WB_NO_CLIMB_TILES: i32 = 3;
 /// `WB_ZONE_SCORE` (`bot.ts:228`): the target-score bonus for a tee in the WB zone.
 pub const WB_ZONE_SCORE: f64 = 300.0;
+
+/// `WB_GUARD` (`wayblock.ts`; on unless the environment variable `DDAI_WB_GUARD` is `0`, TS: `WB_GUARD`):
+/// the new spots (the left end of the upper shelf first) and the guard's behaviour in the bot.
+pub fn wb_guard() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DDAI_WB_GUARD").map(|v| v != "0").unwrap_or(true))
+}
 
 const MIRROR: i32 = 234;
 
@@ -109,12 +120,25 @@ fn left_tube() -> Crossing {
             (103, 39),
             (102, 38),
         ],
+        direct_anchors: vec![7, 0, 6],
         landing: vec![TileBox::new(95, 41, 103, 50)],
         exit: vec![TileBox::new(87, 51, 92, 63), TileBox::new(87, 64, 91, 65)],
         exit_tile: (89, 60),
         hall: Some(vec![TileBox::new(79, 67, 104, 79), TileBox::new(78, 79, 104, 87)]),
         hall_tile: Some((90, 79)),
         toward: -1,
+        wall: Some(left_wall()),
+    }
+}
+
+/// `LEFT_WALL`: route 2 of the left tube.
+fn left_wall() -> WallRoute {
+    WallRoute {
+        anchors: vec![(95, 56), (95, 55), (95, 54), (95, 57), (95, 53)],
+        shelf: vec![TileBox::new(93, 80, 104, 84)],
+        room: vec![TileBox::new(99, 59, 107, 63)],
+        last_row: 58,
+        miss_row: 64,
     }
 }
 
@@ -125,12 +149,20 @@ fn right_tube(left: &Crossing) -> Crossing {
         chamber: left.chamber,
         start: (130, 35),
         anchors: left.anchors.iter().map(|a| (MIRROR - a.0, a.1)).collect(),
+        direct_anchors: left.direct_anchors.clone(),
         landing: left.landing.iter().map(mirror_box).collect(),
         exit: left.exit.iter().map(mirror_box).collect(),
         exit_tile: (MIRROR - left.exit_tile.0, left.exit_tile.1),
         hall: Some(left.hall.as_ref().expect("left hall").iter().map(mirror_box).collect()),
         hall_tile: Some((MIRROR - 90, 79)),
         toward: 1,
+        wall: left.wall.as_ref().map(|w| WallRoute {
+            anchors: w.anchors.iter().map(|a| (MIRROR - a.0, a.1)).collect(),
+            shelf: w.shelf.iter().map(mirror_box).collect(),
+            room: w.room.iter().map(mirror_box).collect(),
+            last_row: w.last_row,
+            miss_row: w.miss_row,
+        }),
     }
 }
 
@@ -140,11 +172,20 @@ fn copy_love_box() -> WbDef {
     let l1 = TileBox::new(79, 67, 104, 79);
     let l2 = TileBox::new(78, 79, 104, 87);
     let left_approach = TileBox::new(84, 41, 103, 66);
-    let left_spots = vec![(94, 84), (82, 79), (101, 84)];
-    let right_spots = vec![(152, 79), (MIRROR - 94, 84), (MIRROR - 101, 84)];
+    let (left_spots, right_spots) = if wb_guard() {
+        (
+            vec![(83, 79), (94, 84), (101, 84)],
+            vec![(MIRROR - 83, 79), (MIRROR - 94, 84), (MIRROR - 101, 84)],
+        )
+    } else {
+        (
+            vec![(94, 84), (82, 79), (101, 84)],
+            vec![(152, 79), (MIRROR - 94, 84), (MIRROR - 101, 84)],
+        )
+    };
     let left_watch = (89, 79);
     WbDef {
-        name: "Copy Love Box",
+        name: "Copy Love Box".to_string(),
         left: side(
             vec![l1, l2],
             vec![left_approach],
@@ -177,7 +218,7 @@ fn shift_side(s: &WbSideDef, dx: i32, dy: i32) -> WbSideDef {
     }
 }
 
-fn shift_def(d: &WbDef, name: &'static str, dx: i32, dy: i32, size: (i32, i32)) -> WbDef {
+fn shift_def(d: &WbDef, name: String, dx: i32, dy: i32, size: (i32, i32)) -> WbDef {
     let left = shift_side(&d.left, dx, dy);
     let right = shift_side(&d.right, dx, dy);
     WbDef {
@@ -193,7 +234,7 @@ fn shift_def(d: &WbDef, name: &'static str, dx: i32, dy: i32, size: (i32, i32)) 
 /// `WAYBLOCKS`.
 pub fn wayblocks() -> Vec<WbDef> {
     let clb = copy_love_box();
-    let joni = shift_def(&clb, "Copy Love Box JoniTee", 182, 212, (600, 600));
+    let joni = shift_def(&clb, "Copy Love Box JoniTee".to_string(), 182, 212, (600, 600));
     vec![clb, joni]
 }
 
@@ -210,33 +251,276 @@ pub fn standable(col: &impl PlanCollision, tx: i32, ty: i32) -> bool {
     col.is_solid(px, py + 32.0)
 }
 
-/// `wayblockFor(mapName, col?)`: the definition for the map named `map_name`, or `None`. With a
-/// collision, the map must also have the measured size, every spot must be standable and every rope
-/// anchor a hookable solid tile (another version of the map is refused).
-pub fn wayblock_for<C: PlanCollision>(map_name: &str, col: Option<&C>) -> Option<WbDef> {
-    let want = map_name.trim().to_lowercase();
-    let def = wayblocks().into_iter().find(|d| d.name.to_lowercase() == want)?;
-    let Some(col) = col else { return Some(def) };
-    if col.width() != def.size.0 || col.height() != def.size.1 {
+/// `HALL_X0` / `HALL_Y0`: where the core of the hall sits in the original 387x250 map (tiles).
+const HALL_X0: i32 = 76;
+const HALL_Y0: i32 = 64;
+
+/// `HALL_CORE`: the hall of `Copy Love Box` (`#` solid, `~` freeze, `X` death, `.` anything else), the
+/// rows from `HALL_Y0` and the columns from `HALL_X0` of the original map.
+const HALL_CORE: [&str; 29] = [
+    ".......#~~~.....~~~~....###############~~~~~###############....~~~~.....~~~#.......",
+    ".......#~~~.....~~~#....#~~~~~~~~~~~...........~~~~~~~~~~~#....#~~~.....~~~#.......",
+    "...########~~~~~####....#~...~~.....................~~...~#....####~~~~~########...",
+    "...#~~~~~~~~~~~~~~~#~~~~##...~~.....................~~...##~~~~#~~~~~~~~~~~~~~~#...",
+    "...#.........................~~.....................~~.........................#...",
+    "...#.........................~~.....................~~.........................#...",
+    "...#.........................~~.....................~~.........................#...",
+    "####.........................~~.....................~~.........................####",
+    "~~~~.........................~~.....................~~.........................~~~~",
+    "~~~~.........................~~.....................~~.........................~~~~",
+    "~~~~.........................~~.....................~~.........................~~~~",
+    ".~~~.........................##.....................##.........................~~~.",
+    ".~~~.........................#########################.........................~~~.",
+    ".~~~.........................~~~~~~~~.........~~~~~~~~.........................~~~.",
+    ".~~~.........................~~~~~~~...~~~~~...~~~~~~~.........................~~~.",
+    ".~~~.........................~~~#~...~~~~~~~~~...~#~~~.........................~~~.",
+    ".################............~~~#...~~~~~~~~~~~...#~~~............################.",
+    "..~#~~~~~~~~~~~~~............~~~~###~~~~~~~~~~~###~~~~............~~~~~~~~~~~~~#~..",
+    "..~#~~~~~~~~~~~~~............~~~~~~~~~~~~~~~~~~~~~~~~~............~~~~~~~~~~~~~#~..",
+    "..~#~~~~~~~~~~~~~............~~.....................~~............~~~~~~~~~~~~~#~..",
+    "..~#~~~~~~~~~~~~~............~~.....................~~............~~~~~~~~~~~~~#~..",
+    "..~#########~~~##############~~.....................~~##############~~~#########~..",
+    "..~~~~~~~~~#~~~#~~~~~~~~~~~~~~~.....................~~~~~~~~~~~~~~~#~~~#~~~~~~~~~..",
+    "..~~~~~~~~##~~~##~~~~~~~~~~~~~~.....................~~~~~~~~~~~~~~##~~~##~~~~~~~~..",
+    ".............................~~.....................~~.............................",
+    ".............................~~.....................~~.............................",
+    ".............................~~.....................~~.............................",
+    ".............................~~.....................~~.............................",
+    ".............................~~.....................~~.............................",
+];
+
+/// `HALL_MATCH`: the share of the hall's tiles that must be equal.
+const HALL_MATCH: f64 = 0.95;
+/// `SAMPLE_MIN`: the share of the sample that must be equal for an offset to be looked at in full.
+const SAMPLE_MIN: f64 = 0.8;
+
+/// `hallClasses` and the sample (`SAMPLE_*`): every 25th non-air tile and every 150th air tile.
+struct HallPattern {
+    w: usize,
+    h: usize,
+    classes: Vec<u8>,
+    sample_x: Vec<usize>,
+    sample_y: Vec<usize>,
+    sample_c: Vec<u8>,
+}
+
+fn hall_pattern() -> &'static HallPattern {
+    static P: OnceLock<HallPattern> = OnceLock::new();
+    P.get_or_init(|| {
+        let w = HALL_CORE[0].len();
+        let h = HALL_CORE.len();
+        let classes: Vec<u8> = HALL_CORE
+            .iter()
+            .flat_map(|r| r.bytes())
+            .map(|c| match c {
+                b'#' => 1,
+                b'~' => 2,
+                b'X' => 3,
+                _ => 0,
+            })
+            .collect();
+        let (mut non_air, mut air) = (0usize, 0usize);
+        let (mut sample_x, mut sample_y, mut sample_c) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, &c) in classes.iter().enumerate() {
+            let take = if c != 0 {
+                let t = non_air % 25 == 0;
+                non_air += 1;
+                t
+            } else {
+                let t = air % 150 == 0;
+                air += 1;
+                t
+            };
+            if take {
+                sample_x.push(i % w);
+                sample_y.push(i / w);
+                sample_c.push(c);
+            }
+        }
+        HallPattern {
+            w,
+            h,
+            classes,
+            sample_x,
+            sample_y,
+            sample_c,
+        }
+    })
+}
+
+/// The result of [`find_hall_offset`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HallOffset {
+    pub dx: i32,
+    pub dy: i32,
+    /// The share of the hall's tiles that are equal.
+    pub matched: f64,
+}
+
+/// `findHallOffset(col)`: where in the map the hall of `Copy Love Box` is (its offset from the original's
+/// place), if its tiles match the hall's by `HALL_MATCH`. The first best offset wins.
+pub fn find_hall_offset(col: &impl PlanCollision) -> Option<HallOffset> {
+    let pat = hall_pattern();
+    let (w, h) = (col.width().max(0) as usize, col.height().max(0) as usize);
+    if w < pat.w || h < pat.h {
         return None;
     }
+    let mut grid = vec![0u8; w * h];
+    for ty in 0..h {
+        for tx in 0..w {
+            grid[ty * w + tx] = match col.game_tile(tx as i32, ty as i32) {
+                TILE_SOLID | TILE_NOHOOK => 1,
+                TILE_FREEZE => 2,
+                TILE_DEATH => 3,
+                _ => 0,
+            };
+        }
+    }
+    let n = pat.sample_c.len();
+    let sample_off: Vec<usize> = (0..n).map(|k| pat.sample_y[k] * w + pat.sample_x[k]).collect();
+    let sample_limit = (n as f64 * (1.0 - SAMPLE_MIN) + 1e-9).floor() as usize;
+    let total = pat.w * pat.h;
+    let limit = (total as f64 * (1.0 - HALL_MATCH) + 1e-9).floor() as usize;
+    let mut best_mis = limit + 1;
+    let mut best: Option<(i32, i32)> = None;
+    for oy in 0..=(h - pat.h) {
+        for ox in 0..=(w - pat.w) {
+            let base = oy * w + ox;
+            let mut mis = 0usize;
+            let mut k = 0;
+            while k < n && mis <= sample_limit {
+                if grid[base + sample_off[k]] != pat.sample_c[k] {
+                    mis += 1;
+                }
+                k += 1;
+            }
+            if mis > sample_limit {
+                continue;
+            }
+            mis = 0;
+            let max = best_mis as i64 - 1;
+            let mut y = 0;
+            while y < pat.h && mis as i64 <= max {
+                let g = base + y * w;
+                let s = y * pat.w;
+                for x in 0..pat.w {
+                    if grid[g + x] != pat.classes[s + x] {
+                        mis += 1;
+                    }
+                }
+                y += 1;
+            }
+            if mis as i64 <= max {
+                best_mis = mis;
+                best = Some((ox as i32 - HALL_X0, oy as i32 - HALL_Y0));
+            }
+        }
+    }
+    best.map(|(dx, dy)| HallOffset {
+        dx,
+        dy,
+        matched: 1.0 - best_mis as f64 / total as f64,
+    })
+}
+
+const TILE_SOLID: u8 = 1;
+const TILE_DEATH: u8 = 2;
+const TILE_NOHOOK: u8 = 3;
+const TILE_FREEZE: u8 = 9;
+
+/// `checkWb(def, col, whole)`: every spot standable, every rope anchor of the tubes a hookable solid tile
+/// and, with `whole`, also every tube's start standable and its exit boxes free of solid and freeze.
+fn check_wb(def: &WbDef, col: &impl PlanCollision, whole: bool) -> bool {
     for s in [&def.left, &def.right] {
         for p in &s.spots {
             if !standable(col, p.0, p.1) {
-                return None;
+                return false;
             }
         }
     }
     for c in &def.crossings {
         for a in &c.anchors {
+            if a.0 < 0 || a.1 < 0 || a.0 >= col.width() || a.1 >= col.height() {
+                return false;
+            }
             let x = f64::from(a.0 * 32 + 16);
             let y = f64::from(a.1 * 32 + 16);
             if !col.is_solid(x, y) || col.is_no_hook(x, y) {
-                return None;
+                return false;
+            }
+        }
+        if !whole {
+            continue;
+        }
+        if !standable(col, c.start.0, c.start.1) {
+            return false;
+        }
+        for b in &c.exit {
+            if b.x0 < 0 || b.y0 < 0 || b.x1 >= col.width() || b.y1 >= col.height() {
+                return false;
+            }
+            for y in b.y0..=b.y1 {
+                for x in b.x0..=b.x1 {
+                    let (px, py) = (f64::from(x * 32 + 16), f64::from(y * 32 + 16));
+                    if col.is_freeze(px, py) || col.is_solid(px, py) {
+                        return false;
+                    }
+                }
             }
         }
     }
-    Some(def)
+    true
+}
+
+/// `checkWalls(def, col)`: a tube whose wall route does not fit this map loses it (route 2 is off for it).
+fn check_walls(def: WbDef, col: &impl PlanCollision) -> WbDef {
+    if def.crossings.iter().all(|c| c.wall.is_none() || wall_route_ok(col, c)) {
+        return def;
+    }
+    let strip = |sd: &WbSideDef| -> WbSideDef {
+        if sd.crossing.wall.is_none() || wall_route_ok(col, &sd.crossing) {
+            return sd.clone();
+        }
+        let mut sd = sd.clone();
+        sd.crossing.wall = None;
+        sd
+    };
+    let left = strip(&def.left);
+    let right = strip(&def.right);
+    WbDef {
+        crossings: vec![left.crossing.clone(), right.crossing.clone()],
+        left,
+        right,
+        ..def
+    }
+}
+
+/// `wayblockFor(mapName, col?)`: the definition for the map named `map_name`, or `None`. With a
+/// collision: a map of the named definition's size with standable spots and hookable anchors is that
+/// definition (its walls checked); any other map is searched for the hall of `Copy Love Box` by its tiles
+/// (`find_hall_offset`) and gets the definition shifted to where the hall is, if that fits (every spot
+/// standable, every anchor hookable, every start standable, every exit free).
+pub fn wayblock_for<C: PlanCollision>(map_name: &str, col: Option<&C>) -> Option<WbDef> {
+    let want = map_name.trim().to_lowercase();
+    let def = wayblocks().into_iter().find(|d| d.name.to_lowercase() == want);
+    let Some(col) = col else { return def };
+    if let Some(def) = def
+        && col.width() == def.size.0
+        && col.height() == def.size.1
+        && check_wb(&def, col, false)
+    {
+        return Some(check_walls(def, col));
+    }
+    let hall = find_hall_offset(col)?;
+    let sign = |n: i32| if n >= 0 { format!("+{n}") } else { format!("{n}") };
+    let found = shift_def(
+        &copy_love_box(),
+        format!("Copy Love Box hall at {},{}", sign(hall.dx), sign(hall.dy)),
+        hall.dx,
+        hall.dy,
+        (col.width(), col.height()),
+    );
+    check_wb(&found, col, true).then(|| check_walls(found, col))
 }
 
 /// `wayblockFor(name)` without a collision: whether a definition for the name exists.
@@ -289,6 +573,46 @@ impl WbDef {
     pub fn walk_allowed(&self, tx: i32, ty: i32) -> bool {
         !in_any_box(&self.avoid, tx, ty)
     }
+
+    /// `wbGuardGeom(def, s)`: the places the guard on the upper shelf of side `s` cares about, all
+    /// measured from the side's watch point (the numbers are those of the left hall, mirrored for the right).
+    pub fn guard_geom(&self, s: WbSide) -> WbGuardGeom {
+        let o = self.side(s).watch;
+        let sign = if s == WbSide::Left { 1 } else { -1 };
+        let gx = |x: i32| o.0 + sign * (x - 89);
+        let gy = |y: i32| o.1 + (y - 79);
+        let bx =
+            |x0: i32, y0: i32, x1: i32, y1: i32| TileBox::new(gx(x0).min(gx(x1)), gy(y0), gx(x0).max(gx(x1)), gy(y1));
+        WbGuardGeom {
+            shelf: bx(92, 81, 104, 84),
+            column: bx(93, 68, 104, 80),
+            landing: bx(85, 76, 92, 79),
+            foot: bx(85, 66, 92, 78),
+            passage: bx(85, 41, 92, 65),
+            corridor: bx(73, 70, 77, 88),
+            job: (gx(91), gy(79)),
+            step_off: (gx(86), gy(79)),
+        }
+    }
+}
+
+/// `WbGuardGeom`: see [`WbDef::guard_geom`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WbGuardGeom {
+    /// The lower shelf, under the spot.
+    pub shelf: TileBox,
+    /// The column of air over the lower shelf.
+    pub column: TileBox,
+    /// Where the tube's first route drops them.
+    pub landing: TileBox,
+    pub foot: TileBox,
+    pub passage: TileBox,
+    /// The corridor behind the wall.
+    pub corridor: TileBox,
+    /// Where the guard stands to throw the ones on the lower shelf.
+    pub job: (i32, i32),
+    /// Where it steps off to when someone in the corridor is in reach of its home.
+    pub step_off: (i32, i32),
 }
 
 /// `wbWalkAllowed` for a map that may have no WB.
@@ -519,12 +843,25 @@ impl WbState {
 
     /// A new map: the choice, the counts and the pauses start over.
     pub fn on_map(&mut self, def: Option<WbDef>) {
+        self.on_map_keeping(def, false);
+    }
+
+    /// A map (re)loaded: with `keep_pauses` (the same map name and size as before: `wbPauseKey`) the failures
+    /// of the walk and its pause are kept, so reloading the map does not end a pause.
+    pub fn on_map_keeping(&mut self, def: Option<WbDef>, keep_pauses: bool) {
         self.def = def;
         self.chooser.reset();
         self.counts = (0, 0);
-        self.walk_fails = 0;
-        self.pauses = 0;
-        self.paused_until_ms = 0;
+        if !keep_pauses {
+            self.walk_fails = 0;
+            self.pauses = 0;
+            self.paused_until_ms = 0;
+        }
+    }
+
+    /// Deaths on the way in a row (`wbWalkFails`).
+    pub fn walk_fails(&self) -> i32 {
+        self.walk_fails
     }
 
     /// `wbHolding()`: the wayblock we are holding now. `fights` is "the mode is fight, or a goto that

@@ -83,6 +83,18 @@ pub fn input_keys_of(t: &Tee) -> i32 {
     (t.direction + 1) | ((t.jumped & 1) << 2) | (i32::from(t.hook_state != HOOK_IDLE) << 3)
 }
 
+/// `NEUTRAL_KEYS` (`bot.ts`): the keys of a tee that holds nothing (direction 0, no jump, no hook).
+const NEUTRAL_KEYS: i32 = 1;
+
+/// `HELD_MOVE_MIN` (`bot.ts`): px a tee must have moved since the last snapshot for held keys to count
+/// as activity (running, swinging on the hook) even when the keys themselves did not change.
+pub const HELD_MOVE_MIN: f32 = 1.0;
+
+/// `keysNeutral(keys)`.
+pub fn keys_neutral(keys: i32) -> bool {
+    keys == NEUTRAL_KEYS
+}
+
 /// Euclidean distance.
 pub fn dist(a: Vec2<f32>, b: Vec2<f32>) -> f32 {
     (a.x - b.x).hypot(a.y - b.y)
