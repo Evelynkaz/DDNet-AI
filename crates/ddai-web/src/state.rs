@@ -64,6 +64,10 @@ pub struct AppState {
     pub relations: RelationsStore,
     /// Task 5.8: the read-only view of the training runs directory.
     pub training: Arc<TrainingStore>,
+    /// Task 5.9: when the launcher requests of the last minute were accepted (the web's own rate limit, on top of the helper's).
+    pub launch_gate: Mutex<std::collections::VecDeque<Instant>>,
+    /// Task 5.9: unix time when a request nobody consumed was found and removed (the launcher is down until a newer status).
+    pub launch_stalled_at: Mutex<Option<u64>>,
 }
 
 impl AppState {
@@ -101,6 +105,8 @@ impl AppState {
             control,
             relations,
             training,
+            launch_gate: Mutex::new(std::collections::VecDeque::new()),
+            launch_stalled_at: Mutex::new(None),
         }
     }
 

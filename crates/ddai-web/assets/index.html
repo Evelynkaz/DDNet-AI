@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>DDNet-AI</title>
     <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/launch.css" />
   </head>
   <body>
     <main class="shell">
@@ -102,6 +103,9 @@
         <strong class="source-title"></strong>
         <span class="source-detail"></span>
       </div>
+
+      <!-- Task 5.9: the «Запуск» card (assets/launch.js builds it into this mount; start/stop the bot, choose its brain). -->
+      <div id="launch-mount"></div>
 
       <section class="card" aria-labelledby="bot-status-title">
         <h2 id="bot-status-title">Состояние</h2>
@@ -374,6 +378,7 @@
 
     <script src="/fly.js"></script>
     <script src="/train.js"></script>
+    <script src="/launch.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

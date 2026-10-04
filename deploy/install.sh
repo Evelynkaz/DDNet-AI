@@ -186,6 +186,10 @@ mkdir -p "$DATA_DIR/secrets"
 mkdir -p "$DATA_DIR/bot"
 chmod 700 "$DATA_DIR/bot"
 chmod 0700 "$DATA_DIR/secrets"
+# Task 5.9 (D-089): the web unit has ReadWritePaths on launch/ (the launcher's request file is written there; a root path unit does
+# the rest, deploy/install-launcher.sh). It must exist before the unit starts, or the unit fails with status 226/NAMESPACE.
+mkdir -p "$DATA_DIR/launch"
+chmod 0755 "$DATA_DIR/launch"
 
 if [[ ! -f "$DATA_DIR/secrets/web-auth.toml" ]]; then
   log "NOTE: no password has been set up yet ($DATA_DIR/secrets/web-auth.toml is missing)."

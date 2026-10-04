@@ -1,0 +1,58 @@
+# The root-side helper of the web launcher (task 5.9, D-089), run by ddnet-ai-launch.path for each request file:
+# `ddnet-ai launch apply` consumes /home/ubuntu/aiddnet/data/launch/request.json, validates EVERY value against fixed allow-lists
+# (nothing from the request is a path, an address or a command line), writes the bot unit's environment file and cgroup
+# drop-in, runs `systemctl start|stop` for the bot and the sparring units, and writes the status the site reads.
+# The web unit itself has no privilege: it only writes the request file. Rules and schemas: deploy/README.md, docs/formats.md 34.
+#
+# It runs the root-owned COPY of the binary (/usr/local/libexec/ddnet-ai/ddnet-ai, installed by deploy/install-launcher.sh), not
+# the user-writable ~/aiddnet/bin one: whoever can replace that file must not get root through this unit.
+
+[Unit]
+Description=Web launcher: apply the request (validate, then start or stop the bot)
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+
+[Service]
+Type=oneshot
+User=root
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Environment=NO_COLOR=1
+ExecStart=/usr/local/libexec/ddnet-ai/ddnet-ai launch apply --data-dir /home/ubuntu/aiddnet/data
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=120
+
+# --- Hardening. Root, but with the least it needs: read the owner's files (live-servers.toml, the proxy secret, the bundle),
+# write only its own few places, talk to systemd over its local socket (and resolve a proxy host name). ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# data/launch: only to remove the request file. The status goes to /run/ddnet-ai (RuntimeDirectory below; root-owned, world-readable,
+# kept between runs): never into a directory the owner's user can rename (the unsandboxed stop hook would follow a swapped path).
+ReadWritePaths=/etc/ddnet-ai /etc/systemd/system/ddnet-ai-bot.service.d /var/lib/ddnet-ai /home/ubuntu/aiddnet/data/launch
+RuntimeDirectory=ddnet-ai
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+# CAP_DAC_OVERRIDE / CAP_DAC_READ_SEARCH: root must read the owner's 0600 secret and write into the owner's launch directory.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=256M
+TasksMax=64
+UMask=0022

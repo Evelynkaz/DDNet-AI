@@ -1733,7 +1733,8 @@
     function setBusy(on) {
       busy = on;
       document.querySelectorAll("#bot-view button").forEach(function (b) {
-        if (b.id !== "cmd-kill") {
+        // The «Запуск» card (launch.js) manages its own buttons.
+        if (b.id !== "cmd-kill" && !b.closest("#launch-mount")) {
           b.disabled = on;
         }
       });
@@ -1921,6 +1922,7 @@
 
     function onShown() {
       shown = true;
+      LaunchCard.onShown();
       pollStatus();
       loadLists();
       if (!timer) {
@@ -1930,12 +1932,14 @@
 
     function onHidden() {
       shown = false;
+      LaunchCard.onHidden();
       if (timer) {
         clearInterval(timer);
         timer = null;
       }
     }
 
+    LaunchCard.mount(el("launch-mount"), api);
     bindCommands();
     bindRelations();
     return { onShown: onShown, onHidden: onHidden, setDemo: setDemo };

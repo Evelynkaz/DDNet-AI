@@ -3,6 +3,7 @@
 
 pub mod assets;
 pub mod bot;
+pub mod launch;
 pub mod login;
 pub mod map;
 pub mod train;

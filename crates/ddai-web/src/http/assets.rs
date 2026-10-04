@@ -11,6 +11,8 @@ const APP_CSS: &str = include_str!("../../assets/app.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
 const FLY_JS: &str = include_str!("../../assets/fly.js");
 const TRAIN_JS: &str = include_str!("../../assets/train.js");
+const LAUNCH_JS: &str = include_str!("../../assets/launch.js");
+const LAUNCH_CSS: &str = include_str!("../../assets/launch.css");
 
 pub async fn page() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX_HTML)
@@ -32,4 +34,14 @@ pub async fn fly_js() -> impl IntoResponse {
 /// Task 5.8: the training panel's script (the «Обучение» tab), loaded before `app.js`.
 pub async fn train_js() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], TRAIN_JS)
+}
+
+/// Task 5.9: the «Запуск» card's script (the «Бот» tab), loaded before `app.js`.
+pub async fn launch_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], LAUNCH_JS)
+}
+
+/// Task 5.9: the «Запуск» card's styles (scoped under `.launch-card`).
+pub async fn launch_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], LAUNCH_CSS)
 }

@@ -42,7 +42,7 @@ use crate::state::SharedState;
 /// A bridge status older than this means the bot is not (or no longer) there.
 pub const STATUS_STALE: Duration = Duration::from_secs(3);
 
-fn json_error(status: StatusCode, error: &'static str) -> Response {
+pub(crate) fn json_error(status: StatusCode, error: &'static str) -> Response {
     (status, Json(serde_json::json!({ "error": error }))).into_response()
 }
 
@@ -51,8 +51,8 @@ fn json_error_detail(status: StatusCode, error: &'static str, detail: &str) -> R
 }
 
 /// Who asked: the opaque audit tag of the session (never the cookie).
-struct Owner {
-    tag: String,
+pub(crate) struct Owner {
+    pub(crate) tag: String,
 }
 
 /// Task 5.7: the offline demo is what the site shows **and** there is no live bot to command: its control socket is not
@@ -70,10 +70,10 @@ async fn demo_only(state: &SharedState) -> bool {
 }
 
 /// A refusal: the status and the `error` code of the JSON body (small, so `Result` stays small).
-type Refusal = (StatusCode, &'static str);
+pub(crate) type Refusal = (StatusCode, &'static str);
 
 /// `refresh`: a request a person made refreshes the idle timeout; the status poll (nobody's action) does not.
-fn authorize_get(state: &SharedState, jar: &CookieJar, refresh: bool) -> Result<Owner, Refusal> {
+pub(crate) fn authorize_get(state: &SharedState, jar: &CookieJar, refresh: bool) -> Result<Owner, Refusal> {
     let id = if refresh {
         current_session(state, jar).map(|(id, _info)| id)
     } else {
@@ -88,7 +88,7 @@ fn authorize_get(state: &SharedState, jar: &CookieJar, refresh: bool) -> Result<
 }
 
 /// Origin (strict) -> session -> CSRF -> JSON content type, in that order; the first failure answers.
-fn authorize_post(state: &SharedState, headers: &HeaderMap, jar: &CookieJar) -> Result<Owner, Refusal> {
+pub(crate) fn authorize_post(state: &SharedState, headers: &HeaderMap, jar: &CookieJar) -> Result<Owner, Refusal> {
     if !request_is_strict_same_origin(headers, state.config.cookie_secure) {
         return Err((StatusCode::FORBIDDEN, "cross_origin"));
     }

@@ -11,6 +11,7 @@ mod dataset_cmd;
 mod demo_cmd;
 mod fly_cmd;
 mod fly_watch;
+mod launch_cmd;
 mod map_cmd;
 mod play_cmd;
 mod proxy_cmd;
@@ -71,6 +72,10 @@ enum Command {
     /// Checks a SOCKS5 proxy (task 2.6): TCP connect, authentication, `UDP ASSOCIATE` and the relay address, and
     /// nothing else: no datagram goes to any game server. Prints ok / UDP not supported / auth failed.
     ProxyCheck(proxy_cmd::ProxyCheckArgs),
+    /// The root-side helper of the web launcher (task 5.9, D-089): `launch apply` consumes the web's request file and starts or
+    /// stops the bot unit; `launch exited` is the bot unit's stop hook. Never takes a path, address or command line from the
+    /// request: every value is checked against fixed allow-lists.
+    Launch(launch_cmd::LaunchArgs),
 }
 
 /// True in the opt-in **training-only build** (`tools/train-v3-build.sh`: `-C target-cpu=x86-64-v3`,
@@ -111,6 +116,7 @@ fn main() -> ExitCode {
         Some(Command::Servers(args)) => servers_cmd::run(args),
         Some(Command::Clip(args)) => clip_cmd::run(args),
         Some(Command::ProxyCheck(args)) => proxy_cmd::run(args),
+        Some(Command::Launch(args)) => launch_cmd::run(args),
     }
 }
 

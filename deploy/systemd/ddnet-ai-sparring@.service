@@ -1,0 +1,74 @@
+# Sparring opponent number %i for the web launcher (task 5.9, D-089): `ddnet-ai play --brain scripted` with the neutral name Spar%i
+# and a random stock skin, on the LOCAL server only, started and stopped by `ddnet-ai launch apply` together with the bot
+# (instances 1..3). Never meant for a public server: the address is fixed here, the cgroup filter below drops everything but
+# loopback, and the helper refuses sparring for any server but "local".
+#
+# It follows the bot unit: BindsTo= stops it whenever ddnet-ai-bot.service stops, ends (the time is up) or fails; After= orders the
+# start behind it. It has a private data directory (data/sparring: its own logs, map cache and bot files) and cannot see the real
+# bot's data/bot or the secrets at all. No web bridge, no control socket, no memory, no settings, no clips: nothing of the bot's.
+# The bot never writes chat (D-007); neither do these.
+#
+# Exit codes are the same as the bot's (docs/formats.md 21.5): 3 and 4 are not retried (RestartPreventExitStatus).
+
+[Unit]
+Description=DDNet-AI sparring opponent Spar%i (scripted, local server only)
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+After=network.target ddnet-local.service ddnet-ai-bot.service
+BindsTo=ddnet-ai-bot.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/aiddnet/data/sparring
+ExecStartPre=/usr/bin/test -x /home/ubuntu/aiddnet/bin/ddnet-ai
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 127.0.0.1:8303 --name Spar%i --brain scripted --duration 0 --clan Spar --no-console --no-bridge --no-control --no-memory --no-settings --no-autoclip --data-dir /home/ubuntu/aiddnet/data/sparring
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Environment=NO_COLOR=1
+Environment=RUST_LOG=info
+Environment=MALLOC_MMAP_THRESHOLD_=131072
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=3 4
+
+# --- Hardening (as for ddnet-ai-bot.service) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Its own data directory and the single-instance lock files (data/run); nothing else is writable.
+ReadWritePaths=/home/ubuntu/aiddnet/data/sparring /home/ubuntu/aiddnet/data/run
+# The real bot's data and every secret are invisible to it.
+InaccessiblePaths=/home/ubuntu/aiddnet/data/bot /home/ubuntu/aiddnet/data/secrets
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+MemoryMax=1G
+TasksMax=128
+# Loopback only, whatever the command line says.
+IPAddressAllow=127.0.0.0/8 ::1
+IPAddressDeny=any
+
+[Install]
+# No WantedBy=: never enabled, never started at boot; only `launch apply` starts it.

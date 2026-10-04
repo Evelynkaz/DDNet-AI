@@ -82,6 +82,19 @@ pub struct WebArgs {
     /// Task 5.8: the training runs the «Обучение» tab shows, read-only (`docs/formats.md` §29). Default `<data-dir>/runs`.
     #[arg(long = "runs-dir")]
     pub(crate) runs_dir: Option<PathBuf>,
+    /// Task 5.9 (D-089): the launcher's directory: the site writes `request.json` here (the status is read from
+    /// `--launch-status-dir`); the root helper (`ddnet-ai launch apply`, run by a systemd path unit) consumes it. Default `<data-dir>/launch`.
+    #[arg(long = "launch-dir")]
+    pub(crate) launch_dir: Option<PathBuf>,
+    /// Task 5.9: the root-owned directory the launcher helper writes `status.json` into (read-only for the site). Default `/run/ddnet-ai`.
+    #[arg(long = "launch-status-dir")]
+    pub(crate) launch_status_dir: Option<PathBuf>,
+    /// Task 5.9: the owner's allow-list the launcher's server choice is built from (read-only). Default `<data-dir>/live-servers.toml`.
+    #[arg(long = "live-servers")]
+    pub(crate) live_servers: Option<PathBuf>,
+    /// Task 5.9: the root-owned launcher config (read only to show the active fly bundle). Default `/etc/ddnet-ai/launch.toml`.
+    #[arg(long = "launch-config")]
+    pub(crate) launch_config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -167,6 +180,18 @@ pub fn run_web(args: WebArgs) -> ExitCode {
     }
     if let Some(path) = args.runs_dir {
         config.runs_dir = path;
+    }
+    if let Some(path) = args.launch_dir {
+        config.launch_dir = path;
+    }
+    if let Some(path) = args.launch_status_dir {
+        config.status_dir = path;
+    }
+    if let Some(path) = args.live_servers {
+        config.live_servers = path;
+    }
+    if let Some(path) = args.launch_config {
+        config.launch_config = path;
     }
     if let Some(socket) = args.bot_socket {
         if config.map_search_dirs.is_empty() {

@@ -158,6 +158,26 @@ impl ProxyConfig {
         &self.name
     }
 
+    /// The IP addresses the proxy's `host:port` resolves to, and nothing else about it: the launcher (task 5.9, D-089) puts
+    /// exactly these into the bot unit's cgroup filter (`IPAddressAllow=`), so the host name itself never leaves this type.
+    /// Duplicates are removed; an empty answer is an error.
+    pub fn resolve_ips(&self) -> std::io::Result<Vec<std::net::IpAddr>> {
+        let mut ips: Vec<std::net::IpAddr> = Vec::new();
+        for addr in (self.host.expose(), self.port).to_socket_addrs()? {
+            let ip = addr.ip().to_canonical();
+            if !ips.contains(&ip) {
+                ips.push(ip);
+            }
+        }
+        if ips.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the proxy host resolves to no address",
+            ));
+        }
+        Ok(ips)
+    }
+
     pub(crate) fn host(&self) -> &Secret {
         &self.host
     }
@@ -367,6 +387,20 @@ pub fn resolve_for_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_ips_gives_the_addresses_only_and_dedups() {
+        let cfg = ProxyConfig::new("p", "127.0.0.1", 1080, None).unwrap();
+        assert_eq!(
+            cfg.resolve_ips().unwrap(),
+            vec!["127.0.0.1".parse::<std::net::IpAddr>().unwrap()]
+        );
+        let v6 = ProxyConfig::new("p", "::ffff:10.1.2.3", 1080, None).unwrap();
+        assert_eq!(
+            v6.resolve_ips().unwrap(),
+            vec!["10.1.2.3".parse::<std::net::IpAddr>().unwrap()]
+        );
+    }
 
     const SECRET_USER: &str = "u-s3cr3t-user";
     const SECRET_PASS: &str = "p-s3cr3t-pass";

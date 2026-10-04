@@ -5706,3 +5706,60 @@ note = "…"        # справочно, не читается
 После ревью раунда 1 e2e повторён на **личной копии сервера** `127.0.0.1:8343` (econ 8344, свой каталог и пароль, `sv_register 0`; сервер остановлен после прогона), без `ddnet-local.service` и порта 8303: тест читает `DDAI_E2E_SERVER`, `DDAI_E2E_ECON_PORT`, `DDAI_E2E_ECON_PASSWORD_FILE` (`.cfg` с `ec_password "…"`) и `DDAI_E2E_RESTART_CMD` (команда перезапуска именно этого сервера; по умолчанию прежние 8303 / 8304 / `sudo -n systemctl restart ddnet-local.service`). Результат тот же: 77 с, три ассоциации, 0 чата (в аудите 6 видов: `Cl_Kill` в этот раз не понадобился), движение PASS. Файл прокси в тесте несёт `for_server` с адресом сервера.
 
 Что нашли неудачные прогоны (код не менялся, менялся тест): (1) убитый бот остаётся в списке сервера до таймаута (100 с, `NET_CONNTIMEOUT`), поэтому ник каждого прогона свой; (2) после потери ассоциации старый слот живёт на сервере до таймаута (закрытие TCP не даёт донести `CLOSE`), а новое соединение с тем же ником сервер записывает как `(1)<ник>`: поэтому проверка идёт по порту ретранслятора, не по нику. Для боя это значит, что после обрыва управляющего соединения прокси на сервере до 100 с видны два слота (один мёртвый), как и при обрыве по таймауту в прямом режиме.
+
+
+## 34. Запуск бота с сайта: запрос, статус, окружение юнита (задача 5.9, D-089, `ddai-web::{launch, http::launch}`, `ddnet-ai launch`)
+
+Сайт ничего не запускает: он пишет файл запроса, root-помощник `ddnet-ai launch apply` его проверяет и выполняет, и пишет статус. Всё в `~/aiddnet/data/launch/` (владелец — `ubuntu`, `0755`), файлы обычные (симлинк и FIFO отвергаются).
+
+### 34.1 Запрос `request.json` (пишет сайт; один файл, атомарно: временный файл и `rename`)
+
+```json
+{"v":1,"id":"0123456789abcdef","ts":1791103000,"action":"start","brain":"hybrid-fly","server":"local","duration":"15m","sparring":2}
+{"v":1,"id":"fedcba9876543210","ts":1791103100,"action":"stop"}
+```
+
+- **Не больше 1024 байт**; неизвестные поля — отказ (`deny_unknown_fields`); `v` = 1; `id` — 8–32 строчных hex-цифры (его делает сайт, он возвращается в статусе); `ts` — секунды Unix, когда сайт сделал запрос.
+- **Свежесть.** Запрос старше **60 с** (и по `ts`, и по mtime файла: проверяются оба) или датированный будущим (больше 5 с вперёд) **не выполняется**: статус `refused` / `request_stale`, файл удаляется. Так запрос, написанный, пока юнит запуска не работал, не запустит бота позже (после перезапуска пути-юнита, перезагрузки). Сайт тоже убирает свой запрос, который никто не взял за 60 с, и говорит «запуск не отвечает».
+- `action`: `start` | `stop`. У `stop` других полей нет. У `start` обязательны `brain`, `server`, `duration`; `sparring` по умолчанию 0.
+- `brain`: `hybrid` | `hybrid-fly` (гибрид с мухой как предлагающим, `--fly-bundle`) | `fly` (муха сама, `--fly-bundle`).
+- `duration`: `15m` (900 с) | `60m` (3600 с) | `unlimited` (`--duration 0`).
+- `server`: `"local"` (`127.0.0.1:8303`, ник `Muha`) **или точный `address`** записи `live-servers.toml` с `ready = true`. Свободный адрес не принимается.
+- `sparring`: 0–3, только при `server = "local"`.
+- Помощник читает файл и **удаляет его до обработки**; следующий запрос нужен для нового действия.
+
+### 34.2 Статус `status.json` (пишет root-помощник в **`/run/ddnet-ai/`** (root, `0755`; сайт читает), файл `0644` при любой umask, ≤ 8 КиБ)
+
+Каталог не `data/launch`: сайт не должен влиять на путь, по которому пишет root (хук остановки бота идёт без песочницы). Запрос по-прежнему в `data/launch`, помощник читает его с `O_NOFOLLOW`. Каталог `/run/ddnet-ai` живёт до перезагрузки (после неё статуса нет, пока не будет первого запуска или остановки).
+
+```json
+{"v":1,"state":"started","at":1791103026,"request_id":"00000000aaaa0001","brain":"hybrid-fly","server":"local","duration":"15m","sparring":2,"bundle":"E-005/e005-fly"}
+{"v":1,"state":"failed","at":…,"request_id":"…","reason":"kicked_or_banned","exit_code":3,"server":"…"}
+```
+
+- `state`: `started` (запуск принят, `systemctl start` выдан; «В игре» говорит живой мост) | `stopped` | `failed` (бот вышел с ошибкой) | `refused` (запрос отвергнут, ничего не изменено) | `error` (запрос верен, но выполнить не вышло).
+- `at` — секунды Unix; `reason` — фиксированный код; `bundle` — имя запуска мухи (`<эксперимент>/<запуск>`), никогда путь; `exit_code` — код выхода бота; остальные поля описывают запуск.
+- Коды `reason` отказа: `bad_request`, `request_too_large`, `request_not_regular`, `request_unreadable`, `request_stale`, `server_not_allowed`, `server_not_ready`, `server_ambiguous`, `server_bad_entry`, `sparring_local_only`, `bundle_missing`, `bundle_bad_path`, `config_bad`, `config_untrusted`, `blocked_after_ban`, `state_unreadable`, `cooldown`, `rate_limited`, `already_running`, `local_server_down`, `unit_overridden`, `proxy_error`, `live_servers_unreadable`, `internal`. Ошибки выполнения: `write_failed`, `state_write_failed`, `systemctl_failed`, `sparring_failed`. Окончания: `stopped_by_owner`, `finished` (время вышло: срок ограничен и бот проработал его, за вычетом 60 с, `stopped`), `ended` (чистый выход без кнопки и до срока: сигнал или остановка вручную, `stopped`), `kicked_or_banned` (3), `join_failed` (4), `crashed` (`failed`).
+
+### 34.3 Окружение юнита `/etc/ddnet-ai/bot-launch.env` (root, `0644`, переписывается при каждом запуске, удаляется хуком после нормального конца)
+
+```
+BOT_LAUNCH_ID="0123456789abcdef"
+BOT_SERVER="127.0.0.1:8303"
+BOT_NAME="Muha"
+BOT_BRAIN="hybrid"
+BOT_DURATION="900"
+BOT_FLY_ARGS="--fly-bundle /home/ubuntu/aiddnet/data/runs/E-005/e005-fly/checkpoints/final.bundle"
+```
+
+Значения — только из `[A-Za-z0-9._/:- []]` (то есть и `[`, `]` для IPv6) (до 512 байт), всегда в двойных кавычках; `BOT_FLY_ARGS` пуст для `hybrid`. Юнит: `ExecStart=… --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} $BOT_FLY_ARGS …`.
+Дроп-ин `/etc/systemd/system/ddnet-ai-bot.service.d/50-launch.conf`: `IPAddressAllow=` (сброс), `IPAddressAllow=127.0.0.0/8 ::1` и, для публичного сервера, IP прокси из файла секретов (без прокси — IP сервера).
+
+### 34.4 Память помощника `/var/lib/ddnet-ai/launch-state.json` (root, `0600`, под `flock`)
+
+`last_start_at`, `last_launch` (запуск), `stop_requested_at`, `last_exit` (`at`, `code`), `blocked` (адрес публичного сервера → `at`, `code`; снимается, когда `live-servers.toml` изменён позже `at`). Нечитаемый файл не перезаписывается, запуски закрыты (`state_unreadable`).
+
+### 34.5 Маршруты сайта (все за сессией; POST — строгий Origin, CSRF, JSON)
+
+- `GET /api/bot/launch` → `{enabled, servers:[{id,label}], brains, durations, max_sparring, bundle, bundle_present, status, launcher_down, pending, pending_age_s}`; `servers` — `local` и готовые записи списка; `launcher_down` — запрос не взяли за 60 с (его убрали), и помощник с тех пор ничего не писал.
+- `POST /api/bot/launch` с `{action, brain?, server?, duration?, sparring?}` → `202 {ok, id, action}`; `400` (`bad_request`, `server_not_allowed`, `sparring_local_only`, `bundle_missing`), `409 pending`, `429 rate_limited` (не чаще одного в 2 с и не больше 6 в минуту: путь-юнит останавливается после 10 срабатываний в минуту), `503 launcher_unavailable`, `500 launch_write_failed`; `401/403/415` как у остальных.

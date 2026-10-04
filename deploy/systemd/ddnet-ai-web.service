@@ -46,7 +46,9 @@ ProtectHome=read-only
 # logs/web/ and bot/ (0700); secrets/ was created earlier by `ddnet-ai web-passwd`), so ProtectSystem=strict's
 # read-only bind mount of everything else never blocks a subdirectory create *inside* these paths. If bot/ is
 # missing the unit fails to start (status 226/NAMESPACE): `mkdir -p -m 700 ~/aiddnet/data/bot`.
-ReadWritePaths=/home/ubuntu/aiddnet/data/secrets /home/ubuntu/aiddnet/data/logs /home/ubuntu/aiddnet/data/bot
+# Task 5.9 (D-089): data/launch is where the launcher's request file is written (the status is read from the root-owned /run/ddnet-ai); a root path unit does the
+# rest, so this unit still has no way to start or stop anything. It must exist before the first start (deploy/install.sh).
+ReadWritePaths=/home/ubuntu/aiddnet/data/secrets /home/ubuntu/aiddnet/data/logs /home/ubuntu/aiddnet/data/bot /home/ubuntu/aiddnet/data/launch
 PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true

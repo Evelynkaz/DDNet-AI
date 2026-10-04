@@ -1,0 +1,20 @@
+# The web launcher's trigger (task 5.9, D-089): the site writes /home/ubuntu/aiddnet/data/launch/request.json (atomically, a
+# small JSON file); this path unit notices it and starts ddnet-ai-launch.service (root), which consumes (deletes) the file, so the
+# unit fires again only for a NEW request. A request that waits longer than a minute (this unit was down) is refused and discarded
+# by the helper (`request_stale`), so it is never carried out later, after a restart or a reboot. Installed and enabled by
+# deploy/install-launcher.sh.
+
+[Unit]
+Description=Web launcher: a request file is waiting
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+
+[Path]
+PathExists=/home/ubuntu/aiddnet/data/launch/request.json
+Unit=ddnet-ai-launch.service
+# A request that cannot be consumed would re-trigger at once: stop after a few instead of spinning. The site accepts at most 6
+# requests a minute, well below this burst.
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target

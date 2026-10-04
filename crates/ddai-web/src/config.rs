@@ -73,6 +73,21 @@ pub struct WebConfig {
     pub relations_path: PathBuf,
     /// Task 5.8: the training runs the «Обучение» tab reads (read-only), default `<data-dir>/runs`.
     pub runs_dir: PathBuf,
+    /// Task 5.9: the launcher's directory (D-089): the web writes `request.json` here (the status is in
+    /// `status_dir`); the root helper (`ddnet-ai launch apply`) consumes it. Default `<data-dir>/launch`.
+    pub launch_dir: PathBuf,
+    /// Task 5.9 (review F5): the root-owned directory the helper writes `status.json` into; the web only reads it. Default
+    /// `/run/ddnet-ai`.
+    pub status_dir: PathBuf,
+    /// Task 5.9 (review F3): the least time between two accepted launcher requests, and the most in any 60 seconds. The path unit
+    /// stops after `TriggerLimitBurst=10` in a minute, so the web stays well below it.
+    pub launch_min_gap: Duration,
+    pub launch_max_per_minute: usize,
+    /// Task 5.9: the owner's allow-list the launcher's server choice is built from (read-only). Default
+    /// `<data-dir>/live-servers.toml`.
+    pub live_servers: PathBuf,
+    /// Task 5.9: the root-owned launcher config (the fly bundle path), read to show which bundle is active.
+    pub launch_config: PathBuf,
 }
 
 impl WebConfig {
@@ -105,6 +120,12 @@ impl WebConfig {
             control_socket: data_dir.join("bot").join("control.sock"),
             relations_path: data_dir.join("bot").join("relations.json"),
             runs_dir: data_dir.join("runs"),
+            launch_dir: data_dir.join("launch"),
+            status_dir: PathBuf::from(crate::launch::DEFAULT_STATUS_DIR),
+            launch_min_gap: Duration::from_secs(2),
+            launch_max_per_minute: 6,
+            live_servers: data_dir.join("live-servers.toml"),
+            launch_config: PathBuf::from(crate::launch::DEFAULT_CONFIG_PATH),
             data_dir,
         }
     }
