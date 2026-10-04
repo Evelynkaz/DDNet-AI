@@ -438,6 +438,30 @@ impl TuningParams {
     pub fn shotgun_speed<R: crate::real::Real>(&self) -> R {
         self.param(idx::SHOTGUN_SPEED)
     }
+    /// `m_LaserReach` (`laser_reach`) — `FireWeapon`'s `WEAPON_SHOTGUN`/`WEAPON_LASER` cases
+    /// (`character.cpp:589,625`): the `StartEnergy` of the fired `CLaser`.
+    pub fn laser_reach<R: crate::real::Real>(&self) -> R {
+        self.param(idx::LASER_REACH)
+    }
+    /// `m_LaserBounceDelay` (`laser_bounce_delay`), milliseconds — `CLaser::Tick()`
+    /// (`laser.cpp:274-275`).
+    pub fn laser_bounce_delay<R: crate::real::Real>(&self) -> R {
+        self.param(idx::LASER_BOUNCE_DELAY)
+    }
+    /// `m_LaserBounceNum` (`laser_bounce_num`) read as an `int` (`laser.cpp:179`: `int BounceNum =
+    /// TuningList()[m_TuneZone].m_LaserBounceNum;` — `CTuneParam`'s `operator float` followed by
+    /// the implicit `float` -> `int` truncation, `cvttss2si` semantics on x86-64).
+    pub fn laser_bounce_num(&self) -> i32 {
+        crate::real::Real::to_i32_trunc(self.param::<f32>(idx::LASER_BOUNCE_NUM))
+    }
+    /// `m_LaserBounceCost` (`laser_bounce_cost`) — `laser.cpp:163`.
+    pub fn laser_bounce_cost<R: crate::real::Real>(&self) -> R {
+        self.param(idx::LASER_BOUNCE_COST)
+    }
+    /// `m_ShotgunStrength` (`shotgun_strength`) — `CLaser::HitCharacter` (`laser.cpp:66`).
+    pub fn shotgun_strength<R: crate::real::Real>(&self) -> R {
+        self.param(idx::SHOTGUN_STRENGTH)
+    }
     /// `m_JetpackStrength` (`jetpack_strength`) — read by `HandleJetpack` (`character.cpp:289`);
     /// never actually applied in this corpus (`jetpack_ticks == 0` — no scenario/map ever sets
     /// `m_Core.m_Jetpack`), kept for structural completeness.

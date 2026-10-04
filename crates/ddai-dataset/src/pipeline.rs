@@ -520,7 +520,8 @@ pub fn build_stream<E>(
 struct Builder<'a> {
     cfg: &'a Config,
     live: LiveWorld,
-    scratch: World<f32>,
+    /// Boxed: see `LiveWorld`'s fields (a by-value `World` blew the 2 MiB stack of test threads).
+    scratch: Box<World<f32>>,
     last_weapon: HashMap<u16, i32>,
     frozen_since: HashMap<u16, i32>,
     /// Tick and record of frame k-1 (its steps are completed when frame k is processed).
@@ -531,7 +532,7 @@ struct Builder<'a> {
 impl<'a> Builder<'a> {
     fn new(cfg: &'a Config, map: &Arc<MapData>) -> Self {
         let live = LiveWorld::new(Arc::clone(map), -1, 0);
-        let scratch = live.base_world().clone();
+        let scratch = Box::new(live.base_world().clone());
         Builder {
             cfg,
             live,

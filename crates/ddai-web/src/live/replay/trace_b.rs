@@ -20,7 +20,10 @@ use std::path::Path;
 use ddai_trace::io::{FormatError, Reader};
 
 const MAGIC: &[u8; 4] = b"TRB1";
-const SUPPORTED_VERSION: u32 = 2;
+/// Versions read: `2`, and `3` (task 1.6b: byte-for-byte the same layout; entity kind 7, the turret
+/// shot, and a dragger beam's real `owner_client_id` are just records/values — `docs/formats.md`
+/// §11, §30.1).
+const SUPPORTED_VERSIONS: [u32; 2] = [2, 3];
 
 /// DDNet's `MAX_CLIENTS` (see `ddai_trace::scenario::MAX_CLIENTS`) — the same bound applied here
 /// to `character_count` before it is ever used to size a `Vec` or drive a read loop, so a
@@ -51,7 +54,7 @@ pub enum TraceBError {
     Format(#[from] FormatError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("unsupported trace-b version {0} (only {SUPPORTED_VERSION} is supported)")]
+    #[error("unsupported trace-b version {0} (only 2 and 3 are supported)")]
     UnsupportedVersion(u32),
     #[error("character_count {0} exceeds the {MAX_CLIENTS} MAX_CLIENTS cap")]
     TooManyCharacters(u32),
@@ -208,7 +211,7 @@ impl TraceBReader {
             .into());
         }
         let version = read_u32(&mut file)?;
-        if version != SUPPORTED_VERSION {
+        if !SUPPORTED_VERSIONS.contains(&version) {
             return Err(TraceBError::UnsupportedVersion(version));
         }
         let metadata_len = read_u32(&mut file)?;
@@ -690,6 +693,29 @@ mod tests {
         std::fs::write(&path, &buf).expect("write");
         let err = TraceBReader::open(&path).expect_err("should reject v1");
         assert!(matches!(err, TraceBError::UnsupportedVersion(1)));
+    }
+
+    #[test]
+    fn reads_version_3_traces_with_the_same_layout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("t.trb");
+        write_trace_b(&path, 2, 2, "rawmap-scenario");
+        let mut bytes = std::fs::read(&path).expect("read");
+        assert_eq!(&bytes[4..8], &2u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("write");
+        let mut reader = TraceBReader::open(&path).expect("v3 opens");
+        let mut n = 0;
+        while reader.next_tick().expect("next_tick").is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 2);
+        bytes[4..8].copy_from_slice(&4u32.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("write");
+        assert!(matches!(
+            TraceBReader::open(&path),
+            Err(TraceBError::UnsupportedVersion(4))
+        ));
     }
 
     #[test]

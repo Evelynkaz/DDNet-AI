@@ -245,12 +245,15 @@ pub struct LiveWorld {
     /// [`LiveWorld::predict`] (which works on [`LiveWorld::scratch`] instead), so it is always
     /// ready to be the base of the *next* `predict()` call, however many extra ticks the
     /// previous one stepped through.
-    world: World<f32>,
+    ///
+    /// Boxed (1.6b review F1): a `World` is ~110 KB, and a `LiveWorld` moved by value through a debug-build
+    /// call chain on a 2 MiB thread stack (test threads, scoped workers) overflowed it.
+    world: Box<World<f32>>,
     /// Reused across [`LiveWorld::predict`] calls: every call re-syncs it to [`Self::world`] via
     /// `World::restore_from` (task 1.10), which reuses this struct's own already-grown buffers
     /// instead of allocating fresh ones — see [`LiveWorld::predict`]'s own doc comment for the
     /// measured cost.
-    scratch: World<f32>,
+    scratch: Box<World<f32>>,
     /// Reused `Vec<TickInput>` buffer for [`LiveWorld::predict`]'s per-tick `World::step` calls.
     tick_inputs_scratch: Vec<TickInput>,
     /// Every other character's "held" input (task spec: "holding the other players' last known
@@ -294,15 +297,20 @@ impl LiveWorld {
         // would be evaluated at `t = server_tick / 50 s` (millions of pixels away, and a line walk
         // over that distance under non-DDRace shotgun curvature).
         world.projectiles.clear();
+        // 1.6b review F4: the map's turrets and rotating/opening lights are not simulated either (the
+        // client does not predict them, and a light with the map-load phase mispredicts more than no
+        // light); draggers stay on, static lights get their beam up front. See
+        // `World::retain_predictable_fixtures`.
+        world.retain_predictable_fixtures();
         // 2.4b review round 1, F1 / 4.1 review round 1, F5: the base world keeps the server's own
         // `sv_destroy_bullets_on_death = true` (the `ddai-dataset` replay clones it and models the
         // server); the "grenades keep flying" relaxation lives on the prediction scratch only
         // (`LiveWorld::predict_impl`).
-        let scratch = world.clone();
+        let scratch = Box::new(world.clone());
         LiveWorld {
             own_id,
             map,
-            world,
+            world: Box::new(world),
             scratch,
             tick_inputs_scratch: Vec::with_capacity(8),
             held_input: [None; MAX_CLIENTS],
@@ -2161,6 +2169,80 @@ mod tests {
             predicted.characters[0].unwrap().reload_timer,
             truth.characters[0].unwrap().reload_timer,
             "reload_timer mismatch — phantom fire from a dropped InputSent"
+        );
+    }
+
+    /// 1.6b review F4: the base world keeps draggers and static lights (with their beam ready), and
+    /// drops turrets and rotating/opening lights, whose phase a client cannot rebuild.
+    #[test]
+    fn the_base_world_keeps_draggers_and_static_lights_but_not_turrets_or_moving_lights() {
+        use ddai_physics::map::{
+            ENTITY_DRAGGER_NORMAL, ENTITY_LASER_LONG, ENTITY_LASER_NORMAL_CW, ENTITY_LASER_STOP, ENTITY_OFFSET,
+            ENTITY_PLASMA, ENTITY_PLASMAU,
+        };
+        use ddai_physics::world::Fixture;
+        let (w, h) = (40usize, 20usize);
+        let mut game = vec![Tile::default(); w * h];
+        for x in 0..w {
+            game[(h - 1) * w + x] = Tile {
+                index: TILE_SOLID,
+                ..Default::default()
+            };
+        }
+        let mut put = |x: usize, y: usize, e: u8| {
+            game[y * w + x] = Tile {
+                index: ENTITY_OFFSET + e,
+                ..Default::default()
+            };
+        };
+        put(3, 10, ENTITY_LASER_STOP); // a static light, east beam via the marker at (4, 10)
+        put(4, 10, ENTITY_LASER_LONG);
+        put(20, 5, ENTITY_LASER_NORMAL_CW); // a rotating light
+        put(21, 5, ENTITY_LASER_LONG);
+        put(10, 15, ENTITY_PLASMA); // two turrets
+        put(30, 15, ENTITY_PLASMAU);
+        put(15, 3, ENTITY_DRAGGER_NORMAL); // a dragger
+        let map = MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        };
+        let plain: World<f32> = World::from_map(&map, 1);
+        let kinds = |w: &World<f32>| {
+            let (mut d, mut g, mut l) = (0, 0, 0);
+            for f in &w.fixtures {
+                match f {
+                    Fixture::Dragger(_) => d += 1,
+                    Fixture::Gun(_) => g += 1,
+                    Fixture::Light(_) => l += 1,
+                }
+            }
+            (d, g, l)
+        };
+        assert_eq!(kinds(&plain), (1, 2, 2), "the map really has all three kinds");
+
+        let live = LiveWorld::new(Arc::new(map), 0, 1);
+        let world = live.base_world();
+        assert_eq!(
+            kinds(world),
+            (1, 0, 1),
+            "dragger and static light stay; turrets and the rotating light go"
+        );
+        let Some(Fixture::Light(l)) = world.fixtures.iter().find(|f| matches!(f, Fixture::Light(_))) else {
+            unreachable!()
+        };
+        assert_eq!(l.angular_speed, 0.0);
+        assert!(
+            l.to.x > l.pos.x + 32.0 && l.to.y == l.pos.y,
+            "a static light starts with its beam, not the empty segment: pos {:?} to {:?}",
+            l.pos,
+            l.to
         );
     }
 }

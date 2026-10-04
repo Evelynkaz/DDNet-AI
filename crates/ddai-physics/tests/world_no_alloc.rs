@@ -230,3 +230,82 @@ fn world_step_performs_zero_heap_allocations_replaying_a_real_map_trace() {
     assert_eq!(info.count_current, 0, "World::step deallocated: {info:?}");
     assert_eq!(info.bytes_total, 0, "{info:?}");
 }
+
+/// Task 1.6 stage B: the same contract with *every* stage-B entity live, replaying the committed
+/// `calm_v0_s37000` golden fixture (`tests/fixtures_oracle_b_stage_b/`: a five-tee map with rifles,
+/// shotguns, ninja dashes, draggers with active beams, turrets with plasma in flight and rotating
+/// lights, and nobody dying in its 300 ticks) — the in-repo counterpart of the corpus-replay test
+/// above, which CI does not have the data for. The reserved capacities
+/// (`world::LASER_CAPACITY`/`PROJECTILE_HEADROOM`) are what keep the vectors from growing.
+#[test]
+fn world_step_performs_zero_heap_allocations_replaying_a_stage_b_fixture() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures_oracle_b_stage_b");
+    let rawmap_bytes = std::fs::read(dir.join("calm_v0_s37000.rawmap")).unwrap();
+    let scn = ScenarioV3::read_bytes(&std::fs::read(dir.join("calm_v0_s37000.scn")).unwrap());
+    let map = ddai_trace::rawmap::read(&rawmap_bytes).expect("rawmap parse failed");
+    let mut world: World<f32> = World::from_map(&map, scn.embedded_seed);
+    world.init(scn.cfg_lines.iter().map(|s| s.as_str())).unwrap();
+    world.apply_commands(scn.cfg_lines.iter().map(|s| s.as_str())).unwrap();
+    for c in &scn.characters {
+        world.players[c.id as usize] = Some(Player::new(0));
+        world::spawn_character(&mut world, c.id as i32, Vec2::new(c.spawn_x as f32, c.spawn_y as f32));
+        if c.team != 0 {
+            world::set_force_character_team(&mut world, c.id as i32, c.team);
+        }
+    }
+    let all_inputs: Vec<Vec<TickInput>> = scn
+        .inputs
+        .iter()
+        .map(|tick| {
+            let mut v: Vec<TickInput> = scn
+                .characters
+                .iter()
+                .zip(tick.iter())
+                .map(|(c, i)| TickInput {
+                    id: c.id as u8,
+                    input: PlayerInput {
+                        direction: i.direction,
+                        target_x: i.target_x,
+                        target_y: i.target_y,
+                        jump: i.jump,
+                        fire: i.fire,
+                        hook: i.hook,
+                        player_flags: i.player_flags,
+                        wanted_weapon: i.wanted_weapon,
+                        next_weapon: i.next_weapon,
+                        prev_weapon: i.prev_weapon,
+                    },
+                    kill: false,
+                })
+                .collect();
+            v.sort_by_key(|ti| ti.id);
+            v
+        })
+        .collect();
+    let warm_up = 40usize;
+    assert!(all_inputs.len() > warm_up + 100);
+    for inputs in &all_inputs[..warm_up] {
+        world.step(inputs);
+    }
+    let mut saw = (false, false, false);
+    let info = measure(|| {
+        for inputs in &all_inputs[warm_up..] {
+            world.step(inputs);
+            for l in &world.lasers {
+                match l {
+                    world::LaserSlot::Laser(_) => saw.0 = true,
+                    world::LaserSlot::Beam(_) => saw.1 = true,
+                    world::LaserSlot::Plasma(_) => saw.2 = true,
+                }
+            }
+        }
+    });
+    assert!(
+        saw.0 && saw.1 && saw.2,
+        "the measured window must have had lasers, beams and plasma: {saw:?}"
+    );
+    assert_eq!(
+        info.count_total, 0,
+        "World::step allocated replaying the stage-B fixture: {info:?}"
+    );
+}

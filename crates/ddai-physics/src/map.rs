@@ -428,14 +428,41 @@ pub const ENTITY_LASER_FAST_CCW: u8 = 12;
 /// 1.6's cut-rule detector treats *only* this case as static-geometry-checkable (see
 /// `docs/formats.md`). `mapitems.h` `ENTITY_LASER_STOP`.
 pub const ENTITY_LASER_STOP: u8 = 15;
+/// Counter-clockwise light, normal speed (`pi / 180` per step). `mapitems.h`
+/// `ENTITY_LASER_NORMAL_CCW`.
+pub const ENTITY_LASER_NORMAL_CCW: u8 = 13;
+/// Counter-clockwise light, slow speed (`pi / 360` per step). `mapitems.h`
+/// `ENTITY_LASER_SLOW_CCW`.
+pub const ENTITY_LASER_SLOW_CCW: u8 = 14;
+/// Clockwise light, slow speed. `mapitems.h` `ENTITY_LASER_SLOW_CW`.
+pub const ENTITY_LASER_SLOW_CW: u8 = 16;
+/// Clockwise light, normal speed. `mapitems.h` `ENTITY_LASER_NORMAL_CW`.
+pub const ENTITY_LASER_NORMAL_CW: u8 = 17;
 /// Upper end of the light-rotation-speed marker range. `mapitems.h` `ENTITY_LASER_FAST_CW`.
 pub const ENTITY_LASER_FAST_CW: u8 = 18;
 /// Lower end of the door/light length-marker range read from a neighbor cell
 /// (`ENTITY_LASER_SHORT..=ENTITY_LASER_LONG`, `Length = 32*3 + 32*(marker - ENTITY_LASER_SHORT)*3`
 /// in `IGameController::OnEntity`). `mapitems.h` `ENTITY_LASER_SHORT`.
 pub const ENTITY_LASER_SHORT: u8 = 19;
+/// Medium door/light length marker. `mapitems.h` `ENTITY_LASER_MEDIUM`.
+pub const ENTITY_LASER_MEDIUM: u8 = 20;
 /// Upper end of the door/light length-marker range. `mapitems.h` `ENTITY_LASER_LONG`.
 pub const ENTITY_LASER_LONG: u8 = 21;
+/// Lower end of the light "closing" speed-marker range read two cells out (`aSides2[i]`):
+/// the beam shrinks and grows again (`CLight::m_Speed`, `m_CurveLength = m_Length` at the start).
+/// `mapitems.h` `ENTITY_LASER_C_SLOW`.
+pub const ENTITY_LASER_C_SLOW: u8 = 22;
+/// Normal-speed "closing" light marker. `mapitems.h` `ENTITY_LASER_C_NORMAL`.
+pub const ENTITY_LASER_C_NORMAL: u8 = 23;
+/// Upper end of the light "closing" speed-marker range. `mapitems.h` `ENTITY_LASER_C_FAST`.
+pub const ENTITY_LASER_C_FAST: u8 = 24;
+/// Lower end of the light "opening" speed-marker range (the beam starts at length `0`).
+/// `mapitems.h` `ENTITY_LASER_O_SLOW`.
+pub const ENTITY_LASER_O_SLOW: u8 = 25;
+/// Normal-speed "opening" light marker. `mapitems.h` `ENTITY_LASER_O_NORMAL`.
+pub const ENTITY_LASER_O_NORMAL: u8 = 26;
+/// Upper end of the light "opening" speed-marker range. `mapitems.h` `ENTITY_LASER_O_FAST`.
+pub const ENTITY_LASER_O_FAST: u8 = 27;
 /// Turret (`CGun`) variant marker: explosive, not freezing. `mapitems.h` `ENTITY_PLASMAE`.
 pub const ENTITY_PLASMAE: u8 = 29;
 /// Turret variant marker: freezing, not explosive. `mapitems.h` `ENTITY_PLASMAF`.
@@ -465,11 +492,15 @@ pub const ENTITY_ARMOR_LASER: u8 = 38;
 /// Lower end of the weak-dragger marker range (`ENTITY_DRAGGER_WEAK..=ENTITY_DRAGGER_STRONG`,
 /// axis-aligned). Stage B (`CDragger`). `mapitems.h` `ENTITY_DRAGGER_WEAK`.
 pub const ENTITY_DRAGGER_WEAK: u8 = 42;
+/// Normal-strength axis-aligned dragger (strength `2`). `mapitems.h` `ENTITY_DRAGGER_NORMAL`.
+pub const ENTITY_DRAGGER_NORMAL: u8 = 43;
 /// Upper end of the axis-aligned dragger marker range. `mapitems.h` `ENTITY_DRAGGER_STRONG`.
 pub const ENTITY_DRAGGER_STRONG: u8 = 44;
 /// Lower end of the diagonal ("NW", `IgnoreWalls`) dragger marker range. `mapitems.h`
 /// `ENTITY_DRAGGER_WEAK_NW`.
 pub const ENTITY_DRAGGER_WEAK_NW: u8 = 45;
+/// Normal-strength ignore-walls dragger. `mapitems.h` `ENTITY_DRAGGER_NORMAL_NW`.
+pub const ENTITY_DRAGGER_NORMAL_NW: u8 = 46;
 /// Upper end of the diagonal dragger marker range. `mapitems.h` `ENTITY_DRAGGER_STRONG_NW`.
 pub const ENTITY_DRAGGER_STRONG_NW: u8 = 47;
 /// A door (switch-layer only: `SwitchType - ENTITY_OFFSET == ENTITY_DOOR`) — the door's own

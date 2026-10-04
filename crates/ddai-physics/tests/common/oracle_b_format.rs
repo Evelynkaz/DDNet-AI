@@ -358,7 +358,7 @@ pub struct TraceBTick {
     pub characters: Vec<CharacterRow>,
 }
 
-/// A streaming trace-b v2 reader: parses the header up front, then yields one tick at a time via
+/// A streaming trace-b v2/v3 reader: parses the header up front, then yields one tick at a time via
 /// [`TraceBReader::next_tick`] — the whole file's bytes are held in memory (`Vec<u8>`, read once
 /// by the caller), but only one [`TraceBTick`] exists at a time, keeping this test's own working
 /// set small regardless of a trace's tick count (see this module's doc comment on the
@@ -366,6 +366,8 @@ pub struct TraceBTick {
 /// documents).
 pub struct TraceBReader<'a> {
     r: Reader<'a>,
+    /// The file's format version (`2` or `3`).
+    pub version: u32,
     pub metadata_json: String,
     pub character_ids: Vec<u32>,
     pub switch_highest_number: u32,
@@ -380,7 +382,9 @@ impl<'a> TraceBReader<'a> {
         let mut r = Reader::new(bytes);
         r.expect_magic(b"TRB1").expect("bad trace-b magic");
         let version = r.u32("version").unwrap();
-        assert_eq!(version, 2, "expected trace-b v2");
+        // v3 (task 1.6 stage B) keeps v2's byte layout; it adds entity kind 7 (`CPlasma`) and
+        // fills kind 4's `owner_client_id` (`docs/formats.md` §11, §11.2).
+        assert!(matches!(version, 2 | 3), "expected trace-b v2 or v3, got v{version}");
         let metadata_len = r.u32("metadata len").unwrap();
         let metadata_bytes = r.bytes(metadata_len as usize, "metadata json").unwrap();
         let metadata_json = String::from_utf8(metadata_bytes.to_vec()).unwrap();
@@ -398,6 +402,7 @@ impl<'a> TraceBReader<'a> {
         let tick_count = r.u32("tick count").unwrap();
         TraceBReader {
             r,
+            version,
             metadata_json,
             character_ids,
             switch_highest_number,

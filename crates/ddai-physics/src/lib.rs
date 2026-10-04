@@ -11,10 +11,12 @@
 //! is built from; [`prng`] and [`vmath`] are small supporting ports ([`prng::Prng`]'s PCG-XSH-RR
 //! algorithm, [`vmath::Vec2`] and its free functions).
 //!
-//! Out of scope for this crate (see the task spec): `CCharacter`/DDRace tile logic (freeze,
-//! switches, tune-zone selection, weapons, ninja, telegun) — that lands in later tasks; this
-//! crate covers exactly what 20.1's `CCharacterCore`/`CWorldCore`/`CCollision` compute on their
-//! own, without any surrounding game-mode logic.
+//! [`world`] is the server-level layer on top (task 1.6): the DDRace character logic (tiles, freeze,
+//! teams, switches), every weapon — hammer, gun, grenade, shotgun and laser (`CLaser`), ninja — the
+//! map entities (pickups, draggers and their beams, turrets and their plasma, lights, doors) and the
+//! server's per-tick order, bit-exact against the real server (Oracle B, `docs/formats.md` §11-§12,
+//! §30). Out of scope there, with no observable effect on any compared field: `/rescue`, `/pause`,
+//! team locking/flocking and practice mode.
 
 /// Port of 20.1 `CCollision` (`src/game/collision.{h,cpp}`).
 pub mod collision;

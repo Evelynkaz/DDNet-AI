@@ -23,18 +23,28 @@
 //! pickups, `CPlayer` spawn/respawn/kill (including the kill bit through the
 //! `OnKillNetMessage` path), and the server's per-tick input/order handling.
 //!
-//! **Out of Stage A's scope** (Stage B, task 1.6's second half): `CLaser` (rifle and shotgun —
-//! DDNet's shotgun fires a laser, not a projectile), `CDragger`/`CDraggerBeam`, `CGun`
-//! (turret)/`CPlasma`, `CLight`, and ninja (`HandleNinja`, `GiveNinja`'s *movement* effect —
-//! ninja pickups/`GiveNinja`'s simple field-set *are* handled here, exactly far enough to let the
-//! cut-rule detector in `tests/parity_oracle_b.rs` see the transition and stop comparing before
-//! `HandleNinja`'s velocity override would diverge; see that test's module doc comment for the
-//! precise cut rule). Also out of scope, with no observable effect on any compared field (see
+//! **Stage B** (task 1.6's second half, merged with Stage A in this module): `CLaser` (rifle and
+//! shotgun — DDNet's shotgun fires a laser, not a projectile; `laser`), `CDragger`/
+//! `CDraggerBeam`, `CGun` (turret)/`CPlasma`, `CLight` (`fixtures`) and ninja (`ninja`,
+//! `HandleNinja` plus the activation in `FireWeapon`). The five classes (plus `CDoor`) share
+//! DDNet's single `ENTTYPE_LASER` entity list, whose tick order this module reproduces: dynamic
+//! entities (lasers, beams, plasma — new ones always go to the list head) in
+//! [`World::lasers`], then the static map fixtures in [`World::fixtures`] (creation order,
+//! newest first). With stage B the "Stage-B cut" of the Oracle B parity test is gone: every
+//! corpus tick is compared. Also out of scope, with no observable effect on any compared field (see
 //! this module's `BUILD REPORT` for the evidence for each): `/rescue` (`TrySetRescue`), `/pause`,
 //! team locking/flocking/practice mode (`CGameTeams::m_aTeamLocked`/`m_aTeamFlock`/`m_aPractice`
 //! — none of the three can ever become `true` through anything this harness/scenario format can
 //! drive: no chat commands, no `sv_practice_by_default` cfg line anywhere in the corpus), and
 //! save/load-team (`GetSaving`, always `false` for the same reason).
+
+mod fixtures;
+mod laser;
+mod ninja;
+
+pub use fixtures::{Dragger, DraggerBeam, DraggerState, Fixture, Gun, GunState, Light, MOVER_PERIOD, Plasma};
+pub use laser::{Laser, LaserList, LaserSlot, add_velocity};
+pub use ninja::handle_ninja;
 
 use crate::collision::Collision;
 use crate::core::{
@@ -65,7 +75,7 @@ use crate::vmath::{self, Vec2};
 pub struct PhaseProfile {
     /// The projectile-tick loop (`world_tick`'s `ENTTYPE_PROJECTILE` pass).
     pub projectiles: std::time::Duration,
-    /// `fixture_tick` (private; Stage-B map fixtures' mover-tile drift).
+    /// The `ENTTYPE_LASER` pass: lasers, dragger beams, turret shots, then draggers/turrets/lights.
     pub fixtures: std::time::Duration,
     /// The pickup-tick loop (`world_tick`'s `ENTTYPE_PICKUP` pass, including each pickup's
     /// `find_characters_in_range_into` scan).
@@ -257,10 +267,23 @@ pub struct ServerConfig {
     /// by default, when in fact (at the DDNet default) every projectile type does.
     pub sv_destroy_bullets_on_death: bool,
     /// `g_Config.m_SvOldLaser` (`sv_old_laser`, default `0`, `CFGFLAG_GAME` —
-    /// `config_variables.h:620`). Not read by any Stage A physics (laser is Stage B) — tracked
-    /// only so the reset rule ([`World::init`]) and the lock ([`apply_command`]) are complete
-    /// and so this command is recognized rather than rejected as unknown.
+    /// `config_variables.h:620`). Read by `CLaser` (self-hit rule, shotgun pull direction); also
+    /// forced on map-wide by a `TILE_OLDLASER` tile, and covered by the reset rule
+    /// ([`World::init`]) and the lock ([`apply_command`]).
     pub sv_old_laser: bool,
+    /// `g_Config.m_SvDestroyLasersOnDeath` (`sv_destroy_lasers_on_death`, default `0`,
+    /// `CFGFLAG_SERVER | CFGFLAG_GAME` — `config_variables.h:297`): `CLaser::Tick` destroys a
+    /// laser whose owner is no longer alive (`laser.cpp:265-272`).
+    pub sv_destroy_lasers_on_death: bool,
+    /// `g_Config.m_SvDraggerRange` (`sv_dragger_range`, default `700`, `1..=99999`,
+    /// `CFGFLAG_GAME` — `config_variables.h:691`): how far a dragger tracks tees.
+    pub sv_dragger_range: i32,
+    /// `g_Config.m_SvPlasmaRange` (`sv_plasma_range`, default `700`, `1..=99999`, `CFGFLAG_GAME`
+    /// — `config_variables.h:689`): how far a turret tracks tees.
+    pub sv_plasma_range: i32,
+    /// `g_Config.m_SvPlasmaPerSec` (`sv_plasma_per_sec`, default `3`, `0..=50`, `CFGFLAG_GAME` —
+    /// `config_variables.h:690`): turret shots per second (`0` = turrets never fire).
+    pub sv_plasma_per_sec: i32,
     /// `g_Config.m_SvShowOthersDefault` (`sv_show_others_default`, default `0` = `SHOW_OTHERS_OFF`,
     /// `CFGFLAG_GAME` — `config_variables.h:686`). Network/HUD-only (never read by any traced
     /// field) — tracked for the same completeness reason as `sv_old_laser`.
@@ -316,6 +339,10 @@ impl Default for ServerConfig {
             sv_teleport_lose_weapons: false,
             sv_destroy_bullets_on_death: true,
             sv_old_laser: false,
+            sv_destroy_lasers_on_death: false,
+            sv_dragger_range: 700,
+            sv_plasma_range: 700,
+            sv_plasma_per_sec: 3,
             sv_show_others_default: 0,
             sv_freeze_delay: 3,
             sv_kill_delay: 1,
@@ -361,6 +388,10 @@ fn is_cfgflag_game(name: &str) -> bool {
             | "sv_show_others_default"
             | "sv_freeze_delay"
             | "sv_destroy_bullets_on_death"
+            | "sv_destroy_lasers_on_death"
+            | "sv_dragger_range"
+            | "sv_plasma_range"
+            | "sv_plasma_per_sec"
     )
 }
 
@@ -377,7 +408,8 @@ pub struct UnknownCommand {
 /// `sv_no_weak_hook`, `sv_deepfly`, `sv_endless_drag`, `sv_old_teleport_hook`,
 /// `sv_old_teleport_weapons`, `sv_teleport_hold_hook`, `sv_teleport_lose_weapons`,
 /// `sv_old_laser`, `sv_show_others_default`, `sv_freeze_delay`, `sv_kill_delay`,
-/// `sv_kill_protection`, `sv_tune_reset`, `sv_ddrace_tune_reset`, `sv_destroy_bullets_on_death`
+/// `sv_kill_protection`, `sv_tune_reset`, `sv_ddrace_tune_reset`, `sv_destroy_bullets_on_death`,
+/// `sv_destroy_lasers_on_death`, `sv_dragger_range`, `sv_plasma_range`, `sv_plasma_per_sec`
 /// (all `ConInt`-style:
 /// `NAME VALUE`), `tune NAME VALUE` (`ConTuneParam`, zone 0 only), `tune_zone N NAME VALUE`
 /// (`ConTuneZone`), `switch_open N` (`ConSwitchOpen`), and `tune_zone_enter`/`tune_zone_leave`
@@ -431,6 +463,10 @@ pub fn apply_command(
         "sv_teleport_lose_weapons" => set_bool(&mut config.sv_teleport_lose_weapons, &rest, line),
         "sv_old_laser" => set_bool(&mut config.sv_old_laser, &rest, line),
         "sv_destroy_bullets_on_death" => set_bool(&mut config.sv_destroy_bullets_on_death, &rest, line),
+        "sv_destroy_lasers_on_death" => set_bool(&mut config.sv_destroy_lasers_on_death, &rest, line),
+        "sv_dragger_range" => set_int(&mut config.sv_dragger_range, &rest, line, 1, 99999),
+        "sv_plasma_range" => set_int(&mut config.sv_plasma_range, &rest, line, 1, 99999),
+        "sv_plasma_per_sec" => set_int(&mut config.sv_plasma_per_sec, &rest, line, 0, 50),
         // Ranges match `config_variables.h`'s own `MACRO_CONFIG_INT(..., min, max, ...)` for
         // each variable exactly (`sv_team` 0-3, `sv_show_others_default` 0-2, `sv_freeze_delay`
         // 1-30, `sv_kill_delay`/`sv_kill_protection` 0-9999).
@@ -531,6 +567,13 @@ pub struct Character<R: Real> {
     pub tune_zone_old: i32,
     /// `m_StartTime`.
     pub start_time: i32,
+    /// `CEntity::m_Pos` — the *entity* position every other entity and every tile lookup sees,
+    /// distinct from `CCharacterCore::m_Pos` ([`CharacterCore::pos`]): only `Spawn()` and
+    /// `TickDeferred()` copy the core position into it, so it lags a core position moved *within*
+    /// a tick (`HandleNinja`'s dash, a teleport) until that tick's deferred pass. [`World::step`]
+    /// re-syncs it from the core at the start of every tick (the value `TickDeferred` left it at,
+    /// unless something outside `step` moved the core).
+    pub pos: Vec2<R>,
     /// `m_PrevPos` — the position `HandleTiles`'s anti-skip loop diffs against; lags the real
     /// position by one server tick (see this module's doc comment / `BUILD REPORT`).
     pub prev_pos: Vec2<R>,
@@ -571,10 +614,14 @@ pub struct Character<R: Real> {
     pub health: i32,
     /// `m_Armor` — same scope note as `m_Health`.
     pub armor: i32,
-    /// `m_NumObjectsHit`/`m_aHitObjects` — ninja-hit dedup; kept only so [`give_ninja`] can zero
-    /// it exactly like `FireWeapon`'s `WEAPON_NINJA` case would (never otherwise read/written
-    /// here — `HandleNinja` itself is Stage B).
+    /// `m_NumObjectsHit` — ninja-hit counter (reset by `FireWeapon`'s `WEAPON_NINJA` case, bumped
+    /// by `HandleNinja` per distinct hit tee).
     pub num_objects_hit: i32,
+    /// `m_aHitObjects[..m_NumObjectsHit]` as a set of client ids (bit `c` = client `c`): the
+    /// ninja's "already hit this tee" list. Only membership is ever read, so a bit set replaces the
+    /// array (two `u64` words, not a `u128`: the latter would raise `Character`'s alignment to 16
+    /// and its size on the hot path; bit `c` is word `c / 64`, bit `c % 64`).
+    pub hit_objects: [u64; 2],
 
     // Input snapshots (`CNetObj_PlayerInput`, 10 fields each — see `core::PlayerInput`).
     /// `m_Input`.
@@ -600,6 +647,7 @@ impl<R: Real> Default for Character<R> {
             tune_zone: 0,
             tune_zone_old: 0,
             start_time: 0,
+            pos: Vec2::zero(),
             prev_pos: Vec2::zero(),
             tele_checkpoint: 0,
             tile_index: 0,
@@ -620,6 +668,7 @@ impl<R: Real> Default for Character<R> {
             health: 0,
             armor: 0,
             num_objects_hit: 0,
+            hit_objects: [0; 2],
             input: PlayerInput::default(),
             latest_input: PlayerInput::default(),
             latest_prev_input: PlayerInput::default(),
@@ -653,6 +702,13 @@ pub struct Player {
     /// `m_Team` — always `TEAM_GAME` once spawned in this harness (never spectator); kept for
     /// `CanSpawn`'s `Team == TEAM_SPECTATORS` guard.
     pub team: i32,
+    /// `CPlayer::m_TuneZone` (`player.cpp:278-280`): the tune zone of the player's *view position*
+    /// (`m_ViewPos`, the character's `m_Pos` as of the last [`player_tick`] it was alive in) —
+    /// distinct from [`Character::tune_zone`], which `HandleTuneLayer` refreshes at the start of the
+    /// character's own tick and which therefore lags one tick of movement behind this one.
+    /// `CGameContext::CreateExplosion` reads *this* one for the owner's `explosion_strength`
+    /// (`gamecontext.cpp:393-396`). `0` until the first alive tick, like a fresh `CPlayer`.
+    pub tune_zone: i32,
     /// Mirrors `m_pCharacter != nullptr` — **not** the same thing as `world.characters[id]
     /// .alive`. A normal in-world death (`Die()`, called from `HandleSkippableTiles`/
     /// `HandleTiles`) sets `alive = false` but does *not* delete the C++ `CCharacter` object
@@ -683,6 +739,7 @@ impl Player {
             weak_hook_spawn: false,
             last_kill: 0,
             team: TEAM_SPECTATORS,
+            tune_zone: 0,
             has_character: false,
         }
     }
@@ -728,6 +785,17 @@ pub struct Projectile<R: Real> {
     /// RemoveEntities`).
     pub marked_for_destroy: bool,
 }
+
+/// Capacity reserved once for [`World::lasers`] (the 1.6 nit "reserve the capacity of
+/// `active_timed_switchers`/`projectiles` once"): 64 live lasers/beams/turret shots at the same
+/// time is far more than a handful of tees ever produce on a block map; a turret-heavy map under a
+/// crowd can exceed it, in which case the vector grows once by doubling (the only allocation
+/// `World::step` can ever make). [`LaserList`] keeps the reservation across `Clone`.
+pub const LASER_CAPACITY: usize = 64;
+/// Extra capacity reserved once for [`World::projectiles`] beyond the map's own crazy-shotgun
+/// fixtures: a gun is reloaded every ~8 ticks and a grenade every 15, with lifetimes of 2 s, so
+/// a few tees keep well under this.
+pub const PROJECTILE_HEADROOM: usize = 32;
 
 /// `LAYER_GAME`/`LAYER_FRONT`/`LAYER_SWITCH` (`mapitems.h`) — the three variants any Stage A
 /// entity actually needs (tele/speedup/tune layers never host a `CProjectile`/`CPickup`/fixture).
@@ -813,7 +881,7 @@ pub struct Pickup<R: Real> {
 /// it up here.
 pub const PICKUP_PROXIMITY_RADIUS: f32 = 20.0;
 
-// --- Map fixtures kept only for the trace-b entity dump / Stage A's cut-rule detector ----------
+// --- `CDoor` map fixture (position only: it never ticks) -----------------------------------------
 
 /// A Stage-A `CDoor` fixture: position only (see `docs/formats.md` §11.2, finding F6 — kind 2's
 /// dynamic state, incl. `m_To`, isn't accessible to the real Oracle B harness either; only
@@ -822,46 +890,6 @@ pub const PICKUP_PROXIMITY_RADIUS: f32 = 20.0;
 pub struct DoorFixture<R: Real> {
     /// `m_Pos`.
     pub pos: Vec2<R>,
-}
-
-/// A Stage-B map fixture (`CDragger` kind 3, `CGun`/turret kind 5, `CLight` kind 6) — position
-/// only, kept so `World` can still (a) emit the entity-dump record `docs/formats.md` §11.2 says
-/// Stage A must reproduce for these kinds (position only) and (b) run Stage A's cut-rule
-/// detector (`tests/parity_oracle_b.rs`), which needs to know where these fixtures are without
-/// implementing their behavior.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FixtureRecord<R: Real> {
-    /// Entity-dump `kind` (`3`, `5`, or `6` — see `docs/formats.md` §11.2's table).
-    pub kind: i32,
-    /// `m_Pos`.
-    pub pos: Vec2<R>,
-    /// `m_Layer`.
-    pub layer: Layer,
-    /// `m_Number`.
-    pub number: i32,
-    /// Cut-rule-only: `sv_dragger_range`-style reach for a dragger (`kind == 3`) fixture, or
-    /// `sv_plasma_range` for a turret (`kind == 5`); unused (`0.0`) for a light (`kind == 6`,
-    /// which uses [`FixtureRecord::light_angular_speed`] instead).
-    pub range: f32,
-    /// Cut-rule-only, dragger fixtures (`kind == 3`): `m_IgnoreWalls` (diagonal "NW" variant).
-    pub ignore_walls: bool,
-    /// Cut-rule-only, light fixtures (`kind == 6`): `m_AngularSpeed`. Only exactly `0.0` (a
-    /// non-rotating `ENTITY_LASER_STOP` light) is handled by the cut-rule's static geometry
-    /// check; see `tests/parity_oracle_b.rs`'s module doc comment.
-    pub light_angular_speed: f32,
-    /// Cut-rule-only, light fixtures: the light's fixed beam direction (`vec2(sin(Rotation),
-    /// cos(Rotation))`) and configured length, used to compute its (non-rotating-case-only)
-    /// static endpoint.
-    pub light_direction: Vec2<R>,
-    /// See [`FixtureRecord::light_direction`].
-    pub light_length: i32,
-    /// `m_Core` — the mover-tile velocity a `TILE_CP`/`TILE_CP_F` tile last set for this fixture
-    /// (`CDragger`/`CGun`/`CLight::Tick()` all share the exact same `if(Tick % (TickSpeed*0.15)
-    /// == 0) { MoverSpeed(...); m_Pos += m_Core; }` shape `CPickup::Move()` has — see
-    /// [`Pickup::mcore`]'s own doc comment for the persistence semantics). `CDoor` (`kind == 2`,
-    /// [`World::doors`]) has no `Tick()` override at all and never moves, so this field only
-    /// exists on `FixtureRecord` (`kind` 3/5/6), not `DoorFixture`.
-    pub mcore: Vec2<R>,
 }
 
 // --- `CGameTeams` (`teams.h`/`.cpp`) — DDRace-team-level state, simplified. ---------------------
@@ -1257,14 +1285,28 @@ pub struct World<R: Real> {
     pub pickups: Vec<Pickup<R>>,
     /// `CDoor` fixtures — position only (see [`DoorFixture`]). Reference-counted (task 1.10b,
     /// speed-up 4): never mutated after [`World::from_map`] (`CDoor` has no `Tick()` override at
-    /// all — see [`FixtureRecord::mcore`]'s doc comment for the contrast with `CDragger`/`CGun`/
+    /// all — see [`Fixture`]'s for the contrast with `CDragger`/`CGun`/
     /// `CLight`, which *do* drift and so stay a plain owned `Vec` below), so a `World::clone()`/
     /// `World::restore_from()` that never touches it can share one allocation instead of copying
     /// it — same idea as [`World::collision`]/`TuningList`'s own `zones` field.
     pub doors: std::sync::Arc<Vec<DoorFixture<R>>>,
-    /// Stage-B map fixtures (draggers/turrets/lights) — position/config only (see
-    /// [`FixtureRecord`]).
-    pub fixtures: Vec<FixtureRecord<R>>,
+    /// The static, ticking members of DDNet's `ENTTYPE_LASER` list — draggers, turrets and
+    /// lights — in list order (index `0` = list head = created last by the map scan, ticked
+    /// first). They sit *behind* every entity of [`World::lasers`] in the real list (those are
+    /// only ever inserted at the head), so a tick visits [`World::lasers`] newest-first, then this
+    /// vector front to back. Never grows or shrinks after [`World::from_map`].
+    pub fixtures: Vec<Fixture<R>>,
+    /// `CDragger::m_aTargetIdInTeam`/beam registry, one per dragger ([`Dragger::state`]).
+    pub dragger_states: Vec<DraggerState>,
+    /// `CGun::m_aLastFireTeam`/`m_aLastFireSolo`, one per turret ([`Gun::state`]).
+    pub gun_states: Vec<GunState>,
+    /// The dynamic members of the `ENTTYPE_LASER` list: lasers (rifle and shotgun shots), dragger
+    /// beams and turret shots. **Stored oldest first**: the real list inserts at the head, so the
+    /// head is the *last* element here (`push` = `InsertEntity`); a tick and the trace-b dump walk
+    /// it back to front. Entities are only ever removed in bulk at the end of a tick
+    /// (`CGameWorld::RemoveEntities`), so indices stay valid during a pass. Capacity is reserved
+    /// once ([`LASER_CAPACITY`]); growing past it allocates (amortized doubling).
+    pub lasers: LaserList<R>,
     /// `CGameContext::m_aTuningList`.
     pub tuning: TuningList,
     /// Server settings this crate models (see [`ServerConfig`]).
@@ -1353,7 +1395,7 @@ impl<R: Real> World<R> {
         let mut spawn_points_by_type: [Vec<Vec2<R>>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         let mut pickups: Vec<Pickup<R>> = Vec::new();
         let mut doors: Vec<DoorFixture<R>> = Vec::new();
-        let mut fixtures: Vec<FixtureRecord<R>> = Vec::new();
+        let mut fixture_scan: FixtureScan<R> = FixtureScan::default();
         let mut crazy_shotguns: Vec<CrazyShotgunSpawn<R>> = Vec::new();
 
         let width = map.width as i32;
@@ -1376,7 +1418,7 @@ impl<R: Real> World<R> {
                         &mut spawn_points_by_type,
                         &mut pickups,
                         &mut doors,
-                        &mut fixtures,
+                        &mut fixture_scan,
                         &mut crazy_shotguns,
                     );
                 }
@@ -1396,7 +1438,7 @@ impl<R: Real> World<R> {
                             &mut spawn_points_by_type,
                             &mut pickups,
                             &mut doors,
-                            &mut fixtures,
+                            &mut fixture_scan,
                             &mut crazy_shotguns,
                         );
                     }
@@ -1416,7 +1458,7 @@ impl<R: Real> World<R> {
                             &mut spawn_points_by_type,
                             &mut pickups,
                             &mut doors,
-                            &mut fixtures,
+                            &mut fixture_scan,
                             &mut crazy_shotguns,
                         );
                     }
@@ -1434,6 +1476,7 @@ impl<R: Real> World<R> {
         // review — every door placement above already left the cache correct).
         // Task 3.6: the door cells just placed changed a layer the derived fast-path tables read.
         collision.recompute_derived();
+        let switcher_count = switchers.len();
         let mut cores: WorldCore<R, MAX_CLIENTS> = WorldCore::new();
         cores.switchers = switchers;
         cores.prng = Some({
@@ -1452,7 +1495,7 @@ impl<R: Real> World<R> {
         // reference's kind-2/3/5/6 dump order was the exact reverse of this crate's own
         // (`ents0.txt`-style entity dumps, this crate's `BUILD REPORT`).
         doors.reverse();
-        fixtures.reverse();
+        fixture_scan.fixtures.reverse();
 
         // `ENTITY_CRAZY_SHOTGUN[_EX]` (`gamecontroller.cpp:214-244`): a permanently-bouncing
         // `WEAPON_SHOTGUN` `CProjectile`, `m_LifeSpan == -2` (never decremented — `Tick()` only
@@ -1466,7 +1509,7 @@ impl<R: Real> World<R> {
         // the first-scanned one: iterate `crazy_shotguns` in reverse here (an earlier revision of
         // this port pushed in scan order, i.e. oldest-first — found empirically against
         // BlmapChill's 12 fixtures, dumped reference-oldest-last at tick 0).
-        let mut projectiles: Vec<Projectile<R>> = Vec::with_capacity(crazy_shotguns.len());
+        let mut projectiles: Vec<Projectile<R>> = Vec::with_capacity(crazy_shotguns.len() + PROJECTILE_HEADROOM);
         for (pos, direction, explosive, bouncing, layer, number) in crazy_shotguns.into_iter().rev() {
             let tune_zone = collision.is_tune(collision.get_map_index(pos));
             projectiles.push(Projectile {
@@ -1503,7 +1546,10 @@ impl<R: Real> World<R> {
             projectiles,
             pickups,
             doors: std::sync::Arc::new(doors),
-            fixtures,
+            fixtures: fixture_scan.fixtures,
+            dragger_states: fixture_scan.dragger_states,
+            gun_states: fixture_scan.gun_states,
+            lasers: LaserList::new(),
             tuning,
             config,
             tick: 0,
@@ -1512,7 +1558,7 @@ impl<R: Real> World<R> {
             spawn_points_blue: std::sync::Arc::new(spawn_points_by_type[2].clone()),
             map_settings: std::sync::Arc::new(map.settings.clone()),
             command_log: Vec::new(),
-            active_timed_switchers: Vec::new(),
+            active_timed_switchers: Vec::with_capacity(switcher_count),
         }
     }
 
@@ -1682,6 +1728,9 @@ impl<R: Real> World<R> {
         self.pickups.clone_from(&source.pickups);
         self.doors.clone_from(&source.doors);
         self.fixtures.clone_from(&source.fixtures);
+        self.dragger_states.clone_from(&source.dragger_states);
+        self.gun_states.clone_from(&source.gun_states);
+        self.lasers.clone_from(&source.lasers);
         self.tuning.clone_from(&source.tuning);
         self.config = source.config;
         self.tick = source.tick;
@@ -1728,7 +1777,7 @@ fn scan_entity<R: Real>(
     spawn_points: &mut [Vec<Vec2<R>>; 3],
     pickups: &mut Vec<Pickup<R>>,
     doors: &mut Vec<DoorFixture<R>>,
-    fixtures: &mut Vec<FixtureRecord<R>>,
+    fixture_scan: &mut FixtureScan<R>,
     crazy_shotguns: &mut Vec<CrazyShotgunSpawn<R>>,
 ) {
     let pos = Vec2::new(R::from_i32(x * 32 + 16), R::from_i32(y * 32 + 16));
@@ -1813,38 +1862,48 @@ fn scan_entity<R: Real>(
             });
         }
     } else if (map::ENTITY_DRAGGER_WEAK..=map::ENTITY_DRAGGER_STRONG_NW).contains(&entity) {
+        // `new CDragger(.., Index - ENTITY_DRAGGER_WEAK[_NW] + 1, IgnoreWalls, Layer, Number)`
+        // (`gamecontroller.cpp:343-350`): the strength parameter is a `float`.
         let (strength, ignore_walls) = if entity <= map::ENTITY_DRAGGER_STRONG {
             (entity - map::ENTITY_DRAGGER_WEAK + 1, false)
         } else {
             (entity - map::ENTITY_DRAGGER_WEAK_NW + 1, true)
         };
-        fixtures.push(FixtureRecord {
-            kind: 3,
+        let state = fixture_scan.dragger_states.len() as u16;
+        fixture_scan.dragger_states.push(DraggerState::default());
+        fixture_scan.fixtures.push(Fixture::Dragger(Dragger {
             pos,
-            layer,
-            number: number as i32,
-            range: 700.0,
+            core: Vec2::zero(),
+            strength: R::from_i32(i32::from(strength)),
             ignore_walls,
-            light_angular_speed: 0.0,
-            light_direction: Vec2::zero(),
-            light_length: strength as i32,
-            mcore: Vec2::zero(),
-        });
-    } else if (map::ENTITY_PLASMAE..=map::ENTITY_PLASMAU).contains(&entity) {
-        fixtures.push(FixtureRecord {
-            kind: 5,
-            pos,
             layer,
-            number: number as i32,
-            range: 700.0,
-            ignore_walls: false,
-            light_angular_speed: 0.0,
-            light_direction: Vec2::zero(),
-            light_length: 0,
-            mcore: Vec2::zero(),
-        });
+            number: i32::from(number),
+            state,
+        }));
+    } else if (map::ENTITY_PLASMAE..=map::ENTITY_PLASMAU).contains(&entity) {
+        // `new CGun(.., Freeze, Explosive, Layer, Number)` (`gamecontroller.cpp:351-366`).
+        let (freeze, explosive) = match entity {
+            map::ENTITY_PLASMAE => (false, true),
+            map::ENTITY_PLASMAF => (true, false),
+            map::ENTITY_PLASMA => (true, true),
+            _ => (false, false), // ENTITY_PLASMAU
+        };
+        let state = fixture_scan.gun_states.len() as u16;
+        fixture_scan.gun_states.push(GunState::default());
+        fixture_scan.fixtures.push(Fixture::Gun(Gun {
+            pos,
+            core: Vec2::zero(),
+            freeze,
+            explosive,
+            layer,
+            number: i32::from(number),
+            state,
+        }));
     } else if (map::ENTITY_LASER_FAST_CCW..=map::ENTITY_LASER_FAST_CW).contains(&entity) {
-        let ind = entity as i32 - map::ENTITY_LASER_STOP as i32;
+        // `gamecontroller.cpp:290-343`. Everything is `float`/`int` exactly as there: `pi / 360`
+        // is a `float` division (`pi` is a `float` constant), `AngularSpeed *= M` multiplies by an
+        // `int`.
+        let ind = i32::from(entity) - i32::from(map::ENTITY_LASER_STOP);
         let (ind_abs, m) = if ind < 0 {
             (-ind, 1)
         } else if ind == 0 {
@@ -1852,33 +1911,61 @@ fn scan_entity<R: Real>(
         } else {
             (ind, -1)
         };
-        let angular_speed = m as f64
-            * match ind_abs {
-                0 => 0.0,
-                1 => std::f64::consts::PI / 360.0,
-                2 => std::f64::consts::PI / 180.0,
-                3 => std::f64::consts::PI / 90.0,
-                _ => 0.0,
-            };
+        let mut angular_speed = R::ZERO;
+        if ind_abs == 1 {
+            angular_speed = R::PI / R::from_i32(360);
+        } else if ind_abs == 2 {
+            angular_speed = R::PI / R::from_i32(180);
+        } else if ind_abs == 3 {
+            angular_speed = R::PI / R::from_i32(90);
+        }
+        angular_speed *= R::from_i32(m);
         for i in 0..8i32 {
             let (dx, dy) = NEIGHBOR_OFFSETS[i as usize];
             let side = entity_at(dx, dy, layer);
-            if (map::ENTITY_LASER_SHORT as i32..=map::ENTITY_LASER_LONG as i32).contains(&side) {
-                let rotation = R::from_f64(std::f64::consts::PI) / R::from_i32(4) * R::from_i32(i);
-                let length = 32 * 3 + 32 * (side - map::ENTITY_LASER_SHORT as i32) * 3;
-                fixtures.push(FixtureRecord {
-                    kind: 6,
+            if (i32::from(map::ENTITY_LASER_SHORT)..=i32::from(map::ENTITY_LASER_LONG)).contains(&side) {
+                // `aSides2[i]`: the same neighbor, two cells out.
+                let side2 = entity_at(dx * 2, dy * 2, layer);
+                let rotation = R::PI / R::from_i32(4) * R::from_i32(i);
+                let length = 32 * 3 + 32 * (side - i32::from(map::ENTITY_LASER_SHORT)) * 3;
+                let (speed, curve_length) = if (i32::from(map::ENTITY_LASER_C_SLOW)
+                    ..=i32::from(map::ENTITY_LASER_C_FAST))
+                    .contains(&side2)
+                {
+                    (1 + (side2 - i32::from(map::ENTITY_LASER_C_SLOW)) * 2, length)
+                } else if (i32::from(map::ENTITY_LASER_O_SLOW)..=i32::from(map::ENTITY_LASER_O_FAST)).contains(&side2) {
+                    (1 + (side2 - i32::from(map::ENTITY_LASER_O_SLOW)) * 2, 0)
+                } else {
+                    (0, length)
+                };
+                fixture_scan.fixtures.push(Fixture::Light(fixtures::new_light(
                     pos,
+                    rotation,
+                    length,
                     layer,
-                    number: number as i32,
-                    range: 0.0,
-                    ignore_walls: false,
-                    light_angular_speed: angular_speed as f32,
-                    light_direction: Vec2::new(rotation.sin(), rotation.cos()),
-                    light_length: length,
-                    mcore: Vec2::zero(),
-                });
+                    i32::from(number),
+                    angular_speed,
+                    speed,
+                    curve_length,
+                )));
             }
+        }
+    }
+}
+
+/// What the map scan collects for [`World::fixtures`] and its two state pools.
+struct FixtureScan<R: Real> {
+    fixtures: Vec<Fixture<R>>,
+    dragger_states: Vec<DraggerState>,
+    gun_states: Vec<GunState>,
+}
+
+impl<R: Real> Default for FixtureScan<R> {
+    fn default() -> Self {
+        FixtureScan {
+            fixtures: Vec::new(),
+            dragger_states: Vec::new(),
+            gun_states: Vec::new(),
         }
     }
 }
@@ -1940,7 +2027,7 @@ pub fn freeze<R: Real>(character: &mut Character<R>, core: &mut CharacterCore<R>
         return false;
     }
     if character.freeze_time == 0 || core.freeze_start < tick - core::SERVER_TICK_SPEED {
-        character.health = 0;
+        character.armor = 0;
         character.freeze_time = seconds * core::SERVER_TICK_SPEED;
         core.freeze_start = tick;
         return true;
@@ -2030,12 +2117,7 @@ pub fn set_endless_hook<R: Real>(core: &mut CharacterCore<R>, enable: bool) {
     core.endless_hook = enable;
 }
 
-/// `CCharacter::GiveNinja()` (`character.cpp:678-689`), field-set only — deliberately **not**
-/// `HandleNinja`'s movement/velocity-override behavior (Stage B; see this module's doc comment).
-/// Stage A implements exactly this much so the cut-rule detector (`tests/parity_oracle_b.rs`) can
-/// see `weapon_got_mask`'s ninja bit/`active_weapon` transition on the exact tick it happens in
-/// the reference trace and stop comparing there — not one tick later, when `HandleNinja` would
-/// otherwise have already diverged `m_Vel`.
+/// `CCharacter::GiveNinja()` (`character.cpp:678-689`); the dash itself is [`handle_ninja`].
 pub fn give_ninja<R: Real>(character: &mut Character<R>, core: &mut CharacterCore<R>, tick: i32) {
     core.ninja.activation_tick = tick;
     core.weapons[WEAPON_NINJA as usize].got = true;
@@ -2046,21 +2128,16 @@ pub fn give_ninja<R: Real>(character: &mut Character<R>, core: &mut CharacterCor
     core.active_weapon = WEAPON_NINJA;
 }
 
-/// `CCharacter::RemoveNinja()` (`character.cpp:691-702`) — see [`give_ninja`]'s doc comment on
-/// scope. `SetWeapon`'s sound/`m_LastWeapon` dance is folded in directly (no separate
-/// `set_weapon` helper exists — nothing else in Stage A's scope needs one).
+/// `CCharacter::RemoveNinja()` (`character.cpp:691-702`).
 pub fn remove_ninja<R: Real>(character: &mut Character<R>, core: &mut CharacterCore<R>) {
     core.ninja = core::NinjaState::default();
     core.weapons[WEAPON_NINJA as usize].got = false;
     core.weapons[WEAPON_NINJA as usize].ammo = 0;
-    let w = character.last_weapon;
-    if w != core.active_weapon {
-        character.last_weapon = core.active_weapon;
-        core.active_weapon = w;
-        if core.active_weapon < 0 || core.active_weapon >= NUM_WEAPONS as i32 {
-            core.active_weapon = 0;
-        }
-    }
+    // `m_Core.m_ActiveWeapon = m_LastWeapon; SetWeapon(m_Core.m_ActiveWeapon);` — the `SetWeapon`
+    // call compares its argument with the (just assigned) active weapon and returns at once
+    // (`character.cpp:154-156`), so neither `m_LastWeapon` nor the range clamp is touched. (Stage
+    // A had this wrong — it never ran, the cut stopped the comparison at the ninja pickup.)
+    core.active_weapon = character.last_weapon;
 }
 
 /// `CCharacter::ReleaseHook()` (`character.cpp:766-771`). `self_id`/`self_slot`: this
@@ -2163,8 +2240,8 @@ impl<R: Real> World<R> {
             // see `for_each_in_entity_order`/`find_characters_in_range_into`/`fire_hammer`'s own
             // scratch buffers). Not worth a dedicated scratch field for a call this infrequent.
             let nearby: Vec<(i32, Vec2<R>, bool)> = characters_in_entity_order(self)
-                .filter(|&(_, core)| vmath::distance(core.pos, spawn) <= R::from_i32(64))
-                .map(|(id, core)| (id, core.pos, core.collision_disabled))
+                .filter(|&(_, pos, _)| vmath::distance(pos, spawn) <= R::from_i32(64))
+                .map(|(id, pos, core)| (id, pos, core.collision_disabled))
                 .collect();
 
             let mut result: Option<usize> = None;
@@ -2224,11 +2301,11 @@ impl<R: Real> World<R> {
     /// every collidable existing character (`1e9` if exactly on top of one).
     fn evaluate_spawn_pos(&self, pos: Vec2<R>, for_client: i32) -> R {
         let mut score = R::ZERO;
-        for (id, core) in characters_in_entity_order(self) {
+        for (id, other_pos, _) in characters_in_entity_order(self) {
             if !character_can_collide(&self.teams_core, for_client, id) {
                 continue;
             }
-            let d = vmath::distance(pos, core.pos);
+            let d = vmath::distance(pos, other_pos);
             score += if d == R::ZERO {
                 R::from_i32(1_000_000_000)
             } else {
@@ -2381,6 +2458,7 @@ fn apply_team_change_side_effects<R: Real>(world: &mut World<R>, id: i32, change
         for p in world.projectiles.iter_mut().filter(|p| p.owner == id) {
             p.marked_for_destroy = true;
         }
+        laser::remove_lasers_of_player(world, id);
         world.team_changed_this_pass = true;
     }
 }
@@ -2395,7 +2473,7 @@ pub fn handle_skippable_tiles<R: Real>(world: &mut World<R>, id: i32, index: i32
     let Some(slot) = world.cores.slot_of(id as u8) else {
         return false;
     };
-    let pos = world.cores.core_at(slot).pos;
+    let pos = world.characters[id as usize].as_ref().unwrap().pos;
     let is_super = world.cores.core_at(slot).is_super;
     let invincible = world.cores.core_at(slot).invincible;
     let on_death = is_on_death_tile(&world.collision, pos);
@@ -2704,7 +2782,7 @@ pub fn handle_character_tiles<R: Real>(world: &mut World<R>, id: i32, map_index:
     let Some(slot) = world.cores.slot_of(id as u8) else {
         return;
     };
-    let pos = world.cores.core_at(slot).pos;
+    let pos = world.characters[id as usize].as_ref().unwrap().pos;
     let r3 = core::physical_size::<R>() / R::from_i32(3);
     let sample = |dx: R, dy: R| world.collision.get_pure_map_index(pos.x + dx, pos.y + dy) as i32;
     let s = [sample(r3, -r3), sample(r3, r3), sample(-r3, -r3), sample(-r3, r3)];
@@ -2777,7 +2855,7 @@ pub fn handle_tiles<R: Real>(world: &mut World<R>, id: i32, map_index: i32) {
         let team = world.teams_core.team(id);
         let team_super = world.teams_core.team_super();
         let switchers = &world.cores.switchers;
-        let pos = world.cores.core_at(slot).pos;
+        let pos = world.characters[id as usize].as_ref().unwrap().pos;
         let restrictions = world.collision.get_move_restrictions(
             Some(|number: u8| {
                 team != team_super
@@ -3336,14 +3414,15 @@ pub fn ddrace_post_core_tick<R: Real>(world: &mut World<R>, id: i32) -> bool {
         core.jumped = 1;
     }
 
-    let pos = world.cores.core_at(slot).pos;
+    // `CCharacter::DDRacePostCoreTick` reads `m_Pos` (`character.cpp:2328,2334`): the entity
+    // position, which a ninja dash earlier in this very tick has not yet moved.
+    let pos = world.characters[id as usize].as_ref().unwrap().pos;
     let current_index = world.collision.get_map_index(pos);
     if !handle_skippable_tiles(world, id, current_index) {
         return false;
     }
 
     let prev_pos = world.characters[id as usize].as_ref().unwrap().prev_pos;
-    let pos = world.cores.core_at(slot).pos;
     let mut indices = std::mem::take(&mut world.map_indices_scratch);
     world.collision.get_map_indices_into(prev_pos, pos, 0, &mut indices);
     let mut alive = true;
@@ -3534,13 +3613,9 @@ fn set_weapon<R: Real>(world: &mut World<R>, id: i32, slot: usize, w: i32) {
     world.characters[id as usize] = Some(character);
 }
 
-/// `CCharacter::FireWeapon()` (`character.cpp:455-656`). Stage A implements `WEAPON_HAMMER`,
-/// `WEAPON_GUN`, `WEAPON_GRENADE` fully; `WEAPON_SHOTGUN`/`WEAPON_LASER`/`WEAPON_NINJA` are Stage
-/// B (`CLaser`/`HandleNinja`) — for those three cases this still runs every check up to (and
-/// including) `m_AttackTick`/`m_ReloadTimer`'s update at the very end (matching the *shape* of
-/// `m_ActiveWeapon != -1` being weapon-independent), but skips the weapon-specific `switch` body,
-/// which the cut-rule detector in `tests/parity_oracle_b.rs` accounts for (a laser fire is one of
-/// its exact trigger conditions).
+/// `CCharacter::FireWeapon()` (`character.cpp:455-656`): every weapon — hammer, gun, shotgun and
+/// laser (a `CLaser`, `laser::laser_new`), grenade, ninja (the dash activation,
+/// `ninja::ninja_activate`).
 #[allow(clippy::too_many_lines)]
 pub fn fire_weapon<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
     if world.characters[id as usize].as_ref().unwrap().reload_timer != 0 {
@@ -3633,7 +3708,7 @@ pub fn fire_weapon<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
     // corpus projectiles, even though `28.0 * 0.75` is itself exact — `direction`'s own components
     // generally aren't, so rounding `direction * 28.0` *before* the second multiply can differ
     // from rounding `direction * 21.0` directly).
-    let proj_start_pos = core.pos + direction * core::physical_size::<R>() * R::from_f64(0.75);
+    let proj_start_pos = character.pos + direction * core::physical_size::<R>() * R::from_f64(0.75);
 
     match core.active_weapon {
         WEAPON_HAMMER => {
@@ -3688,10 +3763,19 @@ pub fn fire_weapon<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
                 },
             );
         }
-        // `WEAPON_SHOTGUN`/`WEAPON_LASER`/`WEAPON_NINJA`: Stage B (`CLaser`/`HandleNinja`) — no
-        // entity created here; the cut-rule detector treats a shotgun/laser fire attempt as an
-        // immediate stop condition (see `tests/parity_oracle_b.rs`), and `WEAPON_NINJA` can only
-        // be active after a ninja pickup, itself a separate cut trigger.
+        WEAPON_SHOTGUN | WEAPON_LASER => {
+            // `new CLaser(.., m_Pos, Direction, LaserReach, owner, type)` (`character.cpp:587-626`);
+            // its constructor already traces the first segment (and can hit anyone, change the
+            // owner's own telegun fields, ...), so the working copies are flushed first and
+            // re-read afterwards, like the hammer branch does.
+            let laser_reach: R = world.tuning.zone(character.tune_zone).laser_reach();
+            world.characters[id as usize] = Some(character);
+            *world.cores.core_at_mut(slot) = core;
+            laser::laser_new(world, character.pos, direction, laser_reach, id, core.active_weapon);
+            character = world.characters[id as usize].unwrap();
+            core = *world.cores.core_at(slot);
+        }
+        WEAPON_NINJA => ninja::ninja_activate(&mut character, &mut core, direction),
         _ => {}
     }
 
@@ -3723,19 +3807,21 @@ fn fire_hammer<R: Real>(world: &mut World<R>, id: i32, slot: usize, proj_start_p
             continue;
         }
         let other_id = world.cores.id_at(other_slot) as i32;
-        let other = world.cores.core_at(other_slot);
         let alive = world.characters[other_id as usize].is_some_and(|c| c.alive);
         if alive && !character_can_collide(&world.teams_core, id, other_id) {
             continue;
         }
-        if vmath::distance(other.pos, proj_start_pos) < search_radius + character_proximity_radius::<R>() {
+        // `pTarget->m_Pos`: the entity position (see [`Character::pos`]).
+        let other_entity_pos =
+            world.characters[other_id as usize].map_or(world.cores.core_at(other_slot).pos, |c| c.pos);
+        if vmath::distance(other_entity_pos, proj_start_pos) < search_radius + character_proximity_radius::<R>() {
             targets.push(other_slot);
         }
     }
     for &other_slot in &targets {
         let other_id = world.cores.id_at(other_slot) as i32;
-        let other_pos = world.cores.core_at(other_slot).pos;
-        let self_pos = world.cores.core_at(slot).pos;
+        let other_pos = world.characters[other_id as usize].map_or(world.cores.core_at(other_slot).pos, |c| c.pos);
+        let self_pos = world.characters[id as usize].map_or(world.cores.core_at(slot).pos, |c| c.pos);
 
         let dir = if vmath::length(other_pos - self_pos) > R::ZERO {
             vmath::normalize(other_pos - self_pos)
@@ -3815,8 +3901,10 @@ pub fn handle_jetpack<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
     }
 }
 
-/// `CCharacter::HandleWeapons()` (`character.cpp:658-676`), minus `HandleNinja` (Stage B).
+/// `CCharacter::HandleWeapons()` (`character.cpp:658-676`), minus the pain-sound timer
+/// (cosmetic).
 pub fn handle_weapons<R: Real>(world: &mut World<R>, id: i32, slot: usize) {
+    handle_ninja(world, id, slot);
     handle_jetpack(world, id, slot);
     let reload = world.characters[id as usize].unwrap().reload_timer;
     if reload != 0 {
@@ -3848,6 +3936,7 @@ fn ddrace_init<R: Real>(core: &mut CharacterCore<R>, sv_endless_drag: bool, sv_h
 pub fn spawn_character<R: Real>(world: &mut World<R>, id: i32, pos: Vec2<R>) {
     let mut character = Character::<R> {
         spawn_tick: world.tick,
+        pos,
         prev_pos: pos,
         ..Default::default()
     };
@@ -3933,6 +4022,12 @@ pub fn try_respawn<R: Real>(world: &mut World<R>, id: i32) -> bool {
         player.spawning = false;
     }
     spawn_character(world, id, pos);
+    // `m_ViewPos = SpawnPos` (`player.cpp:826`) and `CPlayer::Tick` recomputes `m_TuneZone` from it
+    // later in the same call (`player.cpp:278-280`): the player's zone is the spawn zone at once.
+    let spawn_zone = world.collision.is_tune(world.collision.get_map_index(pos));
+    if let Some(player) = world.players[id as usize].as_mut() {
+        player.tune_zone = spawn_zone;
+    }
     if sv_team_forced_solo(&world.config) {
         world.teams_core.set_solo(id, true);
         if let Some(slot) = world.cores.slot_of(id as u8) {
@@ -4013,6 +4108,15 @@ pub fn player_tick<R: Real>(world: &mut World<R>, id: i32) {
     let Some(player) = world.players[id as usize] else {
         return;
     };
+    // `if(m_pCharacter->IsAlive()) { ...; m_ViewPos = m_pCharacter->m_Pos; }` and, at the end of
+    // `CPlayer::Tick`, `m_TuneZone = IsTune(GetMapIndex(m_ViewPos))` (`player.cpp:253-258,278-280`):
+    // the zone only changes when the view position does, so it is refreshed exactly there.
+    if player.has_character
+        && let Some(c) = world.characters[id as usize].filter(|c| c.alive)
+    {
+        let zone = world.collision.is_tune(world.collision.get_map_index(c.pos));
+        world.players[id as usize].as_mut().unwrap().tune_zone = zone;
+    }
     let earliest_respawn_tick = player.previous_die_tick + 3 * core::SERVER_TICK_SPEED;
     let respawn_tick = player.die_tick.max(earliest_respawn_tick) + 2;
     if !player.has_character && respawn_tick <= world.tick {
@@ -4055,10 +4159,14 @@ fn character_proximity_radius<R: Real>() -> R {
 /// associative, so a different visiting order can produce a bit-different sum even summing the
 /// exact same set of terms. An earlier revision of this port used `WorldCore::iter()`
 /// (ascending order) for both — an empirically found bug (see this crate's `BUILD REPORT`).
-fn characters_in_entity_order<R: Real>(world: &World<R>) -> impl Iterator<Item = (i32, &CharacterCore<R>)> {
+fn characters_in_entity_order<R: Real>(world: &World<R>) -> impl Iterator<Item = (i32, Vec2<R>, &CharacterCore<R>)> {
     world.entity_order.iter().map(move |&id| {
         let slot = world.cores.slot_of(id).expect("entity_order id must have a live core");
-        (id as i32, world.cores.core_at(slot))
+        let pos = world.characters[id as usize]
+            .as_ref()
+            .expect("entity_order id must have a character")
+            .pos;
+        (id as i32, pos, world.cores.core_at(slot))
     })
 }
 
@@ -4094,11 +4202,29 @@ pub fn intersect_character<R: Real>(
     exclude_id: i32,
     collide_with: i32,
 ) -> Option<(i32, Vec2<R>)> {
+    intersect_character_ex(world, pos0, pos1, radius, exclude_id, collide_with, -1)
+}
+
+/// [`intersect_character`] with `IntersectEntity`'s `pThisOnly` parameter (`gameworld.cpp:308`):
+/// when `this_only != -1`, only that character can be found. `exclude_id`/`collide_with`/
+/// `this_only` use `-1` for "none", exactly like the C++ `nullptr`/`-1`.
+pub fn intersect_character_ex<R: Real>(
+    world: &World<R>,
+    pos0: Vec2<R>,
+    pos1: Vec2<R>,
+    radius: R,
+    exclude_id: i32,
+    collide_with: i32,
+    this_only: i32,
+) -> Option<(i32, Vec2<R>)> {
     let mut closest_len = vmath::distance(pos0, pos1) * R::from_i32(100);
     let mut result: Option<(i32, Vec2<R>)> = None;
     let bound = character_proximity_radius::<R>() + radius;
-    for (cid, core) in characters_in_entity_order(world) {
+    for (cid, core_pos, _) in characters_in_entity_order(world) {
         if cid == exclude_id {
+            continue;
+        }
+        if this_only != -1 && cid != this_only {
             continue;
         }
         if !world.characters[cid as usize].is_some_and(|c| c.alive) {
@@ -4109,13 +4235,13 @@ pub fn intersect_character<R: Real>(
         }
         // Task 1.10b, speed-up 2: skip the (pricier) closest-point projection entirely for a
         // character nowhere near the segment's own bounding box.
-        if !could_be_near_segment(pos0, pos1, core.pos, bound) {
+        if !could_be_near_segment(pos0, pos1, core_pos, bound) {
             continue;
         }
-        let Some(intersect_pos) = vmath::closest_point_on_line(pos0, pos1, core.pos) else {
+        let Some(intersect_pos) = vmath::closest_point_on_line(pos0, pos1, core_pos) else {
             continue;
         };
-        let len = vmath::distance(core.pos, intersect_pos);
+        let len = vmath::distance(core_pos, intersect_pos);
         if len < bound {
             let len = vmath::distance(pos0, intersect_pos);
             if len < closest_len {
@@ -4162,12 +4288,12 @@ fn could_be_in_range<R: Real>(a: Vec2<R>, b: Vec2<R>, bound: R) -> bool {
 /// itself `O(characters)` is right back to `O(pickups * characters)`, the cost being cut here).
 pub fn alive_characters_bbox<R: Real>(world: &World<R>) -> Option<(Vec2<R>, Vec2<R>)> {
     characters_in_entity_order(world)
-        .filter(|&(cid, _)| world.characters[cid as usize].is_some_and(|c| c.alive))
-        .fold(None, |acc, (_, core)| match acc {
-            None => Some((core.pos, core.pos)),
+        .filter(|&(cid, _, _)| world.characters[cid as usize].is_some_and(|c| c.alive))
+        .fold(None, |acc, (_, pos, _)| match acc {
+            None => Some((pos, pos)),
             Some((min, max)) => Some((
-                Vec2::new(min.x.min(core.pos.x), min.y.min(core.pos.y)),
-                Vec2::new(max.x.max(core.pos.x), max.y.max(core.pos.y)),
+                Vec2::new(min.x.min(pos.x), min.y.min(pos.y)),
+                Vec2::new(max.x.max(pos.x), max.y.max(pos.y)),
             )),
         })
 }
@@ -4193,12 +4319,12 @@ fn could_be_near_alive_characters_bbox<R: Real>(bbox: Option<(Vec2<R>, Vec2<R>)>
 pub fn find_characters_in_range<R: Real>(world: &World<R>, pos: Vec2<R>, radius: R) -> Vec<i32> {
     let bound = radius + character_proximity_radius::<R>();
     characters_in_entity_order(world)
-        .filter(|&(cid, core)| {
+        .filter(|&(cid, core_pos, _)| {
             world.characters[cid as usize].is_some_and(|c| c.alive)
-                && could_be_in_range(core.pos, pos, bound)
-                && vmath::distance(core.pos, pos) < bound
+                && could_be_in_range(core_pos, pos, bound)
+                && vmath::distance(core_pos, pos) < bound
         })
-        .map(|(cid, _)| cid)
+        .map(|(cid, _, _)| cid)
         .collect()
 }
 
@@ -4217,10 +4343,10 @@ pub fn find_characters_in_range<R: Real>(world: &World<R>, pos: Vec2<R>, radius:
 fn find_characters_in_range_into<R: Real>(world: &World<R>, pos: Vec2<R>, radius: R, out: &mut Vec<i32>) {
     let bound = radius + character_proximity_radius::<R>();
     out.clear();
-    out.extend(characters_in_entity_order(world).filter_map(|(cid, core)| {
+    out.extend(characters_in_entity_order(world).filter_map(|(cid, core_pos, _)| {
         (world.characters[cid as usize].is_some_and(|c| c.alive)
-            && could_be_in_range(core.pos, pos, bound)
-            && vmath::distance(core.pos, pos) < bound)
+            && could_be_in_range(core_pos, pos, bound)
+            && vmath::distance(core_pos, pos) < bound)
             .then_some(cid)
     }));
 }
@@ -4577,8 +4703,10 @@ fn create_explosion<R: Real>(
     } else {
         None
     };
+    // `m_apPlayers[Owner]->m_TuneZone` — the *player's* zone ([`Player::tune_zone`]), not the
+    // character's (`gamecontext.cpp:393-396`).
     let owner_tune_zone = if owner >= 0 {
-        world.characters[owner as usize].map(|c| c.tune_zone)
+        world.players[owner as usize].map(|p| p.tune_zone)
     } else {
         None
     };
@@ -4595,8 +4723,10 @@ fn create_explosion<R: Real>(
     let mut targets = std::mem::take(&mut world.range_scratch);
     find_characters_in_range_into(world, pos, radius, &mut targets);
     for &target_id in &targets {
-        let target_core = *world.cores.core_at(world.cores.slot_of(target_id as u8).unwrap());
-        let diff = target_core.pos - pos;
+        let target_pos = world.characters[target_id as usize]
+            .expect("in-range characters exist")
+            .pos;
+        let diff = target_pos - pos;
         let l = vmath::length(diff);
         let force_dir = if l != R::ZERO {
             vmath::normalize(diff)
@@ -4645,32 +4775,6 @@ fn create_explosion<R: Real>(
     targets.clear();
     world.range_scratch = targets;
     let _ = weapon;
-}
-
-// --- `CDragger`/`CGun`/`CLight` mover-tile movement (`entities/{dragger,gun,light}.cpp`) --------
-
-/// The `if(Tick % (TickSpeed * 0.15f) == 0) { MoverSpeed(...); m_Pos += m_Core; }` movement
-/// shape every one of `CDragger::Tick()` (`dragger.cpp:34-40`), `CGun::Tick()` (`gun.cpp:33-40`),
-/// and `CLight::Tick()` (`light.cpp:86-94`) opens with — the exact same mechanism
-/// [`pickup_tick`]/[`Pickup::mcore`] already model, just applied to every [`World::fixtures`]
-/// entry instead (`CDoor`, `kind == 2`, has no `Tick()` at all and never moves — see
-/// [`FixtureRecord::mcore`]'s own doc comment). Found empirically: draggers on a mover tile
-/// (`blmapV5_ddpp`) started moving in the reference from roughly tick 6 while this crate's
-/// fixtures stayed at their map-scan position forever, an un-cut divergence once fixture
-/// positions are compared at all (review round 1, finding F1).
-fn fixture_tick<R: Real>(world: &mut World<R>) {
-    if world.tick % 7 != 0 {
-        return;
-    }
-    for f in world.fixtures.iter_mut() {
-        if let Some((_, speed)) = world
-            .collision
-            .mover_speed(f.pos.x.to_i32_trunc(), f.pos.y.to_i32_trunc())
-        {
-            f.mcore = speed;
-        }
-        f.pos += f.mcore;
-    }
 }
 
 // --- `CPickup::Tick()` (`entities/pickup.cpp:35-162`) -------------------------------------------
@@ -4880,6 +4984,17 @@ impl<R: Real> World<R> {
             "World::step: inputs must be sorted by ascending client id"
         );
 
+        // 0. `CEntity::m_Pos` of every living character is whatever the previous tick's
+        //    `TickDeferred` left it at, i.e. its core position — unless the core was moved from
+        //    outside `step` (a test harness or a live-state injection), which this re-sync
+        //    absorbs. See [`Character::pos`].
+        for slot in 0..self.cores.len() {
+            let id = self.cores.id_at(slot) as usize;
+            if let Some(c) = self.characters[id].as_mut() {
+                c.pos = self.cores.core_at(slot).pos;
+            }
+        }
+
         // 1. Kill bit, applied exactly like a real client's `CNetMsg_Cl_Kill`
         //    (`OnKillNetMessage`), before anything else this tick.
         for ti in inputs {
@@ -4941,8 +5056,10 @@ impl<R: Real> World<R> {
         );
     }
 
-    /// `CGameWorld::Tick()` (`gameworld.cpp:202-263`), Stage A's entity types only (`Projectile`,
-    /// `Pickup`, `Character` — `Laser`/`Flag` are Stage B/never-modeled respectively).
+    /// `CGameWorld::Tick()` (`gameworld.cpp:202-263`): projectiles, the `ENTTYPE_LASER` list
+    /// (lasers, beams, turret shots, then draggers/turrets/lights), pickups, characters, the
+    /// `TickDeferred()` pass, `RemoveEntities()` and the strong/weak ids. (`ENTTYPE_FLAG` is
+    /// never populated in DDRace.)
     fn world_tick(&mut self, no_weak_hook: bool) {
         // Entity-type order: `ENTTYPE_PROJECTILE` (0), `ENTTYPE_LASER` (1 — every `CDragger`/
         // `CGun`/`CLight`/`CDoor`/`CDraggerBeam`/`CLaser` shares this slot), `ENTTYPE_PICKUP`
@@ -4954,7 +5071,51 @@ impl<R: Real> World<R> {
                 }
             }
         });
-        phase_time!(fixtures, fixture_tick(self));
+        phase_time!(fixtures, {
+            // `ENTTYPE_LASER`: the dynamic entities newest first (index `len - 1` is the list
+            // head — see [`World::lasers`]), then the static fixtures in list order. Entities
+            // pushed during the pass (dragger beams, turret shots) go to the head, i.e. *behind*
+            // the traversal cursor, exactly like `m_pNextTraverseEntity` keeps the C++ pass from
+            // visiting them this tick, so iterating the starting length is enough.
+            for i in (0..self.lasers.len()).rev() {
+                match self.lasers[i] {
+                    LaserSlot::Laser(_) => laser::laser_tick(self, i),
+                    LaserSlot::Beam(_) => fixtures::beam_tick(self, i),
+                    LaserSlot::Plasma(_) => fixtures::plasma_tick(self, i),
+                }
+            }
+            // No character moves during this pass, so one bounding box serves every fixture.
+            let characters_bbox = if self.fixtures.is_empty() {
+                None
+            } else {
+                alive_characters_bbox(self)
+            };
+            // A dragger only acts on the movers' tick (`Tick % 7 == 0`); a turret needs either that
+            // tick (it may drift) or a possible target; a light always hits (but cannot hit anyone
+            // without an alive character). Hoisting those tests keeps a map with ~90 idle fixtures
+            // down to a few comparisons per fixture per tick.
+            let mover_tick = self.tick % MOVER_PERIOD == 0;
+            let guns_may_fire = self.config.sv_plasma_per_sec > 0 && characters_bbox.is_some();
+            for i in 0..self.fixtures.len() {
+                match self.fixtures[i] {
+                    Fixture::Dragger(_) => {
+                        if mover_tick {
+                            fixtures::dragger_tick(self, i, characters_bbox);
+                        }
+                    }
+                    Fixture::Gun(_) => {
+                        if mover_tick || guns_may_fire {
+                            fixtures::gun_tick(self, i, characters_bbox);
+                        }
+                    }
+                    Fixture::Light(_) => {
+                        if mover_tick || characters_bbox.is_some() {
+                            fixtures::light_tick(self, i);
+                        }
+                    }
+                }
+            }
+        });
         phase_time!(pickups, {
             // Task 1.10b, speed-up 1: computed once for the whole pass, not once per pickup.
             let characters_bbox = alive_characters_bbox(self);
@@ -5021,7 +5182,12 @@ impl<R: Real> World<R> {
         );
 
         // `RemoveEntities()` (`gameworld.cpp:186-200`): destroy projectiles marked this tick.
-        phase_time!(retain, self.projectiles.retain(|p| !p.marked_for_destroy));
+        phase_time!(retain, {
+            self.projectiles.retain(|p| !p.marked_for_destroy);
+            if !self.lasers.is_empty() {
+                self.lasers.retain(|l| !l.marked_for_destroy());
+            }
+        });
 
         // `m_StrongWeakId` assignment (`gameworld.cpp:256-262`): entity-list order, head first.
         phase_time!(
@@ -5133,6 +5299,11 @@ pub fn character_tick_deferred<R: Real>(world: &mut World<R>, id: i32) {
     };
     core::move_character(&mut world.cores, slot, &world.collision, &world.teams_core);
     core::quantize(world.cores.core_at_mut(slot));
+    // `m_Pos = m_Core.m_Pos;` (`character.cpp:880`)
+    let pos = world.cores.core_at(slot).pos;
+    if let Some(c) = world.characters[id as usize].as_mut() {
+        c.pos = pos;
+    }
 }
 
 /// `CreateAllEntities`'s 5 map-wide global tile effects (`gamecontext.cpp:4288-4312`), checked

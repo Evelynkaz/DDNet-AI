@@ -149,6 +149,10 @@ type TeleNumber = u8;
 /// coordinate's own `ulp` (0.5 px at 2^23) well below the 1 px pads.
 pub(crate) const EARLY_OUT_COORD_LIMIT: f64 = 4_194_304.0;
 
+/// Samples per run the `IntersectNoLaser[NoWalls]` marches try to skip as a unit (see
+/// [`Collision::intersect_no_laser`]).
+const NO_LASER_RUN: i32 = 16;
+
 /// Builds [`Collision::solid_sat`] from `solid` — see that field's doc comment for the table's
 /// exact layout. `width`/`height` `<= 0` (an [`Collision::empty`] map) yields an empty table.
 fn build_solid_sat(solid: &[bool], width: i32, height: i32) -> Vec<u32> {
@@ -221,6 +225,12 @@ pub struct Collision<R: Real> {
     /// `set_collision_at` isn't called anywhere in this crate yet (Stage B), so this cost is
     /// currently theoretical, not a real per-tick or even per-call one.
     solid_sat: Vec<u32>,
+    /// Summed-area table over the cells `IntersectNoLaser` stops at (game `TILE_SOLID`/`TILE_NOHOOK`/
+    /// `TILE_NOLASER`, front `TILE_NOLASER`) — task 1.6 stage B, built by `recompute_derived`, read by
+    /// [`Collision::intersect_no_laser`]'s fast paths (dragger beams and plasma shots call it every tick).
+    no_laser_sat: Vec<u32>,
+    /// Same for `IntersectNoLaserNoWalls`: only the `TILE_NOLASER` cells (game or front).
+    no_laser_only_sat: Vec<u32>,
     /// [`Collision::tile_exists`]'s answer for every cell, precomputed once in [`Collision::new`]
     /// from [`Collision::tile_exists_uncached`] instead of recomputed on every call — same
     /// reasoning as [`Collision::solid`] above, generalized to a function that reads up to 6
@@ -277,6 +287,8 @@ impl<R: Real> Collision<R> {
             height: 0,
             solid: Vec::new(),
             solid_sat: Vec::new(),
+            no_laser_sat: Vec::new(),
+            no_laser_only_sat: Vec::new(),
             tile_exists_cache: Vec::new(),
             pickup_freeze: Vec::new(),
             game: Vec::new(),
@@ -373,6 +385,8 @@ impl<R: Real> Collision<R> {
             height,
             solid,
             solid_sat,
+            no_laser_sat: Vec::new(),
+            no_laser_only_sat: Vec::new(),
             tile_exists_cache: Vec::new(),
             pickup_freeze: map::pickup_freeze_mask(map),
             game: map.game.clone(),
@@ -444,6 +458,18 @@ impl<R: Real> Collision<R> {
             })
             .collect();
         self.hook_sat = build_solid_sat(&hook, self.width, self.height);
+        let front_no_laser = |i: usize| self.front.as_ref().is_some_and(|f| f[i].index == map::TILE_NOLASER);
+        let no_laser_only: Vec<bool> = (0..n)
+            .map(|i| self.game[i].index == map::TILE_NOLASER || front_no_laser(i))
+            .collect();
+        let no_laser_block: Vec<bool> = (0..n)
+            .map(|i| {
+                let g = self.game[i].index;
+                g == map::TILE_SOLID || g == map::TILE_NOHOOK || no_laser_only[i]
+            })
+            .collect();
+        self.no_laser_sat = build_solid_sat(&no_laser_block, self.width, self.height);
+        self.no_laser_only_sat = build_solid_sat(&no_laser_only, self.width, self.height);
         self.hazard = (0..n)
             .map(|i| {
                 self.game[i].index == map::TILE_FREEZE
@@ -1128,10 +1154,18 @@ impl<R: Real> Collision<R> {
     /// rectangle spanned by the two end samples; a summed-area table then answers for the whole run.
     /// `false` (cannot tell) for an empty table, non-finite or out-of-limit coordinates.
     fn march_run_is_free(&self, sat: &[u32], pos0: Vec2<R>, pos1: Vec2<R>, end: i32, i: i32, j: i32) -> bool {
-        if sat.is_empty() {
+        self.march_run_is_free_div(sat, pos0, pos1, R::from_i32(end), i, j)
+    }
+
+    /// [`Collision::march_run_is_free`] for a march whose sample parameter is `k / divisor` with an
+    /// arbitrary `R` divisor (`IntersectNoLaser` samples at `i / Distance`, not at `i / End`): the
+    /// monotonicity argument only needs `k / divisor` to be non-decreasing in `k`, which holds for any
+    /// positive divisor.
+    fn march_run_is_free_div(&self, sat: &[u32], pos0: Vec2<R>, pos1: Vec2<R>, divisor: R, i: i32, j: i32) -> bool {
+        if sat.is_empty() || divisor.is_nan() || divisor <= R::ZERO {
             return false;
         }
-        let at = |k: i32| vmath::mix(pos0, pos1, R::from_i32(k) / R::from_i32(end));
+        let at = |k: i32| vmath::mix(pos0, pos1, R::from_i32(k) / divisor);
         let (a, b) = (at(i), at(j));
         let limit = R::from_f64(EARLY_OUT_COORD_LIMIT);
         let in_range = |v: R| v.is_finite() && v.abs() <= limit;
@@ -1299,35 +1333,82 @@ impl<R: Real> Collision<R> {
     }
 
     /// `CCollision::IntersectNoLaser`.
+    ///
+    /// Task 1.6 stage B: dragger beams and turret shots call this every tick over segments hundreds of
+    /// pixels long, so — exactly like [`Collision::intersect_line`] — a segment whose padded bounding
+    /// box holds no blocking cell returns "no hit" without marching, and a march skips runs of
+    /// `NO_LASER_RUN` (16) samples that a summed-area table proves free (see
+    /// `Collision::intersect_no_laser_impl`).
     pub fn intersect_no_laser(&self, pos0: Vec2<R>, pos1: Vec2<R>) -> LineHit<R> {
+        self.intersect_no_laser_impl(pos0, pos1, true)
+    }
+
+    /// [`Collision::intersect_no_laser`]'s body; `allow_skip = false` is the plain per-sample loop
+    /// (the reference the differential tests compare the fast path against).
+    ///
+    /// The fast paths read `no_laser_sat` (the cells the loop can stop at) and apply only while
+    /// `derived_ok`: whole-box free means the loop would run to the end with no hit; otherwise every
+    /// run of 16 samples [`Collision::march_run_is_free_div`] proves free is jumped over, `last`
+    /// becoming the run's final sample — what the loop leaves behind.
+    fn intersect_no_laser_impl(&self, pos0: Vec2<R>, pos1: Vec2<R>, allow_skip: bool) -> LineHit<R> {
         let distance = vmath::distance(pos0, pos1);
+        let skip = allow_skip && self.derived_ok;
+        if skip {
+            let pad = R::ONE;
+            if self.pixel_box_is_free_in(
+                &self.no_laser_sat,
+                pos0.x.min(pos1.x) - pad,
+                pos0.x.max(pos1.x) + pad,
+                pos0.y.min(pos1.y) - pad,
+                pos0.y.max(pos1.y) + pad,
+            ) {
+                return LineHit {
+                    hit: 0,
+                    collision: pos1,
+                    before_collision: pos1,
+                };
+            }
+        }
         let mut last = pos0;
         // `const int DistanceRounded = std::ceil(Distance);`.
         let end = <f64 as Real>::to_i32_trunc(distance.to_f64().ceil());
-        for i in 0..end {
-            let a = R::from_i32(i) / distance;
-            let pos = vmath::mix(pos0, pos1, a);
-            let nx = (vmath::round_to_int(pos.x) / 32).clamp(0, self.width - 1);
-            let ny = (vmath::round_to_int(pos.y) / 32).clamp(0, self.height - 1);
-            let tile = self.get_index(nx, ny);
-            let front_tile = self.get_front_index(nx, ny);
-            if tile == map::TILE_SOLID as i32
-                || tile == map::TILE_NOHOOK as i32
-                || tile == map::TILE_NOLASER as i32
-                || front_tile == map::TILE_NOLASER as i32
-            {
-                let hit = if front_tile == map::TILE_NOLASER as i32 {
-                    self.get_front_collision_at(pos.x, pos.y)
-                } else {
-                    self.get_collision_at(pos.x, pos.y)
-                };
-                return LineHit {
-                    hit,
-                    collision: pos,
-                    before_collision: last,
-                };
+        let mut i = 0;
+        while i < end {
+            let mut run_end = i;
+            if skip && end - i > NO_LASER_RUN {
+                run_end = i + NO_LASER_RUN - 1;
+                if self.march_run_is_free_div(&self.no_laser_sat, pos0, pos1, distance, i, run_end) {
+                    last = vmath::mix(pos0, pos1, R::from_i32(run_end) / distance);
+                    i = run_end + 1;
+                    continue;
+                }
             }
-            last = pos;
+            for k in i..=run_end {
+                let a = R::from_i32(k) / distance;
+                let pos = vmath::mix(pos0, pos1, a);
+                let nx = (vmath::round_to_int(pos.x) / 32).clamp(0, self.width - 1);
+                let ny = (vmath::round_to_int(pos.y) / 32).clamp(0, self.height - 1);
+                let tile = self.get_index(nx, ny);
+                let front_tile = self.get_front_index(nx, ny);
+                if tile == map::TILE_SOLID as i32
+                    || tile == map::TILE_NOHOOK as i32
+                    || tile == map::TILE_NOLASER as i32
+                    || front_tile == map::TILE_NOLASER as i32
+                {
+                    let hit = if front_tile == map::TILE_NOLASER as i32 {
+                        self.get_front_collision_at(pos.x, pos.y)
+                    } else {
+                        self.get_collision_at(pos.x, pos.y)
+                    };
+                    return LineHit {
+                        hit,
+                        collision: pos,
+                        before_collision: last,
+                    };
+                }
+                last = pos;
+            }
+            i = run_end + 1;
         }
         LineHit {
             hit: 0,
@@ -1336,30 +1417,66 @@ impl<R: Real> Collision<R> {
         }
     }
 
-    /// `CCollision::IntersectNoLaserNoWalls`.
+    /// `CCollision::IntersectNoLaserNoWalls`. Same fast paths as [`Collision::intersect_no_laser`],
+    /// over the `TILE_NOLASER`-only table.
     pub fn intersect_no_laser_no_walls(&self, pos0: Vec2<R>, pos1: Vec2<R>) -> LineHit<R> {
+        self.intersect_no_laser_no_walls_impl(pos0, pos1, true)
+    }
+
+    /// [`Collision::intersect_no_laser_no_walls`]'s body, see [`Collision::intersect_no_laser_impl`].
+    fn intersect_no_laser_no_walls_impl(&self, pos0: Vec2<R>, pos1: Vec2<R>, allow_skip: bool) -> LineHit<R> {
         let distance = vmath::distance(pos0, pos1);
-        let mut last = pos0;
-        let end = <f64 as Real>::to_i32_trunc(distance.to_f64().ceil());
-        for i in 0..end {
-            let a = R::from_i32(i) / distance;
-            let pos = vmath::mix(pos0, pos1, a);
-            let (ix, iy) = (vmath::round_to_int(pos.x), vmath::round_to_int(pos.y));
-            let no_laser = self.is_no_laser(ix, iy);
-            let front_no_laser = self.is_front_no_laser(ix, iy);
-            if no_laser || front_no_laser {
-                let hit = if no_laser {
-                    self.get_collision_at(pos.x, pos.y)
-                } else {
-                    self.get_front_collision_at(pos.x, pos.y)
-                };
+        let skip = allow_skip && self.derived_ok;
+        if skip {
+            let pad = R::ONE;
+            if self.pixel_box_is_free_in(
+                &self.no_laser_only_sat,
+                pos0.x.min(pos1.x) - pad,
+                pos0.x.max(pos1.x) + pad,
+                pos0.y.min(pos1.y) - pad,
+                pos0.y.max(pos1.y) + pad,
+            ) {
                 return LineHit {
-                    hit,
-                    collision: pos,
-                    before_collision: last,
+                    hit: 0,
+                    collision: pos1,
+                    before_collision: pos1,
                 };
             }
-            last = pos;
+        }
+        let mut last = pos0;
+        let end = <f64 as Real>::to_i32_trunc(distance.to_f64().ceil());
+        let mut i = 0;
+        while i < end {
+            let mut run_end = i;
+            if skip && end - i > NO_LASER_RUN {
+                run_end = i + NO_LASER_RUN - 1;
+                if self.march_run_is_free_div(&self.no_laser_only_sat, pos0, pos1, distance, i, run_end) {
+                    last = vmath::mix(pos0, pos1, R::from_i32(run_end) / distance);
+                    i = run_end + 1;
+                    continue;
+                }
+            }
+            for k in i..=run_end {
+                let a = R::from_i32(k) / distance;
+                let pos = vmath::mix(pos0, pos1, a);
+                let (ix, iy) = (vmath::round_to_int(pos.x), vmath::round_to_int(pos.y));
+                let no_laser = self.is_no_laser(ix, iy);
+                let front_no_laser = self.is_front_no_laser(ix, iy);
+                if no_laser || front_no_laser {
+                    let hit = if no_laser {
+                        self.get_collision_at(pos.x, pos.y)
+                    } else {
+                        self.get_front_collision_at(pos.x, pos.y)
+                    };
+                    return LineHit {
+                        hit,
+                        collision: pos,
+                        before_collision: last,
+                    };
+                }
+                last = pos;
+            }
+            i = run_end + 1;
         }
         LineHit {
             hit: 0,
@@ -2895,6 +3012,67 @@ mod tests {
         assert!(
             free * 20 > total,
             "the fuzz must actually exercise the early-out ({free}/{total})"
+        );
+    }
+
+    /// Task 1.6 stage B: `IntersectNoLaser`/`IntersectNoLaserNoWalls` fast paths (whole-box early-out
+    /// and 16-sample run skipping) must return exactly what the plain per-sample loops return, over
+    /// random segments of every scale on a map with sparse solid/nohook/nolaser cells in both layers.
+    #[test]
+    fn intersect_no_laser_fast_paths_match_the_plain_loops() {
+        let (w, h) = (60i32, 40i32);
+        let mut rng = Rng(0x0A5E_0001);
+        let mut game = vec![tile(map::TILE_AIR); (w * h) as usize];
+        let mut front = vec![tile(map::TILE_AIR); (w * h) as usize];
+        for i in 0..(w * h) as usize {
+            match rng.next() % 90 {
+                0..=1 => game[i] = tile(map::TILE_SOLID),
+                2 => game[i] = tile(map::TILE_NOHOOK),
+                3 => game[i] = tile(map::TILE_NOLASER),
+                4..=5 => front[i] = tile(map::TILE_NOLASER),
+                _ => {}
+            }
+        }
+        let map = MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: Some(front),
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        };
+        let c: Collision<f32> = Collision::new(&map);
+        let (mut free, mut skipped_runs_possible, total) = (0u32, 0u32, 30_000u32);
+        for k in 0..total {
+            // Segment lengths up to 2500 px: the plain reference loop runs once per pixel of length when
+            // nothing is hit, so astronomically long segments (the `intersect_line` fuzz's 3e9) would
+            // never finish here.
+            let scale = [30.0f32, 300.0, 1500.0, 2500.0][(rng.next() % 4) as usize];
+            let p0 = Vec2::new(
+                rng.range(-0.1, 1.1) * w as f32 * 32.0,
+                rng.range(-0.1, 1.1) * h as f32 * 32.0,
+            );
+            let p1 = Vec2::new(p0.x + rng.range(-scale, scale), p0.y + rng.range(-scale, scale));
+            let fast = c.intersect_no_laser(p0, p1);
+            let exact = c.intersect_no_laser_impl(p0, p1, false);
+            assert_eq!(fast, exact, "no_laser case {k}: {p0:?} -> {p1:?}");
+            let fast = c.intersect_no_laser_no_walls(p0, p1);
+            let exact = c.intersect_no_laser_no_walls_impl(p0, p1, false);
+            assert_eq!(fast, exact, "no_laser_no_walls case {k}: {p0:?} -> {p1:?}");
+            if exact.hit == 0 {
+                free += 1;
+            }
+            if vmath::distance(p0, p1) > 64.0 && vmath::distance(p0, p1) < 5000.0 {
+                skipped_runs_possible += 1;
+            }
+        }
+        assert!(free * 20 > total, "the fuzz must exercise misses ({free}/{total})");
+        assert!(
+            skipped_runs_possible * 5 > total,
+            "the fuzz must exercise long segments"
         );
     }
 

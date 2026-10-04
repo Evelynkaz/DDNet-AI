@@ -89,6 +89,7 @@
 #include <game/server/entities/gun.h>
 #include <game/server/entities/laser.h>
 #include <game/server/entities/light.h>
+#include <game/server/entities/plasma.h>
 #include <game/server/entities/projectile.h>
 #include <game/server/gamecontext.h>
 #include <game/server/gamecontroller.h>
@@ -112,6 +113,41 @@ bool IsInterrupted()
 
 namespace
 {
+
+// =============================================================================================
+// Reading implicit-private entity members without editing DDNet (task 1.6 stage B).
+//
+// `#define private public` (top of this file) cannot reach a member declared BEFORE any explicit
+// access label of its class (C++'s implicit-private region has no literal `private:` token to
+// rewrite) -- which is where CPlasma/CDraggerBeam keep everything interesting. The sanctioned
+// loophole used here instead is standard C++: the C++ standard exempts the *operand of an explicit
+// template instantiation* from access checking ([temp.spec.general], formerly [temp.spec]/6), so
+// `template struct PrivateGrab<Tag, &CPlasma::m_Core>;` may name a private member's address, and
+// the `friend` function the instantiation defines hands that pointer-to-member back to the
+// harness. No header is edited, no macro is involved, no layout is assumed (unlike a mirror
+// struct), and the objects are still the real, unmodified game objects.
+// =============================================================================================
+template<typename TagT, typename TagT::Type Member>
+struct PrivateGrab
+{
+	friend typename TagT::Type GrabMember(TagT) { return Member; }
+};
+
+#define DDAI_GRAB_FIELD(TAGNAME, CLASS, FIELDTYPE, FIELD) \
+	struct TAGNAME \
+	{ \
+		using Type = FIELDTYPE CLASS::*; \
+		friend Type GrabMember(TAGNAME); \
+	}; \
+	template struct PrivateGrab<TAGNAME, &CLASS::FIELD>;
+
+DDAI_GRAB_FIELD(PlasmaCoreTag, CPlasma, vec2, m_Core)
+DDAI_GRAB_FIELD(PlasmaFreezeTag, CPlasma, int, m_Freeze)
+DDAI_GRAB_FIELD(PlasmaExplosiveTag, CPlasma, bool, m_Explosive)
+DDAI_GRAB_FIELD(PlasmaForClientIdTag, CPlasma, int, m_ForClientId)
+DDAI_GRAB_FIELD(PlasmaEvalTickTag, CPlasma, int, m_EvalTick)
+DDAI_GRAB_FIELD(PlasmaLifeTimeTag, CPlasma, int, m_LifeTime)
+DDAI_GRAB_FIELD(BeamForClientIdTag, CDraggerBeam, int, m_ForClientId)
 
 // =============================================================================================
 // Small binary reader/writer -- field layout mirrors crates/ddai-trace/src/io.rs and
@@ -1506,7 +1542,7 @@ struct DDRaceStateFields
 // implicit-private like the others and stays 0). See docs/formats.md section 8.2.
 struct EntityRecord
 {
-	int32_t Kind = 0; // 0=CProjectile, 1=CLaser, 2=CDoor, 3=CDragger, 4=CDraggerBeam, 5=CGun, 6=CLight
+	int32_t Kind = 0; // 0=CProjectile, 1=CLaser, 2=CDoor, 3=CDragger, 4=CDraggerBeam, 5=CGun, 6=CLight, 7=CPlasma (v3)
 	int32_t OwnerClientId = -1;
 	int32_t WeaponType = 0; // CProjectile::m_Type / CLaser::m_Type (WEAPON_* constant); kind 6: CLight::m_Length
 	float PosX = 0, PosY = 0;
@@ -2295,7 +2331,9 @@ int main(int argc, const char **argv)
 				else if(auto *pBeam = dynamic_cast<CDraggerBeam *>(pEnt))
 				{
 					R.Kind = 4;
-					R.OwnerClientId = -1; // m_ForClientId is implicit-private, unreachable; GetOwnerId() is not overridden either (returns -1).
+					// Trace-b v3 (task 1.6 stage B): the dragged client (`m_ForClientId`, implicit-private)
+					// is read through `PrivateGrab` -- v1/v2 traces carry -1 here.
+					R.OwnerClientId = pBeam->*GrabMember(BeamForClientIdTag{});
 					R.WeaponType = 0;
 					R.PosX = pBeam->m_Pos.x;
 					R.PosY = pBeam->m_Pos.y;
@@ -2303,6 +2341,22 @@ int main(int argc, const char **argv)
 					R.DirY = 0;
 					R.StartTick = 0; // m_EvalTick is implicit-private, unreachable.
 					R.Extra = 0; // m_Strength is implicit-private, unreachable.
+				}
+				else if(auto *pPlasma = dynamic_cast<CPlasma *>(pEnt))
+				{
+					// Trace-b v3 (task 1.6 stage B): a turret shot. Every field is implicit-private and
+					// read through `PrivateGrab` (see its comment at the top of this file).
+					R.Kind = 7;
+					R.OwnerClientId = pPlasma->*GrabMember(PlasmaForClientIdTag{}); // the targeted client
+					R.WeaponType = (pPlasma->*GrabMember(PlasmaExplosiveTag{}) ? 1 : 0) |
+						((pPlasma->*GrabMember(PlasmaFreezeTag{})) != 0 ? 2 : 0); // same subtype bits as CPlasma::Snap
+					R.PosX = pPlasma->m_Pos.x;
+					R.PosY = pPlasma->m_Pos.y;
+					const vec2 Core = pPlasma->*GrabMember(PlasmaCoreTag{});
+					R.DirX = Core.x; // m_Core: the per-tick displacement, grows by PLASMA_ACCEL
+					R.DirY = Core.y;
+					R.StartTick = pPlasma->*GrabMember(PlasmaEvalTickTag{});
+					R.Extra = pPlasma->*GrabMember(PlasmaLifeTimeTag{});
 				}
 				else if(auto *pGun = dynamic_cast<CGun *>(pEnt))
 				{
@@ -2658,7 +2712,7 @@ int main(int argc, const char **argv)
 	// -------------------------------------------------------------------------------------
 	std::ostringstream Json;
 	Json << "{";
-	Json << "\"producer\":{\"name\":\"ddnet-oracle-b\",\"version\":\"1\"},";
+	Json << "\"producer\":{\"name\":\"ddnet-oracle-b\",\"version\":\"2\"},";
 	Json << "\"ddnet\":{\"tag\":\"20.1\",\"commit\":\"c9d208138f85755521f16a0096b6fe036c5c8698\"},";
 	Json << "\"map_sha256\":\"" << oracle_sha256::ToHex(ActualMapSha256) << "\",";
 	Json << "\"seed\":" << Seed << ",";
@@ -2678,7 +2732,7 @@ int main(int argc, const char **argv)
 
 	ByteWriter W;
 	W.Magic("TRB1");
-	W.U32(2); // F14 (round-2 review) bumped this from 1: header gained switch_highest_number/
+	W.U32(3); // Task 1.6 stage B bumped this from 2 (same layout; adds entity kind 7 = CPlasma, and kind 4 now carries the dragged client). F14 (round-2 review) had bumped it from 1: header gained switch_highest_number/
 	// switch_team_count/switch_team_ids, and each row's switch section is no longer
 	// self-describing (count moved to the header) -- see docs/formats.md section 8.2.
 	W.String32(Json.str());

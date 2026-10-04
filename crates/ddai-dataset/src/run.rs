@@ -241,48 +241,53 @@ pub fn from_demos(opts: &Options, cfg: &Config, log: &(dyn Fn(&str) + Sync)) -> 
     let threads = opts.threads.clamp(1, 6);
     std::thread::scope(|scope| {
         for _ in 0..threads {
-            scope.spawn(|| {
-                loop {
-                    if failure.lock().expect("no panics while holding the lock").is_some() {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::SeqCst);
-                    if i >= items.len() {
-                        break;
-                    }
-                    let (sha, path, size) = &items[i];
-                    let started = std::time::Instant::now();
-                    // A panic (a spill file that cannot be read back, or a bug) must stop the other
-                    // workers too, not leave them draining the queue.
-                    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        process_one(opts, cfg, sha, path, *size, &cache, &maps_used)
-                    }))
-                    .unwrap_or_else(|payload| Err(panic_error(payload, &sha[..12])));
-                    let processed = match attempt {
-                        Ok(p) => p,
-                        Err(e) => {
-                            failure
-                                .lock()
-                                .expect("no panics while holding the lock")
-                                .get_or_insert(e);
+            // Explicit stack: a demo replay keeps several `World`s (~110 KB each, more in a debug build's
+            // frames) alive, which overflows the 2 MiB default (same 64 MiB the planner's workers use).
+            std::thread::Builder::new()
+                .stack_size(64 << 20)
+                .spawn_scoped(scope, || {
+                    loop {
+                        if failure.lock().expect("no panics while holding the lock").is_some() {
                             break;
                         }
-                    };
-                    if started.elapsed().as_secs() >= 20 {
-                        log(&format!(
-                            "slow demo {}: {} frames, {:.0} s",
-                            &sha[..12],
-                            processed.entry.frames,
-                            started.elapsed().as_secs_f32()
-                        ));
+                        let i = next.fetch_add(1, Ordering::SeqCst);
+                        if i >= items.len() {
+                            break;
+                        }
+                        let (sha, path, size) = &items[i];
+                        let started = std::time::Instant::now();
+                        // A panic (a spill file that cannot be read back, or a bug) must stop the other
+                        // workers too, not leave them draining the queue.
+                        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            process_one(opts, cfg, sha, path, *size, &cache, &maps_used)
+                        }))
+                        .unwrap_or_else(|payload| Err(panic_error(payload, &sha[..12])));
+                        let processed = match attempt {
+                            Ok(p) => p,
+                            Err(e) => {
+                                failure
+                                    .lock()
+                                    .expect("no panics while holding the lock")
+                                    .get_or_insert(e);
+                                break;
+                            }
+                        };
+                        if started.elapsed().as_secs() >= 20 {
+                            log(&format!(
+                                "slow demo {}: {} frames, {:.0} s",
+                                &sha[..12],
+                                processed.entry.frames,
+                                started.elapsed().as_secs_f32()
+                            ));
+                        }
+                        *results[i].lock().expect("no panics while holding the lock") = Some(processed);
+                        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+                        if n.is_multiple_of(20) || n == items.len() {
+                            log(&format!("processed {n}/{}", items.len()));
+                        }
                     }
-                    *results[i].lock().expect("no panics while holding the lock") = Some(processed);
-                    let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-                    if n.is_multiple_of(20) || n == items.len() {
-                        log(&format!("processed {n}/{}", items.len()));
-                    }
-                }
-            });
+                })
+                .expect("spawn dataset worker");
         }
     });
     if let Some(e) = failure.into_inner().expect("no poisoned lock") {

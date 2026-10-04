@@ -1,76 +1,46 @@
-//! Task 1.6, Stage A: parity against the real Oracle B corpus (task 1.5,
-//! `~/aiddnet/data/traces/oracle-b/v1/`, outside the repository).
+//! Task 1.6: parity against the real Oracle B corpus (task 1.5, `~/aiddnet/data/traces/oracle-b/v1/`,
+//! plus the stage-B corpus `~/aiddnet/data/traces/oracle-b/v2-stageb/`, both outside the
+//! repository).
 //!
-//! # The Stage A cut rule
+//! # Stage B: every tick is compared
 //!
-//! Every trace is compared tick-by-tick, starting at tick 0, **stopping before the first tick**
-//! at which any of the following is true of the *reference* trace (checked in this exact order,
-//! independently of anything this crate's own simulation does):
+//! Stage A compared a trace only up to a *cut*: the first tick at which the reference showed a
+//! mechanic the port did not yet model (lasers, dragger beams, turret shots, lights touching a
+//! character, ninja). Stage B ports all of them, so the comparison now runs over **every tick of
+//! every trace** and a mismatch anywhere is a failure. Compared per tick, all through
+//! `to_bits`/exact integers:
 //!
-//! 1. An `EntityRecord` with `kind == 1` (`CLaser` — a laser-rifle *or* shotgun shot; DDNet's
-//!    shotgun fires a laser, not a projectile) is present.
-//! 2. An `EntityRecord` with `kind == 4` (a dragger beam) is present.
-//! 3. A `kind == 5` (turret) or `kind == 6` (light) `EntityRecord`'s position differs from that
-//!    same fixture's position at tick 0. This crate's own [`ddai_physics::world::FixtureRecord`]
-//!    *does* now track mover-tile movement (`World`'s `fixture_tick`, matching `CDragger`/
-//!    `CGun`/`CLight::Tick()`'s shared movement shape — review round 1, finding F1's dragger
-//!    note), so this condition is stricter than it strictly needs to be for a fixture that
-//!    merely *moves*: kept anyway, as a coarse, deliberately conservative catch-all for anything
-//!    about a moving turret/light this crate's still-static `range`/`light_angular_speed` cut
-//!    inputs (conditions 5/6 below) wouldn't otherwise notice.
-//! 4. Any character's `weapon_got_mask` bit 5 (`WEAPON_NINJA`) becomes newly set (a ninja pickup
-//!    consumed — `GiveNinja`'s field-set effect is Stage A, but `HandleNinja`'s movement
-//!    override, which starts affecting `m_Vel` the *same* tick a pickup is consumed — see
-//!    `entities/pickup.cpp`'s tick order relative to `entities/character.cpp` — is Stage B).
-//! 5. Any *alive* character is within `sv_plasma_range` of a `kind == 5` (turret) fixture (at
-//!    that fixture's tick-0 position — condition 3 already cuts before this one could ever see a
-//!    stale position for a turret that actually moved) **and** has a clear line of sight to it:
-//!    `CGun::Fire()`'s own necessary-but-not-sufficient firing precondition
-//!    (`GameServer()->m_World.FindEntities(m_Pos, g_Config.m_SvPlasmaRange, ...,
-//!    ENTTYPE_CHARACTER)`, `gun.cpp:53-54`, and `IsReachable = !IntersectLine(m_Pos,
-//!    pTarget->m_Pos, ...)`, `gun.cpp:92`). `CPlasma` isn't in the entity dump at all (see below),
-//!    so this crate cannot know whether a turret actually *fired* this tick (that also needs the
-//!    per-team/per-solo `sv_plasma_per_sec` rate limit and target-team-size bookkeeping,
-//!    `gun.cpp:56-121` — not modeled) — this condition is a deliberately conservative
-//!    over-approximation of "a plasma shot could have been fired at someone this tick", cutting
-//!    at least as early as any tick a plasma shot's un-modeled freeze/damage could actually
-//!    diverge the trace, at the cost of also cutting some ticks where the rate limit alone would
-//!    have prevented a real shot. `sv_plasma_range`'s value itself isn't in the dump either (a
-//!    config variable, not a per-entity field); `SV_PLASMA_RANGE_DEFAULT` below hardcodes its
-//!    default (`700`, `config_variables.h:689`), matching [`ddai_physics::world::FixtureRecord::range`]'s
-//!    own hardcoded default for `kind == 5` — no scenario in this corpus overrides it.
-//! 6. Any *alive* character's proximity radius (`28.0`) touches a *static* (`light_angular_speed
-//!    == 0.0` — a non-rotating `ENTITY_LASER_STOP` light; a rotating light isn't covered, see
-//!    below) `kind == 6` fixture's own beam — `CLight::Tick()`'s unconditional per-tick
-//!    `HitCharacter()` call (`light.cpp:86-97`), via `IntersectedCharacters(m_Pos, m_To, 0.0f,
-//!    nullptr)` (`light.cpp:34`). Computed from *this tick's own* [`World::fixtures`] position
-//!    (not a frozen tick-0 snapshot, unlike condition 3) and its own `light_direction`/
-//!    `light_length`, clipped against the map exactly like `CLight::Step()`'s own
-//!    `IntersectNoLaser(m_Pos, NextPosition, &m_To, nullptr)` (`light.cpp:76-78`) — this is
-//!    exact for a static light (its beam geometry never changes), not conservative the way
-//!    condition 5 is. A *rotating* light (`light_angular_speed != 0.0`) isn't checked at all:
-//!    the entity dump only gives `m_AngularSpeed`/`m_Length`/`m_Speed` (the light's own
-//!    *configuration*), never its accumulated `m_Rotation`/`m_CurveLength` (see
-//!    `docs/formats.md` §11.2's table) or `m_EvalTick`, so this crate has no way to reconstruct
-//!    a rotating light's current beam endpoint from the dump alone — recorded as further Oracle
-//!    B debt alongside `CPlasma` (item 5).
+//! - every character's input-independent state (`compare_character`: the 28 core fields and the
+//!   54 DDRace fields, `docs/formats.md` §11.3);
+//! - `GlobalTickFields.switches` (per switch, per dumped team);
+//! - every live projectile, in dump order;
+//! - the whole `ENTTYPE_LASER` entity list **in list order**: lasers (kind 1), dragger beams
+//!   (kind 4, their `owner` = the dragged client from trace version 3 on), turret shots
+//!   (kind 7, version 3 only), then the static fixtures — the positions of doors (kind 2),
+//!   draggers (3), turrets (5) and lights (6), plus a light's `m_Length`/`m_AngularSpeed`/
+//!   `m_Speed` which the dump carries (the last one flips sign at run time);
+//! - each character's `died_this_tick`/`respawned_this_tick`.
 //!
-//! Conditions 1-4 and 6 are either exact or a *conservative superset* of "a laser/dragger-beam-
-//! shot/light-touch happened" (the task spec's own phrasing); condition 5 (turret) is the one
-//! genuine approximation left, since `CPlasma` isn't in the entity dump at all (see
-//! `docs/formats.md` §11.2's note that only 6 of the 7 classes sharing `ENTTYPE_LASER` are ever
-//! recovered by the harness's `dynamic_cast` chain) and a rotating light isn't covered (see
-//! condition 6 above). Coverage is bounded honestly by whatever mismatch (if any) production
-//! reaches once a cut is hit — see the per-map coverage report this test prints, and this
-//! crate's `BUILD REPORT` for how that turned out empirically on the full corpus (`blmapV5_ddpp`'s
-//! many turret/dragger fixtures are exactly why its own Stage-A-comparable share is expected to
-//! be low — Oracle B debt: stage B will add `CPlasma` to the dump as its own kind, and enough of
-//! a rotating light's live state to reconstruct its beam, and regenerate the affected traces,
-//! letting conditions 5 and 6's rotating-light gap both be replaced with exact ones).
+//! # The retired Stage A cut rule (diagnostic only)
+//!
+//! To keep reporting "how many character-ticks were previously beyond the cut" the old rule is
+//! still evaluated against the *reference* trace of every tick (never stopping anything): the
+//! first tick at which any of the following holds is recorded as `cut_tick`, and every compared
+//! tick from there on counts as `previously_cut`:
+//!
+//! 1. an `EntityRecord` with `kind == 1` (`CLaser`) is present;
+//! 2. an `EntityRecord` with `kind == 4` (a dragger beam) is present;
+//! 3. a `kind == 5`/`6` record's position differs from that fixture's tick-0 position;
+//! 4. a character's `weapon_got_mask` ninja bit (5) becomes newly set;
+//! 5. an alive character is within `sv_plasma_range` (+ its own radius `28`) of a turret with a
+//!    clear line of sight (`CGun::Fire`'s necessary firing precondition, `gun.cpp:53,92`);
+//! 6. an alive character's radius touches a *static* (`m_AngularSpeed == 0`) light's beam.
+//!
+//! The rule is identical to Stage A's (`docs/formats.md` §17); only its consequence changed.
 
 use ddai_physics::core::{PlayerInput, WEAPON_GRENADE, WEAPON_LASER, WEAPON_SHOTGUN};
 use ddai_physics::vmath::{self, Vec2};
-use ddai_physics::world::{self, Player, TickInput, World};
+use ddai_physics::world::{self, Fixture, LaserSlot, Player, TickInput, World};
 use std::path::{Path, PathBuf};
 
 #[path = "common/oracle_b_format.rs"]
@@ -80,6 +50,20 @@ use oracle_b_format::{ScenarioV3, TraceBReader, metadata_seed};
 fn corpus_dir() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
     PathBuf::from(home).join("aiddnet/data/traces/oracle-b/v1")
+}
+
+/// The stage-B corpus (task 1.6 stage B): traces regenerated or crafted with the trace-b v3 harness
+/// (`tools/ddnet-oracle`, `docs/formats.md` §11/§12) — maps with turrets, plus targeted scenarios
+/// for lasers/shotgun bounces with tele tiles, ninja, lights, draggers and turrets. Never overlaps
+/// with `v1`.
+fn stage_b_corpus_dir() -> PathBuf {
+    // `DDAI_STAGE_B_DIR` redirects the test at a scratch corpus while a scenario family is being
+    // developed; unset, it is the real stage-B corpus.
+    if let Some(dir) = std::env::var_os("DDAI_STAGE_B_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").expect("HOME must be set");
+    PathBuf::from(home).join("aiddnet/data/traces/oracle-b/v2-stageb")
 }
 
 fn resolve_rawmap_path(scn_path: &Path, rawmap_path_in_file: &str) -> PathBuf {
@@ -179,19 +163,22 @@ fn cut_signal(
     // extended fixture-position comparison, `compare_extended`), so this tick's *own* fixture
     // position is available and correct — no need to fall back to a frozen tick-0 snapshot the
     // way condition 3 (a coarser, position-only proxy) still does.
-    for f in world
-        .fixtures
-        .iter()
-        .filter(|f| f.kind == 6 && f.light_angular_speed == 0.0)
-    {
-        let raw_endpoint = f.pos + f.light_direction * (f.light_length as f32);
-        let to = collision.intersect_no_laser(f.pos, raw_endpoint).collision;
+    for l in world.fixtures.iter().filter_map(|f| match f {
+        Fixture::Light(l) if l.angular_speed == 0.0 => Some(l),
+        _ => None,
+    }) {
+        // The Stage A rule's geometry: the light's fixed direction `(sin(rot), cos(rot))` times its
+        // configured length (a static light never rotates, so `rotation` is its construction
+        // value).
+        let direction = Vec2::new(l.rotation.sin(), l.rotation.cos());
+        let raw_endpoint = l.pos + direction * (l.length as f32);
+        let to = collision.intersect_no_laser(l.pos, raw_endpoint).collision;
         for row in &tick.characters {
             if row.ddrace.alive == 0 {
                 continue;
             }
             let char_pos = Vec2::new(row.core.pos_x, row.core.pos_y);
-            let Some(closest) = vmath::closest_point_on_line(f.pos, to, char_pos) else {
+            let Some(closest) = vmath::closest_point_on_line(l.pos, to, char_pos) else {
                 continue;
             };
             // `IntersectedCharacters(m_Pos, m_To, 0.0f, nullptr)` (`light.cpp:34`): a `0`-radius
@@ -215,11 +202,101 @@ fn cut_signal(
 
 struct RunResult {
     compared_ticks: u64,
+    /// Of `compared_ticks`: character-ticks at or after the retired Stage A cut (see the module
+    /// doc comment) — i.e. ticks Stage A could not compare.
+    previously_cut: u64,
     total_ticks: u64,
     character_count: u64,
     mismatch: Option<String>,
     cut_reason: Option<&'static str>,
     cut_tick: Option<i32>,
+    stats: MechanicStats,
+}
+
+/// How much of each stage-B mechanic a trace actually exercises, counted from the *reference*
+/// dump (so a mechanic the port wrongly never produces is still counted).
+#[derive(Default, Clone, Copy)]
+struct MechanicStats {
+    /// Ticks with at least one `CLaser` (rifle or shotgun) alive.
+    laser_ticks: u64,
+    /// Sum over ticks of live `CLaser`s.
+    laser_records: u64,
+    /// Highest `m_Bounces` seen on a laser.
+    max_bounces: i32,
+    /// Ticks with at least one dragger beam alive.
+    beam_ticks: u64,
+    /// Sum over ticks of live dragger beams.
+    beam_records: u64,
+    /// Ticks with at least one turret shot (kind 7, trace version 3 only) alive.
+    plasma_ticks: u64,
+    /// Character-ticks with ninja as the active weapon.
+    ninja_ticks: u64,
+    /// Character-ticks in the ninja dash (`m_CurrentMoveTime > 0`).
+    ninja_dash_ticks: u64,
+    /// Ticks (counted on *our* simulation, which the comparison proves equal) with a laser that has
+    /// just been teleported by a `TILE_TELEINWEAPON` tile and not yet continued (`m_WasTele`).
+    tele_laser_ticks: u64,
+    /// Ticks with a spent rifle laser whose owner holds a telegun laser and whose teleport was not
+    /// cancelled (`HasTelegunLaser`, `!m_TeleportCancelled`): the shots that arm `m_TeleGunTeleport`.
+    telegun_laser_ticks: u64,
+}
+
+impl MechanicStats {
+    fn add(&mut self, o: &MechanicStats) {
+        self.laser_ticks += o.laser_ticks;
+        self.laser_records += o.laser_records;
+        self.max_bounces = self.max_bounces.max(o.max_bounces);
+        self.beam_ticks += o.beam_ticks;
+        self.beam_records += o.beam_records;
+        self.plasma_ticks += o.plasma_ticks;
+        self.ninja_ticks += o.ninja_ticks;
+        self.ninja_dash_ticks += o.ninja_dash_ticks;
+        self.tele_laser_ticks += o.tele_laser_ticks;
+        self.telegun_laser_ticks += o.telegun_laser_ticks;
+    }
+
+    fn observe_ours(&mut self, world: &World<f32>) {
+        let (mut tele, mut telegun) = (false, false);
+        for slot in &world.lasers {
+            if let LaserSlot::Laser(l) = slot {
+                tele |= l.was_tele;
+                telegun |= l.weapon_type == 4
+                    && l.energy <= 0.0
+                    && !l.teleport_cancelled
+                    && world.cores.get(l.owner as u8).is_some_and(|c| c.has_telegun_laser);
+            }
+        }
+        self.tele_laser_ticks += u64::from(tele);
+        self.telegun_laser_ticks += u64::from(telegun);
+    }
+
+    fn observe(&mut self, tick: &oracle_b_format::TraceBTick) {
+        let (mut lasers, mut beams, mut plasma) = (0u64, 0u64, 0u64);
+        for e in &tick.entities {
+            match e.kind {
+                1 => {
+                    lasers += 1;
+                    self.max_bounces = self.max_bounces.max(e.extra);
+                }
+                4 => beams += 1,
+                7 => plasma += 1,
+                _ => {}
+            }
+        }
+        self.laser_ticks += u64::from(lasers > 0);
+        self.laser_records += lasers;
+        self.beam_ticks += u64::from(beams > 0);
+        self.beam_records += beams;
+        self.plasma_ticks += u64::from(plasma > 0);
+        for row in &tick.characters {
+            if row.ddrace.alive != 0 && row.core.active_weapon == 5 {
+                self.ninja_ticks += 1;
+                if row.ddrace.ninja_current_move_time > 0 {
+                    self.ninja_dash_ticks += 1;
+                }
+            }
+        }
+    }
 }
 
 /// One scenario character entry as `run_trace` needs it: `(id, spawn_x, spawn_y, team)`.
@@ -300,6 +377,8 @@ fn run_trace(trb_path: &Path) -> RunResult {
     let mut prev_ninja_mask = std::collections::HashMap::new();
     let mut death_tracking = DeathTracking::new(trace.character_ids.len());
     let mut compared_ticks: u64 = 0;
+    let mut previously_cut: u64 = 0;
+    let mut stats = MechanicStats::default();
     let mut mismatch: Option<String> = None;
     let mut cut_reason: Option<&'static str> = None;
     let mut cut_tick: Option<i32> = None;
@@ -322,17 +401,20 @@ fn run_trace(trb_path: &Path) -> RunResult {
         }
 
         if mismatch.is_none() {
-            if let Some(reason) = cut_signal(
-                &reference,
-                &tick0_fixtures,
-                &mut prev_ninja_mask,
-                &trace.character_ids,
-                &world,
-            ) {
+            if cut_reason.is_none()
+                && let Some(reason) = cut_signal(
+                    &reference,
+                    &tick0_fixtures,
+                    &mut prev_ninja_mask,
+                    &trace.character_ids,
+                    &world,
+                )
+            {
+                // Diagnostic only (module doc comment): record the retired cut, keep comparing.
                 cut_reason = Some(reason);
                 cut_tick = Some(tick_index);
-                break;
             }
+            stats.observe(&reference);
 
             let inputs: Vec<TickInput> = scenario_characters
                 .iter()
@@ -357,10 +439,16 @@ fn run_trace(trb_path: &Path) -> RunResult {
             let mut sorted = inputs.clone();
             sorted.sort_by_key(|ti| ti.id);
             world.step(&sorted);
+            stats.observe_ours(&world);
             assert_eq!(
                 world.tick, reference.game_tick,
                 "game tick counter diverged at index {tick_index}"
             );
+            if let Some((from, to)) = debug_window()
+                && (from..=to).contains(&tick_index)
+            {
+                debug_print_tick(&world, &reference, tick_index, &scenario_characters);
+            }
             for (&(id, ..), row) in scenario_characters.iter().zip(reference.characters.iter()) {
                 if let Some(reason) = compare_character(&world, id as i32, row) {
                     mismatch = Some(format!(
@@ -377,6 +465,7 @@ fn run_trace(trb_path: &Path) -> RunResult {
                     &trace.switch_team_ids,
                     trace.switch_highest_number,
                     &trace.character_ids,
+                    trace.version,
                     &mut death_tracking,
                 )
             {
@@ -387,6 +476,9 @@ fn run_trace(trb_path: &Path) -> RunResult {
             }
             if mismatch.is_none() {
                 compared_ticks += character_count;
+                if cut_reason.is_some() {
+                    previously_cut += character_count;
+                }
             }
         }
         tick_index += 1;
@@ -394,11 +486,13 @@ fn run_trace(trb_path: &Path) -> RunResult {
 
     RunResult {
         compared_ticks,
+        previously_cut,
         total_ticks,
         character_count,
         mismatch,
         cut_reason,
         cut_tick,
+        stats,
     }
 }
 
@@ -495,6 +589,8 @@ fn run_recipe_trace(trb_path: &Path) -> RunResult {
     let mut prev_ninja_mask = std::collections::HashMap::new();
     let mut death_tracking = DeathTracking::new(trace.character_ids.len());
     let mut compared_ticks: u64 = 0;
+    let mut previously_cut: u64 = 0;
+    let mut stats = MechanicStats::default();
     let mut mismatch: Option<String> = None;
     let mut cut_reason: Option<&'static str> = None;
     let mut cut_tick: Option<i32> = None;
@@ -517,17 +613,20 @@ fn run_recipe_trace(trb_path: &Path) -> RunResult {
         }
 
         if mismatch.is_none() {
-            if let Some(reason) = cut_signal(
-                &reference,
-                &tick0_fixtures,
-                &mut prev_ninja_mask,
-                &trace.character_ids,
-                &world,
-            ) {
+            if cut_reason.is_none()
+                && let Some(reason) = cut_signal(
+                    &reference,
+                    &tick0_fixtures,
+                    &mut prev_ninja_mask,
+                    &trace.character_ids,
+                    &world,
+                )
+            {
+                // Diagnostic only (module doc comment): record the retired cut, keep comparing.
                 cut_reason = Some(reason);
                 cut_tick = Some(tick_index);
-                break;
             }
+            stats.observe(&reference);
 
             let scenario_inputs = &scenario.inputs[tick_index as usize];
             let mut resolved = Vec::with_capacity(scenario.characters.len());
@@ -558,6 +657,7 @@ fn run_recipe_trace(trb_path: &Path) -> RunResult {
             let mut sorted = inputs.clone();
             sorted.sort_by_key(|ti| ti.id);
             world.step(&sorted);
+            stats.observe_ours(&world);
             assert_eq!(
                 world.tick, reference.game_tick,
                 "game tick counter diverged at index {tick_index}"
@@ -585,6 +685,7 @@ fn run_recipe_trace(trb_path: &Path) -> RunResult {
                     &trace.switch_team_ids,
                     trace.switch_highest_number,
                     &trace.character_ids,
+                    trace.version,
                     &mut death_tracking,
                 )
             {
@@ -595,6 +696,9 @@ fn run_recipe_trace(trb_path: &Path) -> RunResult {
             }
             if mismatch.is_none() {
                 compared_ticks += character_count;
+                if cut_reason.is_some() {
+                    previously_cut += character_count;
+                }
             }
         }
         tick_index += 1;
@@ -602,11 +706,13 @@ fn run_recipe_trace(trb_path: &Path) -> RunResult {
 
     RunResult {
         compared_ticks,
+        previously_cut,
         total_ticks,
         character_count,
         mismatch,
         cut_reason,
         cut_tick,
+        stats,
     }
 }
 
@@ -647,6 +753,7 @@ fn compare_extended(
     switch_team_ids: &[i32],
     switch_highest_number: u32,
     character_ids: &[u32],
+    trace_version: u32,
     tracking: &mut DeathTracking,
 ) -> Option<String> {
     for (ti, &team) in switch_team_ids.iter().enumerate() {
@@ -702,39 +809,20 @@ fn compare_extended(
         }
     }
 
-    let mut theirs_fixtures: Vec<(i32, u32, u32)> = reference
-        .entities
-        .iter()
-        .filter(|e| matches!(e.kind, 2 | 3 | 5 | 6))
-        .map(|e| (e.kind, e.pos_x.to_bits(), e.pos_y.to_bits()))
-        .collect();
-    let mut ours_fixtures: Vec<(i32, u32, u32)> = world
-        .doors
-        .iter()
-        .map(|d| (2, d.pos.x.to_bits(), d.pos.y.to_bits()))
-        .chain(
-            world
-                .fixtures
-                .iter()
-                .map(|f| (f.kind, f.pos.x.to_bits(), f.pos.y.to_bits())),
-        )
-        .collect();
-    theirs_fixtures.sort();
-    ours_fixtures.sort();
-    if theirs_fixtures != ours_fixtures {
-        return Some(format!(
-            "fixture multiset differs: ours {} theirs {}",
-            ours_fixtures.len(),
-            theirs_fixtures.len()
-        ));
+    if let Some(reason) = compare_laser_list(world, reference, trace_version) {
+        return Some(reason);
     }
 
     for (i, (&id, row)) in character_ids.iter().zip(reference.characters.iter()).enumerate() {
         let alive = world.characters[id as usize].is_some_and(|c| c.alive);
         let die_tick = world.players[id as usize].map(|p| p.die_tick).unwrap_or(0);
         let spawn_tick = world.characters[id as usize].map(|c| c.spawn_tick).unwrap_or(-1);
-        let died = (tracking.prev_alive[i] && !alive) || (alive && die_tick != tracking.rec_die_tick[i]);
-        let respawned = (!tracking.prev_alive[i] && alive) || (alive && spawn_tick == reference.game_tick);
+        // The harness's `Tick > 0` guards (`oracle_server.cpp`'s `DiedThisTickReal`/
+        // `RespawnedThisTickReal`): the very first tick (game tick 1) never reports the same-tick
+        // forms, even when a kill bit at tick 0 really did kill and respawn the tee.
+        let not_first = reference.game_tick > 1;
+        let died = (tracking.prev_alive[i] && !alive) || (not_first && alive && die_tick != tracking.rec_die_tick[i]);
+        let respawned = (!tracking.prev_alive[i] && alive) || (not_first && alive && spawn_tick == reference.game_tick);
         let theirs = (row.ddrace.died_this_tick != 0, row.ddrace.respawned_this_tick != 0);
         if (died, respawned) != theirs {
             return Some(format!(
@@ -747,6 +835,142 @@ fn compare_extended(
         tracking.prev_alive[i] = alive;
     }
 
+    None
+}
+
+/// The `ENTTYPE_LASER` entity list (everything in the dump that is not a projectile), compared in
+/// the reference's own order: dynamic entities first (newest first — `World::lasers` is stored
+/// oldest first, so it is walked back to front), then the static fixtures. Doors, draggers,
+/// turrets and lights are compared per kind in list order (their cross-kind interleaving is a
+/// map-scan artefact nothing depends on: doors never tick and the ticking fixtures keep their own
+/// relative order, which the per-kind comparison pins).
+///
+/// Trace version 2 (the v1 corpus) predates two dump fields, so for it: dragger beams are
+/// compared without their `owner` (the dump carried `-1`) and turret shots (kind 7), which that
+/// dump never listed, are left out of our side.
+fn compare_laser_list(
+    world: &World<f32>,
+    reference: &oracle_b_format::TraceBTick,
+    trace_version: u32,
+) -> Option<String> {
+    let v3 = trace_version >= 3;
+    let theirs_dynamic: Vec<_> = reference
+        .entities
+        .iter()
+        .filter(|e| matches!(e.kind, 1 | 4 | 7))
+        .collect();
+    let ours_dynamic: Vec<&LaserSlot<f32>> = world
+        .lasers
+        .iter()
+        .rev()
+        .filter(|l| v3 || !matches!(l, LaserSlot::Plasma(_)))
+        .collect();
+    if theirs_dynamic.len() != ours_dynamic.len() {
+        return Some(format!(
+            "laser-list length (lasers/beams/plasma): ours={} theirs={}",
+            ours_dynamic.len(),
+            theirs_dynamic.len()
+        ));
+    }
+    for (k, (e, slot)) in theirs_dynamic.iter().zip(ours_dynamic.iter()).enumerate() {
+        let theirs = (
+            e.kind,
+            e.owner_client_id,
+            e.weapon_type,
+            e.pos_x.to_bits(),
+            e.pos_y.to_bits(),
+            e.dir_x.to_bits(),
+            e.dir_y.to_bits(),
+            e.start_tick,
+            e.extra,
+        );
+        let ours = match slot {
+            LaserSlot::Laser(l) => (
+                1,
+                l.owner,
+                l.weapon_type,
+                l.pos.x.to_bits(),
+                l.pos.y.to_bits(),
+                l.dir.x.to_bits(),
+                l.dir.y.to_bits(),
+                l.eval_tick,
+                l.bounces,
+            ),
+            LaserSlot::Beam(b) => (
+                4,
+                if v3 { b.for_client } else { -1 },
+                0,
+                b.pos.x.to_bits(),
+                b.pos.y.to_bits(),
+                0,
+                0,
+                0,
+                0,
+            ),
+            LaserSlot::Plasma(p) => (
+                7,
+                p.for_client,
+                i32::from(p.explosive) | (i32::from(p.freeze) << 1),
+                p.pos.x.to_bits(),
+                p.pos.y.to_bits(),
+                p.core.x.to_bits(),
+                p.core.y.to_bits(),
+                p.eval_tick,
+                p.life_time,
+            ),
+        };
+        if ours != theirs {
+            return Some(format!("laser-list entry #{k}: ours={ours:?} theirs={theirs:?}"));
+        }
+    }
+
+    let theirs_of = |kind: i32| -> Vec<&oracle_b_format::EntityRecord> {
+        reference.entities.iter().filter(|e| e.kind == kind).collect()
+    };
+    let theirs_doors = theirs_of(2);
+    if theirs_doors.len() != world.doors.len()
+        || theirs_doors
+            .iter()
+            .zip(world.doors.iter())
+            .any(|(e, d)| (e.pos_x.to_bits(), e.pos_y.to_bits()) != (d.pos.x.to_bits(), d.pos.y.to_bits()))
+    {
+        return Some(format!(
+            "door positions differ (ours {} theirs {})",
+            world.doors.len(),
+            theirs_doors.len()
+        ));
+    }
+    for kind in [3, 5, 6] {
+        let theirs = theirs_of(kind);
+        let ours: Vec<&Fixture<f32>> = world.fixtures.iter().filter(|f| f.dump_kind() == kind).collect();
+        if theirs.len() != ours.len() {
+            return Some(format!(
+                "kind {kind} fixture count: ours={} theirs={}",
+                ours.len(),
+                theirs.len()
+            ));
+        }
+        for (k, (e, f)) in theirs.iter().zip(ours.iter()).enumerate() {
+            let pos = f.pos();
+            if (e.pos_x.to_bits(), e.pos_y.to_bits()) != (pos.x.to_bits(), pos.y.to_bits()) {
+                return Some(format!(
+                    "kind {kind} fixture #{k} position: ours=({}, {}) theirs=({}, {})",
+                    pos.x, pos.y, e.pos_x, e.pos_y
+                ));
+            }
+            if let Fixture::Light(l) = f {
+                // The dump's `weapon_type` is `m_Length`, `dir_x` is `m_AngularSpeed`, `extra`
+                // is `m_Speed` (`docs/formats.md` §11.2).
+                let ours = (l.length, l.angular_speed.to_bits(), l.speed);
+                let theirs = (e.weapon_type, e.dir_x.to_bits(), e.extra);
+                if ours != theirs {
+                    return Some(format!(
+                        "light #{k} length/angular_speed/speed: ours={ours:?} theirs={theirs:?}"
+                    ));
+                }
+            }
+        }
+    }
     None
 }
 
@@ -946,9 +1170,68 @@ fn compare_character(world: &World<f32>, id: i32, row: &oracle_b_format::Charact
     None
 }
 
+/// `DDAI_DEBUG_TICKS=from-to` makes [`run_trace`] print, for those tick indices, a one-line
+/// side-by-side of our state and the reference's for every character plus our `lasers`/`fixtures`
+/// summary — the tool for chasing a mismatch the one-line report doesn't explain.
+fn debug_window() -> Option<(i32, i32)> {
+    let v = std::env::var("DDAI_DEBUG_TICKS").ok()?;
+    let (a, b) = v.split_once('-')?;
+    Some((a.parse().ok()?, b.parse().ok()?))
+}
+
+fn debug_print_tick(
+    world: &World<f32>,
+    reference: &oracle_b_format::TraceBTick,
+    tick_index: i32,
+    scenario_characters: &[ScenarioCharacter],
+) {
+    for (&(id, ..), row) in scenario_characters.iter().zip(reference.characters.iter()) {
+        let Some(slot) = world.cores.slot_of(id as u8) else {
+            continue;
+        };
+        let c = world.cores.core_at(slot);
+        let ch = world.characters[id as usize].unwrap();
+        eprintln!(
+            "[dbg t{tick_index} c{id}] ours: alive={} pos=({},{}) vel=({},{}) freeze={} w={} ninja(move={},dir=({},{}),old={}) hooked={} | theirs: alive={} pos=({},{}) vel=({},{}) freeze={} w={} ninja(move={},dir=({},{}),old={}) hooked={}",
+            u8::from(ch.alive),
+            c.pos.x,
+            c.pos.y,
+            c.vel.x,
+            c.vel.y,
+            ch.freeze_time,
+            c.active_weapon,
+            c.ninja.current_move_time,
+            c.ninja.activation_dir.x,
+            c.ninja.activation_dir.y,
+            c.ninja.old_vel_amount,
+            c.hooked_player(),
+            row.ddrace.alive,
+            row.core.pos_x,
+            row.core.pos_y,
+            row.core.vel_x,
+            row.core.vel_y,
+            row.ddrace.freeze_time,
+            row.core.active_weapon,
+            row.ddrace.ninja_current_move_time,
+            row.ddrace.ninja_activation_dir_x,
+            row.ddrace.ninja_activation_dir_y,
+            row.ddrace.ninja_old_vel_amount,
+            row.core.hooked_player,
+        );
+    }
+    for e in &reference.entities {
+        if matches!(e.kind, 1 | 4 | 7) {
+            eprintln!(
+                "[dbg t{tick_index}]   ref entity kind={} owner={} pos=({},{}) extra={}",
+                e.kind, e.owner_client_id, e.pos_x, e.pos_y, e.extra
+            );
+        }
+    }
+}
+
 fn assert_run_result(name: &str, result: &RunResult) {
     eprintln!(
-        "{name}: compared {}/{} character-ticks ({:.1}%), cut={:?} at tick {:?}, mismatch={:?}",
+        "{name}: compared {}/{} character-ticks ({:.1}%), previously-cut={:?} at tick {:?}, mismatch={:?}",
         result.compared_ticks,
         result.total_ticks * result.character_count,
         100.0 * result.compared_ticks as f64 / (result.total_ticks * result.character_count).max(1) as f64,
@@ -1003,24 +1286,25 @@ fn replays_one_sample_recipe_trace() {
     assert_run_result("recipe_arena_seed20001", &result);
 }
 
-/// Per-map/per-recipe totals: `compared` (matched, Stage-A-comparable ticks), `lost_to_cut`
-/// (character-ticks past the Stage-B cut rule this file's own module doc comment defines — not a
-/// defect, an intentionally-out-of-scope mechanic), `lost_to_mismatch` (character-ticks past a
-/// genuine mismatch — a defect), `total` (`compared + lost_to_cut + lost_to_mismatch`, always).
-/// Coordinator follow-up item 2: separates "coverage given up to the Stage-B cut" from "coverage
-/// lost to a bug", which a single `compared/total` percentage conflates.
+/// Per-map/per-recipe totals: `compared` (matched character-ticks — with no cut anymore this is
+/// every tick of a trace until a mismatch), `previously_cut` (of those, the character-ticks the
+/// retired Stage A cut rule — see the module doc comment — would have skipped), `lost_to_mismatch`
+/// (character-ticks past a genuine mismatch — a defect) and `total` (`compared + lost_to_mismatch`,
+/// always).
 #[derive(Default, Clone, Copy)]
 struct CoverageTotals {
     compared: u64,
-    lost_to_cut: u64,
+    previously_cut: u64,
     lost_to_mismatch: u64,
     total: u64,
+    stats: MechanicStats,
 }
 
 fn run_corpus_subset(entries: &[PathBuf]) {
     let mut per_map: std::collections::BTreeMap<String, CoverageTotals> = std::collections::BTreeMap::new();
     let mut failures = Vec::new();
     let mut grand_total = CoverageTotals::default();
+    let quiet = std::env::var_os("DDAI_PARITY_QUIET").is_some();
 
     for path in entries {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -1033,64 +1317,58 @@ fn run_corpus_subset(entries: &[PathBuf]) {
             run_recipe_trace(path)
         };
         let total_possible = result.total_ticks * result.character_count;
-        let lost = total_possible - result.compared_ticks;
-        // A trace stops for exactly one reason (cut *or* mismatch, whichever the tick loop hits
-        // first — `run_trace`/`run_recipe_trace` never set both): attribute every ticks it never
-        // got to compare to whichever one actually happened, not both.
-        let (lost_to_cut, lost_to_mismatch) = match (result.cut_reason, &result.mismatch) {
-            (Some(_), None) => (lost, 0),
-            (None, Some(_)) => (0, lost),
-            (None, None) => (0, 0),
-            (Some(_), Some(_)) => unreachable!("run_trace/run_recipe_trace never set both cut_reason and mismatch"),
-        };
+        let lost_to_mismatch = total_possible - result.compared_ticks;
 
-        let entry = per_map.entry(map_key).or_default();
-        entry.compared += result.compared_ticks;
-        entry.lost_to_cut += lost_to_cut;
-        entry.lost_to_mismatch += lost_to_mismatch;
-        entry.total += total_possible;
-        grand_total.compared += result.compared_ticks;
-        grand_total.lost_to_cut += lost_to_cut;
-        grand_total.lost_to_mismatch += lost_to_mismatch;
-        grand_total.total += total_possible;
+        for t in [per_map.entry(map_key).or_default(), &mut grand_total] {
+            t.compared += result.compared_ticks;
+            t.previously_cut += result.previously_cut;
+            t.lost_to_mismatch += lost_to_mismatch;
+            t.total += total_possible;
+            t.stats.add(&result.stats);
+        }
 
-        eprintln!(
-            "{name}: compared {}/{total_possible} ({:.1}%), cut={:?}@{:?}, mismatch={:?}",
-            result.compared_ticks,
-            100.0 * result.compared_ticks as f64 / total_possible.max(1) as f64,
-            result.cut_reason,
-            result.cut_tick,
-            result.mismatch
-        );
+        if !quiet || result.mismatch.is_some() {
+            eprintln!(
+                "{name}: compared {}/{total_possible} ({:.1}%), previously beyond the cut {} (cut={:?}@{:?}), mismatch={:?}",
+                result.compared_ticks,
+                100.0 * result.compared_ticks as f64 / total_possible.max(1) as f64,
+                result.previously_cut,
+                result.cut_reason,
+                result.cut_tick,
+                result.mismatch
+            );
+        }
         if let Some(m) = result.mismatch {
             failures.push(format!("{name}: {m}"));
         }
     }
 
-    eprintln!("=== per-map Stage A coverage (compared / lost-to-cut / lost-to-mismatch) ===");
-    for (map, t) in &per_map {
+    eprintln!("=== per-map parity (compared / previously beyond the Stage A cut / lost to mismatch) ===");
+    let line = |label: &str, t: &CoverageTotals| {
         eprintln!(
-            "{map}: compared {}/{} ({:.1}%), lost-to-cut {} ({:.1}%), lost-to-mismatch {} ({:.1}%)",
+            "{label}: compared {}/{} ({:.1}%), previously-beyond-cut {} ({:.1}%), lost-to-mismatch {}; \
+             laser-ticks {} (max bounces {}, tele-laser-ticks {}, telegun-laser-ticks {}), beam-ticks {} ({} beam-records), plasma-ticks {}, ninja-char-ticks {} (dash {})",
             t.compared,
             t.total,
             100.0 * t.compared as f64 / t.total.max(1) as f64,
-            t.lost_to_cut,
-            100.0 * t.lost_to_cut as f64 / t.total.max(1) as f64,
+            t.previously_cut,
+            100.0 * t.previously_cut as f64 / t.total.max(1) as f64,
             t.lost_to_mismatch,
-            100.0 * t.lost_to_mismatch as f64 / t.total.max(1) as f64,
+            t.stats.laser_ticks,
+            t.stats.max_bounces,
+            t.stats.tele_laser_ticks,
+            t.stats.telegun_laser_ticks,
+            t.stats.beam_ticks,
+            t.stats.beam_records,
+            t.stats.plasma_ticks,
+            t.stats.ninja_ticks,
+            t.stats.ninja_dash_ticks,
         );
+    };
+    for (map, t) in &per_map {
+        line(map, t);
     }
-    eprintln!(
-        "TOTAL: compared {}/{} ({:.1}%), lost-to-cut {} ({:.1}%), lost-to-mismatch {} ({:.1}%), across {} traces",
-        grand_total.compared,
-        grand_total.total,
-        100.0 * grand_total.compared as f64 / grand_total.total.max(1) as f64,
-        grand_total.lost_to_cut,
-        100.0 * grand_total.lost_to_cut as f64 / grand_total.total.max(1) as f64,
-        grand_total.lost_to_mismatch,
-        100.0 * grand_total.lost_to_mismatch as f64 / grand_total.total.max(1) as f64,
-        entries.len()
-    );
+    line(&format!("TOTAL across {} traces", entries.len()), &grand_total);
 
     assert!(
         failures.is_empty(),
@@ -1196,7 +1474,7 @@ fn replays_full_oracle_b_corpus() {
     assert!(dir.is_dir(), "{} not found", dir.display());
     // Every real-map trace (`.trb` + companion `.scn`) plus every synthetic-recipe trace
     // (`recipe_*.trb`, no companion — `run_recipe_trace` regenerates its scenario instead):
-    // the full 650-trace corpus, all of it now part of Stage A's scope (item 2).
+    // the full 650-trace corpus, compared over every tick (no cut).
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1208,6 +1486,24 @@ fn replays_full_oracle_b_corpus() {
                         .and_then(|n| n.to_str())
                         .is_some_and(|n| n.starts_with("recipe_")))
         })
+        .collect();
+    entries.sort();
+    assert!(!entries.is_empty(), "no .trb traces found under {}", dir.display());
+    run_corpus_subset(&entries);
+}
+
+/// Every `.trb` of the stage-B corpus (all of them have a companion `.scn` + rawmap; the crafted
+/// ones are replayed through the same scenario-v3 path as the real-map traces).
+#[test]
+#[ignore]
+fn replays_stage_b_corpus() {
+    let dir = stage_b_corpus_dir();
+    assert!(dir.is_dir(), "{} not found", dir.display());
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "trb") && p.with_extension("scn").is_file())
         .collect();
     entries.sort();
     assert!(!entries.is_empty(), "no .trb traces found under {}", dir.display());
