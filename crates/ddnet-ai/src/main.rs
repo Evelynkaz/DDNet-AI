@@ -13,6 +13,7 @@ mod fly_cmd;
 mod fly_watch;
 mod map_cmd;
 mod play_cmd;
+mod proxy_cmd;
 mod rec_cmd;
 mod record_cmd;
 mod servers_cmd;
@@ -67,6 +68,9 @@ enum Command {
     /// Read-only look at the DDNet master list (task 4.3): the block servers, their players, and which of
     /// them the bot may connect to. Opens no game connection.
     Servers(servers_cmd::ServersArgs),
+    /// Checks a SOCKS5 proxy (task 2.6): TCP connect, authentication, `UDP ASSOCIATE` and the relay address, and
+    /// nothing else: no datagram goes to any game server. Prints ok / UDP not supported / auth failed.
+    ProxyCheck(proxy_cmd::ProxyCheckArgs),
 }
 
 /// True in the opt-in **training-only build** (`tools/train-v3-build.sh`: `-C target-cpu=x86-64-v3`,
@@ -106,6 +110,7 @@ fn main() -> ExitCode {
         Some(Command::Rec(args)) => rec_cmd::run(args),
         Some(Command::Servers(args)) => servers_cmd::run(args),
         Some(Command::Clip(args)) => clip_cmd::run(args),
+        Some(Command::ProxyCheck(args)) => proxy_cmd::run(args),
     }
 }
 

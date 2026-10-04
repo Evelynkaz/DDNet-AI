@@ -80,9 +80,9 @@ impl std::str::FromStr for ServerArg {
 }
 
 /// Resolves `--server`: an address as given, or the restricted auto-pick over the master list (read-only).
-fn resolve_server(arg: &ServerArg, name: &str) -> Result<SocketAddr, String> {
+fn resolve_server(arg: &ServerArg, name: &str, live_servers: Option<&Path>) -> Result<SocketAddr, String> {
     let ServerArg::Addr(addr) = arg else {
-        let path = ddai_client::live_servers::LiveServers::default_path();
+        let path = live_servers.map_or_else(ddai_client::live_servers::LiveServers::default_path, Path::to_path_buf);
         let list = ddai_client::live_servers::LiveServers::load_or_empty(&path).map_err(|e| e.to_string())?;
         let local: SocketAddr = ddai_client::server_list::LOCAL_SERVER
             .parse()
@@ -121,6 +121,11 @@ pub struct PlayArgs {
     /// `<data-dir>/logs/play`). Defaults to `~/aiddnet/data`.
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
+    /// The live-server allow-list (`live-servers.toml`, D-067). Defaults to `~/aiddnet/data/live-servers.toml`.
+    /// A server's `proxy = "<name>"` entry makes the game's UDP go through the SOCKS5 proxy in
+    /// `<data-dir>/secrets/<name>-proxy.toml` (task 2.6, D-053 amendment); there is no other way to use a proxy.
+    #[arg(long)]
+    pub live_servers: Option<PathBuf>,
     /// Connection silence timeout, in seconds, before a lost connection is detected and a
     /// reconnect is attempted — defaults to the real DDNet client's own 100s
     /// (`conn_timeout`/`ddai_net::conn::DEFAULT_TIMEOUT`). Test/tooling knob: e2e scenario (d)
@@ -362,7 +367,7 @@ pub fn run(args: PlayArgs) -> ExitCode {
     // own local multi-bot e2e tests, which run several distinctly-named bots against one address
     // at once). D-016: never more than one bot under the same identity on a server, from either
     // command.
-    let server = match resolve_server(&args.server, &args.name) {
+    let server = match resolve_server(&args.server, &args.name, args.live_servers.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("--server: {e}");
@@ -382,7 +387,7 @@ pub fn run(args: PlayArgs) -> ExitCode {
         return crate::bot_cmd::run(&args, &data_dir, server);
     }
 
-    let config = ClientConfig {
+    let mut config = ClientConfig {
         name: args.name.clone(),
         cache_dir: data_dir.join("maps").join("cache"),
         timeout: args
@@ -398,6 +403,10 @@ pub fn run(args: PlayArgs) -> ExitCode {
         // here.
         ..ClientConfig::default()
     };
+    if let Err(e) = crate::proxy_cmd::prepare_client(&mut config, args.live_servers.as_deref(), server, &data_dir) {
+        eprintln!("refusing to connect: {e}");
+        return ExitCode::from(e.exit);
+    }
 
     // Review round 1, finding F8: graceful shutdown on SIGINT/SIGTERM (see `record_cmd`'s
     // identical handler for the full rationale — a bare `kill` here skips `client.disconnect()`,

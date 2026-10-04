@@ -395,7 +395,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
 
 /// The process exit code for how the driver ended (D-016/D-037/D-050): a kick or ban is 3, a join
 /// that never completed (watchdog, reconnect loop, attempts exhausted, reconnect budget, or the
-/// in-game reconnect cap) is 4, being moved to the spectators after having played is 3 like a kick, a
+/// in-game reconnect cap, or a SOCKS5 proxy's final refusal: 0x07, wrong password) is 4, being moved to the spectators after having played is 3 like a kick, a
 /// requested stop or no stop at all is 0, anything else (local errors, protocol violations, redirect
 /// loops) is 1. None of them is ever retried by the runner.
 pub fn exit_code_for(category: Option<GaveUpCategory>) -> u8 {
@@ -405,7 +405,8 @@ pub fn exit_code_for(category: Option<GaveUpCategory>) -> u8 {
             GaveUpCategory::HandshakeTimeout
             | GaveUpCategory::ReconnectLoop
             | GaveUpCategory::TooManyAttempts
-            | GaveUpCategory::ReconnectBudgetExhausted,
+            | GaveUpCategory::ReconnectBudgetExhausted
+            | GaveUpCategory::ProxyRefused,
         ) => EXIT_JOIN_FAILED,
         Some(GaveUpCategory::Requested) | None => EXIT_OK,
         Some(GaveUpCategory::ProtocolViolation | GaveUpCategory::RedirectLoop | GaveUpCategory::LocalError) => {
@@ -724,6 +725,7 @@ mod tests {
             GaveUpCategory::ReconnectLoop,
             GaveUpCategory::TooManyAttempts,
             GaveUpCategory::ReconnectBudgetExhausted,
+            GaveUpCategory::ProxyRefused,
         ] {
             assert_eq!(exit_code_for(Some(c)), 4, "{c:?}");
         }

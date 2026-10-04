@@ -38,8 +38,18 @@ fd-lock = "4.0.4"
 # `server_list` (task 4.3): the read-only master-list JSON parser.
 serde_json = "1"
 
+[features]
+# Exposes `socks5_testserver` (an in-process SOCKS5 server with a UDP relay and fault injection, loopback only)
+# to other crates' tests, same pattern as `ddai-map`'s `test-util`.
+test-util = []
+
 [dev-dependencies]
 tempfile = "3.14"
+# Task 2.6: the SOCKS5 UDP header parser is fuzzed with it (already in the tree via ddai-net/ddai-demo).
+proptest = "1"
+# Turns `test-util` on for this crate's own integration tests (`tests/socks5_client.rs`), so a plain
+# `cargo test -p ddai-client` runs them without `--features`.
+ddai-client = { path = ".", features = ["test-util"] }
 # Unlocks `ddai_map::testutil` (a tiny synthetic `.map` builder) for this crate's own tests, same
 # pattern `ddai-map` uses on itself — see that crate's Cargo.toml.
 ddai-map = { path = "../ddai-map", features = ["test-util"] }

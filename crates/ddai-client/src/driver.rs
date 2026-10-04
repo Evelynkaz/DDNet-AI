@@ -32,11 +32,12 @@
 use crate::map_cache;
 use crate::session::{ClientConfig, Session, SessionEvent};
 use crate::timing::MarginSummary;
+use crate::transport::{DirectUdp, Transport, TransportError};
 use ddai_net::generated::enums::playerflagflag;
 use ddai_net::generated::objects::PlayerInput;
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -427,6 +428,13 @@ pub enum GaveUpCategory {
     /// within the reconnect budget (`ClientConfig::handshake_timeout`, extended by map-download
     /// progress). Distinct from [`GaveUpCategory::HandshakeTimeout`] (a join that never completed).
     ReconnectBudgetExhausted,
+    /// Task 2.6 (review F3): the SOCKS5 proxy gave an answer retrying cannot change and that a restart would only
+    /// repeat: UDP not supported (reply 0x07), wrong username/password, no usable method, a refusal by its rule
+    /// set, an unusable relay address, the proxy not being the one the proxy file is for (that last one at the
+    /// driver's own check; `ddnet-ai`'s start-up check of the same thing exits 4 directly). Callers map it to the
+    /// "join failed" exit code (4), which the unit's `RestartPreventExitStatus` lists, so systemd does not
+    /// replay a failing login (account lockout) three times.
+    ProxyRefused,
 }
 
 impl ClientEvent {
@@ -1179,9 +1187,9 @@ impl Drop for Client {
     }
 }
 
-fn send_all(socket: &UdpSocket, datagrams: Vec<Vec<u8>>) {
+fn send_all(transport: &mut dyn Transport, datagrams: Vec<Vec<u8>>) {
     for dg in datagrams {
-        if let Err(e) = socket.send(&dg) {
+        if let Err(e) = transport.send(&dg) {
             tracing::warn!(error = %e, "failed to send a datagram");
         }
     }
@@ -1321,7 +1329,7 @@ fn handle_session_event(
 /// else in this crate shares that grouping.
 #[allow(clippy::too_many_arguments)]
 fn run_one_connection(
-    socket: &UdpSocket,
+    transport: &mut dyn Transport,
     session: &mut Session,
     config: &ClientConfig,
     start: Instant,
@@ -1395,7 +1403,7 @@ fn run_one_connection(
         if !*reached_in_game && Instant::now() >= *handshake_deadline {
             let now = Instant::now().duration_since(start);
             session.disconnect(Some("handshake watchdog: not in game in time"));
-            send_all(socket, session.flush(now));
+            send_all(transport, session.flush(now));
             return ConnectionOutcome::HandshakeTimedOut;
         }
         // Review finding F5: an explicit `Control::Disconnect` *or* the channel having been
@@ -1407,7 +1415,7 @@ fn run_one_connection(
             Ok(Control::Disconnect) | Err(mpsc::TryRecvError::Disconnected) => {
                 let now = Instant::now().duration_since(start);
                 session.disconnect(Some("client requested disconnect"));
-                send_all(socket, session.flush(now));
+                send_all(transport, session.flush(now));
                 return ConnectionOutcome::Stop;
             }
             // Task 8.4a: not terminal — send the request now (rather than waiting for the next
@@ -1416,22 +1424,22 @@ fn run_one_connection(
             Ok(Control::SetTeam(team)) => {
                 let now = Instant::now().duration_since(start);
                 session.request_team(team, now);
-                send_all(socket, session.flush(now));
+                send_all(transport, session.flush(now));
             }
             Ok(Control::Kill) => {
                 let now = Instant::now().duration_since(start);
                 session.request_kill(now);
-                send_all(socket, session.flush(now));
+                send_all(transport, session.flush(now));
             }
             Ok(Control::ServerCommand(command)) => {
                 let now = Instant::now().duration_since(start);
                 session.request_server_command(command, now);
-                send_all(socket, session.flush(now));
+                send_all(transport, session.flush(now));
             }
             Ok(Control::ShowDistance(x, y)) => {
                 let now = Instant::now().duration_since(start);
                 session.request_show_distance(x, y, now);
-                send_all(socket, session.flush(now));
+                send_all(transport, session.flush(now));
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -1444,7 +1452,7 @@ fn run_one_connection(
         latest_input.adopt_if_due(next_send_tick);
         session.set_input(latest_input.input);
 
-        match socket.recv(&mut buf) {
+        match transport.recv(&mut buf) {
             Ok(n) => {
                 let now = Instant::now().duration_since(start);
                 for ev in session.feed(&buf[..n], now) {
@@ -1453,7 +1461,7 @@ fn run_one_connection(
                     }
                     if matches!(ev, SessionEvent::Connected)
                         && let Some(outcome) =
-                            reject_duplicate_connected(&mut seen_connected, socket, session, now, events_tx)
+                            reject_duplicate_connected(&mut seen_connected, transport, session, now, events_tx)
                     {
                         return outcome;
                     }
@@ -1463,7 +1471,7 @@ fn run_one_connection(
                         // `ACCEPT`/ack the join sequence needs to complete) must actually reach
                         // the wire before this connection's socket is dropped, not get silently
                         // discarded still sitting in `Connection`'s send queue.
-                        send_all(socket, session.flush(now));
+                        send_all(transport, session.flush(now));
                         return outcome;
                     }
                 }
@@ -1497,7 +1505,7 @@ fn run_one_connection(
         }
 
         let now = Instant::now().duration_since(start);
-        send_all(socket, session.flush(now));
+        send_all(transport, session.flush(now));
         for ev in session.take_events() {
             // Task 4.1: the first send after a decision reports its snapshot-to-wire latency.
             if let SessionEvent::InputSent { tick, .. } = &ev
@@ -1513,13 +1521,14 @@ fn run_one_connection(
             // own docs say it never actually produces a `Connected`-mapped event, but this is
             // cheap enough to check unconditionally rather than trust that documentation forever.
             if matches!(ev, SessionEvent::Connected)
-                && let Some(outcome) = reject_duplicate_connected(&mut seen_connected, socket, session, now, events_tx)
+                && let Some(outcome) =
+                    reject_duplicate_connected(&mut seen_connected, transport, session, now, events_tx)
             {
                 return outcome;
             }
             if let Some(outcome) = handle_session_event(ev, session, config, now, events_tx) {
                 // See the comment on the identical pattern above.
-                send_all(socket, session.flush(now));
+                send_all(transport, session.flush(now));
                 return outcome;
             }
         }
@@ -1535,7 +1544,7 @@ fn run_one_connection(
 /// Returns `Some(outcome)` when the caller must stop and return that outcome immediately.
 fn reject_duplicate_connected(
     seen_connected: &mut bool,
-    socket: &UdpSocket,
+    transport: &mut dyn Transport,
     session: &mut Session,
     now: Duration,
     events_tx: &event_channel::Sender,
@@ -1553,7 +1562,7 @@ fn reject_duplicate_connected(
         reason: reason.clone(),
     })));
     session.disconnect(Some(&reason));
-    send_all(socket, session.flush(now));
+    send_all(transport, session.flush(now));
     Some(ConnectionOutcome::ProtocolViolation)
 }
 
@@ -1601,25 +1610,39 @@ fn give_up_on_attempt_cap(events_tx: &event_channel::Sender, target: SocketAddr,
     });
 }
 
-/// Discards anything still queued on the (reused) socket from the previous connection, so a stale
-/// `CLOSE`/`CONNECTACCEPT` from the old connection can never be mistaken for a reply to the new
-/// `CONNECT` (a `Connecting` connection has no token to check yet). Beyond the real client, which
-/// does not do this; strictly safer.
-fn drain_stale_datagrams(socket: &UdpSocket) {
-    if socket.set_nonblocking(true).is_err() {
-        return;
-    }
-    let mut buf = [0u8; RECV_BUF_SIZE];
-    let mut drained = 0u32;
-    while socket.recv(&mut buf).is_ok() {
-        drained += 1;
-    }
-    let _ = socket.set_nonblocking(false);
-    if drained > 0 {
-        tracing::info!(
-            drained,
-            "driver: discarded stale datagrams from the previous connection"
-        );
+/// Task 2.6: the proxy binding gate, checked before every connection attempt. The allow-list entry that admits
+/// a connection decides whether it goes through a proxy (`proxy = "<name>"`); the caller's
+/// [`ClientConfig::proxy`] must say exactly the same. Both mismatches are refused: a proxy that the entry does
+/// not name is never used (D-053: sanctioned for one server only), and a server whose entry names a proxy is
+/// never connected to directly (that is the VPN-ban of D-052).
+fn check_proxy_binding(target: SocketAddr, config: &ClientConfig) -> Result<(), String> {
+    let bound = config
+        .live_servers
+        .proxy_binding(target, &config.name)
+        .map_err(|e| format!("live-servers safety switch refused {target}: {e}"))?;
+    match (bound, config.proxy.as_ref()) {
+        (None, None) => Ok(()),
+        (Some(entry), Some(cfg)) if cfg.name() == entry => {
+            if cfg.allows(target) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "live-servers safety switch refused {target}: proxy {:?} is issued for another server (its file's `for_server`), D-053",
+                    cfg.name()
+                ))
+            }
+        }
+        (Some(entry), Some(cfg)) => Err(format!(
+            "live-servers safety switch refused {target}: its entry names proxy {entry:?}, but proxy {:?} was configured",
+            cfg.name()
+        )),
+        (Some(entry), None) => Err(format!(
+            "live-servers safety switch refused {target}: its entry names proxy {entry:?}, but none was configured (refusing a direct connection)"
+        )),
+        (None, Some(cfg)) => Err(format!(
+            "live-servers safety switch refused {target}: proxy {:?} was configured, but the entry for this server does not name it (a proxy is used only for a server whose entry names it)",
+            cfg.name()
+        )),
     }
 }
 
@@ -1641,29 +1664,33 @@ fn run(
     // `Connect()`s that same `CNetClient`. Before this fix every attempt bound a fresh ephemeral
     // port; a server or anti-bot layer that keys its state on the client's `ip:port` then sees a
     // brand-new client on every reconnect and can never conclude the handshake.
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(e) => {
-            events_tx.send(ClientEvent::GaveUp {
-                reason: format!("failed to bind a local socket: {e}"),
-                category: GaveUpCategory::LocalError,
-            });
-            return;
+    // Task 2.6: the datagram path is a `Transport`: the plain UDP socket above for a server whose
+    // allow-list entry names no proxy, a SOCKS5 UDP association when it names one (`ClientConfig::proxy`,
+    // checked against the entry before every attempt below). The direct path is unchanged.
+    let mut transport: Box<dyn Transport> = match &config.proxy {
+        None => match DirectUdp::bind(POLL_TIMEOUT) {
+            Ok(t) => {
+                if let Some(port) = t.local_port() {
+                    tracing::info!(
+                        local_port = port,
+                        "driver: local UDP socket bound (reused for every reconnect)"
+                    );
+                }
+                Box::new(t)
+            }
+            Err(reason) => {
+                events_tx.send(ClientEvent::GaveUp {
+                    reason,
+                    category: GaveUpCategory::LocalError,
+                });
+                return;
+            }
+        },
+        Some(p) => {
+            tracing::info!(proxy = %p.name(), "driver: UDP goes through a SOCKS5 proxy (the association opens with the first attempt)");
+            Box::new(crate::socks5::Socks5UdpTransport::new(p.clone(), POLL_TIMEOUT))
         }
     };
-    if let Err(e) = socket.set_read_timeout(Some(POLL_TIMEOUT)) {
-        events_tx.send(ClientEvent::GaveUp {
-            reason: format!("failed to configure the socket: {e}"),
-            category: GaveUpCategory::LocalError,
-        });
-        return;
-    }
-    if let Ok(local) = socket.local_addr() {
-        tracing::info!(
-            local_port = local.port(),
-            "driver: local UDP socket bound (reused for every reconnect)"
-        );
-    }
     // Server-requested reconnects followed since the last time we were in game — see
     // `MAX_SERVER_RECONNECTS_BEFORE_IN_GAME`.
     let mut server_reconnects_pending: u32 = 0;
@@ -1729,6 +1756,15 @@ fn run(
             return;
         }
 
+        // Task 2.6: a proxy is used for a server if and only if its entry names it.
+        if let Err(reason) = check_proxy_binding(target, &config) {
+            events_tx.send(ClientEvent::GaveUp {
+                reason,
+                category: GaveUpCategory::LocalError,
+            });
+            return;
+        }
+
         if !wait_for_attempt_slot(target, &should_abort) {
             // Task 2.3b: tell the two ways `should_abort` can have fired apart — the watchdog
             // expiring while queued for a slot is not the same "local" condition as the channel
@@ -1750,36 +1786,55 @@ fn run(
             "connecting"
         );
 
-        // Re-associate the one long-lived socket with this attempt's target (a no-op for a plain
-        // reconnect; a new port for a redirect). See `socket` above for why it is reused.
-        if let Err(e) = socket.connect(target) {
-            events_tx.send(ClientEvent::GaveUp {
-                reason: format!("failed to connect the socket to {target}: {e}"),
-                category: GaveUpCategory::LocalError,
-            });
-            return;
+        // Make the transport ready for this attempt's target: re-associate the one long-lived UDP socket (a
+        // no-op for a plain reconnect; a new port for a redirect), or open a SOCKS5 association when there is
+        // none. At most one proxy connection per attempt, and this attempt already holds its slot in the
+        // 5-per-20-s table above, so proxy reconnects count toward the same limits (D-050/D-058).
+        let mut not_ready = None;
+        if let Err(e) = transport.begin_attempt(target) {
+            if e.is_fatal() {
+                tracing::error!(error = %e, "transport: fatal, not retrying");
+                events_tx.send(ClientEvent::GaveUp {
+                    reason: e.to_string(),
+                    category: match e {
+                        TransportError::Proxy(_) => GaveUpCategory::ProxyRefused,
+                        TransportError::Connect { .. } => GaveUpCategory::LocalError,
+                    },
+                });
+                return;
+            }
+            tracing::warn!(error = %e, "transport: not ready for this attempt");
+            not_ready = Some(e);
         }
-        drain_stale_datagrams(&socket);
 
         let start = Instant::now();
         let mut session = Session::new(config.clone());
         session.connect(Duration::ZERO);
-        send_all(&socket, session.flush(Duration::ZERO));
 
         let mut reached_in_game = false;
-        let outcome = run_one_connection(
-            &socket,
-            &mut session,
-            &config,
-            start,
-            &events_tx,
-            &input_rx,
-            &control_rx,
-            &mut latest_input,
-            &mut reached_in_game,
-            &mut handshake_deadline,
-            hard_deadline,
-        );
+        let outcome = if let Some(e) = not_ready {
+            // A transient proxy failure is an ordinary lost connection: the session never left `Connecting`.
+            events_tx.send(ClientEvent::Session(Box::new(SessionEvent::Disconnected {
+                reason: Some(format!("proxy error: {e}")),
+                by_peer: false,
+            })));
+            ConnectionOutcome::LostConnection
+        } else {
+            send_all(&mut *transport, session.flush(Duration::ZERO));
+            run_one_connection(
+                &mut *transport,
+                &mut session,
+                &config,
+                start,
+                &events_tx,
+                &input_rx,
+                &control_rx,
+                &mut latest_input,
+                &mut reached_in_game,
+                &mut handshake_deadline,
+                hard_deadline,
+            )
+        };
 
         // Review finding F7: a connection that made it in-game (even briefly) before ending is
         // not "still failing to connect" — reset the backoff/attempt-count state so a *later*,
@@ -1857,7 +1912,7 @@ fn run(
                 server_reconnects_pending += 1;
                 if server_reconnects_pending > MAX_SERVER_RECONNECTS_BEFORE_IN_GAME {
                     session.disconnect(Some("driver: reconnect loop, giving up"));
-                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    send_all(&mut *transport, session.flush(Instant::now().duration_since(start)));
                     tracing::error!(
                         addr = %target,
                         attempts = connection_attempt,
@@ -1876,13 +1931,13 @@ fn run(
                 }
                 if attempt_cap_reached(ever_in_game, connection_attempt) {
                     session.disconnect(Some("driver: attempt budget exhausted"));
-                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    send_all(&mut *transport, session.flush(Instant::now().duration_since(start)));
                     events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     give_up_on_attempt_cap(&events_tx, target, connection_attempt);
                     return;
                 }
                 session.disconnect(Some("driver: server requested reconnect"));
-                send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                send_all(&mut *transport, session.flush(Instant::now().duration_since(start)));
                 backoff = MIN_BACKOFF; // a server-requested reconnect is not a failure
                 tracing::info!(
                     addr = %target,
@@ -1898,7 +1953,7 @@ fn run(
             ConnectionOutcome::Redirect(port) => {
                 if redirects_followed >= 1 {
                     session.disconnect(Some("driver: refusing a second redirect"));
-                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    send_all(&mut *transport, session.flush(Instant::now().duration_since(start)));
                     events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     events_tx.send(ClientEvent::RedirectRefused {
                         reason: "refusing a second redirect in the same session (loop protection)".to_string(),
@@ -1911,7 +1966,7 @@ fn run(
                 }
                 if attempt_cap_reached(ever_in_game, connection_attempt) {
                     session.disconnect(Some("driver: attempt budget exhausted"));
-                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    send_all(&mut *transport, session.flush(Instant::now().duration_since(start)));
                     events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     give_up_on_attempt_cap(&events_tx, target, connection_attempt);
                     return;
@@ -1919,7 +1974,7 @@ fn run(
                 // Review finding F4: same reasoning as `Reconnect` above — close the old
                 // connection before opening a new one to the redirect target.
                 session.disconnect(Some("driver: following a redirect"));
-                send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                send_all(&mut *transport, session.flush(Instant::now().duration_since(start)));
                 redirects_followed += 1;
                 target = SocketAddr::new(target.ip(), port);
                 events_tx.send(ClientEvent::RedirectFollowed { to: target });
@@ -1927,11 +1982,13 @@ fn run(
                 continue;
             }
             ConnectionOutcome::LostConnection => {
+                // A transport with connection-like state (a SOCKS5 association) starts over after a loss.
+                transport.reset_after_loss();
                 // Review F1: a retry-worthy peer `CLOSE` ("This server is full", "Server shutdown",
                 // ...) or a timeout before the session was ever in game gets exactly one retry.
                 if attempt_cap_reached(ever_in_game, connection_attempt) {
                     session.disconnect(Some("driver: attempt budget exhausted"));
-                    send_all(&socket, session.flush(Instant::now().duration_since(start)));
+                    send_all(&mut *transport, session.flush(Instant::now().duration_since(start)));
                     events_tx.send(ClientEvent::MarginSummary(margin_summary_of(&session, &latest_input)));
                     give_up_on_attempt_cap(&events_tx, target, connection_attempt);
                     return;
@@ -1997,16 +2054,29 @@ mod duplicate_connected_invariant_tests {
     /// it today.
     #[test]
     fn first_connected_passes_second_is_a_hard_stop() {
-        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind a throwaway socket");
+        let mut transport =
+            DirectUdp::from_socket(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a throwaway socket"));
         let (events_tx, events_rx) = event_channel::channel();
         let mut session = Session::new(ClientConfig::default());
         let mut seen_connected = false;
 
-        let first = reject_duplicate_connected(&mut seen_connected, &socket, &mut session, Duration::ZERO, &events_tx);
+        let first = reject_duplicate_connected(
+            &mut seen_connected,
+            &mut transport,
+            &mut session,
+            Duration::ZERO,
+            &events_tx,
+        );
         assert!(first.is_none(), "the first Connected must be allowed through");
         assert!(seen_connected);
 
-        let second = reject_duplicate_connected(&mut seen_connected, &socket, &mut session, Duration::ZERO, &events_tx);
+        let second = reject_duplicate_connected(
+            &mut seen_connected,
+            &mut transport,
+            &mut session,
+            Duration::ZERO,
+            &events_tx,
+        );
         assert!(
             matches!(second, Some(ConnectionOutcome::ProtocolViolation)),
             "a second Connected must be a hard ProtocolViolation stop, got {second:?}"
@@ -2249,5 +2319,77 @@ mod give_up_message_tests {
         st.receive(tagged(1, 112));
         st.adopt_if_due(Some(112));
         assert_eq!(st.input.fire, 1);
+    }
+}
+
+/// Task 2.6: a proxy (re)connection is only ever made inside a connection attempt, and an attempt only starts once it
+/// holds a slot in the process-wide 5-per-20-s table, so proxy reconnects count toward the same limit (D-050/D-058).
+#[cfg(test)]
+mod proxy_attempt_limit_tests {
+    use super::*;
+    use crate::live_servers::{LiveServerEntry, LiveServers};
+    use crate::proxy::ProxyConfig;
+    use crate::socks5_testserver::{Config, TestSocks5Server};
+
+    fn unused_udp_addr() -> SocketAddr {
+        std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+    }
+
+    fn client_for(game: SocketAddr, proxy: &TestSocks5Server) -> Client {
+        let a = proxy.addr();
+        Client::connect(
+            game,
+            ClientConfig {
+                name: "Muha".to_string(),
+                live_servers: LiveServers {
+                    servers: vec![LiveServerEntry {
+                        address: game.to_string(),
+                        nick: "Muha".to_string(),
+                        purpose: String::new(),
+                        ready: true,
+                        proxy: Some("t".to_string()),
+                    }],
+                },
+                proxy: Some(ProxyConfig::new("t", a.ip().to_string(), a.port(), None).unwrap()),
+                ..ClientConfig::default()
+            },
+        )
+    }
+
+    fn fill_attempt_table(addr: SocketAddr, n: usize) {
+        let mut log = attempt_log().lock().unwrap();
+        let entry = log.entry(addr).or_default();
+        for _ in 0..n {
+            entry.push_back(Instant::now());
+        }
+    }
+
+    #[test]
+    fn a_full_attempt_table_holds_back_the_proxy_connection_too() {
+        let proxy = TestSocks5Server::start(Config::default());
+        let game = unused_udp_addr();
+        fill_attempt_table(game, MAX_ATTEMPTS_PER_WINDOW);
+        let mut client = client_for(game, &proxy);
+        thread::sleep(Duration::from_millis(1200));
+        assert_eq!(proxy.tcp_accepts(), 0, "no slot, so no connection to the proxy either");
+        client.disconnect();
+        client.join();
+        assert_eq!(proxy.tcp_accepts(), 0);
+    }
+
+    #[test]
+    fn with_one_slot_left_exactly_one_proxy_connection_is_made() {
+        let proxy = TestSocks5Server::start(Config::default());
+        let game = unused_udp_addr();
+        fill_attempt_table(game, MAX_ATTEMPTS_PER_WINDOW - 1);
+        let mut client = client_for(game, &proxy);
+        let end = Instant::now() + Duration::from_secs(3);
+        while proxy.tcp_accepts() == 0 && Instant::now() < end {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(proxy.tcp_accepts(), 1);
+        client.disconnect();
+        client.join();
+        assert_eq!(proxy.tcp_accepts(), 1);
     }
 }

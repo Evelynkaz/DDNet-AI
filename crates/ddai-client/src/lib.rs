@@ -37,11 +37,16 @@ pub mod allowlist;
 pub mod driver;
 pub mod live_servers;
 pub mod map_cache;
+pub mod proxy;
 pub mod server_list;
 pub mod session;
 pub mod single_instance;
 pub mod smooth_time;
+pub mod socks5;
+#[cfg(any(test, feature = "test-util"))]
+pub mod socks5_testserver;
 pub mod timing;
+pub mod transport;
 
 pub use ddai_net::generated::enums;
 pub use ddai_net::generated::objects::PlayerInput;

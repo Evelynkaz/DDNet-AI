@@ -228,6 +228,12 @@ pub struct ClientConfig {
     /// list (refuses every non-loopback address, the safe direction), and so, deliberately, is a
     /// file that fails to parse (logged as a warning, never a panic or a silent "allow anything").
     pub live_servers: live_servers::LiveServers,
+    /// Task 2.6 (D-053 amendment): the SOCKS5 proxy the game's UDP goes through, or `None` for a direct
+    /// connection. It must match the `proxy = "<name>"` of the allow-list entry of the server being
+    /// connected to — the driver checks that before **every** attempt and refuses a mismatch in either
+    /// direction, so a proxy is only ever used for a server whose entry names it (build it with
+    /// [`crate::proxy::resolve_for_server`]). Its `Debug` shows the name only.
+    pub proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 /// `~/aiddnet/data/maps/cache`, per `CLAUDE.md`'s folder layout, falling back to a relative
@@ -267,6 +273,7 @@ impl Default for ClientConfig {
             emit_outgoing_audit: false,
             margin_report_every: None,
             live_servers: default_live_servers(),
+            proxy: None,
         }
     }
 }

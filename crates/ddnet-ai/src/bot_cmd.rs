@@ -288,6 +288,10 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
             .unwrap_or(ClientConfig::default().timeout),
         ..ClientConfig::default()
     };
+    if let Err(e) = crate::proxy_cmd::prepare_client(&mut client, args.live_servers.as_deref(), server, data_dir) {
+        eprintln!("refusing to connect: {e}");
+        return ExitCode::from(e.exit);
+    }
     match o.prediction_margin_ms {
         Some(m) => client.prediction_margin_ms = m,
         None => client.adaptive_margin = true,

@@ -32,6 +32,12 @@ pub struct LiveServerEntry {
     /// Missing means not ready.
     #[serde(default)]
     pub ready: bool,
+    /// Task 2.6 (D-053 amendment): the name of the SOCKS5 proxy this server is reached through; the proxy
+    /// itself is read from `<secrets>/<name>-proxy.toml` (`crate::proxy`). A proxy is used for a server **only**
+    /// when its entry names it (the driver refuses any other pairing), and the entry still needs `ready = true`
+    /// like every non-loopback entry. Missing means a direct connection.
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 /// The parsed file: a flat list of [`LiveServerEntry`].
@@ -103,12 +109,55 @@ impl LiveServers {
         self.servers.iter().filter(|e| e.ready)
     }
 
+    /// The proxy a connection to `addr` as `nick` must go through (task 2.6): the `proxy` of the entry that
+    /// admits this connection, or `None` for a direct one.
+    ///
+    /// The entries considered are exactly the ones [`check`] would admit: those whose address matches, whose
+    /// nick is `nick`, and (for a non-loopback address) which are `ready`. Loopback needs no entry at all, so
+    /// with none it is direct. If the admitting entries disagree (one names a proxy, another does not, or two
+    /// name different ones) the answer is an error, never a guess: connecting directly to a server that is only
+    /// reachable through its proxy would be exactly the VPN-ban incident of D-052.
+    pub fn proxy_binding(&self, addr: SocketAddr, nick: &str) -> Result<Option<&str>, ProxyBindingError> {
+        let mut found: Option<Option<&str>> = None;
+        for e in &self.servers {
+            if e.nick != nick || !(is_loopback(addr) || e.ready) {
+                continue;
+            }
+            if !resolve(&e.address).is_some_and(|r| r.contains(&addr)) {
+                continue;
+            }
+            let name = e.proxy.as_deref();
+            if name.is_some_and(|n| !crate::proxy::valid_proxy_name(n)) {
+                return Err(ProxyBindingError::InvalidName { addr });
+            }
+            match found {
+                None => found = Some(name),
+                Some(prev) if prev == name => {}
+                Some(_) => return Err(ProxyBindingError::Ambiguous { addr }),
+            }
+        }
+        Ok(found.flatten())
+    }
+
     /// [`LiveServers::allowed_nick`] for a `ready` entry only.
     pub fn ready_nick(&self, addr: SocketAddr) -> Option<&str> {
         self.ready_entries()
             .find(|e| resolve(&e.address).is_some_and(|resolved| resolved.contains(&addr)))
             .map(|e| e.nick.as_str())
     }
+}
+
+/// Why [`LiveServers::proxy_binding`] could not give one answer.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProxyBindingError {
+    #[error(
+        "live-servers.toml has several entries for {addr} under this nick that disagree about `proxy`: refusing to guess"
+    )]
+    Ambiguous { addr: SocketAddr },
+    #[error(
+        "the `proxy` of the entry for {addr} is not a valid proxy name (allowed: 1-64 characters from A-Z a-z 0-9 _ -)"
+    )]
+    InvalidName { addr: SocketAddr },
 }
 
 fn resolve(address: &str) -> Option<Vec<SocketAddr>> {
@@ -340,5 +389,92 @@ mod tests {
         )
         .expect("valid test TOML");
         assert!(check("45.141.57.35:8308".parse().unwrap(), "Muha", &list).is_ok());
+    }
+
+    fn parse(text: &str) -> LiveServers {
+        LiveServers::parse(text, Path::new("<test>")).expect("valid test TOML")
+    }
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn the_proxy_field_is_optional_and_defaults_to_a_direct_connection() {
+        let list = parse("[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\n");
+        assert_eq!(list.servers[0].proxy, None);
+        assert_eq!(list.proxy_binding(addr("45.141.57.35:8308"), "Muha"), Ok(None));
+    }
+
+    #[test]
+    fn an_entry_names_its_proxy_and_only_for_the_right_address_nick_and_ready() {
+        let list =
+            parse("[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"swarfey\"\n");
+        assert_eq!(
+            list.proxy_binding(addr("45.141.57.35:8308"), "Muha"),
+            Ok(Some("swarfey"))
+        );
+        // Another port, another address, another nick: no binding (and `check` refuses them anyway).
+        assert_eq!(list.proxy_binding(addr("45.141.57.35:8309"), "Muha"), Ok(None));
+        assert_eq!(list.proxy_binding(addr("1.2.3.4:8308"), "Muha"), Ok(None));
+        assert_eq!(list.proxy_binding(addr("45.141.57.35:8308"), "Other"), Ok(None));
+        // Not ready: the entry does not admit the connection, so it does not bind a proxy either.
+        let off = parse("[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nproxy = \"swarfey\"\n");
+        assert_eq!(off.proxy_binding(addr("45.141.57.35:8308"), "Muha"), Ok(None));
+        assert!(matches!(
+            check(addr("45.141.57.35:8308"), "Muha", &off),
+            Err(LiveServerCheckError::NotReady { .. })
+        ));
+    }
+
+    #[test]
+    fn a_loopback_entry_may_name_a_proxy_without_ready_and_loopback_without_an_entry_is_direct() {
+        let list = parse("[[server]]\naddress = \"127.0.0.1:8303\"\nnick = \"Muha\"\nproxy = \"local\"\n");
+        assert_eq!(list.proxy_binding(addr("127.0.0.1:8303"), "Muha"), Ok(Some("local")));
+        assert_eq!(list.proxy_binding(addr("127.0.0.1:8303"), "Other"), Ok(None));
+        assert_eq!(list.proxy_binding(addr("127.0.0.1:8313"), "Muha"), Ok(None));
+        assert_eq!(
+            LiveServers::default().proxy_binding(addr("127.0.0.1:8303"), "Muha"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn entries_that_disagree_about_the_proxy_are_an_error_not_a_guess() {
+        let mixed = parse(
+            "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\n\n\
+             [[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"swarfey\"\n",
+        );
+        assert!(matches!(
+            mixed.proxy_binding(addr("45.141.57.35:8308"), "Muha"),
+            Err(ProxyBindingError::Ambiguous { .. })
+        ));
+        let two = parse(
+            "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"a\"\n\n\
+             [[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"b\"\n",
+        );
+        assert!(two.proxy_binding(addr("45.141.57.35:8308"), "Muha").is_err());
+        // The same proxy twice is fine.
+        let same = parse(
+            "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"a\"\n\n\
+             [[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"a\"\n",
+        );
+        assert_eq!(same.proxy_binding(addr("45.141.57.35:8308"), "Muha"), Ok(Some("a")));
+    }
+
+    #[test]
+    fn a_proxy_name_that_is_a_path_is_refused() {
+        for bad in ["../x", "a/b", "", "a.b"] {
+            let list = parse(&format!(
+                "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"{bad}\"\n"
+            ));
+            assert!(
+                matches!(
+                    list.proxy_binding(addr("45.141.57.35:8308"), "Muha"),
+                    Err(ProxyBindingError::InvalidName { .. })
+                ),
+                "{bad:?}"
+            );
+        }
     }
 }

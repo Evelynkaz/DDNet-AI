@@ -87,6 +87,7 @@ fn connect_to_a_test_net_address_listed_under_a_different_nick_is_also_refused()
                 nick: "Muha".to_string(),
                 purpose: "test".to_string(),
                 ready: true,
+                proxy: None,
             }],
         },
         ..ClientConfig::default()
@@ -126,6 +127,7 @@ fn connect_to_a_listed_but_not_ready_test_net_address_is_refused_with_the_right_
                 nick: "Muha".to_string(),
                 purpose: "test".to_string(),
                 ready: false,
+                proxy: None,
             }],
         },
         ..ClientConfig::default()

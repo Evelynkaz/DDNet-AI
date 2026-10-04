@@ -272,7 +272,7 @@ pub fn run(args: RecordArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let config = ClientConfig {
+    let mut config = ClientConfig {
         name: args.name.clone(),
         cache_dir: data_dir.join("maps").join("cache"),
         show_distance: (args.show_distance, args.show_distance),
@@ -292,6 +292,12 @@ pub fn run(args: RecordArgs) -> ExitCode {
         live_servers: list,
         ..ClientConfig::default()
     };
+    // Task 2.6: a proxy only if this server's allow-list entry names one (the driver re-checks every attempt).
+    if let Err(e) = crate::proxy_cmd::attach_proxy(&mut config, args.server, &data_dir) {
+        tracing::error!(error = %e, "refusing to connect: proxy");
+        eprintln!("refusing to connect: {e}");
+        return ExitCode::from(e.exit);
+    }
     let client_version = config.version_str.clone();
 
     let mut input_log = match &args.input_log {
@@ -581,6 +587,7 @@ pub fn run(args: RecordArgs) -> ExitCode {
                 | GaveUpCategory::ReconnectLoop
                 | GaveUpCategory::TooManyAttempts
                 | GaveUpCategory::ReconnectBudgetExhausted
+                | GaveUpCategory::ProxyRefused
         )
     ) {
         return ExitCode::from(EXIT_HANDSHAKE_TIMEOUT);
