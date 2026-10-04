@@ -4,17 +4,24 @@
 //! document per line (`\n`-terminated, at most [`MAX_REQUEST_BYTES`] / [`MAX_REPLY_BYTES`] including the newline):
 //! a [`ControlRequest`] from the web, one [`ControlReply`] back, strictly in turn.
 //!
-//! **No chat, by construction.** [`ControlCommand`] is a closed enum. Not one variant carries text to the game
-//! server; the only free text is [`ControlCommand::Clip`]'s note, which goes into a clip *file* (and its name) on
-//! the bot's disk. The bot maps a command to its own `BotCommand` (the 4.3 console API), which has no way to reach
-//! the chat either. Unknown fields and unknown command types are refused at parse time (`deny_unknown_fields`), so
-//! a newer or hostile client cannot smuggle anything in.
+//! **Chat only as the owner typed it.** [`ControlCommand`] is a closed enum. Exactly one variant carries text to the game
+//! server, [`ControlCommand::Say`] (task 4.9, D-094: a line the owner typed on the authenticated website), and its text is
+//! judged by `ddai_net::owner_chat::OwnerText::check` (non-empty, at most 255 bytes, no control or invisible character, no leading `/`)
+//! on the web side ([`ControlCommand::validate`]), which makes no value, **and again** on the bot side, where the control dispatcher
+//! (the one holder of the process's `OwnerChannel`) alone can turn it into an `OwnerText`, before it can become a `BotCommand`. The only other
+//! free text is [`ControlCommand::Clip`]'s note, which goes into a clip *file* (and its name) on the bot's disk. Unknown fields
+//! and unknown command types are refused at parse time (`deny_unknown_fields`), so a newer or hostile client cannot smuggle
+//! anything in. `Say`'s text is never in a tag, a log line or the audit trail, and `Debug` shows its length only.
 //!
 //! **No nicknames.** Nothing in a request or in [`ControlCommand::tag`] is a nickname, which is what the audit log
 //! relies on. The friend / war / ignore lists are not sent through this channel at all: the web edits the lists
 //! file and sends [`ControlCommand::ReloadRelations`]; the bot reads the file itself.
 
+// Re-exported so the web unit judges a chat line with the very rules the bot applies (`OwnerText::check`, which makes no value),
+// without a dependency of its own. The `OwnerChannel` is deliberately not: the web has no business with it.
+pub use ddai_net::owner_chat::{MAX_OWNER_TEXT_BYTES, OwnerText, OwnerTextError};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Protocol version in every request and reply.
 pub const VERSION: u32 = 1;
@@ -94,6 +101,33 @@ impl BrainArg {
     }
 }
 
+/// The text of a [`ControlCommand::Say`]: a plain string on the wire, but `Debug` shows its length only, so no `{:?}` of a request
+/// can put the owner's line in a log. Whether it is acceptable is [`OwnerText::check`]'s call, not this type's.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SayText(String);
+
+impl SayText {
+    pub fn new(text: impl Into<String>) -> SayText {
+        SayText(text.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The same check the bot applies. It makes no value: only the bot's dispatcher, holding the `OwnerChannel`, can make an `OwnerText`.
+    pub fn check(&self) -> Result<(), OwnerTextError> {
+        OwnerText::check(&self.0)
+    }
+}
+
+impl fmt::Debug for SayText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SayText(len {})", self.0.len())
+    }
+}
+
 /// Everything the web may ask. Closed: see the module docs. (The argument-less commands are `{}` variants, not unit
 /// variants, because serde's `deny_unknown_fields` is not applied to unit variants of an internally tagged enum.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +155,9 @@ pub enum ControlCommand {
     Join {},
     /// Re-read the friend / war / ignore lists file the web editor has just written.
     ReloadRelations {},
+    /// Say a line in the game chat (task 4.9, D-094): the one thing the owner types on the website that the bot says. `team` is
+    /// team chat instead of all chat. Subject to the bot's own limits (3 s apart, 10 a minute, a queue of 3).
+    Say { team: bool, text: SayText },
 }
 
 /// Why a request is not acceptable (a static text: it never echoes the request).
@@ -134,6 +171,11 @@ pub enum Invalid {
     Note,
     #[error("goto coordinates out of range")]
     Goto,
+    #[error("the chat line is not acceptable: {0}")]
+    Say(OwnerTextError),
+    /// The bot runs with the owner chat switched off (`--no-owner-chat`, `owner_chat = false`) or without the channel.
+    #[error("the owner chat is switched off on the bot")]
+    ChatDisabled,
 }
 
 impl ControlCommand {
@@ -152,6 +194,8 @@ impl ControlCommand {
             ControlCommand::Spec {} => "spec".to_string(),
             ControlCommand::Join {} => "join".to_string(),
             ControlCommand::ReloadRelations {} => "relations:reload".to_string(),
+            // The line itself is never in a tag; only which chat it goes to.
+            ControlCommand::Say { team, .. } => if *team { "say:team" } else { "say:all" }.to_string(),
         }
     }
 
@@ -168,6 +212,9 @@ impl ControlCommand {
                 if !range.contains(x) || !range.contains(y) {
                     return Err(Invalid::Goto);
                 }
+            }
+            ControlCommand::Say { text, .. } => {
+                text.check().map_err(Invalid::Say)?;
             }
             _ => {}
         }
@@ -302,6 +349,14 @@ mod tests {
             ControlCommand::Spec {},
             ControlCommand::Join {},
             ControlCommand::ReloadRelations {},
+            ControlCommand::Say {
+                team: false,
+                text: SayText::new("gg wp"),
+            },
+            ControlCommand::Say {
+                team: true,
+                text: SayText::new("привет"),
+            },
         ]
     }
 
@@ -352,8 +407,12 @@ mod tests {
     #[test]
     fn anything_that_is_not_a_known_command_is_refused_at_parse_time() {
         for bad in [
-            // The things a chat path would need.
+            // The things a chat path would need (`say` exists since 4.9, but only whole: both fields, nothing else).
             r#"{"v":1,"session":"a","cmd":{"type":"say","text":"hi"}}"#,
+            r#"{"v":1,"session":"a","cmd":{"type":"say","team":false}}"#,
+            r#"{"v":1,"session":"a","cmd":{"type":"say","team":"no","text":"hi"}}"#,
+            r#"{"v":1,"session":"a","cmd":{"type":"say","team":false,"text":5}}"#,
+            r#"{"v":1,"session":"a","cmd":{"type":"say","team":false,"text":"hi","to":"all"}}"#,
             r#"{"v":1,"session":"a","cmd":{"type":"chat","message":"hi"}}"#,
             r#"{"v":1,"session":"a","cmd":{"type":"quit"}}"#,
             r#"{"v":1,"session":"a","cmd":{"type":"target","name":"x"}}"#,
@@ -412,6 +471,65 @@ mod tests {
             Err(Invalid::Goto),
             "abs() of MIN must not wrap into range"
         );
+    }
+
+    #[test]
+    fn say_has_a_documented_wire_form_a_text_free_tag_and_a_redacted_debug() {
+        let req = ControlRequest::new(
+            "a1b2",
+            ControlCommand::Say {
+                team: true,
+                text: SayText::new("hello \"quoted\""),
+            },
+        );
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"v":1,"session":"a1b2","cmd":{"type":"say","team":true,"text":"hello \"quoted\""}}"#
+        );
+        assert_eq!(req.cmd.tag(), "say:team");
+        let all = ControlCommand::Say {
+            team: false,
+            text: SayText::new("SECRET-LINE-xyz"),
+        };
+        assert_eq!(all.tag(), "say:all");
+        let shown = format!("{all:?} {:?}", ControlRequest::new("ab", all.clone()));
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(shown.contains("SayText(len 15)"), "{shown}");
+        // the longest accepted line fits a request line with room to spare, even when every character needs escaping
+        let worst = ControlRequest::new(
+            "a".repeat(MAX_SESSION_CHARS),
+            ControlCommand::Say {
+                team: true,
+                text: SayText::new("\"".repeat(MAX_OWNER_TEXT_BYTES)),
+            },
+        );
+        assert!(serde_json::to_string(&worst).unwrap().len() < MAX_REQUEST_BYTES);
+    }
+
+    #[test]
+    fn say_is_validated_with_the_same_rules_the_bot_applies() {
+        let say = |t: &str| ControlCommand::Say {
+            team: false,
+            text: SayText::new(t),
+        };
+        assert_eq!(say("hello").validate(), Ok(()));
+        assert_eq!(say("  hello  ").validate(), Ok(()), "trimmed, then fine");
+        assert_eq!(say(&"a".repeat(255)).validate(), Ok(()));
+        let bad = |t: &str, e: OwnerTextError| assert_eq!(say(t).validate(), Err(Invalid::Say(e)), "{t:?}");
+        bad("", OwnerTextError::Empty);
+        bad("   ", OwnerTextError::Empty);
+        bad(&"a".repeat(256), OwnerTextError::TooLong);
+        bad("a\nb", OwnerTextError::Control);
+        bad("a\u{0}b", OwnerTextError::Control);
+        bad("/kill", OwnerTextError::Command);
+        bad("  /kill", OwnerTextError::Command);
+        bad("/w someone hi", OwnerTextError::Command);
+        // and a request that carries it is validated as a whole
+        let req = ControlRequest::new("ab", say("/kill"));
+        assert_eq!(req.validate(), Err(Invalid::Say(OwnerTextError::Command)));
+        // the refusal never repeats the text
+        let msg = Invalid::Say(OwnerTextError::Command).to_string();
+        assert!(!msg.contains("kill"), "{msg}");
     }
 
     #[test]

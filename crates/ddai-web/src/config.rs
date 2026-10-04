@@ -88,6 +88,12 @@ pub struct WebConfig {
     pub live_servers: PathBuf,
     /// Task 5.9: the root-owned launcher config (the fly bundle path), read to show which bundle is active.
     pub launch_config: PathBuf,
+    /// Task 4.9 (D-090): the web's own rate limit for the owner's chat lines (`POST /api/bot/say`), on top of the bot's (3 s apart,
+    /// 10 a minute, a queue of 3): at most `say_burst` requests in any `say_burst_window`, and at most `say_max_per_minute` in any 60
+    /// seconds. A burst of two covers a quick correction; a third in the same moment is refused here, before it reaches the bot.
+    pub say_burst: usize,
+    pub say_burst_window: Duration,
+    pub say_max_per_minute: usize,
 }
 
 impl WebConfig {
@@ -126,6 +132,9 @@ impl WebConfig {
             launch_max_per_minute: 6,
             live_servers: data_dir.join("live-servers.toml"),
             launch_config: PathBuf::from(crate::launch::DEFAULT_CONFIG_PATH),
+            say_burst: 2,
+            say_burst_window: Duration::from_secs(3),
+            say_max_per_minute: 10,
             data_dir,
         }
     }

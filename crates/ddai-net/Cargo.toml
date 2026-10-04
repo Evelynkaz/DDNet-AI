@@ -11,6 +11,11 @@ description = "Transport-independent Teeworlds 0.6 + DDNet network protocol: Huf
 [lints]
 workspace = true
 
+[features]
+# `OwnerChannel::mint_for_tests` for other crates' tests (task 4.9). Only dev-dependencies turn it on; the census test
+# (`ddai-bot/tests/owner_chat_census.rs`) forbids its use in production sources.
+test-util = []
+
 [dependencies]
 thiserror = "2"
 md-5 = "0.11"

@@ -50,6 +50,8 @@ proptest = "1"
 # Turns `test-util` on for this crate's own integration tests (`tests/socks5_client.rs`), so a plain
 # `cargo test -p ddai-client` runs them without `--features`.
 ddai-client = { path = ".", features = ["test-util"] }
+# Task 4.9: tests mint their own `OwnerChannel` (the process's real one belongs to the bot's control dispatcher).
+ddai-net = { path = "../ddai-net", features = ["test-util"] }
 # Unlocks `ddai_map::testutil` (a tiny synthetic `.map` builder) for this crate's own tests, same
 # pattern `ddai-map` uses on itself — see that crate's Cargo.toml.
 ddai-map = { path = "../ddai-map", features = ["test-util"] }

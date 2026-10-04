@@ -13,7 +13,10 @@
 //!
 //! The bot never writes chat (D-007): the client API has no call that takes text, and the unstick kill is the
 //! `Cl_Kill` protocol message. The one exception, allowed by the owner (D-078, task 4.6, [`killfallback`]): the typed server
-//! command `/kill`, sent only when a `Cl_Kill` had no effect (DDNet's `sv_kill_protection`). It never evades a kick or ban (D-016/D-037): the runner stops.
+//! command `/kill`, sent only when a `Cl_Kill` had no effect (DDNet's `sv_kill_protection`). And a second one, decided by the owner
+//! (D-094, task 4.9, [`ownerchat`]): a line the owner typed on the authenticated website, validated, paced (3 s apart, 10 a minute, a
+//! queue of 3) and sent only in the game; nothing automatic, nothing read from the game chat. It never evades a kick or ban
+//! (D-016/D-037): the runner stops.
 
 pub mod activity;
 pub mod bot;
@@ -31,6 +34,7 @@ pub mod killfallback;
 pub mod latency;
 pub mod mapgrid;
 pub mod nav_hooks;
+pub mod ownerchat;
 pub mod planning;
 pub mod players;
 pub mod reach;

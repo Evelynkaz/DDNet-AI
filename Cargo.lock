@@ -986,6 +986,7 @@ dependencies = [
 name = "ddai-botctl"
 version = "0.1.0"
 dependencies = [
+ "ddai-net",
  "serde",
  "serde_json",
  "tempfile",

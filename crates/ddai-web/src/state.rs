@@ -68,6 +68,8 @@ pub struct AppState {
     pub launch_gate: Mutex<std::collections::VecDeque<Instant>>,
     /// Task 5.9: unix time when a request nobody consumed was found and removed (the launcher is down until a newer status).
     pub launch_stalled_at: Mutex<Option<u64>>,
+    /// Task 4.9: when the owner's chat requests of the last minute were let through to the bot (the web's own rate limit).
+    pub say_gate: Mutex<std::collections::VecDeque<Instant>>,
 }
 
 impl AppState {
@@ -107,6 +109,7 @@ impl AppState {
             training,
             launch_gate: Mutex::new(std::collections::VecDeque::new()),
             launch_stalled_at: Mutex::new(None),
+            say_gate: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 

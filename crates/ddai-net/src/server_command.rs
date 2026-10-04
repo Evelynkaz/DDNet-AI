@@ -8,7 +8,8 @@
 //! **The guarantee is in the type.** [`ServerCommand`] has one variant, [`ServerCommand::Kill`], and its encoder
 //! writes the constant text `/kill` with the team flag 0 (all-chat, as the real client sends a typed command).
 //! There is no function anywhere that takes a string and makes a `Cl_Say` of it: the generated `encode_cl_say`
-//! stays `pub(crate)`, and this module is its only caller. The outgoing allow-list (`ddai-client::allowlist`) is the
+//! stays `pub(crate)`, and this module and [`crate::owner_chat`] (the owner's website messages, task 4.9, D-094: a validated
+//! [`crate::owner_chat::OwnerText`], never a bare string) are its only callers. The outgoing allow-list (`ddai-client::allowlist`) is the
 //! second, independent check: it lets a `Cl_Say` through only when the payload is **byte-identical** to
 //! [`ServerCommand::payload`].
 

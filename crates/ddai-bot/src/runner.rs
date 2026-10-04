@@ -14,9 +14,11 @@
 //! and this shell just reports. One connection per server; the `ddnet-ai play` wrapper additionally
 //! holds the single-instance lock.
 //!
-//! **Chat.** Nothing here can write chat: the client API has no such call, and the audit events
-//! (`SessionEvent::OutgoingGame`, enabled by [`RunnerConfig::audit_outgoing`]) are counted per label so
-//! a test can assert that no `Cl_Say` ever reached the wire and that every `Cl_Kill` is the bot's own.
+//! **Chat.** The only chat this runner can send is the typed `/kill` fallback (D-078) and a line the owner typed on the website
+//! (`BotCommand::Say` from the control channel, D-094, task 4.9): the latter goes through [`OwnerChat`] (pacing, the queue, in the
+//! game only) and `Client::owner_say`; its text is never logged. The audit events (`SessionEvent::OutgoingGame`, enabled by
+//! [`RunnerConfig::audit_outgoing`]) are counted per label (`Cl_Say(/kill)` and `Cl_Say(owner)` apart from each other) so a test can
+//! assert that no other `Cl_Say` ever reached the wire and that every `Cl_Kill` is the bot's own.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -27,16 +29,18 @@ use std::time::{Duration, Instant};
 
 use ddai_client::{Client, ClientConfig, ClientEvent, GaveUpCategory, LiveWorldSnapshot, SessionEvent, map_cache};
 use ddai_net::generated::messages::GameMsg;
+use ddai_net::owner_chat::OwnerSay;
 use ddai_physics::map::MapData;
 
 use crate::bot::{Bot, BotConfig, BotEvent, BotStats, Output};
 use crate::brains::{BrainError, BrainOptions, make_brain};
 use crate::bridge::{Bridge, FrameChar, MapMessage, PlayerEntry, PlayersMessage, StatusMessage};
-use crate::command::CommandInbox;
+use crate::command::{BotCommand, CommandInbox};
 use crate::console::Printer;
 use crate::hooks::MapIdent;
 use crate::latency::{LatencyStats, Summary};
 use crate::nav_hooks::{NavConfig, NavHandle, nav_hooks};
+use crate::ownerchat::{self, OwnerChat, OwnerChatStats};
 use crate::relations::Relations;
 
 /// Process exit codes (`ddnet-ai record` uses the same).
@@ -133,6 +137,8 @@ pub struct RunReport {
     /// The ticks of the snapshots whose decision sent the `/kill` fallback (D-078); each is also in the audit under
     /// `Cl_Say(/kill)`, never under `Cl_Kill`.
     pub kill_command_ticks: Vec<i32>,
+    /// What the owner's website chat did (D-094): lines taken, said, refused, dropped. The text is nowhere in the report.
+    pub owner_chat: OwnerChatStats,
     pub gave_up: Option<(String, GaveUpCategory)>,
     pub map_name: Option<String>,
     pub events: Vec<BotEvent>,
@@ -230,6 +236,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         outgoing: BTreeMap::new(),
         kill_ticks: Vec::new(),
         kill_command_ticks: Vec::new(),
+        owner_chat: OwnerChatStats::default(),
         gave_up: None,
         map_name: None,
         events: Vec::new(),
@@ -240,6 +247,8 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         bridge_clients_dropped: 0,
     };
     let mut pending: Option<Box<LiveWorldSnapshot>> = None;
+    // Task 4.9 (D-094): the owner's website lines wait here for their turn.
+    let mut owner_chat = OwnerChat::new();
     let mut ended = false;
     // Set by the bot (moved to the spectators) or the reconnect budget: stop and disconnect politely.
     let mut stop_now = false;
@@ -303,9 +312,23 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         // The operator's commands (and the navigation's answers to them), between two snapshots.
         if let Some(inbox) = &cfg.commands {
             while let Some(req) = inbox.try_next() {
-                let reply = bot.command(req.cmd);
+                let reply = match req.cmd {
+                    BotCommand::Say { team, text } => {
+                        let result =
+                            owner_chat.submit(OwnerSay::new(team, text), started.elapsed(), bot.is_connected());
+                        if let Err(refusal) = &result {
+                            tracing::info!(reason = refusal.code(), "owner chat refused");
+                        }
+                        ownerchat::reply_for(&result)
+                    }
+                    cmd => bot.command(cmd),
+                };
                 let _ = req.reply.send(reply);
             }
+        }
+        // The owner's lines whose turn has come (at most one per pass; none outside the game).
+        if let Some(say) = owner_chat.poll(started.elapsed(), bot.is_connected()) {
+            client.owner_say(say);
         }
         for line in cfg.nav_handle.drain_replies() {
             match &cfg.console_out {
@@ -379,6 +402,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         }
     }
     bot.shutdown();
+    report.owner_chat = owner_chat.stats();
     report.stats = bot.stats();
     report.latency = bot.latency().clone();
     report.block_stats = bot.block_stats();

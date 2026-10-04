@@ -869,6 +869,9 @@ enum Control {
     /// Task 4.6 (D-078): a typed server command (only `/kill` exists), see
     /// [`crate::session::Session::request_server_command`].
     ServerCommand(ddai_net::server_command::ServerCommand),
+    /// Task 4.9 (D-094): a line the owner typed on the website, see [`crate::session::Session::request_owner_say`]. Its `Debug` shows
+    /// the length only.
+    OwnerSay(ddai_net::owner_chat::OwnerSay),
 }
 
 /// Task 4.1: what the caller expected of a decision, echoed back in [`ClientEvent::InputLatency`] so
@@ -1119,6 +1122,14 @@ impl Client {
     /// refuses any other `Cl_Say`. Best-effort like [`Client::kill`]; the caller owns the cooldown.
     pub fn server_command(&self, command: ddai_net::server_command::ServerCommand) {
         let _ = self.control_tx.send(Control::ServerCommand(command));
+    }
+
+    /// Says a line the owner typed on the website, as `Cl_Say` (task 4.9, D-094). The argument is the validated
+    /// [`ddai_net::owner_chat::OwnerSay`] (an `OwnerText` cannot be built without its checks), and the session lets it onto the wire only
+    /// while in the game and only against a one-shot authorisation for its exact bytes. Best-effort like [`Client::kill`]: a line that
+    /// arrives between two connections is dropped, never kept for later. The caller owns the rate limit (`ddai-bot::ownerchat`).
+    pub fn owner_say(&self, say: ddai_net::owner_chat::OwnerSay) {
+        let _ = self.control_tx.send(Control::OwnerSay(say));
     }
 
     /// Requests `Cl_ShowDistance(x, y)` (task 4.1; D-007's replacement for `/showall`).
@@ -1434,6 +1445,14 @@ fn run_one_connection(
             Ok(Control::ServerCommand(command)) => {
                 let now = Instant::now().duration_since(start);
                 session.request_server_command(command, now);
+                send_all(transport, session.flush(now));
+            }
+            Ok(Control::OwnerSay(say)) => {
+                let now = Instant::now().duration_since(start);
+                // Outside the game this is `Err(NotInGame)`: nothing is sent and nothing is kept.
+                if session.request_owner_say(&say, now).is_err() {
+                    tracing::info!("owner chat dropped (not in the game, or refused)");
+                }
                 send_all(transport, session.flush(now));
             }
             Ok(Control::ShowDistance(x, y)) => {
@@ -2028,7 +2047,11 @@ fn run(
                         }
                         // Between connections there is nothing to send them on: dropped.
                         Ok(
-                            Control::SetTeam(_) | Control::Kill | Control::ShowDistance(..) | Control::ServerCommand(_),
+                            Control::SetTeam(_)
+                            | Control::Kill
+                            | Control::ShowDistance(..)
+                            | Control::ServerCommand(_)
+                            | Control::OwnerSay(_),
                         ) => continue,
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     }

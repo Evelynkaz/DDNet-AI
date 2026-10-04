@@ -13,6 +13,8 @@ const FLY_JS: &str = include_str!("../../assets/fly.js");
 const TRAIN_JS: &str = include_str!("../../assets/train.js");
 const LAUNCH_JS: &str = include_str!("../../assets/launch.js");
 const LAUNCH_CSS: &str = include_str!("../../assets/launch.css");
+const SAY_JS: &str = include_str!("../../assets/say.js");
+const SAY_CSS: &str = include_str!("../../assets/say.css");
 
 pub async fn page() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX_HTML)
@@ -44,4 +46,14 @@ pub async fn launch_js() -> impl IntoResponse {
 /// Task 5.9: the «Запуск» card's styles (scoped under `.launch-card`).
 pub async fn launch_css() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], LAUNCH_CSS)
+}
+
+/// Task 4.9: the chat input's script (`SayCard`, mounted by `app.js`; to be mounted under the chat panel of the «Игра» tab later).
+pub async fn say_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], SAY_JS)
+}
+
+/// Task 4.9: the chat input's styles (scoped under `.say-card`).
+pub async fn say_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], SAY_CSS)
 }

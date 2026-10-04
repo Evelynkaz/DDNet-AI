@@ -2,12 +2,12 @@
 //! control ask of a running bot, [`parse_line`] is the console syntax (`!cmd args` or `?cmd args`), and
 //! [`CommandBus`] carries them to the bot's thread. The bot applies one with `Bot::command`.
 //!
-//! **No chat, by construction.** There is no `Say` variant and no variant that carries text to the
-//! server: a line that does not begin with `!` or `?` is a [`ParseError::NoPrefix`] and goes nowhere
-//! (the TS bot sent it to the game chat, `handleConsole` `bot.ts:1314-1322`); `!say`, `!owner`, `!llm`,
-//! the dummy and the vote commands parse to [`BotCommand::Unsupported`] with the reason. The type the
-//! parser returns has no way to reach `Client::say`, which `ddai-client` does not even have (D-007), and
-//! `tests/commands.rs` fuzzes the parser to prove no input ever produces anything but an enum value.
+//! **No chat from the console, by construction.** A line that does not begin with `!` or `?` is a [`ParseError::NoPrefix`] and goes
+//! nowhere (the TS bot sent it to the game chat, `handleConsole` `bot.ts:1314-1322`); `!say`, `!owner`, `!llm`, the dummy and the vote
+//! commands parse to [`BotCommand::Unsupported`] with the reason. [`parse_line`] never returns [`BotCommand::Say`]: that variant comes
+//! from one place only, the web control channel (`crate::control`, task 4.9, D-094), and it carries an [`OwnerText`], a line the
+//! owner typed on the authenticated website that passed the one validating constructor. `tests/commands.rs` fuzzes the parser to
+//! prove no console input ever produces anything but an enum value, and never a `Say`.
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -16,6 +16,7 @@ use crate::bot::Mode;
 use crate::brains::BrainKind;
 use crate::nav_hooks::WbMode;
 use crate::relations::ListKind;
+use ddai_net::owner_chat::OwnerText;
 
 /// `!goto` forms.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +101,13 @@ pub enum BotCommand {
     /// command (the console edits the lists itself); it comes from the web control channel (task 5.6).
     ReloadRelations,
     Quit,
+    /// Say a line in the game chat (task 4.9, D-094): what the owner typed on the website, already validated. The only variant
+    /// that carries text for the server; the console cannot make one. Applied by the runner's `OwnerChat` (rate limits, queue,
+    /// in-game only), not by `Bot::command`.
+    Say {
+        team: bool,
+        text: OwnerText,
+    },
     /// A command the old bot had that this one deliberately does not (with the reason).
     Unsupported(&'static str),
 }
@@ -124,7 +132,7 @@ impl ParseError {
         match self {
             ParseError::Empty => String::new(),
             ParseError::NoPrefix => {
-                "not a command: start with ! or ? (try !help). The bot never writes in the game chat, so a line without a prefix goes nowhere".to_string()
+                "not a command: start with ! or ? (try !help). The console never writes in the game chat, so a line without a prefix goes nowhere".to_string()
             }
             ParseError::NoCommand => "empty command -- try !help".to_string(),
             ParseError::Unknown(c) => format!("unknown command '{c}' -- try !help"),
@@ -241,7 +249,9 @@ pub fn parse_line(line: &str) -> Result<BotCommand, ParseError> {
         "kill" | "reset" => BotCommand::Kill,
         "quit" | "exit" => BotCommand::Quit,
         // Dropped on purpose (task 4.3 / D-007): each says why instead of "unknown command".
-        "say" => BotCommand::Unsupported("say: the bot never writes in the game chat (D-007)"),
+        "say" => BotCommand::Unsupported(
+            "say: the console never writes in the game chat (D-007); the owner types chat lines on the website (D-094)",
+        ),
         "owner" | "llm" => BotCommand::Unsupported("owner / llm: chat orders are gone with the chat (D-007)"),
         "d" => BotCommand::Unsupported("d: there is no dummy"),
         "emote" => BotCommand::Unsupported("emote: the bot sends no emotes"),

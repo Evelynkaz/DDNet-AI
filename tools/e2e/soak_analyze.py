@@ -44,12 +44,16 @@ KILL_EFFECT_TICKS = 50
 MAX_DEAD_KILLS_IN_A_ROW = 3
 # Task 4.6 (D-078): the one chat-channel message the bot may send, as the outgoing audit labels it (`ddai_client::session::SERVER_COMMAND_KILL_LABEL`).
 KILL_COMMAND_LABEL = "Cl_Say(/kill)"
+# Task 4.9 (D-094): the owner's website chat, as the outgoing audit labels it (`ddai_client::session::OWNER_SAY_LABEL`). Allowed only
+# against the report's own `owner_chat` numbers (see `analyze_chat`).
+OWNER_SAY_LABEL = "Cl_Say(owner)"
 SLOPE_WINDOW_S = 5 * 3600.0
 SLOPE_LIMIT_MIB_WEEK = 50.0
 INGAME_RECONNECT_WINDOW_S = 600
 # What the bot may put on the wire: the join's one-offs plus Cl_Kill / Cl_SetTeam (docs/formats.md 21.6).
 ALLOWED_OUTGOING = {
     "Cl_Say(/kill)",  # task 4.6, D-078: the typed /kill fallback; every other Cl_Say stays a failure
+    "Cl_Say(owner)",  # task 4.9, D-094: a line the owner typed on the website; judged against report["owner_chat"]
     "Cl_StartInfo",
     "Cl_IsDDNetLegacy",
     "Cl_ShowDistance",
@@ -652,14 +656,26 @@ def analyze_chat(res, log, report, console_text):
         res.check("0 chat in the outgoing audit", False, "no --report: the outgoing audit is missing")
         return
     labels = sorted(out)
-    chat = [k for k in labels if ("Say" in k or "Chat" in k) and k != KILL_COMMAND_LABEL]
+    chat = [k for k in labels if ("Say" in k or "Chat" in k) and k not in (KILL_COMMAND_LABEL, OWNER_SAY_LABEL)]
     unknown = [k for k in labels if k not in ALLOWED_OUTGOING]
     refused = {k: v["refused"] for k, v in out.items() if v["refused"]}
     res.check(
-        "0 chat in the outgoing audit except the allowlisted /kill",
+        "0 chat in the outgoing audit except the allowlisted /kill and the owner's own lines",
         not chat and not unknown and not refused,
         "outgoing: " + ", ".join(f"{k} x{out[k]['accepted']}" for k in labels) + f"; chat {chat}; unknown {unknown}; refused {refused}",
     )
+    # The owner's lines (task 4.9): the bot says them only when the owner types them on the website, so a run with none must show none,
+    # and a run with some must account for each: the wire count is at most what the runner handed to the client (`owner_chat.sent`;
+    # a line can still be dropped by a session that left the game in between), and none was refused by the allow-list.
+    owner = out.get(OWNER_SAY_LABEL)
+    if owner is not None:
+        counts = (report or {}).get("owner_chat")
+        sent = counts.get("sent") if isinstance(counts, dict) else None
+        res.check(
+            "every Cl_Say(owner) on the wire was handed over by the owner chat (wire <= owner_chat.sent, none refused)",
+            sent is not None and owner["accepted"] <= sent and owner["refused"] == 0,
+            f"wire {owner['accepted']}, refused {owner['refused']}, owner_chat {counts}",
+        )
     kills_sent = out.get("Cl_Kill", {}).get("accepted", 0)
     kill_ticks = (report or {}).get("kill_ticks", [])
     res.check(
@@ -1008,7 +1024,7 @@ def analyze(run_dir, baseline=None):
 # ------------------------------------------------------------------------------------------------ self test
 
 
-def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99_growth=0.0, bad_kill=False, chat=False, panic=False, clips=10, drops=1, viewer=25, file_growth=0.0, swapped_growth=0.0, prod_dir_ok=True, duration=3600, leak_mib_h=0.0, real_dir=False, dead_kills=0, cmd_kills=0, dead_cmds=False, stray_cmd=False, orphan_cmd=False):
+def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99_growth=0.0, bad_kill=False, chat=False, panic=False, clips=10, drops=1, viewer=25, file_growth=0.0, swapped_growth=0.0, prod_dir_ok=True, duration=3600, leak_mib_h=0.0, real_dir=False, dead_kills=0, cmd_kills=0, dead_cmds=False, stray_cmd=False, orphan_cmd=False, owner_wire=0, owner_refused=0, owner_report=None):
     """A fake run (60 minutes by default; `duration` for a long one) whose numbers we control, to prove that every acceptance check can fail."""
     import random
 
@@ -1127,8 +1143,11 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
         out["Cl_Say(/kill)"] = {"accepted": n_cmds + int(stray_cmd) + int(orphan_cmd), "refused": 0}
     if chat:
         out["Cl_Say"] = {"accepted": 1, "refused": 0}
+    if owner_wire or owner_refused:
+        out["Cl_Say(owner)"] = {"accepted": owner_wire, "refused": owner_refused}
     (run / "bot-report.json").write_text(
-        json.dumps({"exit_code": 0, "gave_up": None, "outgoing_game_messages": out, "kill_ticks": [1000, 1600, 1700] + [2300 + 500 * n for n in range(dead_kills)] + [4000 + 500 * n for n in range(cmd_kills)],
+        json.dumps({"exit_code": 0, "gave_up": None, "outgoing_game_messages": out,
+                    **({"owner_chat": owner_report} if owner_report is not None else {}), "kill_ticks": [1000, 1600, 1700] + [2300 + 500 * n for n in range(dead_kills)] + [4000 + 500 * n for n in range(cmd_kills)],
                     "kill_command_ticks": [4050 + 500 * n for n in range(cmd_kills)] + ([2350 + 500 * n for n in range(dead_kills)] if dead_cmds else []) + ([99_999] if orphan_cmd else [])})
     )
     return run
@@ -1160,6 +1179,12 @@ def selftest():
         ("a /kill on the wire the bot never decided on fails", {"stray_cmd": True}, "/kill on the wire"),
         ("a /kill with no Cl_Kill decision before it fails (counts equal, tick orphaned)", {"orphan_cmd": True}, "/kill on the wire"),
         ("chat fails", {"chat": True}, "0 chat"),
+        ("the owner's lines, all handed over by the owner chat, pass (task 4.9)", {"owner_wire": 3, "owner_report": {"accepted": 3, "sent": 3, "refused": 0, "dropped": 0}}, None),
+        ("an owner line the runner handed over but the session dropped (wire < sent) passes", {"owner_wire": 2, "owner_report": {"accepted": 3, "sent": 3, "refused": 0, "dropped": 0}}, None),
+        ("more owner lines on the wire than the owner chat sent fail", {"owner_wire": 4, "owner_report": {"accepted": 3, "sent": 3, "refused": 0, "dropped": 0}}, "Cl_Say(owner)"),
+        ("an owner line the allow-list refused fails", {"owner_wire": 2, "owner_refused": 1, "owner_report": {"accepted": 3, "sent": 3, "refused": 0, "dropped": 0}}, "Cl_Say(owner)"),
+        ("owner lines with no owner_chat numbers in the report fail", {"owner_wire": 1}, "Cl_Say(owner)"),
+        ("another Cl_Say label beside the owner's still fails", {"owner_wire": 1, "chat": True, "owner_report": {"accepted": 1, "sent": 1, "refused": 0, "dropped": 0}}, "0 chat"),
         ("panic fails", {"panic": True}, "no panic"),
         ("unbounded clips fail", {"clips": 60}, "clips bounded"),
         ("reconnect budget fails", {"drops": 4}, "reconnects within"),

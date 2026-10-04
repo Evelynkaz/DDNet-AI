@@ -153,6 +153,10 @@ pub struct BotOpts {
     /// Do not open the web control socket.
     #[arg(long, conflicts_with = "control")]
     pub no_control: bool,
+    /// Emergency switch (task 4.9, D-094; also `owner_chat = false` in the settings file): refuse the owner's chat lines from the
+    /// website (`say`) while the rest of the control channel works. With it the bot cannot be made to say anything but the typed `/kill`.
+    #[arg(long)]
+    pub no_owner_chat: bool,
     /// The control channel's audit log (command tags, session tags, outcomes; no nicknames). Default
     /// `<data-dir>/logs/bot/control-audit.log`.
     #[arg(long)]
@@ -253,9 +257,16 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
             .clone()
             .unwrap_or_else(|| data_dir.join("bot").join("settings.toml"))
     });
+    // The owner chat fails closed (D-094): an unreadable file or an unknown key (a typo of `owner_chat`) switches it off.
+    let mut settings_unreadable = false;
+    let unknown_settings_keys = settings_path
+        .as_deref()
+        .map(ddai_bot::settings::unknown_keys)
+        .unwrap_or_default();
     let settings = match settings_path.as_deref().map(ddai_bot::settings::load) {
         Some(ddai_bot::settings::Loaded::Ok(s)) => s,
         Some(ddai_bot::settings::Loaded::Corrupt { moved_to, why }) => {
+            settings_unreadable = true;
             eprintln!(
                 "settings: ignored ({why}){}",
                 moved_to.map_or(String::new(), |p| format!("; the file is kept as {}", p.display()))
@@ -458,6 +469,8 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
     };
     // Held until the bot has stopped: dropping it closes and removes the socket.
     let _control = if o.no_control {
+        // No control socket means no chat; the channel is burnt so that nothing else in this process can claim it later.
+        ddai_bot::control::forgo_owner_chat();
         None
     } else {
         let socket = o
@@ -478,7 +491,25 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
                 return ExitCode::FAILURE;
             }
         };
-        match ddai_bot::control::ControlServer::start(&socket, bus_sender.clone(), audit) {
+        // Chat is on unless something switches it off, and it fails closed: the flag, `owner_chat = false`, the marker file
+        // `bot/owner-chat.off` (survives `launch apply`), an unreadable settings file, or a settings key the bot does not know.
+        let marker =
+            std::fs::symlink_metadata(data_dir.join("bot").join(ddai_bot::settings::OWNER_CHAT_OFF_MARKER)).is_ok();
+        let chat_off = ddai_bot::settings::owner_chat_off(
+            o.no_owner_chat,
+            &settings,
+            settings_unreadable,
+            &unknown_settings_keys,
+            marker,
+        );
+        let owner_chat = chat_off.is_none();
+        if let Some(why) = &chat_off {
+            println!(
+                "owner chat: switched off ({}): lines typed on the website are refused",
+                why.describe()
+            );
+        }
+        match ddai_bot::control::ControlServer::start_with_owner_chat(&socket, bus_sender.clone(), audit, owner_chat) {
             Ok(server) => {
                 bus_used = true;
                 Some(server)
@@ -620,6 +651,9 @@ pub fn report_json(r: &RunReport) -> serde_json::Value {
         "blocks": {"blocks": r.block_stats.blocks, "blocked_by": r.block_stats.blocked_by},
         "kill_ticks": r.kill_ticks,
         "kill_command_ticks": r.kill_command_ticks,
+        // The owner's website chat (D-094). `sent` counts the lines handed to the client, which can still drop one if the session left
+        // the game in between: the wire count in `outgoing_game_messages["Cl_Say(owner)"]` is at most `sent`.
+        "owner_chat": {"accepted": r.owner_chat.accepted, "sent": r.owner_chat.sent, "refused": r.owner_chat.refused, "dropped": r.owner_chat.dropped},
         "outgoing_game_messages": outgoing,
         "latency_us": {
             "total": sum_json(r.latency.total.summary()),
@@ -657,6 +691,43 @@ mod tests {
         assert_eq!(mmap_threshold_warning(Some(OsStr::new("131072"))), None);
     }
 
+    /// F2 (task 4.9): the report carries the owner chat's numbers, which the soak analyser needs to judge `Cl_Say(owner)`.
+    #[test]
+    fn the_report_json_carries_the_owner_chat_numbers() {
+        let report = RunReport {
+            exit_code: 0,
+            stats: Default::default(),
+            latency: Default::default(),
+            block_stats: Default::default(),
+            outgoing: [("Cl_Say(owner)".to_string(), (2, 0))].into_iter().collect(),
+            kill_ticks: Vec::new(),
+            kill_command_ticks: Vec::new(),
+            owner_chat: ddai_bot::ownerchat::OwnerChatStats {
+                accepted: 3,
+                sent: 2,
+                refused: 1,
+                dropped: 1,
+            },
+            gave_up: None,
+            map_name: None,
+            events: Vec::new(),
+            seal_times: Default::default(),
+            reach_times: Default::default(),
+            margin: None,
+            elapsed: Duration::from_secs(1),
+            bridge_clients_dropped: 0,
+        };
+        let json = report_json(&report);
+        assert_eq!(
+            json["owner_chat"],
+            serde_json::json!({"accepted": 3, "sent": 2, "refused": 1, "dropped": 1})
+        );
+        assert_eq!(
+            json["outgoing_game_messages"]["Cl_Say(owner)"],
+            serde_json::json!({"accepted": 2, "refused": 0})
+        );
+    }
+
     #[test]
     fn duration_zero_means_no_limit_for_the_bot() {
         assert_eq!(run_for(0), None);
@@ -692,6 +763,22 @@ mod search_threads_tests {
         for bad in ["0", "17", "-1", "many", ""] {
             assert!(get(&["--search-threads", bad]).is_err(), "{bad:?}");
         }
+    }
+
+    /// F4 (task 4.9): the chat-only emergency switch is a flag, off by default.
+    #[test]
+    fn the_owner_chat_switch_is_a_flag_and_off_by_default() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.no_owner_chat)
+        };
+        assert!(!get(&[]).unwrap());
+        assert!(get(&["--no-owner-chat"]).unwrap());
+        assert!(
+            get(&["--no-owner-chat", "--no-control"]).unwrap(),
+            "it does not conflict with --no-control"
+        );
     }
 
     #[test]

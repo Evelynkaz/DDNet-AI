@@ -6,6 +6,7 @@
     <title>DDNet-AI</title>
     <link rel="stylesheet" href="/app.css" />
     <link rel="stylesheet" href="/launch.css" />
+    <link rel="stylesheet" href="/say.css" />
   </head>
   <body>
     <main class="shell">
@@ -106,6 +107,10 @@
 
       <!-- Task 5.9: the «Запуск» card (assets/launch.js builds it into this mount; start/stop the bot, choose its brain). -->
       <div id="launch-mount"></div>
+
+      <!-- Task 4.9 (D-090): the chat input (assets/say.js builds it into this mount): what the owner types here, the bot says in the game
+           chat. To be moved under the chat panel of the «Игра» tab (SayCard.mount(root, api, { embedded: true }); crates/ddai-web/README.md). -->
+      <div id="say-mount"></div>
 
       <section class="card" aria-labelledby="bot-status-title">
         <h2 id="bot-status-title">Состояние</h2>
@@ -379,6 +384,7 @@
     <script src="/fly.js"></script>
     <script src="/train.js"></script>
     <script src="/launch.js"></script>
+    <script src="/say.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

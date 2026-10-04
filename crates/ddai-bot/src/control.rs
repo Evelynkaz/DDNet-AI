@@ -4,11 +4,14 @@
 //!
 //! - **Private.** `control.sock` is created `0600` in a `0700` directory ([`crate::bridge::bind_private_socket`]); that
 //!   file mode is the access control (same user only), as for the bridge.
-//! - **Typed, closed, no chat.** A request is a `ddai_botctl::proto::ControlRequest`; its command is a closed enum of
-//!   what the web needs (mode, stop/go, wb, brain, kill, clip, goto x y, spec/join, reload the lists). [`to_bot_command`]
-//!   maps it onto a `BotCommand` with an exhaustive `match` (no wildcard), and `BotCommand` has no variant that
-//!   reaches the game chat (`crate::command`). Unknown commands and fields are refused when parsing; `quit`, `target`
-//!   by name and `say` do not exist in the protocol.
+//! - **Typed and closed.** A request is a `ddai_botctl::proto::ControlRequest`; its command is a closed enum of
+//!   what the web needs (mode, stop/go, wb, brain, kill, clip, goto x y, spec/join, reload the lists, and since task 4.9 `say`: a
+//!   line the owner typed on the website). [`to_bot_command`] maps it onto a `BotCommand` with an exhaustive `match` (no wildcard);
+//!   for `say` it validates the text **again** and makes the `OwnerText` with the process's one `OwnerChannel`, which only the
+//!   [`Dispatcher`] holds (`ControlServer::start` claims it): no other code can make an `OwnerText`, so a `BotCommand::Say` always
+//!   holds a validated line that came through this socket. Without the channel (`--no-owner-chat`, or `owner_chat = false` in the
+//!   settings, or the channel already taken) a `say` is refused (`chat_disabled`) and everything else works. Unknown commands and fields are refused when parsing; `quit` and `target` by name do not exist in the
+//!   protocol. The bot's own pacing of chat lines (`crate::ownerchat`) comes after that.
 //! - **Rate-limited.** One token bucket for the whole socket ([`RATE_BURST`], [`RATE_PER_SEC`]) counts every request line,
 //!   well-formed or not; an empty bucket answers `rate_limited` without bothering the bot. At most [`MAX_CONNECTIONS`]
 //!   connections are served at once.
@@ -31,13 +34,14 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ddai_botctl::proto::{
-    BrainArg, ControlCommand, ControlReply, ControlRequest, MAX_REQUEST_BYTES, ModeArg, ReplyCode, WbArg,
+    BrainArg, ControlCommand, ControlReply, ControlRequest, Invalid, MAX_REQUEST_BYTES, ModeArg, ReplyCode, WbArg,
 };
 
 use crate::bot::Mode;
 use crate::brains::BrainKind;
 use crate::command::{BotCommand, BusError, CommandSender, GotoArg};
 use crate::nav_hooks::WbMode;
+use ddai_net::owner_chat::{OwnerChannel, OwnerText};
 
 /// File name of the socket inside the bot's directory.
 pub const SOCKET_NAME: &str = "control.sock";
@@ -55,9 +59,10 @@ pub const ANSWER_TIMEOUT: Duration = crate::console::ANSWER_TIMEOUT;
 pub const AUDIT_MAX_BYTES: u64 = 8 << 20;
 
 /// What a control command asks of the bot, as the 4.3 console's own type. Exhaustive on purpose: a command added to the
-/// protocol must be given its meaning here.
-pub fn to_bot_command(cmd: &ControlCommand) -> BotCommand {
-    match cmd {
+/// protocol must be given its meaning here. Fails only for a `say`: its text is refused by `OwnerText::new` (the bot's own check of
+/// the owner's line, independent of the web's), or there is no `owner` channel (the owner chat is switched off).
+pub fn to_bot_command(cmd: &ControlCommand, owner: Option<&OwnerChannel>) -> Result<BotCommand, Invalid> {
+    Ok(match cmd {
         ControlCommand::Mode { mode } => BotCommand::Mode(Some(match mode {
             ModeArg::Fight => Mode::Fight,
             ModeArg::Passive => Mode::Passive,
@@ -84,7 +89,22 @@ pub fn to_bot_command(cmd: &ControlCommand) -> BotCommand {
         ControlCommand::Spec {} => BotCommand::Spec,
         ControlCommand::Join {} => BotCommand::Join,
         ControlCommand::ReloadRelations {} => BotCommand::ReloadRelations,
-    }
+        ControlCommand::Say { team, text } => {
+            let channel = owner.ok_or(Invalid::ChatDisabled)?;
+            BotCommand::Say {
+                team: *team,
+                text: OwnerText::new(channel, text.as_str()).map_err(Invalid::Say)?,
+            }
+        }
+    })
+}
+
+/// Gives up the owner chat for this process: claims the process's one `OwnerChannel` and lets it go, so that no later `claim()` gets
+/// it (task 4.9, D-094). Called when the chat is switched off (`--no-owner-chat`, `owner_chat = false`, the marker file, a settings
+/// file that cannot be trusted) and when there is no control socket at all (`--no-control`): the capability must not be left lying
+/// free exactly in the modes where the owner asked for no chat.
+pub fn forgo_owner_chat() {
+    let _burnt = OwnerChannel::claim();
 }
 
 // ---- the rate limit ---------------------------------------------------------------------------------
@@ -265,6 +285,9 @@ pub struct Dispatcher {
     audit: Arc<dyn AuditSink>,
     limits: Mutex<Limits>,
     answer_timeout: Duration,
+    /// The process's one `OwnerChannel` (task 4.9, D-094): the only thing that can turn a `say` request into an `OwnerText`. `None`:
+    /// the owner chat is off and every `say` is refused.
+    owner: Option<OwnerChannel>,
 }
 
 impl Dispatcher {
@@ -287,7 +310,20 @@ impl Dispatcher {
                 last_limited_audit: None,
             }),
             answer_timeout,
+            owner: None,
         }
+    }
+
+    /// Hands the dispatcher the process's `OwnerChannel`: from now on it turns validated `say` requests into `OwnerText`s. The only
+    /// production caller is [`ControlServer::start`], with the channel from `OwnerChannel::claim()`.
+    pub fn with_owner_channel(mut self, channel: OwnerChannel) -> Dispatcher {
+        self.owner = Some(channel);
+        self
+    }
+
+    /// Whether this dispatcher can pass a chat line on.
+    pub fn owner_chat_enabled(&self) -> bool {
+        self.owner.is_some()
     }
 
     fn audit(&self, session: &str, cmd: &str, outcome: Outcome) {
@@ -337,7 +373,21 @@ impl Dispatcher {
             self.audit(session, &tag, Outcome::BadRequest);
             return ControlReply::refused(ReplyCode::BadRequest, &e.to_string());
         }
-        let (reply, outcome) = match self.sender.send(to_bot_command(&req.cmd), self.answer_timeout) {
+        // The bot's own check of a chat line (the web has validated it too); nothing else can fail here.
+        let bot_cmd = match to_bot_command(&req.cmd, self.owner.as_ref()) {
+            Ok(c) => c,
+            Err(Invalid::ChatDisabled) => {
+                self.audit(&req.session, &tag, Outcome::Failed);
+                let mut reply = ControlReply::answer(false, "refused: the owner chat is switched off on the bot");
+                reply.data = Some(serde_json::json!({ "reason": "chat_disabled" }));
+                return reply;
+            }
+            Err(e) => {
+                self.audit(&req.session, &tag, Outcome::BadRequest);
+                return ControlReply::refused(ReplyCode::BadRequest, &e.to_string());
+            }
+        };
+        let (reply, outcome) = match self.sender.send(bot_cmd, self.answer_timeout) {
             Ok(r) => {
                 let mut reply = ControlReply::answer(r.ok, &r.text);
                 reply.data = r.data;
@@ -442,8 +492,34 @@ pub struct ControlServer {
 impl ControlServer {
     /// Binds `path` (mode `0600` in a `0700` directory; a live bot's socket is not stolen, a stale one is replaced) and
     /// starts serving it on a thread named `ddai-botctl`.
+    ///
+    /// **Claims the process's one `OwnerChannel`** and moves it into the dispatcher (task 4.9, D-094): this is the only place a chat line
+    /// can enter the bot. If the channel is already taken the server still starts, with the owner chat off.
     pub fn start(path: &Path, sender: CommandSender, audit: Arc<dyn AuditSink>) -> io::Result<ControlServer> {
-        ControlServer::start_with(path, Dispatcher::new(sender, audit))
+        ControlServer::start_with_owner_chat(path, sender, audit, true)
+    }
+
+    /// [`ControlServer::start`] with the owner chat on or off: off (`--no-owner-chat`, the emergency switch) gives the dispatcher no
+    /// channel and **burns** the process's one channel ([`forgo_owner_chat`]), so every `say` is refused while the rest of the control
+    /// channel works and nothing else can claim it later.
+    pub fn start_with_owner_chat(
+        path: &Path,
+        sender: CommandSender,
+        audit: Arc<dyn AuditSink>,
+        owner_chat: bool,
+    ) -> io::Result<ControlServer> {
+        let mut dispatcher = Dispatcher::new(sender, audit);
+        if owner_chat {
+            match OwnerChannel::claim() {
+                Some(channel) => dispatcher = dispatcher.with_owner_channel(channel),
+                None => {
+                    tracing::warn!("the owner chat channel was already taken in this process: chat lines are refused")
+                }
+            }
+        } else {
+            forgo_owner_chat();
+        }
+        ControlServer::start_with(path, dispatcher)
     }
 
     pub fn start_with(path: &Path, dispatcher: Dispatcher) -> io::Result<ControlServer> {
@@ -609,6 +685,7 @@ mod tests {
     #[test]
     fn every_protocol_command_becomes_the_console_command_it_names() {
         use ddai_botctl::proto::*;
+        let channel = OwnerChannel::mint_for_tests();
         let all: Vec<(ControlCommand, BotCommand)> = vec![
             (
                 ControlCommand::Mode { mode: ModeArg::Fight },
@@ -675,14 +752,157 @@ mod tests {
             (ControlCommand::Spec {}, BotCommand::Spec),
             (ControlCommand::Join {}, BotCommand::Join),
             (ControlCommand::ReloadRelations {}, BotCommand::ReloadRelations),
+            (
+                ControlCommand::Say {
+                    team: false,
+                    text: ddai_botctl::proto::SayText::new("  hello  "),
+                },
+                BotCommand::Say {
+                    team: false,
+                    text: OwnerText::new(&channel, "hello").unwrap(),
+                },
+            ),
+            (
+                ControlCommand::Say {
+                    team: true,
+                    text: ddai_botctl::proto::SayText::new("gg"),
+                },
+                BotCommand::Say {
+                    team: true,
+                    text: OwnerText::new(&channel, "gg").unwrap(),
+                },
+            ),
         ];
         for (c, want) in all {
-            assert_eq!(to_bot_command(&c), want, "{c:?}");
+            assert_eq!(to_bot_command(&c, Some(&channel)), Ok(want.clone()), "{c:?}");
             assert!(
-                !matches!(to_bot_command(&c), BotCommand::Quit | BotCommand::Unsupported(_)),
+                !matches!(want, BotCommand::Quit | BotCommand::Unsupported(_)),
                 "no control command quits or is a dropped one"
             );
         }
+    }
+
+    /// Task 4.9: the bot's own check of a chat line, independent of `ControlRequest::validate`, which the web ran first.
+    #[test]
+    fn the_bot_checks_a_chat_line_itself_when_it_maps_it() {
+        use ddai_botctl::proto::SayText;
+        use ddai_net::owner_chat::OwnerTextError;
+        let channel = OwnerChannel::mint_for_tests();
+        for (text, why) in [
+            ("", OwnerTextError::Empty),
+            ("/kill", OwnerTextError::Command),
+            ("a\nb", OwnerTextError::Control),
+            (&"x".repeat(256), OwnerTextError::TooLong),
+            ("\u{200B}/kill", OwnerTextError::Control),
+            ("\u{2800}/w someone hi", OwnerTextError::Command),
+            ("xd sure chillerbot.png is lyfe", OwnerTextError::Reserved),
+        ] {
+            let c = ControlCommand::Say {
+                team: false,
+                text: SayText::new(text),
+            };
+            assert_eq!(to_bot_command(&c, Some(&channel)), Err(Invalid::Say(why)), "{text:?}");
+            // and without the channel the bot refuses before it even looks at the text
+            assert_eq!(to_bot_command(&c, None), Err(Invalid::ChatDisabled), "{text:?}");
+        }
+    }
+
+    /// Task 4.9: a chat line goes through the dispatcher like any command, is trimmed, reaches the bot as a typed `BotCommand::Say`,
+    /// and its text is nowhere in the audit trail; one the bot refuses never reaches it.
+    #[test]
+    fn a_chat_line_reaches_the_bot_typed_and_its_text_is_not_audited() {
+        use ddai_botctl::proto::SayText;
+        let (d, audit, bot) = setup(1000.0, 1000.0, |c| match c {
+            BotCommand::Say { .. } => {
+                let mut r = CommandReply::ok("accepted: it is being said now");
+                r.data = Some(serde_json::json!({"reason": "none"}));
+                r
+            }
+            _ => CommandReply::err("unexpected"),
+        });
+        let d = d.with_owner_channel(OwnerChannel::mint_for_tests());
+        let say = |team: bool, text: &str| {
+            line(&ControlCommand::Say {
+                team,
+                text: SayText::new(text),
+            })
+        };
+        let ok = d.handle_line(&say(true, "  SECRET-LINE-777 "));
+        assert!(ok.ok && ok.code.is_none(), "{ok:?}");
+        assert_eq!(
+            ok.data,
+            Some(serde_json::json!({"reason": "none"})),
+            "the bot's data is relayed"
+        );
+        for bad in ["/kill", "", "a\nb", &"x".repeat(300)] {
+            let r = d.handle_line(&say(false, bad));
+            assert!(!r.ok);
+            assert_eq!(r.code, Some(ReplyCode::BadRequest), "{bad:?}");
+            assert!(!r.text.contains("kill") || bad.is_empty(), "{}", r.text);
+        }
+        thread::sleep(Duration::from_millis(30));
+        let seen = bot.seen();
+        assert_eq!(seen.len(), 1, "only the valid line reached the bot: {seen:?}");
+        let BotCommand::Say { team, text } = &seen[0] else {
+            panic!("{seen:?}")
+        };
+        assert!(*team);
+        assert_eq!(text.as_str(), "SECRET-LINE-777");
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(entries[0].cmd, "say:team");
+        assert_eq!(entries[0].outcome, Outcome::Ok);
+        for e in &entries {
+            assert!(!e.to_line().contains("SECRET"), "{}", e.to_line());
+            assert!(e.cmd == "say:team" || e.cmd == "say:all", "{}", e.cmd);
+        }
+        assert!(entries[1..].iter().all(|e| e.outcome == Outcome::BadRequest));
+    }
+
+    /// F4 (task 4.9): the emergency switch. Without the owner channel every `say` is refused with `chat_disabled` (a plain refusal, not
+    /// a bad request) and never reaches the bot, while every other command works.
+    #[test]
+    fn without_the_owner_channel_chat_is_refused_and_everything_else_works() {
+        use ddai_botctl::proto::SayText;
+        let (d, audit, bot) = setup(1000.0, 1000.0, |_| CommandReply::ok("did it"));
+        assert!(!d.owner_chat_enabled());
+        let r = d.handle_line(&line(&ControlCommand::Say {
+            team: false,
+            text: SayText::new("hello there"),
+        }));
+        assert!(!r.ok && r.code.is_none(), "{r:?}");
+        assert_eq!(r.data, Some(serde_json::json!({"reason": "chat_disabled"})));
+        assert!(
+            r.text.contains("switched off") && !r.text.contains("hello"),
+            "{}",
+            r.text
+        );
+        // the others are unaffected
+        assert!(d.handle_line(&line(&ControlCommand::Stop {})).ok);
+        assert!(d.handle_line(&line(&ControlCommand::Kill {})).ok);
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            bot.seen(),
+            vec![BotCommand::Stop, BotCommand::Kill],
+            "the chat line never reached the bot"
+        );
+        let entries = audit.0.lock().unwrap().clone();
+        assert_eq!(
+            (entries[0].cmd.as_str(), entries[0].outcome),
+            ("say:all", Outcome::Failed)
+        );
+        // with the channel it works
+        let (d, _audit, bot) = setup(1000.0, 1000.0, |_| CommandReply::ok("did it"));
+        let d = d.with_owner_channel(OwnerChannel::mint_for_tests());
+        assert!(d.owner_chat_enabled());
+        assert!(
+            d.handle_line(&line(&ControlCommand::Say {
+                team: true,
+                text: SayText::new("hello there"),
+            }))
+            .ok
+        );
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(bot.seen().len(), 1);
     }
 
     #[test]

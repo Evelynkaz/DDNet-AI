@@ -13,8 +13,9 @@
 //! under `no-store` like every `/api/*` route, and the security headers are the unchanged global ones.
 //!
 //! **What the web cannot do through here.** The only things it can send the bot are the variants of `ControlCommand`:
-//! no chat, no quit, no connect, no allow-list and no `ready` flag exist in that vocabulary (and the web process never
-//! writes `live-servers.toml`). The relations editor writes only the lists file.
+//! no quit, no connect, no allow-list and no `ready` flag exist in that vocabulary (and the web process never
+//! writes `live-servers.toml`). The one variant with text for the game chat, `Say` (task 4.9, D-090), is refused on
+//! `/api/bot/command` and has its own route, [`crate::http::say`]. The relations editor writes only the lists file.
 //!
 //! **Names.** The lists are returned to the logged-in owner only. Nothing here logs a name: log lines carry the audit
 //! tag of the session, the command's tag and counts.
@@ -46,7 +47,7 @@ pub(crate) fn json_error(status: StatusCode, error: &'static str) -> Response {
     (status, Json(serde_json::json!({ "error": error }))).into_response()
 }
 
-fn json_error_detail(status: StatusCode, error: &'static str, detail: &str) -> Response {
+pub(crate) fn json_error_detail(status: StatusCode, error: &'static str, detail: &str) -> Response {
     (status, Json(serde_json::json!({ "error": error, "detail": detail }))).into_response()
 }
 
@@ -60,7 +61,7 @@ pub(crate) struct Owner {
 /// but whose bridge is away (started with `--no-bridge`, or the site's bridge connection is reconnecting) still has its control
 /// socket, so it stays commandable while the demo is on show. A stale socket file with nobody behind it is refused later, by
 /// the connection (`bot_unavailable`).
-async fn demo_only(state: &SharedState) -> bool {
+pub(crate) async fn demo_only(state: &SharedState) -> bool {
     let demo_on_show = state
         .live_hub
         .as_ref()
@@ -212,6 +213,10 @@ pub async fn command(State(state): State<SharedState>, headers: HeaderMap, jar: 
         Ok(c) => c,
         Err(_) => return json_error(StatusCode::BAD_REQUEST, "bad_request"),
     };
+    // A chat line has its own route (`POST /api/bot/say`: its own rate limit and answers); it is never taken from here.
+    if matches!(cmd, ControlCommand::Say { .. }) {
+        return json_error(StatusCode::BAD_REQUEST, "use_say_route");
+    }
     if let Err(e) = cmd.validate() {
         return json_error_detail(StatusCode::BAD_REQUEST, "invalid", &e.to_string());
     }

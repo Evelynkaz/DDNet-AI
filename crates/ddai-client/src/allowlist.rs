@@ -21,6 +21,7 @@
 //! see [`Guard::check`]'s doc comment for exactly where that split is enforced).
 
 use ddai_net::message::Registry;
+use ddai_net::owner_chat::{OwnerPayload, OwnerSay};
 use ddai_net::packer::Unpacker;
 use ddai_net::server_command::ServerCommand;
 use ddai_net::uuid::{MsgId, unpack_msg_id};
@@ -61,13 +62,64 @@ pub enum GuardError {
     #[error("refused a system message on the game guard path (should never happen: sys messages bypass this guard)")]
     UnexpectedSystemMessage,
     #[error(
-        "outgoing numbered game message id {0} is not on the allow-list (D-007: the bot never sends chat; D-078: only `/kill`, byte for byte)"
+        "outgoing numbered game message id {0} is not on the allow-list (D-007: the bot never sends chat; D-078: only `/kill`, byte for byte; D-094: a Cl_Say only against a one-shot authorisation for an owner's website line)"
     )]
     NumberedIdNotAllowed(i32),
     #[error("outgoing ex game message '{0}' is not on the allow-list (D-007: the bot never sends chat)")]
     ExNameNotAllowed(String),
     #[error("outgoing ex game message has an unresolved/unregistered UUID — refused, not on the allow-list")]
     UnresolvedExName,
+}
+
+/// One-shot authorisations for owner chat (task 4.9, D-094): the exact payload bytes of `Cl_Say` lines that the session itself encoded
+/// from an [`OwnerSay`] and is about to send. [`check_authorised`] **consumes** an entry when it lets a `Cl_Say` through, so replaying
+/// the same bytes is refused, and the session revokes whatever is left as soon as its send is done.
+///
+/// There is no way to make an entry from raw bytes: [`OwnerSayAuth::grant`] takes an [`OwnerPayload`], which only
+/// `OwnerSay::payload` (in `ddai-net`, from a validated `OwnerText`) can build. A forged authorisation therefore cannot be
+/// written, and [`check_authorised`] additionally requires the bytes to be the canonical encoding of an [`OwnerSay`].
+#[derive(Default)]
+pub struct OwnerSayAuth {
+    granted: Vec<Vec<u8>>,
+}
+
+impl std::fmt::Debug for OwnerSayAuth {
+    /// The count only: the bytes are a user's text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OwnerSayAuth({} pending)", self.granted.len())
+    }
+}
+
+impl OwnerSayAuth {
+    pub fn new() -> OwnerSayAuth {
+        OwnerSayAuth::default()
+    }
+
+    /// Records an authorisation for exactly these bytes, good for one `Cl_Say`.
+    pub fn grant(&mut self, payload: &OwnerPayload) {
+        self.granted.push(payload.as_bytes().to_vec());
+    }
+
+    /// Drops every authorisation that was not used.
+    pub fn revoke_all(&mut self) {
+        self.granted.clear();
+    }
+
+    /// How many authorisations are waiting.
+    pub fn pending(&self) -> usize {
+        self.granted.len()
+    }
+
+    /// Removes and reports the authorisation for these exact bytes.
+    fn take(&mut self, payload: &[u8]) -> bool {
+        match self.granted.iter().position(|g| g == payload) {
+            Some(i) => {
+                self.granted.swap_remove(i);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Peeks the leading `(id<<1)|sys` varint (and UUID, if extended) of `payload` — the exact same
@@ -86,6 +138,13 @@ pub enum GuardError {
 /// chat, so a reviewer auditing this file never has to reason about the (much larger, and
 /// deliberately not enumerated here) set of legitimate system message ids too.
 pub fn check(payload: &[u8], registry: &Registry) -> Result<(), GuardError> {
+    check_authorised(payload, registry, &mut OwnerSayAuth::new())
+}
+
+/// [`check`] with the session's one-shot owner-chat authorisations (task 4.9, D-094): a `Cl_Say` also passes when `auth` holds an
+/// authorisation for exactly these bytes **and** the bytes are the canonical encoding of an [`OwnerSay`] (so a validated line:
+/// trimmed, no control character, no leading `/`, at most 255 bytes, team 0 or 1). The authorisation is consumed either way.
+pub fn check_authorised(payload: &[u8], registry: &Registry, auth: &mut OwnerSayAuth) -> Result<(), GuardError> {
     let mut unpacker = Unpacker::new(payload);
     let (id, sys) = unpack_msg_id(&mut unpacker, registry.uuids()).map_err(|_| GuardError::Undecodable)?;
     if sys {
@@ -93,10 +152,16 @@ pub fn check(payload: &[u8], registry: &Registry) -> Result<(), GuardError> {
     }
     match id {
         MsgId::Numbered(numbered) => {
-            // D-078: `Cl_Say` is allowed for exactly one payload, the typed `/kill` command, byte for byte (no other text, no
-            // other case, no trailing byte, no team chat). Everything else with this id is chat and stays refused.
+            // D-078: `Cl_Say` is allowed for the typed `/kill` command, byte for byte (no other text, no other case, no trailing
+            // byte, no team chat). D-094: and for an owner's website line, only against a one-shot authorisation the session
+            // recorded for these very bytes. Everything else with this id is chat and stays refused.
             if numbered == ddai_net::generated::messages::id::NETMSGTYPE_CL_SAY {
-                return if ServerCommand::recognise(payload) == Some(ServerCommand::Kill) {
+                if ServerCommand::recognise(payload) == Some(ServerCommand::Kill) {
+                    return Ok(());
+                }
+                // `take` first, so the authorisation is spent even when the structural check then refuses.
+                let authorised = auth.take(payload);
+                return if authorised && OwnerSay::is_canonical(payload) {
                     Ok(())
                 } else {
                     Err(GuardError::NumberedIdNotAllowed(numbered))
@@ -217,6 +282,151 @@ mod tests {
         let mut sys = ServerCommand::Kill.payload();
         sys[0] |= 1;
         assert!(check(&sys, &registry).is_err());
+    }
+
+    fn owner_say(team: bool, text: &str) -> OwnerSay {
+        OwnerSay::new(
+            team,
+            ddai_net::owner_chat::OwnerText::new(&ddai_net::owner_chat::OwnerChannel::mint_for_tests(), text)
+                .expect("valid owner text"),
+        )
+    }
+
+    fn hand_built_say(team: i32, text: &str) -> Vec<u8> {
+        let mut buf = [0u8; 2048];
+        let mut packer = Packer::new(&mut buf);
+        pack_msg_id(&mut packer, MsgId::Numbered(msgs::id::NETMSGTYPE_CL_SAY), false);
+        packer.add_int(team);
+        packer.add_string(text, 0, true);
+        packer.data().to_vec()
+    }
+
+    /// Task 4.9 (D-094): an owner's line passes with its authorisation, in all chat and in team chat, and only once.
+    #[test]
+    fn an_owner_line_passes_once_against_its_authorisation_and_a_replay_is_refused() {
+        let registry = Registry::new();
+        for team in [false, true] {
+            let say = owner_say(team, "gg wp");
+            let payload = say.payload();
+            let mut auth = OwnerSayAuth::new();
+            // without an authorisation the very same bytes are refused (it is a hand-built Cl_Say as far as the guard knows)
+            assert_eq!(
+                check_authorised(payload.as_bytes(), &registry, &mut auth).unwrap_err(),
+                GuardError::NumberedIdNotAllowed(msgs::id::NETMSGTYPE_CL_SAY),
+                "team {team}: no authorisation"
+            );
+            assert_eq!(
+                check(payload.as_bytes(), &registry).unwrap_err(),
+                GuardError::NumberedIdNotAllowed(msgs::id::NETMSGTYPE_CL_SAY),
+                "the plain `check` has no authorisations at all"
+            );
+            auth.grant(&payload);
+            assert_eq!(auth.pending(), 1);
+            assert!(
+                check_authorised(payload.as_bytes(), &registry, &mut auth).is_ok(),
+                "team {team}"
+            );
+            assert_eq!(auth.pending(), 0, "consumed");
+            // replay
+            assert_eq!(
+                check_authorised(payload.as_bytes(), &registry, &mut auth).unwrap_err(),
+                GuardError::NumberedIdNotAllowed(msgs::id::NETMSGTYPE_CL_SAY),
+                "team {team}: a replay of an authorised payload"
+            );
+        }
+    }
+
+    /// An authorisation is for exact bytes: another text, the other team flag or a longer line is not covered by it.
+    #[test]
+    fn an_authorisation_covers_only_its_exact_bytes() {
+        let registry = Registry::new();
+        let mut auth = OwnerSayAuth::new();
+        auth.grant(&owner_say(false, "hello").payload());
+        for (team, text) in [
+            (1, "hello"),  // the other team flag
+            (0, "hello!"), // longer
+            (0, "hell"),
+            (0, "Hello"),
+            (0, "hello "),
+            (0, "/kill "),
+            (0, "bye"),
+        ] {
+            assert!(
+                check_authorised(&hand_built_say(team, text), &registry, &mut auth).is_err(),
+                "team {team} text {text:?}"
+            );
+        }
+        assert_eq!(
+            auth.pending(),
+            1,
+            "refusals of other bytes leave the authorisation alone"
+        );
+        assert!(check_authorised(&hand_built_say(0, "hello"), &registry, &mut auth).is_ok());
+        assert_eq!(auth.pending(), 0);
+    }
+
+    /// Two lines authorised in one flush are each good once, in any order.
+    #[test]
+    fn several_authorisations_are_independent_and_revocable() {
+        let registry = Registry::new();
+        let (a, b) = (owner_say(false, "one").payload(), owner_say(true, "two").payload());
+        let mut auth = OwnerSayAuth::new();
+        auth.grant(&a);
+        auth.grant(&b);
+        assert!(check_authorised(b.as_bytes(), &registry, &mut auth).is_ok());
+        assert!(check_authorised(b.as_bytes(), &registry, &mut auth).is_err());
+        auth.revoke_all();
+        assert_eq!(auth.pending(), 0);
+        assert!(check_authorised(a.as_bytes(), &registry, &mut auth).is_err(), "revoked");
+    }
+
+    /// Defence in depth: even an authorisation entry for bytes that are not a valid owner line (it cannot be made from outside this
+    /// module, a test builds it by hand) does not let them through.
+    #[test]
+    fn an_authorised_payload_must_still_be_a_canonical_owner_line() {
+        let registry = Registry::new();
+        let long = "x".repeat(300);
+        for bytes in [
+            hand_built_say(0, "/kill "),
+            hand_built_say(0, "/w someone secret"),
+            hand_built_say(0, " padded"),
+            hand_built_say(0, ""),
+            hand_built_say(0, "a\u{1}b"),
+            hand_built_say(2, "hi"),
+            hand_built_say(0, &long),
+        ] {
+            let mut auth = OwnerSayAuth {
+                granted: vec![bytes.clone()],
+            };
+            assert!(check_authorised(&bytes, &registry, &mut auth).is_err(), "{bytes:?}");
+            assert_eq!(auth.pending(), 0, "spent even though refused");
+        }
+    }
+
+    /// An authorisation never opens any other message id: a granted payload with the system bit or another id is refused as before.
+    #[test]
+    fn an_authorisation_does_not_widen_anything_but_cl_say() {
+        let registry = Registry::new();
+        let payload = owner_say(false, "hello").payload();
+        let mut auth = OwnerSayAuth::new();
+        auth.grant(&payload);
+        let mut sys = payload.as_bytes().to_vec();
+        sys[0] |= 1;
+        assert_eq!(
+            check_authorised(&sys, &registry, &mut auth).unwrap_err(),
+            GuardError::UnexpectedSystemMessage
+        );
+        let kill = numbered_payload(false, msgs::id::NETMSGTYPE_CL_KILL, |_| {});
+        assert!(
+            check_authorised(&kill, &registry, &mut auth).is_ok(),
+            "Cl_Kill is as allowed as ever"
+        );
+        let vote = numbered_payload(false, msgs::id::NETMSGTYPE_CL_VOTE, |_| {});
+        assert!(
+            check_authorised(&vote, &registry, &mut auth).is_err(),
+            "Cl_Vote is still not"
+        );
+        assert_eq!(auth.pending(), 1, "none of that touched the authorisation");
     }
 
     #[test]

@@ -178,8 +178,8 @@ fn the_commands_the_old_bot_had_for_chat_and_chat_orders_are_refused_with_a_reas
 
 // ---- no chat, ever --------------------------------------------------------------------------------
 
-/// Every variant, listed so that adding one (say, a `Say`) breaks this build and asks for a decision:
-/// none of these carries text for the server, and the type has nothing the runner could pass to a chat call.
+/// Every variant, listed so that adding one breaks this build and asks for a decision: none of these carries text for the server
+/// except `Say` (task 4.9, D-094), which holds a validated `OwnerText` and which the console can never produce (see the tests below).
 fn variant_name(c: &BotCommand) -> &'static str {
     match c {
         BotCommand::Help => "help",
@@ -202,6 +202,7 @@ fn variant_name(c: &BotCommand) -> &'static str {
         BotCommand::Kill => "kill",
         BotCommand::ReloadRelations => "reload_relations",
         BotCommand::Quit => "quit",
+        BotCommand::Say { .. } => "say",
         BotCommand::Unsupported(_) => "unsupported",
     }
 }
@@ -274,11 +275,36 @@ fn whatever_is_typed_parses_to_a_command_or_an_error_and_never_panics() {
                     "{line:?} -> {}",
                     variant_name(&c)
                 );
+                assert!(
+                    !matches!(c, BotCommand::Say { .. }),
+                    "the console made a Say from {line:?}"
+                );
             }
             Err(ParseError::NoPrefix) => assert!(!matches!(line.trim().chars().next(), Some('!' | '?') | None)),
             Err(_) => {}
         }
     }
+}
+
+/// Task 4.9 (D-094): the console cannot say anything in the game chat, `!say` included; a `Say` reaches the bot only from the web
+/// control channel, and `Bot::command` itself never acts on one (the runner's `OwnerChat` does).
+#[test]
+fn the_console_cannot_make_a_say_and_the_bot_state_machine_does_not_act_on_one() {
+    for line in ["!say hello", "?say hello", "!say", "say hello", "!say /kill", "!SAY gg"] {
+        assert!(!matches!(parse_line(line), Ok(BotCommand::Say { .. })), "{line}");
+    }
+    let Ok(BotCommand::Unsupported(why)) = parse_line("!say hello") else {
+        panic!("!say must stay unsupported");
+    };
+    assert!(why.contains("website"), "{why}");
+    big_stack(|| {
+        let mut r = rig(vec![tee(0, 1000)]);
+        let channel = ddai_net::owner_chat::OwnerChannel::mint_for_tests();
+        let text = ddai_net::owner_chat::OwnerText::new(&channel, "hello").unwrap();
+        let reply = r.bot.command(BotCommand::Say { team: false, text });
+        assert!(!reply.ok, "{}", reply.text);
+        assert!(reply.text.contains("runner"), "{}", reply.text);
+    });
 }
 
 // ---- applying -------------------------------------------------------------------------------------

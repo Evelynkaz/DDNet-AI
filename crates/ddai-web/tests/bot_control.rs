@@ -378,8 +378,9 @@ async fn the_security_headers_and_no_store_cover_the_new_routes() {
 async fn there_is_no_route_to_chat_to_connect_or_to_the_allowlist() {
     let server = TestServer::start().await;
     let l = login(&server);
+    // (`/api/bot/say` exists since task 4.9, D-090: the owner's own chat line, with its own tests in `tests/say.rs`; it is no
+    // longer on this list, and `/api/bot/chat` and every other path below still is.)
     for path in [
-        "/api/bot/say",
         "/api/bot/chat",
         "/api/bot/connect",
         "/api/bot/server",

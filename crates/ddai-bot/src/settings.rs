@@ -35,6 +35,9 @@ pub struct Settings {
     /// A fixed skin; without it the bot picks a random stock skin at every start (D-068).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skin: Option<String>,
+    /// `false` switches the owner's website chat off (task 4.9, D-094: the emergency switch; `--no-owner-chat` does the same for one run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_chat: Option<bool>,
 }
 
 /// `~/aiddnet/data/bot/settings.toml`.
@@ -42,6 +45,93 @@ pub fn default_path() -> PathBuf {
     match std::env::var_os("HOME") {
         Some(home) if !home.is_empty() => PathBuf::from(home).join("aiddnet/data/bot/settings.toml"),
         _ => PathBuf::from("data/bot/settings.toml"),
+    }
+}
+
+/// The keys of [`Settings`], for [`unknown_keys`]. A test keeps this list equal to the struct's fields.
+pub const KNOWN_KEYS: &[&str] = &[
+    "brain",
+    "wb",
+    "relations",
+    "low",
+    "strong",
+    "clan",
+    "skin",
+    "owner_chat",
+];
+
+/// The top-level keys of the file at `path` that [`Settings`] does not know (a typo such as `owner-chat`), sorted. An unreadable or
+/// unparsable file has none to report (the loader deals with it).
+pub fn unknown_keys(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = table
+        .keys()
+        .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The marker file that switches the owner chat off and survives `launch apply` and settings rewrites (`<data-dir>/bot/owner-chat.off`;
+/// any entry of that name counts, also a symlink or an empty file).
+pub const OWNER_CHAT_OFF_MARKER: &str = "owner-chat.off";
+
+/// Why the owner chat is off for this run (task 4.9, D-094). The owner chat **fails closed**: anything that makes the switch's state
+/// uncertain turns it off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatOff {
+    /// `--no-owner-chat`.
+    Flag,
+    /// `owner_chat = false` in the settings file.
+    Setting,
+    /// The marker file `bot/owner-chat.off` exists.
+    Marker,
+    /// The settings file could not be read or parsed: the switch in it cannot be trusted.
+    SettingsUnreadable,
+    /// The settings file has keys the bot does not know (a typo of `owner_chat`, say).
+    UnknownKeys(Vec<String>),
+}
+
+impl ChatOff {
+    pub fn describe(&self) -> String {
+        match self {
+            ChatOff::Flag => "--no-owner-chat".to_string(),
+            ChatOff::Setting => "owner_chat = false in the settings file".to_string(),
+            ChatOff::Marker => format!("the marker file bot/{OWNER_CHAT_OFF_MARKER} exists"),
+            ChatOff::SettingsUnreadable => "the settings file could not be read (fail closed)".to_string(),
+            ChatOff::UnknownKeys(k) => {
+                format!("the settings file has unknown keys {k:?}: a typo of owner_chat? (fail closed)")
+            }
+        }
+    }
+}
+
+/// Whether the owner chat is off, and why. Pure: the caller reads the flag, the settings and the marker.
+pub fn owner_chat_off(
+    flag: bool,
+    settings: &Settings,
+    settings_unreadable: bool,
+    unknown: &[String],
+    marker_present: bool,
+) -> Option<ChatOff> {
+    if flag {
+        Some(ChatOff::Flag)
+    } else if settings.owner_chat == Some(false) {
+        Some(ChatOff::Setting)
+    } else if marker_present {
+        Some(ChatOff::Marker)
+    } else if settings_unreadable {
+        Some(ChatOff::SettingsUnreadable)
+    } else if !unknown.is_empty() {
+        Some(ChatOff::UnknownKeys(unknown.to_vec()))
+    } else {
+        None
     }
 }
 
@@ -114,6 +204,97 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_owner_chat_fails_closed() {
+        let on = Settings::default();
+        let none: &[String] = &[];
+        assert_eq!(
+            owner_chat_off(false, &on, false, none, false),
+            None,
+            "nothing switches it off: it is on"
+        );
+        assert_eq!(
+            owner_chat_off(
+                false,
+                &Settings {
+                    owner_chat: Some(true),
+                    ..Settings::default()
+                },
+                false,
+                none,
+                false
+            ),
+            None
+        );
+        assert_eq!(owner_chat_off(true, &on, false, none, false), Some(ChatOff::Flag));
+        let off = Settings {
+            owner_chat: Some(false),
+            ..Settings::default()
+        };
+        assert_eq!(owner_chat_off(false, &off, false, none, false), Some(ChatOff::Setting));
+        assert_eq!(owner_chat_off(false, &on, false, none, true), Some(ChatOff::Marker));
+        assert_eq!(
+            owner_chat_off(false, &on, true, none, false),
+            Some(ChatOff::SettingsUnreadable)
+        );
+        let typo = vec!["owner-chat".to_string()];
+        assert_eq!(
+            owner_chat_off(false, &on, false, &typo, false),
+            Some(ChatOff::UnknownKeys(typo.clone()))
+        );
+        assert!(ChatOff::UnknownKeys(typo).describe().contains("owner-chat"));
+    }
+
+    /// F7: a typo of the key and a string where a bool belongs both end with the chat off, not on.
+    #[test]
+    fn a_typo_or_a_corrupt_file_switches_the_chat_off_and_unknown_keys_are_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "owner-chat = false\nclan = \"X\"\nbrian = 1\n").unwrap();
+        let unknown = unknown_keys(&path);
+        assert_eq!(unknown, vec!["brian".to_string(), "owner-chat".to_string()]);
+        let Loaded::Ok(s) = load(&path) else {
+            panic!("a file with unknown keys still loads")
+        };
+        assert_eq!(s.clan.as_deref(), Some("X"));
+        assert!(matches!(
+            owner_chat_off(false, &s, false, &unknown, false),
+            Some(ChatOff::UnknownKeys(_))
+        ));
+        // a string where a bool belongs: the loader calls the file corrupt, and the verdict is "off"
+        std::fs::write(&path, "owner_chat = \"false\"\n").unwrap();
+        let loaded = load(&path);
+        assert!(matches!(loaded, Loaded::Corrupt { .. }));
+        assert_eq!(
+            owner_chat_off(false, &loaded.settings(), true, &[], false),
+            Some(ChatOff::SettingsUnreadable)
+        );
+        // a good file has no unknown keys, and a missing file has none either
+        std::fs::write(&path, "owner_chat = true\nclan = \"X\"\n").unwrap();
+        assert!(unknown_keys(&path).is_empty());
+        assert!(unknown_keys(&dir.path().join("missing.toml")).is_empty());
+    }
+
+    #[test]
+    fn the_known_keys_are_the_structs_fields() {
+        let full = Settings {
+            brain: Some("a".into()),
+            wb: Some("a".into()),
+            relations: Some(PathBuf::from("a")),
+            low: Some(true),
+            strong: Some(true),
+            clan: Some("a".into()),
+            skin: Some("a".into()),
+            owner_chat: Some(true),
+        };
+        let table: toml::Table = toml::to_string(&full).unwrap().parse().unwrap();
+        let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut known = KNOWN_KEYS.to_vec();
+        known.sort_unstable();
+        assert_eq!(keys, known, "update KNOWN_KEYS with the struct");
+    }
+
+    #[test]
     fn a_missing_file_is_the_defaults_and_a_saved_one_reads_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bot/settings.toml");
@@ -126,6 +307,7 @@ mod tests {
             strong: Some(false),
             clan: Some("Neuroset".into()),
             skin: Some("pinky".into()),
+            owner_chat: Some(false),
         };
         save(&path, &s).unwrap();
         assert_eq!(load(&path), Loaded::Ok(s));

@@ -1733,8 +1733,8 @@
     function setBusy(on) {
       busy = on;
       document.querySelectorAll("#bot-view button").forEach(function (b) {
-        // The «Запуск» card (launch.js) manages its own buttons.
-        if (b.id !== "cmd-kill" && !b.closest("#launch-mount")) {
+        // The «Запуск» card (launch.js) and the chat input (say.js) manage their own buttons.
+        if (b.id !== "cmd-kill" && !b.closest("#launch-mount") && !b.closest("#say-mount")) {
           b.disabled = on;
         }
       });
@@ -1940,6 +1940,7 @@
     }
 
     LaunchCard.mount(el("launch-mount"), api);
+    SayCard.mount(el("say-mount"), api);
     bindCommands();
     bindRelations();
     return { onShown: onShown, onHidden: onHidden, setDemo: setDemo };

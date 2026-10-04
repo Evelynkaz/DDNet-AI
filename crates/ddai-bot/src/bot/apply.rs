@@ -45,7 +45,7 @@ const HELP: &str = "\
   !kill / !reset         kill and respawn (500-tick cooldown)
   !quit                  disconnect and exit
 
-  '?' works too. A line without ! or ? goes nowhere: this bot never writes in the game chat.";
+  '?' works too. A line without ! or ? goes nowhere: the console never writes in the game chat (the owner's chat lines come from the website).";
 
 /// How long a console list edit waits for the lists file's cross-process lock. It runs on the decision thread (D-042:
 /// p99 <= 5 ms), so the wait is a few milliseconds, not the web's 2 s: a taken lock is answered with "busy, try again".
@@ -161,6 +161,11 @@ impl Bot {
                     quit: true,
                     data: None,
                 }
+            }
+            // The owner's website line is applied by the runner's `OwnerChat` (rate limits, the queue, in the game only): it
+            // needs the wall clock and the client, which this sans-IO state machine has neither of. It never says anything itself.
+            BotCommand::Say { .. } => {
+                CommandReply::err("chat lines are sent by the runner, not by the bot state machine")
             }
         }
     }

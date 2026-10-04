@@ -18,7 +18,7 @@
 # NO other drop-in may override ExecStart= here: `launch apply` refuses to start while one exists.
 #
 # The console is off (no stdin, --no-console), but the web control channel is on (control.sock in data/bot, task 5.6): the owner commands the
-# bot from the site's Bot tab (closed command list, no chat, rate-limited, audited). The bot's logs carry tags `c<id>-<hash>`, never other players'
+# bot from the site's Bot tab (closed command list, rate-limited, audited; the one chat it can carry is a line the owner types there, D-094, switched off with --no-owner-chat, owner_chat = false or the marker file data/bot/owner-chat.off). The bot's logs carry tags `c<id>-<hash>`, never other players'
 # nicknames (D-067); the bot's own nick is not logged either.
 
 [Unit]

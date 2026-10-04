@@ -77,6 +77,7 @@ use ddai_net::delta::StaticSizes;
 use ddai_net::generated::{enums::playerflagflag, messages as msgs, objects};
 use ddai_net::huffman::Huffman;
 use ddai_net::message::{self, ExSysMsg, Msg, Registry};
+use ddai_net::owner_chat::OwnerSay;
 use ddai_net::packer::Packer;
 use ddai_net::server_command::ServerCommand;
 use ddai_net::sysmsg::{self, SysMsg};
@@ -473,6 +474,21 @@ pub enum SessionEvent {
 /// The audit label of the one chat-channel message the bot may send, `/kill` (task 4.6, D-078).
 pub const SERVER_COMMAND_KILL_LABEL: &str = "Cl_Say(/kill)";
 
+/// The audit label of the other chat-channel message the bot may send: a line the owner typed on the website (task 4.9, D-094). Counted
+/// apart from `Cl_Say(/kill)`; the text is never in the audit, only this label.
+pub const OWNER_SAY_LABEL: &str = "Cl_Say(owner)";
+
+/// Why [`Session::request_owner_say`] did not send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum OwnerSayError {
+    /// The session is not in the game (joining, or already gone): nothing is queued for later.
+    #[error("not in the game")]
+    NotInGame,
+    /// The outgoing allow-list refused the payload (it never happens for a validated line; kept as a refusal, not a panic).
+    #[error("the outgoing guard refused the message")]
+    Refused,
+}
+
 /// Why [`Session::supply_cached_map`] refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SupplyCachedMapError {
@@ -643,6 +659,9 @@ pub struct Session {
     tuning: TuneParams,
     teams_state: Option<TeamsState>,
     outgoing_log: VecDeque<OutgoingLogEntry>,
+    /// Task 4.9 (D-094): the one-shot authorisations of the owner chat line being sent. Non-empty only inside
+    /// [`Session::request_owner_say`]; the allow-list consumes them.
+    owner_auth: allowlist::OwnerSayAuth,
     /// When to next originate a `PINGEX` (`client.cpp:527,2982-3004`) — `None` until `ENTERGAME`,
     /// review finding F9.
     next_ping_ex_at_ns: Option<i64>,
@@ -694,6 +713,7 @@ impl Session {
             tuning: DEFAULT_TUNE_PARAMS,
             teams_state: None,
             outgoing_log: VecDeque::new(),
+            owner_auth: allowlist::OwnerSayAuth::new(),
             next_ping_ex_at_ns: None,
             pending_events: VecDeque::new(),
             config,
@@ -762,6 +782,30 @@ impl Session {
             ServerCommand::Kill => SERVER_COMMAND_KILL_LABEL,
         };
         self.send_game_chunk(command.payload(), true, now, label);
+    }
+
+    /// Sends a line the owner typed on the website as `Cl_Say` (task 4.9, D-094), only while in the game: otherwise nothing is sent or
+    /// queued ([`OwnerSayError::NotInGame`]).
+    ///
+    /// The payload comes from [`OwnerSay::payload`], so the text has passed [`ddai_net::owner_chat::OwnerText::new`] (which needs the process's one `OwnerChannel`). This call
+    /// records a one-shot authorisation for exactly those bytes, hands them to the single outgoing path, whose allow-list consumes the
+    /// authorisation, and revokes whatever is left, so nothing authorised outlives the call and the same bytes cannot be sent twice.
+    /// The audit label is [`OWNER_SAY_LABEL`]; the log gets the length only, never the text. The caller owns the rate limit
+    /// (`ddai-bot::ownerchat`).
+    pub fn request_owner_say(&mut self, say: &OwnerSay, now: Duration) -> Result<(), OwnerSayError> {
+        if !self.is_in_game() {
+            return Err(OwnerSayError::NotInGame);
+        }
+        let payload = say.payload();
+        self.owner_auth.grant(&payload);
+        let sent = self.send_game_chunk(payload.into_bytes(), true, now, OWNER_SAY_LABEL);
+        self.owner_auth.revoke_all();
+        if sent {
+            tracing::info!("owner chat sent (len {})", say.text.len());
+            Ok(())
+        } else {
+            Err(OwnerSayError::Refused)
+        }
     }
 
     /// Sends `Cl_ShowDistance(x, y)` (task 4.1) — the same message [`Session::send_post_enter_extras`]
@@ -1621,17 +1665,22 @@ impl Session {
     /// checked here anyway, on the raw bytes, exactly as it would check a hostile hand-built
     /// `Cl_Say` — see `crate::allowlist`'s module docs for why this is worth doing even though
     /// the type system already makes it hard to reach this function with the wrong thing.
-    fn send_game_chunk(&mut self, payload: Vec<u8>, vital: bool, now: Duration, label: &'static str) {
-        match allowlist::check(&payload, &self.registry) {
+    ///
+    /// Returns whether the message went to the connection (the guard let it through and it queued).
+    fn send_game_chunk(&mut self, payload: Vec<u8>, vital: bool, now: Duration, label: &'static str) -> bool {
+        match allowlist::check_authorised(&payload, &self.registry, &mut self.owner_auth) {
             Ok(()) => {
                 self.log_outgoing(label, true);
                 if let Err(e) = self.connection.send_chunk(&payload, vital, now) {
                     tracing::warn!(error = %e, label, "failed to queue outgoing game message");
+                    return false;
                 }
+                true
             }
             Err(e) => {
                 tracing::error!(error = %e, label, "BLOCKED an outgoing game message by the allow-list guard");
                 self.log_outgoing(label, false);
+                false
             }
         }
     }
@@ -1653,15 +1702,22 @@ impl Session {
     /// ... inspect outgoing messages via a test hook").
     #[cfg(test)]
     fn try_send_hand_built_cl_say_for_testing(&mut self, now: Duration) {
+        self.try_send_hand_built_cl_say_text_for_testing(0, "this must never reach the wire", now);
+    }
+
+    /// Test-only: [`Session::try_send_hand_built_cl_say_for_testing`] with the team flag and text of the caller's choice (the owner-chat
+    /// tests send the very bytes of a line that was authorised a moment before: a replay).
+    #[cfg(test)]
+    fn try_send_hand_built_cl_say_text_for_testing(&mut self, team: i32, text: &str, now: Duration) -> bool {
         // `msgs::encode_cl_say` is `pub(crate)` inside `ddai-net` (D-007: not reachable from
         // outside that crate at all) — hand-pack the exact same wire shape directly, since the
         // whole point here is a *hand-built* Cl_Say sneaking in through the raw `Packer`/
         // `Connection::send_chunk` path this guard defends (see `crate::allowlist`'s module docs).
         let payload = build_numbered_game_payload(msgs::id::NETMSGTYPE_CL_SAY, |p| {
-            p.add_int(0); // team
-            p.add_string("this must never reach the wire", 0, true);
+            p.add_int(team);
+            p.add_string(text, 0, true);
         });
-        self.send_game_chunk(payload, true, now, "Cl_Say(test-only)");
+        self.send_game_chunk(payload, true, now, "Cl_Say(test-only)")
     }
 }
 
@@ -1669,6 +1725,11 @@ impl Session {
 mod tests {
     use super::*;
     use ddai_map::testutil::{MapWriter, TILESLAYERFLAG_GAME, game_layer_data};
+    use ddai_net::owner_chat::{OwnerChannel, OwnerText};
+
+    fn owner_text(raw: &str) -> OwnerText {
+        OwnerText::new(&OwnerChannel::mint_for_tests(), raw).unwrap()
+    }
     use std::net::UdpSocket;
 
     fn secs(s: u64) -> Duration {
@@ -2158,6 +2219,69 @@ mod tests {
             }
         }
         assert!(saw_set_team, "expected Cl_SetTeam(-1) to reach the server");
+
+        // Task 4.9 (D-094): an owner's website line reaches the real wire from the connected session, as `Cl_Say` with the team flag
+        // and the trimmed text; the audit counts it under its own label; the authorisation was one-shot, so a hand-built `Cl_Say`
+        // with the very same bytes right after is refused.
+        now += ms(5);
+        let say = OwnerSay::new(true, owner_text("  gg wp  "));
+        assert_eq!(session.request_owner_say(&say, now), Ok(()));
+        let mut said = Vec::new();
+        for dg in session.flush(now) {
+            for msg in server.feed(&dg, now) {
+                if let Msg::Game(msgs::GameMsg::ClSay(s)) = msg {
+                    said.push((s.team, s.message));
+                }
+            }
+        }
+        assert_eq!(
+            said,
+            vec![(1, "gg wp".to_string())],
+            "exactly the owner's line, trimmed, in team chat"
+        );
+        assert!(
+            !session.try_send_hand_built_cl_say_text_for_testing(1, "gg wp", now),
+            "replaying the authorised bytes by hand is refused"
+        );
+        let said_again = session
+            .flush(now)
+            .iter()
+            .flat_map(|dg| server.feed(dg, now))
+            .any(|m| matches!(m, Msg::Game(msgs::GameMsg::ClSay(_))));
+        assert!(!said_again, "and nothing reached the wire");
+        let labels: Vec<_> = session
+            .recent_outgoing()
+            .filter(|e| e.label.starts_with("Cl_Say"))
+            .map(|e| (e.label, e.accepted))
+            .collect();
+        assert_eq!(labels, vec![(OWNER_SAY_LABEL, true), ("Cl_Say(test-only)", false)]);
+        assert_eq!(session.owner_auth.pending(), 0);
+    }
+
+    /// Task 4.9: nothing is sent, queued or audited while the session is not in the game.
+    #[test]
+    fn an_owner_line_is_refused_outside_the_game_and_leaves_no_trace() {
+        let mut session = Session::new(ClientConfig::default());
+        let say = OwnerSay::new(false, owner_text("hello"));
+        assert_eq!(session.request_owner_say(&say, secs(0)), Err(OwnerSayError::NotInGame));
+        assert_eq!(session.recent_outgoing().count(), 0);
+        assert_eq!(session.owner_auth.pending(), 0);
+        assert!(session.flush(secs(0)).is_empty(), "no datagram");
+    }
+
+    /// Task 4.9: the two chat paths and the forged one, side by side, each under its own label.
+    #[test]
+    fn the_owner_line_has_its_own_label_beside_the_kill_command_and_a_forgery() {
+        let mut session = Session::new(ClientConfig::default());
+        // Not in the game: the session-level gate refuses the owner line, but the guard path itself is exercised through the hook.
+        session.request_server_command(ServerCommand::Kill, secs(0));
+        assert!(!session.try_send_hand_built_cl_say_text_for_testing(0, "hello", secs(0)));
+        let labels: Vec<_> = session.recent_outgoing().map(|e| (e.label, e.accepted)).collect();
+        assert_eq!(
+            labels,
+            vec![(SERVER_COMMAND_KILL_LABEL, true), ("Cl_Say(test-only)", false)]
+        );
+        assert_ne!(OWNER_SAY_LABEL, SERVER_COMMAND_KILL_LABEL);
     }
 
     fn session_default_name() -> String {

@@ -1,0 +1,70 @@
+/* Task 4.9: the chat input (the «Чат» card of the «Бот» tab; later under the chat panel of the «Игра» tab). Everything is scoped under
+   `.say-card`; no global element is restyled. The colours come from the page's own tokens (--muted, --ok, --danger) so a restyled theme
+   carries over. */
+
+.say-card .say-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.say-card .say-row {
+  display: flex;
+  gap: 8px;
+}
+
+.say-card .say-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+}
+
+.say-card .say-send {
+  flex: 0 0 auto;
+  min-height: 44px;
+  min-width: 6rem;
+}
+
+.say-card .say-opts {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.say-card .say-team {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.say-card .say-count.bad {
+  color: var(--danger);
+}
+
+.say-card .say-result {
+  min-height: 1.3em;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.say-card .say-result.ok {
+  color: var(--ok);
+}
+
+.say-card .say-result.bad {
+  color: var(--danger);
+}
+
+.say-card .say-send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.say-card.say-embedded {
+  margin: 0;
+  padding: 0;
+}

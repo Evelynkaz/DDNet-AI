@@ -56,6 +56,8 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/bot/relations",
             get(http::bot::relations_get).post(http::bot::relations_post),
         )
+        // Task 4.9 (D-090): the owner's chat line; session, strict Origin, CSRF, JSON, its own rate limit.
+        .route("/api/bot/say", post(http::say::say))
         // Task 5.9: the launcher. The web only writes a request file and reads a status file (D-089).
         .route(
             "/api/bot/launch",
@@ -81,7 +83,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/fly.js", get(http::assets::fly_js))
         .route("/train.js", get(http::assets::train_js))
         .route("/launch.js", get(http::assets::launch_js))
-        .route("/launch.css", get(http::assets::launch_css));
+        .route("/launch.css", get(http::assets::launch_css))
+        .route("/say.js", get(http::assets::say_js))
+        .route("/say.css", get(http::assets::say_css));
 
     let app: Router<SharedState> = Router::new().merge(api_and_ws).merge(map_route).merge(assets);
     // Order matters (review finding F5): `tower::Layer::layer` wraps the *current* service, so
