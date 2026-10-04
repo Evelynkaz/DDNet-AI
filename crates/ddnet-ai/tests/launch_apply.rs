@@ -137,11 +137,16 @@ impl Rig {
     }
 
     fn proxy_file(&self) {
+        self.proxy_file_with("");
+    }
+
+    /// The proxy file plus extra lines (for example `relay = "public"`, task 2.6b).
+    fn proxy_file_with(&self, extra: &str) {
         let path = self.data().join("secrets/swarfey-proxy.toml");
         fs::write(
             &path,
             format!(
-                "host = \"{PROXY_IP}\"\nport = 1080\nuser = \"{PROXY_USER}\"\npass = \"{PROXY_PASS}\"\nfor_server = \"{SERVER_IP}:8308\"\n"
+                "host = \"{PROXY_IP}\"\nport = 1080\nuser = \"{PROXY_USER}\"\npass = \"{PROXY_PASS}\"\nfor_server = \"{SERVER_IP}:8308\"\n{extra}"
             ),
         )
         .unwrap();
@@ -507,6 +512,105 @@ fn a_direct_public_entry_gets_the_server_ip_and_a_bad_proxy_setup_is_a_refusal()
     rig.proxy_file();
     let path = rig.data().join("secrets/swarfey-proxy.toml");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(rig.send(&start(&format!("{SERVER_IP}:8308"))).status.success());
+    assert_eq!(reason(&rig.status()), "proxy_error");
+    assert!(rig.actions().is_empty());
+}
+
+/// Task 2.6b: a proxy whose file says `relay = "public"` (its UDP relay is on another host) gets the opposite filter:
+/// both lists reset, every IP of the game server denied, no allow list, so the relay is reachable anywhere and the server
+/// is not reachable directly.
+#[test]
+fn a_public_relay_proxy_gets_a_deny_the_server_filter_with_no_allow_list_and_no_secret_leaks() {
+    let rig = Rig::new();
+    rig.allow_list(&public_entry(true, true));
+    rig.proxy_file_with("relay = \"public\"\n");
+    let mut body = start(&format!("{SERVER_IP}:8308"));
+    body["brain"] = json!("hybrid");
+    let out = rig.send(&body);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    let dropin = rig.dropin();
+    let lines: Vec<&str> = dropin.lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(
+        lines,
+        [
+            "[Service]",
+            "IPAddressAllow=",
+            "IPAddressDeny=",
+            &format!("IPAddressDeny={SERVER_IP}"),
+            // The server is IPv4: the IPv6 family is denied too (2.6b review F3), then the private ranges.
+            "IPAddressDeny=::/0",
+            "IPAddressDeny=10.0.0.0/8",
+            "IPAddressDeny=172.16.0.0/12",
+            "IPAddressDeny=192.168.0.0/16",
+            "IPAddressDeny=169.254.0.0/16",
+            "IPAddressDeny=100.64.0.0/10",
+            "IPAddressDeny=fc00::/7",
+            "IPAddressDeny=fe80::/10",
+        ],
+        "{dropin}"
+    );
+    // Neither the proxy's IP nor loopback nor `any` appears: nothing is allowed.
+    assert!(
+        !dropin.contains(PROXY_IP) && !dropin.contains("127.0.0.0/8") && !dropin.contains("any"),
+        "{dropin}"
+    );
+    let env = rig.env_file();
+    assert!(env.contains(&format!("BOT_SERVER=\"{SERVER_IP}:8308\"\n")), "{env}");
+    let everything = format!(
+        "{env}{dropin}{}{}{}{}",
+        rig.status(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+        rig.calls().join("\n")
+    );
+    for secret in [PROXY_USER, PROXY_PASS, PROXY_IP] {
+        assert!(!everything.contains(secret), "{secret} leaked");
+    }
+    // The units were started as usual: reload, then the bot.
+    let actions = rig.actions();
+    assert!(actions.iter().any(|a| a == "daemon-reload"), "{actions:?}");
+    assert!(
+        actions
+            .iter()
+            .any(|a| a.starts_with("start") && a.contains("ddnet-ai-bot")),
+        "{actions:?}"
+    );
+}
+
+#[test]
+fn the_default_relay_mode_keeps_the_allow_the_proxy_filter_and_a_public_run_ends_with_the_plain_local_default() {
+    // An explicit "proxy-host-only" is the old filter exactly.
+    let rig = Rig::new();
+    rig.allow_list(&public_entry(true, true));
+    rig.proxy_file_with("relay = \"proxy-host-only\"\n");
+    assert!(rig.send(&start(&format!("{SERVER_IP}:8308"))).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    let dropin = rig.dropin();
+    assert!(dropin.contains(&format!("IPAddressAllow={PROXY_IP}\n")), "{dropin}");
+    assert!(!dropin.contains("IPAddressDeny"), "{dropin}");
+    // After a deny-the-server run ends, the next hand start is back to the plain local default: no deny line left.
+    let rig = Rig::new();
+    rig.allow_list(&public_entry(true, true));
+    rig.proxy_file_with("relay = \"public\"\n");
+    assert!(rig.send(&start(&format!("{SERVER_IP}:8308"))).status.success());
+    assert!(rig.dropin().contains(&format!("IPAddressDeny={SERVER_IP}\n")));
+    assert!(rig.exited("exited", "0").status.success());
+    let dropin = rig.dropin();
+    assert!(
+        dropin.contains("IPAddressAllow=127.0.0.0/8 ::1")
+            && !dropin.contains("IPAddressDeny")
+            && !dropin.contains(SERVER_IP),
+        "{dropin}"
+    );
+}
+
+#[test]
+fn a_bad_relay_value_in_the_proxy_file_is_a_refusal_not_a_filter() {
+    let rig = Rig::new();
+    rig.allow_list(&public_entry(true, true));
+    rig.proxy_file_with("relay = \"anywhere\"\n");
     assert!(rig.send(&start(&format!("{SERVER_IP}:8308"))).status.success());
     assert_eq!(reason(&rig.status()), "proxy_error");
     assert!(rig.actions().is_empty());

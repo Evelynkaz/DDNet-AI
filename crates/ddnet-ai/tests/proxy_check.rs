@@ -262,3 +262,185 @@ fn play_refuses_a_proxy_issued_for_another_server() {
     assert!(game.recv_from(&mut buf).is_err(), "a datagram reached the game server");
     assert_eq!(server.tcp_accepts(), 0);
 }
+
+// --- task 2.6b: `relay = "public"`, the UDP probe, session picking --------------------------------------------------
+
+fn plain_body(server: &TestSocks5Server, extra: &str) -> String {
+    format!("host = \"127.0.0.1\"\nport = {}\n{extra}", server.addr().port())
+}
+
+#[test]
+fn the_default_mode_says_which_rule_applied_and_sends_no_datagram() {
+    let server = TestSocks5Server::start(Config::default());
+    let dir = tempfile::tempdir().unwrap();
+    write_secret(dir.path(), "p", &plain_body(&server, ""), 0o600);
+    let out = check(dir.path(), "p");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(stdout.contains("relay rule: proxy-host-only"), "{stdout}");
+    assert!(!stdout.contains("median RTT"), "{stdout}");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(server.datagrams_from_clients().is_empty());
+}
+
+#[test]
+fn public_mode_probes_the_relay_with_dns_queries_prints_the_median_and_never_names_a_game_server() {
+    let server = TestSocks5Server::start(Config {
+        auth: Auth::UserPass(USER.into(), PASS.into()),
+        fake_dns: true,
+        ..Default::default()
+    });
+    let dir = tempfile::tempdir().unwrap();
+    write_secret(
+        dir.path(),
+        "p",
+        &format!("{}relay = \"public\"\n", proxy_body(&server, USER, PASS)),
+        0o600,
+    );
+    let out = check(dir.path(), "p");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    for want in [
+        "relay rule: public",
+        "5 of 5 DNS queries to 1.1.1.1:53 answered, median RTT ",
+        "Nothing was sent to any game server",
+    ] {
+        assert!(stdout.contains(want), "{want:?} not in {stdout}");
+    }
+    assert_no_secrets(&server, &text(&out));
+    // The only datagrams the relay ever got were the five DNS queries to port 53.
+    let wire = server.datagrams_from_clients();
+    assert_eq!(wire.len(), 5);
+    for (_, dg) in wire {
+        let packet = ddai_client::socks5::parse_udp(&dg).unwrap();
+        match packet.source {
+            ddai_client::socks5::UdpSource::Ip(dst) => assert_eq!(dst.to_string(), "1.1.1.1:53"),
+            ddai_client::socks5::UdpSource::Domain => panic!("a domain destination"),
+        }
+    }
+    assert_eq!(server.tcp_accepts(), 1);
+}
+
+#[test]
+fn public_mode_refuses_a_non_public_relay_and_sends_nothing() {
+    // Each class a hostile or NAT'd proxy might announce: private, loopback alias, link-local, CGNAT, the server's
+    // own `for_server` address. The loopback alias is also the proof that the test hook cannot be set from a file.
+    for (bnd, class) in [
+        (Bnd::OtherIp("10.1.2.3".parse().unwrap()), "private"),
+        (Bnd::OtherIp("127.0.0.2".parse().unwrap()), "loopback"),
+        (Bnd::OtherIp("169.254.169.254".parse().unwrap()), "link-local"),
+        (Bnd::OtherIp("100.64.1.1".parse().unwrap()), "carrier-grade"),
+        (Bnd::Domain("relay.example".into()), "domain"),
+    ] {
+        let server = TestSocks5Server::start(Config {
+            bnd,
+            fake_dns: true,
+            ..Default::default()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        write_secret(dir.path(), "p", &plain_body(&server, "relay = \"public\"\n"), 0o600);
+        let out = check(dir.path(), "p");
+        assert_eq!(out.status.code(), Some(1), "{class}: {}", text(&out));
+        assert!(text(&out).contains(class), "{class}: {}", text(&out));
+        assert!(text(&out).contains("failed"), "{class}: {}", text(&out));
+        for leak in ["10.1.2.3", "169.254", "100.64", "relay.example"] {
+            assert!(!text(&out).contains(leak), "{class}: leaked {leak}: {}", text(&out));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            server.datagrams_from_clients().is_empty(),
+            "{class}: a datagram was sent"
+        );
+    }
+}
+
+#[test]
+fn a_bad_relay_value_in_the_file_is_refused_before_the_proxy_is_contacted() {
+    let server = TestSocks5Server::start(Config::default());
+    let dir = tempfile::tempdir().unwrap();
+    write_secret(dir.path(), "p", &plain_body(&server, "relay = \"anywhere\"\n"), 0o600);
+    let out = check(dir.path(), "p");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("relay"), "{}", text(&out));
+    assert!(!text(&out).contains("anywhere"), "{}", text(&out));
+    assert_eq!(server.tcp_accepts(), 0);
+}
+
+#[test]
+fn session_picking_reports_round_trip_times_and_no_user_names() {
+    let server = TestSocks5Server::start(Config {
+        auth: Auth::UserPassSession("sess-".into(), PASS.into()),
+        fake_dns: true,
+        relay_delays: ["120", "10", "240"]
+            .iter()
+            .map(|d| Duration::from_millis(d.parse().unwrap()))
+            .collect(),
+        ..Default::default()
+    });
+    let dir = tempfile::tempdir().unwrap();
+    write_secret(
+        dir.path(),
+        "p",
+        &format!(
+            "host = \"127.0.0.1\"\nport = {}\nuser = \"sess-{{session}}\"\npass = \"{PASS}\"\nrelay = \"public\"\nsession_pick = 3\n",
+            server.addr().port()
+        ),
+        0o600,
+    );
+    let out = check(dir.path(), "p");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(stdout.contains("Sessions tried (median RTT): "), "{stdout}");
+    assert!(stdout.contains("session 2 is the one kept"), "{stdout}");
+    assert_eq!(server.tcp_accepts(), 3);
+    let users = server.users_seen();
+    assert_eq!(users.len(), 3);
+    for u in users {
+        assert!(!text(&out).contains(&u), "a user name was printed: {u}");
+    }
+    assert!(!text(&out).contains("sess-"), "{}", text(&out));
+}
+
+/// `play`, `relay = "public"`, a proxy that announces a loopback alias: refused as a final proxy refusal
+/// (`GaveUp(ProxyRefused)`; plain `play` exits 0 on any give-up, `--bot` maps it to exit 4) after one proxy
+/// connection, and the game server hears nothing.
+#[test]
+fn play_in_public_mode_refuses_a_loopback_relay_and_sends_nothing_to_the_game_server() {
+    let game = UdpSocket::bind("127.0.0.1:0").unwrap();
+    game.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+    let game_addr = game.local_addr().unwrap();
+    let server = TestSocks5Server::start(Config {
+        relay_ip: Some("127.0.0.2".parse().unwrap()),
+        ..Default::default()
+    });
+    let dir = tempfile::tempdir().unwrap();
+    write_secret(dir.path(), "named", &plain_body(&server, "relay = \"public\"\n"), 0o600);
+    let list = dir.path().join("live-servers.toml");
+    std::fs::write(
+        &list,
+        format!("[[server]]\naddress = \"{game_addr}\"\nnick = \"Muha\"\nready = true\nproxy = \"named\"\n"),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ddnet-ai"))
+        .args([
+            "play",
+            "--server",
+            &game_addr.to_string(),
+            "--name",
+            "Muha",
+            "--brain",
+            "idle",
+        ])
+        .args(["--duration", "3", "--data-dir"])
+        .arg(dir.path())
+        .arg("--live-servers")
+        .arg(&list)
+        .output()
+        .expect("run ddnet-ai play");
+    assert!(text(&out).contains("ProxyRefused"), "{}", text(&out));
+    assert!(text(&out).contains("loopback"), "{}", text(&out));
+    let mut buf = [0u8; 64];
+    assert!(game.recv_from(&mut buf).is_err(), "a datagram reached the game server");
+    assert_eq!(server.tcp_accepts(), 1);
+    assert!(server.datagrams_from_clients().is_empty());
+}

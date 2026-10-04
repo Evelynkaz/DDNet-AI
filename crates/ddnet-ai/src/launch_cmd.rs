@@ -8,7 +8,9 @@
 //!   the address that reach the unit come from that entry, never from the request;
 //! - the root-owned environment file for the bot unit holds only validated values from a closed character set;
 //! - the unit's cgroup filter (a generated drop-in) allows loopback, plus the proxy's IPs (read from the secrets file, never
-//!   printed) or the entry's server IP for a public server;
+//!   printed) or the entry's server IP for a public server; for a proxy with `relay = "public"` (its UDP relay lives on
+//!   another host, task 2.6b, D-090) it is the opposite: both lists are reset and **every IP of the game server is denied**,
+//!   with no allow list, so the relay is reachable anywhere and the server never directly;
 //! - at most one start per [`START_INTERVAL_SECS`]; a cool-down after exit 3/4; after a kick/ban on a **public** server that
 //!   server is refused until the owner has edited `live-servers.toml` again (re-opened it).
 //!
@@ -397,26 +399,90 @@ fn render_env(id: &str, plan: &Plan) -> Result<String, Refuse> {
     Ok(out)
 }
 
-/// The cgroup filter drop-in: loopback always, plus exactly the given IPs.
-fn render_dropin(extra: &[IpAddr]) -> String {
-    let mut out = String::from(
-        "# Written by `ddnet-ai launch apply` (root): the addresses the bot unit may talk to for the current launch. Do not edit.\n[Service]\nIPAddressAllow=\nIPAddressAllow=127.0.0.0/8 ::1\n",
-    );
-    for ip in extra {
-        out += &format!("IPAddressAllow={ip}\n");
-    }
-    out
+/// What the bot unit's cgroup filter must be for one launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Filter {
+    /// Loopback always, plus exactly these IPs: none for the local server, the proxy's IPs for a proxy whose relay is on
+    /// the proxy's host (`relay = "proxy-host-only"`), the server's own IP for a direct public server.
+    Allow(Vec<IpAddr>),
+    /// `relay = "public"`: everything **except** these IPs, the game server's. No allow list: systemd lets an allow match
+    /// win over a deny match (measured on this machine's systemd 255 by `tools/e2e/ipfilter_probe.sh`), so any allow
+    /// entry covering the server would void the deny. Never empty (an empty deny list would filter nothing).
+    DenyServer(Vec<IpAddr>),
 }
 
-/// The IPs the bot unit must be allowed to reach besides loopback: none for the local server; for a public server the IPs of
-/// its proxy (read from the secrets file, never printed), or of the server itself when the entry names no proxy.
-fn allowed_ips(plan: &Plan, live: &LiveServers, secrets_dir: &Path) -> Result<Vec<IpAddr>, Refuse> {
+/// The cgroup filter drop-in.
+fn render_dropin(filter: &Filter) -> String {
+    match filter {
+        Filter::Allow(extra) => {
+            let mut out = String::from(
+                "# Written by `ddnet-ai launch apply` (root): the addresses the bot unit may talk to for the current launch. Do not edit.\n[Service]\nIPAddressAllow=\nIPAddressAllow=127.0.0.0/8 ::1\n",
+            );
+            for ip in extra {
+                out += &format!("IPAddressAllow={ip}\n");
+            }
+            out
+        }
+        Filter::DenyServer(server) => {
+            // Reset BOTH lists (the unit ships `Allow=127.0.0.0/8 ::1` and `Deny=any`), then deny each server IP.
+            let mut out = String::from(
+                "# Written by `ddnet-ai launch apply` (root): relay = public. The bot unit may talk to everything except the game server's own addresses and the private ranges. Do not edit.\n[Service]\nIPAddressAllow=\nIPAddressDeny=\n",
+            );
+            for ip in server {
+                out += &format!("IPAddressDeny={ip}\n");
+            }
+            // Task 2.6b review F3: the code refuses a relay whose address family differs from the server's, so the other
+            // family is closed here too (a v4-mapped destination is judged as IPv4 by the kernel filter, probed in
+            // `tools/e2e/ipfilter_probe.sh` S8). The proxy must then be reachable over the server's family.
+            if server.iter().all(IpAddr::is_ipv4) {
+                out += "IPAddressDeny=::/0\n";
+            }
+            // The ranges the client already refuses as a relay; also keeps the cloud metadata address away from the bot.
+            for range in DENY_PRIVATE_RANGES {
+                out += &format!("IPAddressDeny={range}\n");
+            }
+            out
+        }
+    }
+}
+
+/// Ranges denied next to the server's IPs for `relay = "public"`: private (RFC 1918), link-local, CGNAT, and the IPv6
+/// unique-local and link-local blocks. Loopback is not among them (the DNS stub, the web unit and the like stay reachable).
+const DENY_PRIVATE_RANGES: [&str; 7] = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "100.64.0.0/10",
+    "fc00::/7",
+    "fe80::/10",
+];
+
+/// The cgroup filter for a launch: nothing extra for the local server; for a public server the IPs of its proxy (read from
+/// the secrets file, never printed) when the proxy's relay is on its own host, **every IP of the game server denied** when
+/// the proxy file says `relay = "public"` (the relay may be anywhere), or the IP of the server itself when the entry names
+/// no proxy. The server's IPs are the entry's address plus whatever the proxy file's `for_server` resolves to.
+fn filter_for(plan: &Plan, live: &LiveServers, secrets_dir: &Path) -> Result<Filter, Refuse> {
     if !plan.target.public {
-        return Ok(Vec::new());
+        return Ok(Filter::Allow(Vec::new()));
     }
     match ddai_client::proxy::resolve_for_server(plan.target.addr, &plan.target.nick, live, secrets_dir) {
-        Ok(Some(proxy)) => proxy.resolve_ips().map_err(|_| Refuse("proxy_error")),
-        Ok(None) => Ok(vec![plan.target.addr.ip().to_canonical()]),
+        Ok(Some(proxy)) => match proxy.relay_mode() {
+            ddai_client::proxy::RelayMode::ProxyHostOnly => proxy
+                .resolve_ips()
+                .map(Filter::Allow)
+                .map_err(|_| Refuse("proxy_error")),
+            ddai_client::proxy::RelayMode::Public => {
+                let mut server = vec![plan.target.addr.ip().to_canonical()];
+                for ip in proxy.for_server_ips() {
+                    if !server.contains(&ip) {
+                        server.push(ip);
+                    }
+                }
+                Ok(Filter::DenyServer(server))
+            }
+        },
+        Ok(None) => Ok(Filter::Allow(vec![plan.target.addr.ip().to_canonical()])),
         Err(_) => Err(Refuse("proxy_error")),
     }
 }
@@ -509,7 +575,11 @@ fn write_root_file(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> 
 fn reset_to_local(paths: &Paths) {
     let _ = std::fs::remove_file(&paths.env_file);
     if paths.dropin.exists() {
-        let _ = write_root_file(&paths.dropin, render_dropin(&[]).as_bytes(), 0o644);
+        let _ = write_root_file(
+            &paths.dropin,
+            render_dropin(&Filter::Allow(Vec::new())).as_bytes(),
+            0o644,
+        );
     }
 }
 
@@ -684,15 +754,15 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let secrets_dir = ddai_client::proxy::secrets_dir_for(&paths.data_dir);
-    let ips = match allowed_ips(&plan, &live, &secrets_dir) {
-        Ok(ips) => ips,
+    let filter = match filter_for(&plan, &live, &secrets_dir) {
+        Ok(filter) => filter,
         Err(Refuse(code)) => {
             refused(paths, now, id, code);
             return ExitCode::SUCCESS;
         }
     };
     let (env, dropin) = match render_env(&req.id, &plan) {
-        Ok(env) => (env, render_dropin(&ips)),
+        Ok(env) => (env, render_dropin(&filter)),
         Err(Refuse(code)) => {
             refused(paths, now, id, code);
             return ExitCode::SUCCESS;
@@ -1123,16 +1193,148 @@ mod tests {
 
     #[test]
     fn the_cgroup_drop_in_resets_the_list_and_adds_only_the_given_ips() {
-        let local = render_dropin(&[]);
+        let local = render_dropin(&Filter::Allow(Vec::new()));
         assert!(
             local.contains("[Service]\nIPAddressAllow=\nIPAddressAllow=127.0.0.0/8 ::1\n"),
             "{local}"
         );
         assert_eq!(local.matches("IPAddressAllow=").count(), 2);
-        let proxied = render_dropin(&["198.51.100.7".parse().unwrap(), "2001:db8::1".parse().unwrap()]);
+        assert!(!local.contains("IPAddressDeny"), "{local}");
+        let proxied = render_dropin(&Filter::Allow(vec![
+            "198.51.100.7".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+        ]));
         assert!(
             proxied.contains("IPAddressAllow=198.51.100.7\nIPAddressAllow=2001:db8::1\n"),
             "{proxied}"
+        );
+    }
+
+    /// Task 2.6b: `relay = "public"`. Both lists are reset and every server IP is denied; no allow entry may exist after
+    /// the reset (an allow match beats a deny match: probed on systemd 255, `tools/e2e/ipfilter_probe.sh` S2, S5, S7).
+    #[test]
+    fn the_public_relay_drop_in_resets_both_lists_and_denies_the_server_and_the_private_ranges() {
+        let private = [
+            "IPAddressDeny=10.0.0.0/8",
+            "IPAddressDeny=172.16.0.0/12",
+            "IPAddressDeny=192.168.0.0/16",
+            "IPAddressDeny=169.254.0.0/16",
+            "IPAddressDeny=100.64.0.0/10",
+            "IPAddressDeny=fc00::/7",
+            "IPAddressDeny=fe80::/10",
+        ];
+        let body_of =
+            |d: &str| -> Vec<String> { d.lines().filter(|l| !l.starts_with('#')).map(str::to_string).collect() };
+        // A server with both families: its IPs, no `::/0` (the relay may be IPv6), then the private ranges.
+        let drop_in = render_dropin(&Filter::DenyServer(vec![
+            "203.0.113.5".parse().unwrap(),
+            "2001:db8::7".parse().unwrap(),
+        ]));
+        let mut want: Vec<String> = [
+            "[Service]",
+            "IPAddressAllow=",
+            "IPAddressDeny=",
+            "IPAddressDeny=203.0.113.5",
+            "IPAddressDeny=2001:db8::7",
+        ]
+        .map(String::from)
+        .to_vec();
+        want.extend(private.map(String::from));
+        assert_eq!(body_of(&drop_in), want, "{drop_in}");
+        // An IPv4-only server (Swarfey): the whole IPv6 family is denied too (F3), right after the server's IPs.
+        let v4 = render_dropin(&Filter::DenyServer(vec!["203.0.113.5".parse().unwrap()]));
+        let mut want: Vec<String> = [
+            "[Service]",
+            "IPAddressAllow=",
+            "IPAddressDeny=",
+            "IPAddressDeny=203.0.113.5",
+            "IPAddressDeny=::/0",
+        ]
+        .map(String::from)
+        .to_vec();
+        want.extend(private.map(String::from));
+        assert_eq!(body_of(&v4), want, "{v4}");
+        // An IPv6-only server: nothing denies the IPv4 family (the proxy is usually reached over it).
+        let v6 = render_dropin(&Filter::DenyServer(vec!["2001:db8::7".parse().unwrap()]));
+        assert!(!v6.contains("0.0.0.0/0") && !v6.contains("::/0"), "{v6}");
+        // Not a single non-empty allow entry, no `any`, no loopback entry, in any spelling.
+        for d in [&drop_in, &v4, &v6] {
+            assert!(
+                !d.contains("any") && !d.contains("127.0.0.0/8") && !d.contains("::1\n"),
+                "{d}"
+            );
+            for line in d.lines().filter(|l| l.starts_with("IPAddressAllow")) {
+                assert_eq!(line, "IPAddressAllow=", "{d}");
+            }
+        }
+    }
+
+    fn proxy_dir(extra: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("swarfey-proxy.toml");
+        std::fs::write(
+            &path,
+            format!("host = \"198.51.100.7\"\nport = 1080\nuser = \"u\"\npass = \"p\"\nfor_server = \"203.0.113.5:8308\"\n{extra}"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        dir
+    }
+
+    fn plan_for(toml: &str) -> (Plan, LiveServers) {
+        let l = live(toml);
+        let plan = decide_with(&req("203.0.113.5:8308"), &l, Some(&State::default()), 0, 1000).expect("plan");
+        (plan, l)
+    }
+
+    #[test]
+    fn the_filter_follows_the_proxy_files_relay_mode() {
+        let (plan, l) = plan_for(PUBLIC);
+        let server: IpAddr = "203.0.113.5".parse().unwrap();
+        // Default (and explicit "proxy-host-only"): the proxy's own IP is allowed, the server's is not mentioned.
+        for extra in ["", "relay = \"proxy-host-only\"\n"] {
+            let dir = proxy_dir(extra);
+            assert_eq!(
+                filter_for(&plan, &l, dir.path()),
+                Ok(Filter::Allow(vec!["198.51.100.7".parse().unwrap()])),
+                "{extra:?}"
+            );
+        }
+        // relay = "public": the SERVER's IPs are denied (once each, even though `for_server` names the same IP), and
+        // the proxy's own address is not special.
+        let dir = proxy_dir("relay = \"public\"\n");
+        assert_eq!(filter_for(&plan, &l, dir.path()), Ok(Filter::DenyServer(vec![server])));
+        // A local launch needs nothing extra whatever the files say.
+        let local = decide_with(&req("local"), &l, Some(&State::default()), 0, 1000).expect("plan");
+        assert_eq!(filter_for(&local, &l, dir.path()), Ok(Filter::Allow(Vec::new())));
+        // An entry without a proxy: the server's IP is allowed, as before.
+        let (direct, dl) = plan_for("[[server]]\naddress = \"203.0.113.5:8308\"\nnick = \"Muha\"\nready = true\n");
+        assert_eq!(filter_for(&direct, &dl, dir.path()), Ok(Filter::Allow(vec![server])));
+        // A missing or unsafe proxy file is a refusal, never a filter.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(filter_for(&plan, &l, empty.path()), Err(Refuse("proxy_error")));
+    }
+
+    #[test]
+    fn a_public_relay_filter_denies_an_ipv6_server_address() {
+        let l =
+            live("[[server]]\naddress = \"[2001:db8::7]:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"swarfey\"\n");
+        let plan = decide_with(&req("[2001:db8::7]:8308"), &l, Some(&State::default()), 0, 1000).expect("plan");
+        let dir = tempfile::tempdir().unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.path().join("swarfey-proxy.toml");
+            std::fs::write(
+                &path,
+                "host = \"198.51.100.7\"\nport = 1080\nfor_server = \"[2001:db8::7]:8308\"\nrelay = \"public\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(
+            filter_for(&plan, &l, dir.path()),
+            Ok(Filter::DenyServer(vec!["2001:db8::7".parse().unwrap()]))
         );
     }
 

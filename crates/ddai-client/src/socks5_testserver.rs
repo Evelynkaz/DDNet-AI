@@ -8,6 +8,10 @@
 //! - the `UDP ASSOCIATE` reply code (`0x07` for "UDP not supported", any other for a refusal);
 //! - what `BND.ADDR` says: the real relay address, `0.0.0.0` with the real port, a domain name, or any fixed
 //!   address;
+//! - task 2.6b: the relay's own address (`relay_ip`: another loopback alias such as `127.0.0.2`, to test a relay on
+//!   another host), a per-association relay delay (`relay_delays`, to give sessions different round-trip times), a
+//!   fake DNS responder inside the relay (`fake_dns`: a datagram addressed to port 53 is answered by the relay itself,
+//!   so a probe needs no network), and session-style user names (`Auth::UserPassSession`);
 //! - stalls: say nothing after accept / the greeting / the authentication / the request, to exercise timeouts;
 //! - a raw byte reply instead of a real one, for garbage-handling tests.
 //!
@@ -33,6 +37,9 @@ pub enum Auth {
     #[default]
     None,
     UserPass(String, String),
+    /// Any user name that starts with the prefix, with this password: what a proxy with session ids in the user
+    /// name looks like. Every user name presented is recorded ([`TestSocks5Server::users_seen`]).
+    UserPassSession(String, String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -73,6 +80,15 @@ pub struct Config {
     pub drip: Option<Duration>,
     /// The version byte of the RFC 1929 reply (1 is correct; some real proxies send 5).
     pub auth_reply_version: Option<u8>,
+    /// The address the relay socket binds (default `127.0.0.1`): another loopback alias puts the relay on "another
+    /// host" (`Bnd::Relay` then announces it).
+    pub relay_ip: Option<IpAddr>,
+    /// Relay `n` (0-based, in the order associations are made) delays everything it forwards, in both directions, by
+    /// `relay_delays[n % len]`. Empty: no delay.
+    pub relay_delays: Vec<Duration>,
+    /// A datagram addressed to port 53 is answered by the relay itself with a copy marked as a response (a fake
+    /// resolver, as if the relay could reach one) instead of being forwarded.
+    pub fake_dns: bool,
 }
 
 struct Relay {
@@ -87,6 +103,7 @@ struct Shared {
     stop: AtomicBool,
     tcp_accepts: AtomicUsize,
     greetings: Mutex<Vec<Vec<u8>>>,
+    users: Mutex<Vec<String>>,
     datagrams: Mutex<Vec<(SocketAddr, Vec<u8>)>>,
     relays: Mutex<Vec<Arc<Relay>>>,
     controls: Mutex<Vec<TcpStream>>,
@@ -151,6 +168,11 @@ impl TestSocks5Server {
             .addr
     }
 
+    /// The UDP relay address of every association so far, in order.
+    pub fn relay_addrs(&self) -> Vec<SocketAddr> {
+        self.shared.relays.lock().unwrap().iter().map(|r| r.addr).collect()
+    }
+
     /// TCP connections accepted so far.
     pub fn tcp_accepts(&self) -> usize {
         self.shared.tcp_accepts.load(Ordering::SeqCst)
@@ -164,6 +186,11 @@ impl TestSocks5Server {
     /// The greeting (`VER NMETHODS METHODS...`) of every connection, in order.
     pub fn greetings(&self) -> Vec<Vec<u8>> {
         self.shared.greetings.lock().unwrap().clone()
+    }
+
+    /// Every user name presented in RFC 1929 authentication, in order (right or wrong).
+    pub fn users_seen(&self) -> Vec<String> {
+        self.shared.users.lock().unwrap().clone()
     }
 
     /// Every datagram the relays received from a client, with the client's UDP source, raw (header included).
@@ -280,7 +307,7 @@ fn serve_control(conn: &mut TcpStream, shared: &Arc<Shared>, cfg: &Config) {
     }
     let method = match &cfg.auth {
         Auth::None if methods.contains(&0x00) => 0x00,
-        Auth::UserPass(..) if methods.contains(&0x02) => 0x02,
+        Auth::UserPass(..) | Auth::UserPassSession(..) if methods.contains(&0x02) => 0x02,
         _ => 0xff,
     };
     if conn.write_all(&[5, method]).is_err() || method == 0xff {
@@ -291,7 +318,7 @@ fn serve_control(conn: &mut TcpStream, shared: &Arc<Shared>, cfg: &Config) {
     }
     // RFC 1929.
     if method == 0x02 {
-        let Auth::UserPass(want_user, want_pass) = &cfg.auth else {
+        let (Auth::UserPass(want_user, want_pass) | Auth::UserPassSession(want_user, want_pass)) = &cfg.auth else {
             return;
         };
         let mut ver_ulen = [0u8; 2];
@@ -307,7 +334,16 @@ fn serve_control(conn: &mut TcpStream, shared: &Arc<Shared>, cfg: &Config) {
         if conn.read_exact(&mut pass).is_err() {
             return;
         }
-        let ok = ver_ulen[0] == 1 && user == want_user.as_bytes() && pass == want_pass.as_bytes();
+        shared
+            .users
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(&user).into_owned());
+        let user_ok = match &cfg.auth {
+            Auth::UserPassSession(..) => user.starts_with(want_user.as_bytes()),
+            _ => user == want_user.as_bytes(),
+        };
+        let ok = ver_ulen[0] == 1 && user_ok && pass == want_pass.as_bytes();
         let version = cfg.auth_reply_version.unwrap_or(1);
         if conn.write_all(&[version, u8::from(!ok)]).is_err() || !ok {
             return;
@@ -346,7 +382,8 @@ fn serve_control(conn: &mut TcpStream, shared: &Arc<Shared>, cfg: &Config) {
         return;
     }
     // Success: create the relay.
-    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind the relay socket");
+    let socket =
+        UdpSocket::bind((cfg.relay_ip.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0)).expect("bind the relay socket");
     socket
         .set_read_timeout(Some(Duration::from_millis(20)))
         .expect("relay timeout");
@@ -357,12 +394,21 @@ fn serve_control(conn: &mut TcpStream, shared: &Arc<Shared>, cfg: &Config) {
         client: Arc::new(Mutex::new(None)),
         closed: Arc::new(AtomicBool::new(false)),
     });
-    shared.relays.lock().unwrap().push(Arc::clone(&relay));
+    let delay = {
+        let mut relays = shared.relays.lock().unwrap();
+        relays.push(Arc::clone(&relay));
+        if cfg.relay_delays.is_empty() {
+            Duration::ZERO
+        } else {
+            cfg.relay_delays[(relays.len() - 1) % cfg.relay_delays.len()]
+        }
+    };
+    let fake_dns = cfg.fake_dns;
     let relay_shared = Arc::clone(shared);
     let relay_for_thread = Arc::clone(&relay);
     let _ = thread::Builder::new()
         .name("socks5-test-relay".into())
-        .spawn(move || run_relay(&relay_for_thread, &relay_shared, peer.ip()));
+        .spawn(move || run_relay(&relay_for_thread, &relay_shared, peer.ip(), delay, fake_dns));
 
     let mut reply = vec![5, 0, 0];
     match &cfg.bnd {
@@ -411,7 +457,7 @@ fn push_addr(out: &mut Vec<u8>, addr: SocketAddr) {
     out.extend_from_slice(&addr.port().to_be_bytes());
 }
 
-fn run_relay(relay: &Relay, shared: &Shared, client_ip: IpAddr) {
+fn run_relay(relay: &Relay, shared: &Shared, client_ip: IpAddr, delay: Duration, fake_dns: bool) {
     let mut buf = vec![0u8; 4096];
     while !relay.closed.load(Ordering::SeqCst) && !shared.stop.load(Ordering::SeqCst) {
         let Ok((n, from)) = relay.socket.recv_from(&mut buf) else {
@@ -435,10 +481,28 @@ fn run_relay(relay: &Relay, shared: &Shared, client_ip: IpAddr) {
             if let Ok(packet) = parse_udp(&buf[..n])
                 && let crate::socks5::UdpSource::Ip(dst) = packet.source
             {
-                let _ = relay.socket.send_to(packet.payload, dst);
+                if !delay.is_zero() {
+                    thread::sleep(delay);
+                }
+                if fake_dns && dst.port() == 53 {
+                    // The relay plays the resolver: the query with the QR bit set, from the address it was sent to.
+                    let mut answer = packet.payload.to_vec();
+                    if answer.len() >= 12 {
+                        answer[2] |= 0x80;
+                        let mut wrapped = Vec::with_capacity(answer.len() + 10);
+                        crate::socks5::encode_udp_into(&mut wrapped, dst, &answer);
+                        let _ = relay.socket.send_to(&wrapped, from);
+                    }
+                } else if dst.ip().is_loopback() {
+                    // Loopback only: a test can never reach a real host through this relay.
+                    let _ = relay.socket.send_to(packet.payload, dst);
+                }
             }
         } else if let Some(client) = *relay.client.lock().unwrap() {
             // A reply from a game server: wrap it with the source and hand it to the client.
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
             let mut wrapped = Vec::with_capacity(n + 10);
             crate::socks5::encode_udp_into(&mut wrapped, from, &buf[..n]);
             let _ = relay.socket.send_to(&wrapped, client);

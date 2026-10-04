@@ -7,9 +7,13 @@
 //! 1. [`associate`] opens the TCP control connection (every step bounded by [`Timeouts`]), negotiates no
 //!    authentication or username/password, sends `UDP ASSOCIATE` and returns the relay address. Reply
 //!    `0x07` becomes [`Socks5Error::UdpNotSupported`], which [`Socks5Error::is_fatal`] says stops all retrying.
-//!    `BND.ADDR` is the proxy's claim and is **not trusted**: datagrams always go to the proxy's own IP (the TCP
-//!    peer) with the announced port. An unspecified address or the proxy's own is the normal case; any other
-//!    (NAT, private, the game server's own IP, ...) is substituted and logged, never obeyed.
+//!    `BND.ADDR` is the proxy's claim and is **not trusted**. With `relay = "proxy-host-only"` (the default)
+//!    datagrams always go to the proxy's own IP (the TCP peer) with the announced port: an unspecified address or
+//!    the proxy's own is the normal case; any other (NAT, private, the game server's own IP, ...) is substituted
+//!    and logged, never obeyed. With `relay = "public"` (task 2.6b, for proxies whose relay lives on another
+//!    machine) an address on another host is obeyed only if it is a public unicast address
+//!    (`crate::relay_rule::classify`), and, once the game server is known, none of the server's IPs and not the
+//!    server's port ([`check_relay_is_not_target`]); a domain name is never resolved and is refused.
 //! 2. [`Socks5UdpTransport`] wraps every outgoing datagram in the RFC 1928 §7 header (`RSV=0000`, `FRAG=0`,
 //!    `ATYP`, `DST.ADDR`, `DST.PORT`) and sends it to the relay; an incoming datagram is accepted only if it
 //!    comes from the relay's address, has `RSV=0000` and `FRAG=0`, parses cleanly, and names the game server
@@ -23,7 +27,9 @@
 //! No credential, proxy address or port is ever put into an error, a log line or a `Debug` output: errors carry
 //! the step and the `io::ErrorKind` only (`crate::proxy::Secret`).
 
-use crate::proxy::ProxyConfig;
+use crate::proxy::{ProxyConfig, RelayMode, fresh_session_token};
+use crate::relay_probe::{DNS_PROBE_TARGET, ProbePlan, probe_rtt};
+use crate::relay_rule::{RelayClass, RelayTarget, classify, is_local_address};
 use crate::transport::{Transport, TransportError};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
@@ -101,6 +107,9 @@ pub enum Socks5Error {
     Protocol(&'static str),
     #[error("unusable relay address in the proxy's reply: {0}")]
     RelayAddress(&'static str),
+    /// The UDP probe through the relay got no answer to any query (task 2.6b): the relay does not carry UDP for us.
+    #[error("the UDP relay answered none of the DNS probe queries")]
+    ProbeFailed,
     /// The TCP control connection closed or failed after the association was set up: the association is gone.
     #[error("the proxy's TCP control connection closed: the UDP association is gone")]
     ControlClosed,
@@ -123,6 +132,7 @@ impl Socks5Error {
             Socks5Error::Io { .. }
             | Socks5Error::Timeout { .. }
             | Socks5Error::Closed { .. }
+            | Socks5Error::ProbeFailed
             | Socks5Error::ControlClosed => false,
         }
     }
@@ -302,6 +312,9 @@ pub enum RelayHost {
     /// used with the announced port, the usual handling for a proxy behind NAT. Game datagrams therefore
     /// never go anywhere but the host we hold the control connection to.
     Substituted,
+    /// `relay = "public"` only: `BND.ADDR` named another host, it is a public unicast address, and it is used as
+    /// announced. Whether it is the game server is checked when the server is known ([`check_relay_is_not_target`]).
+    Remote,
 }
 
 /// What a successful `UDP ASSOCIATE` produced.
@@ -317,11 +330,34 @@ pub struct Established {
 }
 
 /// The outcome of [`check`]: what `ddnet-ai proxy-check` prints (no address, no credential).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyCheck {
     pub relay_host: RelayHost,
     pub relay_port: u16,
     pub authenticated: bool,
+    /// The rule that applied (`relay` of the proxy file).
+    pub mode: RelayMode,
+    /// Public mode (or session picking): the UDP probe through the relay. `None` in the default mode.
+    pub probe: Option<ProbeReport>,
+    /// Session picking: one entry per session tried, in order (`None` = no answer or failed), and which one won. No user
+    /// names, only round-trip times.
+    pub sessions: Option<SessionReport>,
+}
+
+/// The UDP probe of one relay: `replies` answers to `sent` DNS queries, with their median round-trip time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeReport {
+    pub sent: u16,
+    pub replies: u16,
+    pub median: Duration,
+}
+
+/// The sessions `session_pick` tried (median RTT of each, `None` for one that failed or got no answer) and the index of
+/// the one kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionReport {
+    pub rtts: Vec<Option<Duration>>,
+    pub picked: usize,
 }
 
 fn resolve_with_timeout(host: &str, port: u16, timeout: Duration) -> Result<Vec<SocketAddr>, Socks5Error> {
@@ -435,8 +471,18 @@ enum BoundHost {
 }
 
 /// Opens the control connection and completes `UDP ASSOCIATE`; see the module docs. Credentials are sent only
-/// if the proxy selects username/password, and are offered only if the config has them.
+/// if the proxy selects username/password, and are offered only if the config has them. A `{session}` placeholder in
+/// the user name gets a fresh random token.
 pub fn associate(cfg: &ProxyConfig, timeouts: &Timeouts) -> Result<Established, Socks5Error> {
+    associate_session(cfg, None, timeouts)
+}
+
+/// [`associate`] with an explicit session token for the `{session}` placeholder of the user name (none: a fresh one).
+pub fn associate_session(
+    cfg: &ProxyConfig,
+    session: Option<&str>,
+    timeouts: &Timeouts,
+) -> Result<Established, Socks5Error> {
     let dl = Deadline {
         at: Instant::now() + timeouts.total,
         cap: timeouts.total,
@@ -486,6 +532,7 @@ pub fn associate(cfg: &ProxyConfig, timeouts: &Timeouts) -> Result<Established, 
 
     // 2. Method negotiation (RFC 1928 §3).
     let auth = cfg.auth();
+    let user = cfg.user_for(session);
     let greeting: &[u8] = if auth.is_some() {
         &[SOCKS_VERSION, 2, METHOD_NO_AUTH, METHOD_USERPASS]
     } else {
@@ -505,7 +552,8 @@ pub fn associate(cfg: &ProxyConfig, timeouts: &Timeouts) -> Result<Established, 
                 return Err(Socks5Error::UnsupportedMethod(METHOD_USERPASS));
             };
             // 3. RFC 1929.
-            let (user, pass) = (auth.user.expose().as_bytes(), auth.pass.expose().as_bytes());
+            let user = user.unwrap_or_default();
+            let (user, pass) = (user.as_bytes(), auth.pass.expose().as_bytes());
             let mut msg = Vec::with_capacity(3 + user.len() + pass.len());
             msg.push(AUTH_VERSION);
             // Lengths are 1..=255, checked when the config is built.
@@ -560,27 +608,14 @@ pub fn associate(cfg: &ProxyConfig, timeouts: &Timeouts) -> Result<Established, 
     if port == 0 {
         return Err(Socks5Error::RelayAddress("BND.PORT is 0"));
     }
-    // `BND.ADDR` is the proxy's claim about itself and is not trusted: whatever it says, game datagrams go to the
-    // proxy's own IP (the host we hold the control connection to). An unspecified address or one equal to the proxy's
-    // IP is the normal case; any other (a private or NAT address, loopback, the game server's own IP, ...) is
-    // replaced by the proxy's IP with the announced port, as clients do for a proxy behind NAT.
+    // `BND.ADDR` is the proxy's claim about itself and is not trusted (`judge_relay`).
     let announced = match host {
         BoundHost::Ip(ip) => Some(ip),
         // Rare, but legal. Never resolved: that would be a DNS query for a name the proxy chose, and the answer
-        // would only be compared with the proxy's IP anyway. A name is treated as "another host".
+        // could not be trusted either.
         BoundHost::Domain => None,
     };
-    let relay_host = match announced {
-        Some(ip) if ip.is_unspecified() || ip.to_canonical() == proxy_ip.to_canonical() => RelayHost::SameAsProxy,
-        _ => {
-            tracing::warn!(
-                relay_port = port,
-                "socks5: the proxy announced a relay address on another host; using the proxy's own address with the announced port"
-            );
-            RelayHost::Substituted
-        }
-    };
-    let relay_ip = proxy_ip;
+    let (relay_ip, relay_host) = judge_relay(cfg, announced, proxy_ip)?;
     // From here on the control connection is only polled for closure.
     stream.set_nonblocking(true).map_err(|e| io_err(Step::Associate, e))?;
     Ok(Established {
@@ -591,15 +626,256 @@ pub fn associate(cfg: &ProxyConfig, timeouts: &Timeouts) -> Result<Established, 
     })
 }
 
-/// `ddnet-ai proxy-check`: the whole handshake (TCP connect, authentication, `UDP ASSOCIATE`, the relay
-/// address) and nothing else: no UDP socket is created and no datagram goes anywhere. The control
-/// connection is closed on return.
+/// Decides where datagrams go, from what the proxy announced (`announced`: `None` for a domain name) and the IP the
+/// control connection reached (`proxy_ip`). Target-independent; the game server is checked later
+/// ([`check_relay_is_not_target`]), once it is known.
+///
+/// - Unspecified or the proxy's own IP: the proxy's IP ([`RelayHost::SameAsProxy`]), the normal case.
+/// - `relay = "proxy-host-only"`: anything else (another IP, a domain) is replaced by the proxy's IP, with a warning
+///   ([`RelayHost::Substituted`]).
+/// - `relay = "public"`: another IP is used as announced ([`RelayHost::Remote`]) only if it is a public unicast address;
+///   a private, loopback, link-local, CGNAT, multicast, broadcast, documentation or reserved address, and any domain
+///   name, is refused fatally, because a proxy that announces one cannot be told apart from one trying to make us send
+///   to somewhere it chose.
+fn judge_relay(
+    cfg: &ProxyConfig,
+    announced: Option<IpAddr>,
+    proxy_ip: IpAddr,
+) -> Result<(IpAddr, RelayHost), Socks5Error> {
+    judge_relay_with(cfg, announced, proxy_ip, is_local_address)
+}
+
+/// [`judge_relay`] with the "is this one of this machine's own addresses" test passed in (tests).
+fn judge_relay_with(
+    cfg: &ProxyConfig,
+    announced: Option<IpAddr>,
+    proxy_ip: IpAddr,
+    is_local: impl Fn(IpAddr) -> bool,
+) -> Result<(IpAddr, RelayHost), Socks5Error> {
+    if let Some(ip) = announced
+        && (ip.is_unspecified() || ip.to_canonical() == proxy_ip.to_canonical())
+    {
+        return Ok((proxy_ip, RelayHost::SameAsProxy));
+    }
+    match cfg.relay_mode() {
+        RelayMode::ProxyHostOnly => {
+            tracing::warn!(
+                "socks5: the proxy announced a relay address on another host; using the proxy's own address with the announced port"
+            );
+            Ok((proxy_ip, RelayHost::Substituted))
+        }
+        RelayMode::Public => {
+            let Some(ip) = announced else {
+                return Err(Socks5Error::RelayAddress(
+                    "the relay is announced as a domain name, which is never resolved (relay = public needs a public unicast IP)",
+                ));
+            };
+            let ip = ip.to_canonical();
+            let class = classify(ip);
+            // The test hook only ever applies to loopback (`ProxyConfig::loopback_relay_allowed` is false outside
+            // tests and never set from a file).
+            if class == RelayClass::Public {
+                // Review F5 of 2.6b: not one of this machine's own (public) addresses either.
+                if is_local(ip) {
+                    return Err(Socks5Error::RelayAddress(
+                        "the announced relay address is one of this machine's own addresses (relay = public needs another host)",
+                    ));
+                }
+                Ok((ip, RelayHost::Remote))
+            } else if cfg.loopback_relay_allowed() && ip.is_loopback() {
+                Ok((ip, RelayHost::Remote))
+            } else {
+                Err(Socks5Error::RelayAddress(class.refusal()))
+            }
+        }
+    }
+}
+
+/// `proxy-check`'s probe: 5 queries, each waiting at most 2 s (and never longer than one handshake step).
+fn check_probe(timeouts: &Timeouts) -> ProbePlan {
+    ProbePlan {
+        queries: 5,
+        per_query: timeouts.step.min(Duration::from_secs(2)),
+    }
+}
+
+/// Session picking: fewer, shorter queries per candidate (it runs inside one connection attempt, up to
+/// [`ProxyConfig::session_pick`] times): 3 queries, each waiting at most 600 ms.
+fn pick_probe(timeouts: &Timeouts) -> ProbePlan {
+    ProbePlan {
+        queries: 3,
+        per_query: timeouts.step.min(Duration::from_millis(600)),
+    }
+}
+
+/// How long a whole session pick may take (review F1 of 2.6b): well under the driver's 15 s handshake watchdog, and
+/// short enough that `systemctl stop` (30 s) is never kept waiting by it.
+const PICK_BUDGET: Duration = Duration::from_secs(8);
+
+/// The handshake bounds of one pick candidate: tighter than a normal handshake (3 s in all), because a healthy proxy
+/// answers in tens of milliseconds and the whole pick has [`PICK_BUDGET`].
+fn pick_timeouts(timeouts: &Timeouts) -> Timeouts {
+    Timeouts {
+        connect: timeouts.connect.min(Duration::from_secs(2)),
+        step: timeouts.step.min(Duration::from_secs(2)),
+        total: timeouts.total.min(Duration::from_secs(3)),
+    }
+}
+
+/// A UDP socket of the relay's address family, bound to a free port.
+fn bind_for(relay: SocketAddr) -> Result<UdpSocket, Socks5Error> {
+    let bind: SocketAddr = match relay {
+        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    UdpSocket::bind(bind).map_err(|e| io_err(Step::Associate, e))
+}
+
+/// A fresh association that passed the acceptance rule against `target`, with its UDP socket, and (when `probe` is set)
+/// the median UDP round-trip time through it to the neutral DNS target.
+struct Candidate {
+    est: Established,
+    udp: UdpSocket,
+    probe: Option<ProbeReport>,
+}
+
+/// `associate_session` + the target check + (optionally) the DNS probe. The target check comes **first**: the probe
+/// is the first datagram this association ever carries, and it must not go to the game server.
+fn establish(
+    cfg: &ProxyConfig,
+    session: Option<&str>,
+    timeouts: &Timeouts,
+    target: &RelayTarget,
+    probe: Option<ProbePlan>,
+) -> Result<Candidate, Socks5Error> {
+    let est = associate_session(cfg, session, timeouts)?;
+    check_relay_is_not_target(est.relay, est.proxy_ip, target)?;
+    let udp = bind_for(est.relay)?;
+    let probe = match probe {
+        None => None,
+        Some(plan) => {
+            let result = probe_rtt(&udp, est.relay, DNS_PROBE_TARGET, plan).map_err(|e| io_err(Step::Associate, e))?;
+            let median = result.median().ok_or(Socks5Error::ProbeFailed)?;
+            Some(ProbeReport {
+                sent: result.sent,
+                replies: u16::try_from(result.rtts.len()).unwrap_or(u16::MAX),
+                median,
+            })
+        }
+    };
+    Ok(Candidate { est, udp, probe })
+}
+
+/// Tries up to `cfg.session_pick()` sessions (one TCP connection each, a fresh token each), measures the UDP round-trip
+/// time through each relay and keeps the lowest. Returns the winner, its token and the report.
+///
+/// - A fatal answer from the proxy (a wrong password, 0x07, a refused relay, ...) stops at once, so a wrong password is
+///   tried once, not four times. A session that merely fails or gets no answer is skipped.
+/// - The whole pick is bounded by [`PICK_BUDGET`] (8 s): each candidate has the tight [`pick_timeouts`], and a further
+///   candidate is started only if the worst case of one candidate (its handshake bound plus its probe) still fits in what
+///   is left. A mute relay therefore costs about two connections and a few seconds, never the watchdog.
+fn pick_session(
+    cfg: &ProxyConfig,
+    timeouts: &Timeouts,
+    target: &RelayTarget,
+) -> Result<(Candidate, String, SessionReport), Socks5Error> {
+    let n = usize::from(cfg.session_pick());
+    let started = Instant::now();
+    let t = pick_timeouts(timeouts);
+    let plan = pick_probe(&t);
+    let worst_candidate = t.total + plan.per_query * u32::from(plan.queries);
+    let mut used: Vec<String> = Vec::new();
+    let mut rtts: Vec<Option<Duration>> = Vec::new();
+    let mut best: Option<(usize, Candidate, String)> = None;
+    let mut last_err = Socks5Error::ProbeFailed;
+    for i in 0..n {
+        if i > 0 && started.elapsed() + worst_candidate > PICK_BUDGET {
+            break;
+        }
+        let token = fresh_session_token(&used);
+        used.push(token.clone());
+        match establish(cfg, Some(&token), &t, target, Some(plan)) {
+            Ok(c) => {
+                let rtt = c.probe.map(|p| p.median);
+                rtts.push(rtt);
+                let better = match (&best, rtt) {
+                    (None, Some(_)) => true,
+                    (Some((_, b, _)), Some(r)) => b.probe.is_some_and(|bp| r < bp.median),
+                    _ => false,
+                };
+                if better {
+                    best = Some((i, c, token));
+                }
+            }
+            Err(e) if e.is_fatal() => return Err(e),
+            Err(e) => {
+                rtts.push(None);
+                last_err = e;
+            }
+        }
+    }
+    let Some((picked, cand, token)) = best else {
+        return Err(last_err);
+    };
+    tracing::info!(
+        tried = rtts.len(),
+        picked = picked + 1,
+        rtt_ms = ?rtts.iter().map(|r| r.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))).collect::<Vec<_>>(),
+        "socks5: session picking done (round-trip times only)"
+    );
+    Ok((cand, token, SessionReport { rtts, picked }))
+}
+
+/// The game server a proxy check measures against: the proxy file's own `for_server` (the one server it is issued for),
+/// when it has one. `proxy-check` has no other idea of a server and never contacts one.
+fn target_of(cfg: &ProxyConfig) -> RelayTarget {
+    let mut t = RelayTarget::from_ips(cfg.for_server_ips());
+    if let Some(port) = cfg.for_server_port() {
+        t = t.with_port(port);
+    }
+    t
+}
+
+/// `ddnet-ai proxy-check`: the whole handshake (TCP connect, authentication, `UDP ASSOCIATE`, the relay address and the
+/// acceptance rule) and, in `relay = "public"` mode (or with `session_pick`), a UDP reachability probe through the
+/// relay: DNS queries for a neutral name to a public resolver ([`DNS_PROBE_TARGET`]) and their median round-trip time.
+/// Never a datagram to a game server: the relay is checked against the proxy file's `for_server` first, and the probe
+/// target is the resolver. In the default mode no UDP socket is created. The control connection is closed on return.
 pub fn check(cfg: &ProxyConfig, timeouts: &Timeouts) -> Result<ProxyCheck, Socks5Error> {
+    let target = target_of(cfg);
+    let mode = cfg.relay_mode();
+    let authenticated = cfg.auth().is_some();
+    if cfg.session_pick() >= 2 {
+        let (cand, _token, report) = pick_session(cfg, timeouts, &target)?;
+        return Ok(ProxyCheck {
+            relay_host: cand.est.relay_host,
+            relay_port: cand.est.relay.port(),
+            authenticated,
+            mode,
+            probe: cand.probe,
+            sessions: Some(report),
+        });
+    }
+    if mode == RelayMode::Public {
+        let cand = establish(cfg, None, timeouts, &target, Some(check_probe(timeouts)))?;
+        return Ok(ProxyCheck {
+            relay_host: cand.est.relay_host,
+            relay_port: cand.est.relay.port(),
+            authenticated,
+            mode,
+            probe: cand.probe,
+            sessions: None,
+        });
+    }
     let est = associate(cfg, timeouts)?;
+    check_relay_is_not_target(est.relay, est.proxy_ip, &target)?;
     Ok(ProxyCheck {
         relay_host: est.relay_host,
         relay_port: est.relay.port(),
-        authenticated: cfg.auth().is_some(),
+        authenticated,
+        mode,
+        probe: None,
+        sessions: None,
     })
 }
 
@@ -628,17 +904,31 @@ struct Association {
 }
 
 /// A relay that is the game server itself would send our datagrams straight to it, around the proxy (the D-052
-/// ban path). The relay is always on the proxy's IP, so this can only happen when the proxy runs on the game
-/// server's own host (loopback tests). Addresses are not compared literally: the same host has several (IPv6 and
-/// IPv4, a second IPv4), and a proxy reached at one of them announcing the game port would make the bot send to
-/// the game server's port on that host. So a relay **port equal to the target's port is refused whatever the IP**
-/// (real relay ports are ephemeral; loopback tests use other ports), and a relay IP that equals the target's but is
-/// not the proxy's is refused outright. Fatal: retrying cannot change it.
-fn check_relay_is_not_target(relay: SocketAddr, proxy_ip: IpAddr, target: SocketAddr) -> Result<(), Socks5Error> {
-    let same_ip = relay.ip().to_canonical() == target.ip().to_canonical();
+/// ban path). Refused fatally, whatever the proxy says:
+///
+/// - **a relay port equal to the server's port, whatever the IP.** Addresses are not compared literally: the same host
+///   has several (IPv6 and IPv4, a second IPv4), and a proxy reached at one of them announcing the game port would make the
+///   bot send to the game server's port on that host. Real relay ports are ephemeral; loopback tests use other ports;
+/// - **a relay IP that is any of the server's IPs but is not the proxy's own** (IPv4-mapped spellings included). A relay
+///   on the proxy's own IP is always the proxy's own socket, so it can be the server's IP only when the proxy runs on
+///   the server's host (loopback tests), where the port rule above is what protects.
+///
+/// - **a relay on another host in the other address family than the server** (an IPv6 relay for an IPv4 server): it could
+///   be the server's own host at its other address, which no list of the server's IPs can name.
+///
+/// (A relay port of 0 never gets here: `associate` refuses it.) The unit's cgroup filter is the second layer: in
+/// `relay = "public"` mode it denies every game-server IP outright (`deploy/README.md`).
+fn check_relay_is_not_target(relay: SocketAddr, proxy_ip: IpAddr, target: &RelayTarget) -> Result<(), Socks5Error> {
     let relay_is_proxy = relay.ip().to_canonical() == proxy_ip.to_canonical();
-    if relay.port() == target.port() || (same_ip && !relay_is_proxy) {
+    if relay.port() == 0 || target.port() == Some(relay.port()) || (target.has_ip(relay.ip()) && !relay_is_proxy) {
         return Err(Socks5Error::RelayAddress("the relay address is the game server itself"));
+    }
+    // A relay on another host in the other address family than the server could be the server's own host at its other
+    // address (review F3 of 2.6b): refused. The proxy's own IP is not judged (it is where we hold the control connection).
+    if !relay_is_proxy && target.lacks_family_of(relay.ip()) {
+        return Err(Socks5Error::RelayAddress(
+            "the relay is in another address family than the game server (relay = public)",
+        ));
     }
     Ok(())
 }
@@ -654,8 +944,14 @@ pub struct Socks5UdpTransport {
     stats: DropStats,
     send_buf: Vec<u8>,
     recv_buf: Vec<u8>,
-    /// How many control connections this transport has opened (diagnostics and tests).
+    /// How many associations this transport has kept (diagnostics and tests).
     associations_opened: u64,
+    /// The session token session picking chose: every later association (after a loss) uses it again, so the exit stays
+    /// the same and the proxy is not asked to pick again.
+    session: Option<String>,
+    /// A session pick has been tried (and failed without a fatal answer): never again, every later association is one
+    /// plain connection per attempt with a fresh token (review F1 of 2.6b).
+    pick_failed: bool,
 }
 
 impl std::fmt::Debug for Socks5UdpTransport {
@@ -684,6 +980,8 @@ impl Socks5UdpTransport {
             send_buf: Vec::with_capacity(1500),
             recv_buf: vec![0; RECV_BUF_SIZE],
             associations_opened: 0,
+            session: None,
+            pick_failed: false,
         }
     }
 
@@ -700,13 +998,26 @@ impl Socks5UdpTransport {
         self.assoc.is_some()
     }
 
-    fn open(&mut self) -> Result<(), Socks5Error> {
-        let est = associate(&self.cfg, &self.timeouts)?;
-        let bind: SocketAddr = match est.relay {
-            SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-            SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    /// Opens an association that passed the acceptance rule against `target`. With `session_pick` and no session chosen
+    /// yet, this is the pick (up to `session_pick` proxy connections, once per transport); otherwise exactly one.
+    fn open(&mut self, target: &RelayTarget) -> Result<(), Socks5Error> {
+        let cand = if self.cfg.session_pick() >= 2 && self.session.is_none() && !self.pick_failed {
+            // Once, whatever the outcome: a pick that fails (a mute relay, a proxy that drops us) is not repeated at the
+            // next attempt. This attempt is lost with the error; later ones are plain.
+            match pick_session(&self.cfg, &self.timeouts, target) {
+                Ok((cand, token, _report)) => {
+                    self.session = Some(token);
+                    cand
+                }
+                Err(e) => {
+                    self.pick_failed = true;
+                    return Err(e);
+                }
+            }
+        } else {
+            establish(&self.cfg, self.session.as_deref(), &self.timeouts, target, None)?
         };
-        let udp = UdpSocket::bind(bind).map_err(|e| io_err(Step::Associate, e))?;
+        let Candidate { est, udp, .. } = cand;
         udp.set_read_timeout(Some(self.poll))
             .map_err(|e| io_err(Step::Associate, e))?;
         self.associations_opened += 1;
@@ -774,14 +1085,20 @@ impl Transport for Socks5UdpTransport {
             let _ = self.lose_association();
         }
         let reused = self.assoc.is_some();
-        if !reused {
-            self.open()?;
-        }
-        if let Some(a) = self.assoc.as_ref()
-            && let Err(e) = check_relay_is_not_target(a.relay, a.proxy_ip, target)
-        {
-            self.assoc = None;
-            return Err(e.into());
+        // Every address the game server is known by: the attempt's target and what the proxy file's `for_server`
+        // resolves to.
+        let mut known = RelayTarget::new(target);
+        known.add_ips(self.cfg.for_server_ips());
+        if reused {
+            if let Some(a) = self.assoc.as_ref()
+                && let Err(e) = check_relay_is_not_target(a.relay, a.proxy_ip, &known)
+            {
+                self.assoc = None;
+                return Err(e.into());
+            }
+        } else {
+            // A fresh association is checked inside `open`, before it carries a single datagram.
+            self.open(&known)?;
         }
         if reused && let Some(a) = self.assoc.as_ref() {
             // Reusing the association (a server-requested reconnect or a redirect): discard what is queued
@@ -869,6 +1186,7 @@ impl Transport for Socks5UdpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::RelayMode;
     use crate::socks5_testserver::{Auth, Bnd, Stall, TestSocks5Server};
     use proptest::prelude::*;
 
@@ -1210,21 +1528,46 @@ mod tests {
         // The relay IP equals the target's but is not the proxy's: refused whatever the port.
         for relay in ["10.0.0.9:4000", "10.0.0.9:8303"] {
             assert_eq!(
-                check_relay_is_not_target(v4(relay), ip("127.0.0.1"), v4("10.0.0.9:8303")),
+                check_relay_is_not_target(v4(relay), ip("127.0.0.1"), &RelayTarget::new(v4("10.0.0.9:8303"))),
                 Err(Socks5Error::RelayAddress("the relay address is the game server itself"))
             );
         }
         // The relay is the game server's exact endpoint, even on the proxy's own host.
-        assert!(check_relay_is_not_target(v4("127.0.0.1:8303"), ip("127.0.0.1"), v4("127.0.0.1:8303")).is_err());
+        assert!(
+            check_relay_is_not_target(
+                v4("127.0.0.1:8303"),
+                ip("127.0.0.1"),
+                &RelayTarget::new(v4("127.0.0.1:8303"))
+            )
+            .is_err()
+        );
         // A proxy co-located with the game server (loopback tests) at another port, and any other host: fine.
-        assert!(check_relay_is_not_target(v4("127.0.0.1:4000"), ip("127.0.0.1"), v4("127.0.0.1:8303")).is_ok());
-        assert!(check_relay_is_not_target(v4("203.0.113.5:4000"), ip("203.0.113.5"), v4("198.51.100.7:8303")).is_ok());
+        assert!(
+            check_relay_is_not_target(
+                v4("127.0.0.1:4000"),
+                ip("127.0.0.1"),
+                &RelayTarget::new(v4("127.0.0.1:8303"))
+            )
+            .is_ok()
+        );
+        assert!(
+            check_relay_is_not_target(
+                v4("203.0.113.5:4000"),
+                ip("203.0.113.5"),
+                &RelayTarget::new(v4("198.51.100.7:8303"))
+            )
+            .is_ok()
+        );
         // F6: addresses are not compared literally. The proxy is reached at one address of the game server's host
         // (`127.0.0.1`), the game server is at another (`[::1]` or `127.0.0.3`), and `BND.PORT` is the game port:
         // the relay would be the game server's port on its own host. Refused whatever the IP.
         for target in ["[::1]:8303", "127.0.0.3:8303", "[::ffff:127.0.0.5]:8303"] {
             assert_eq!(
-                check_relay_is_not_target(v4("127.0.0.1:8303"), ip("127.0.0.1"), target.parse().unwrap()),
+                check_relay_is_not_target(
+                    v4("127.0.0.1:8303"),
+                    ip("127.0.0.1"),
+                    &RelayTarget::new(target.parse().unwrap())
+                ),
                 Err(Socks5Error::RelayAddress("the relay address is the game server itself")),
                 "{target}"
             );
@@ -1643,5 +1986,628 @@ mod tests {
         let text = format!("{t:?}");
         assert!(!text.contains("user-xyz") && !text.contains("pass-xyz"), "{text}");
         assert!(!text.contains(&server.addr().port().to_string()), "{text}");
+    }
+
+    // --- task 2.6b: a relay on another host (`relay = "public"`) ---------------------------------------------------
+
+    fn public_cfg(server: &TestSocks5Server) -> ProxyConfig {
+        cfg_for(server, None).with_relay(RelayMode::Public)
+    }
+
+    fn announcing(bnd: Bnd) -> TestSocks5Server {
+        TestSocks5Server::start(crate::socks5_testserver::Config {
+            bnd,
+            ..Default::default()
+        })
+    }
+
+    /// Every refused class, through the handshake: each is a fatal `RelayAddress` in public mode, and each is still
+    /// merely substituted in the default mode (unchanged behaviour).
+    #[test]
+    fn public_mode_refuses_every_non_public_class_the_default_mode_substitutes() {
+        for announced in [
+            "0.1.2.3:4000",   // reserved "this network"
+            "127.0.0.2:4000", // loopback
+            "[::1]:4000",     // loopback v6
+            "10.1.2.3:4000",  // private
+            "172.16.5.5:4000",
+            "192.168.0.7:4000",
+            "[fd00::7]:4000",       // unique local
+            "169.254.169.254:4000", // link-local
+            "[fe80::1]:4000",
+            "100.64.0.9:4000", // CGNAT
+            "224.0.0.1:4000",  // multicast
+            "[ff02::1]:4000",
+            "255.255.255.255:4000", // broadcast
+            "192.0.2.5:4000",       // documentation
+            "198.51.100.5:4000",
+            "203.0.113.5:4000",
+            "[2001:db8::5]:4000",
+            "240.0.0.1:4000", // reserved
+            "198.18.0.1:4000",
+            "[2002:7f00:3::1]:4000",  // 6to4 embedding 127.0.0.3
+            "[64:ff9b::7f00:3]:4000", // NAT64 embedding 127.0.0.3
+            "[::127.0.0.3]:4000",     // IPv4-compatible
+            "[::ffff:10.0.0.1]:4000", // mapped private
+        ] {
+            let server = announcing(Bnd::Fixed(announced.parse().unwrap()));
+            let err = associate(&public_cfg(&server), &fast()).unwrap_err();
+            assert!(matches!(err, Socks5Error::RelayAddress(_)), "{announced}: {err:?}");
+            assert!(err.is_fatal(), "{announced}");
+            let text = err.to_string();
+            assert!(text.contains("relay = public"), "{announced}: {text}");
+            assert!(!text.contains("4000"), "no address or port in the error: {text}");
+            // The default mode never obeys it.
+            let est = associate(&cfg_for(&server, None), &fast()).unwrap();
+            assert_eq!(est.relay_host, RelayHost::Substituted, "{announced}");
+            assert_eq!(est.relay, v4("127.0.0.1:4000"), "{announced}");
+        }
+    }
+
+    #[test]
+    fn public_mode_never_resolves_a_domain_and_refuses_it() {
+        let server = announcing(Bnd::Domain("never-resolved.invalid".into()));
+        let err = associate(&public_cfg(&server), &fast()).unwrap_err();
+        assert!(matches!(err, Socks5Error::RelayAddress(_)), "{err:?}");
+        assert!(err.is_fatal());
+        assert!(err.to_string().contains("domain"), "{err}");
+        // Not even `localhost`.
+        let server = announcing(Bnd::Domain("localhost".into()));
+        assert!(matches!(
+            associate(&public_cfg(&server), &fast()).unwrap_err(),
+            Socks5Error::RelayAddress(_)
+        ));
+    }
+
+    #[test]
+    fn public_mode_accepts_a_public_address_on_another_host_and_the_normal_cases_stay_normal() {
+        // No datagram is sent here: only the handshake.
+        for (announced, want) in [
+            ("8.8.8.8:4000", "8.8.8.8:4000"),
+            ("104.171.172.27:51234", "104.171.172.27:51234"),
+            ("[2606:4700:4700::1111]:4000", "[2606:4700:4700::1111]:4000"),
+            // A mapped spelling is used as the IPv4 address it stands for.
+            ("[::ffff:8.8.4.4]:4000", "8.8.4.4:4000"),
+        ] {
+            let server = announcing(Bnd::Fixed(announced.parse().unwrap()));
+            let est = associate(&public_cfg(&server), &fast()).unwrap();
+            assert_eq!(est.relay_host, RelayHost::Remote, "{announced}");
+            assert_eq!(est.relay, want.parse::<SocketAddr>().unwrap(), "{announced}");
+            assert_eq!(est.proxy_ip, "127.0.0.1".parse::<IpAddr>().unwrap());
+        }
+        // The proxy's own address, in any spelling, and the wildcard, are the proxy's host as before.
+        for bnd in [
+            Bnd::Relay,
+            Bnd::Unspecified,
+            Bnd::Fixed("[::ffff:127.0.0.1]:4000".parse().unwrap()),
+        ] {
+            let server = announcing(bnd);
+            let est = associate(&public_cfg(&server), &fast()).unwrap();
+            assert_eq!(est.relay_host, RelayHost::SameAsProxy);
+            assert_eq!(est.relay.ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
+        }
+        // Port 0 is no relay at all, in public mode too.
+        let server = announcing(Bnd::Fixed("8.8.8.8:0".parse().unwrap()));
+        assert!(matches!(
+            associate(&public_cfg(&server), &fast()).unwrap_err(),
+            Socks5Error::RelayAddress(_)
+        ));
+    }
+
+    #[test]
+    fn the_acceptance_rule_refuses_a_relay_that_is_any_of_the_servers_ips_or_its_port() {
+        let proxy: IpAddr = "92.204.171.83".parse().unwrap();
+        let ok = |relay: &str, target: &RelayTarget| check_relay_is_not_target(relay.parse().unwrap(), proxy, target);
+        let refused = Err(Socks5Error::RelayAddress("the relay address is the game server itself"));
+        let target = RelayTarget::new(v4("45.141.57.35:8308"));
+        assert_eq!(ok("104.171.172.27:51234", &target), Ok(()));
+        // The target's own IP, whatever the port; and the target's port, whatever the IP.
+        assert_eq!(ok("45.141.57.35:51234", &target), refused);
+        assert_eq!(ok("45.141.57.35:8308", &target), refused);
+        assert_eq!(ok("104.171.172.27:8308", &target), refused);
+        assert_eq!(ok("[2606:4700::1]:8308", &target), refused);
+        // v4-mapped spellings of the target's IP.
+        assert_eq!(ok("[::ffff:45.141.57.35]:51234", &target), refused);
+        let mapped_target = RelayTarget::new("[::ffff:45.141.57.35]:8308".parse().unwrap());
+        assert_eq!(ok("45.141.57.35:51234", &mapped_target), refused);
+        // Every IP the target resolves to counts, not just the one in hand.
+        let mut multi = RelayTarget::new(v4("45.141.57.35:8308"));
+        multi.add_ips(["104.171.172.27".parse().unwrap(), "2001:4860::8888".parse().unwrap()]);
+        assert_eq!(ok("104.171.172.27:51234", &multi), refused);
+        assert_eq!(ok("[2001:4860::8888]:51234", &multi), refused);
+        assert_eq!(ok("8.8.8.8:51234", &multi), Ok(()));
+        // Port 0 is never a relay.
+        assert_eq!(ok("8.8.8.8:0", &target), refused);
+        // A known IP list without a port (`proxy-check` with an unresolvable `for_server` port) still guards the IPs.
+        let ips_only = RelayTarget::from_ips(["45.141.57.35".parse().unwrap()]);
+        assert_eq!(ok("45.141.57.35:1234", &ips_only), refused);
+        assert_eq!(ok("8.8.8.8:8308", &ips_only), Ok(()));
+    }
+
+    /// The transport with a relay on another loopback alias (the test hook makes loopback count as public): the
+    /// datagrams reach the game server from the relay's address, never from the bot's socket.
+    #[test]
+    fn a_relay_on_another_host_carries_the_session_in_public_mode() {
+        let server = TestSocks5Server::start(crate::socks5_testserver::Config {
+            relay_ip: Some("127.0.0.2".parse().unwrap()),
+            ..Default::default()
+        });
+        let game = GameDouble::new();
+        // Without the hook, loopback is not public and the association is refused before any datagram.
+        let mut strict = Socks5UdpTransport::with_timeouts(public_cfg(&server), Duration::from_millis(20), fast());
+        let err = strict.begin_attempt(game.addr()).unwrap_err();
+        assert!(
+            matches!(err, TransportError::Proxy(Socks5Error::RelayAddress(_))),
+            "{err:?}"
+        );
+        assert!(err.is_fatal());
+        assert!(!strict.is_associated());
+        assert!(
+            game.socket.recv_from(&mut [0u8; 16]).is_err(),
+            "nothing reached the game server"
+        );
+
+        let mut t = Socks5UdpTransport::with_timeouts(
+            public_cfg(&server).with_test_loopback_relay(),
+            Duration::from_millis(20),
+            fast(),
+        );
+        t.begin_attempt(game.addr()).unwrap();
+        let relay = t.assoc.as_ref().unwrap().relay;
+        assert_eq!(relay, server.relay_addr());
+        assert_eq!(relay.ip(), "127.0.0.2".parse::<IpAddr>().unwrap());
+        t.send(b"hello").unwrap();
+        let (got, from) = game.recv();
+        assert_eq!(got, b"hello");
+        assert_eq!(from, server.relay_addr(), "from the relay on the other host");
+        game.socket.send_to(b"world", from).unwrap();
+        assert_eq!(recv_for(&mut t, Duration::from_secs(1)).unwrap(), b"world");
+        assert_eq!(t.stats(), DropStats::default());
+    }
+
+    /// A relay that is the game server's own IP is refused even though the class rule would let it through, and not one
+    /// datagram reaches the server: the target's IPs are compared in every spelling and include `for_server`'s.
+    #[test]
+    fn a_remote_relay_on_the_game_servers_own_ip_is_refused_before_any_datagram() {
+        let game = UdpSocket::bind("127.0.0.2:0").unwrap();
+        game.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let game_addr = game.local_addr().unwrap();
+        let hooked = |server: &TestSocks5Server| public_cfg(server).with_test_loopback_relay();
+        // (a) The relay announced is the game server's IP at another port; (b) the target written v4-mapped.
+        for (target, label) in [
+            (game_addr, "plain"),
+            (
+                SocketAddr::new("::ffff:127.0.0.2".parse().unwrap(), game_addr.port()),
+                "mapped",
+            ),
+        ] {
+            let server = announcing(Bnd::Fixed(SocketAddr::new(game_addr.ip(), 5000)));
+            let mut t = Socks5UdpTransport::with_timeouts(hooked(&server), Duration::from_millis(20), fast());
+            let err = t.begin_attempt(target).unwrap_err();
+            assert!(
+                matches!(err, TransportError::Proxy(Socks5Error::RelayAddress(_))),
+                "{label}: {err:?}"
+            );
+            assert!(err.is_fatal(), "{label}");
+            assert!(!t.is_associated(), "{label}");
+            assert_eq!(t.send(b"x").unwrap_err().kind(), io::ErrorKind::NotConnected);
+        }
+        // (c) Another IP of the same server, known only from the proxy file's `for_server`.
+        let server = announcing(Bnd::Fixed("127.0.0.2:5000".parse().unwrap()));
+        let mut t = Socks5UdpTransport::with_timeouts(
+            hooked(&server).with_for_server("127.0.0.2:9"),
+            Duration::from_millis(20),
+            fast(),
+        );
+        let err = t.begin_attempt(v4("127.0.0.1:8303")).unwrap_err();
+        assert!(
+            matches!(err, TransportError::Proxy(Socks5Error::RelayAddress(_))),
+            "{err:?}"
+        );
+        // (d) The relay's port is the game server's port, on a different IP.
+        let server = announcing(Bnd::Fixed(SocketAddr::new(
+            "127.0.0.3".parse().unwrap(),
+            game_addr.port(),
+        )));
+        let mut t = Socks5UdpTransport::with_timeouts(hooked(&server), Duration::from_millis(20), fast());
+        let err = t.begin_attempt(game_addr).unwrap_err();
+        assert!(
+            matches!(err, TransportError::Proxy(Socks5Error::RelayAddress(_))),
+            "{err:?}"
+        );
+        assert!(
+            game.recv_from(&mut [0u8; 16]).is_err(),
+            "the game server got a datagram"
+        );
+    }
+
+    /// A redirect reuses the association, so the acceptance rule is applied again to the NEW target: a redirect onto the
+    /// IP the (remote) relay sits on drops the association and sends nothing.
+    #[test]
+    fn a_redirect_onto_the_relays_own_address_is_refused_and_drops_a_remote_association() {
+        let server = TestSocks5Server::start(crate::socks5_testserver::Config {
+            relay_ip: Some("127.0.0.2".parse().unwrap()),
+            ..Default::default()
+        });
+        let game = GameDouble::new();
+        let mut t = Socks5UdpTransport::with_timeouts(
+            public_cfg(&server).with_test_loopback_relay(),
+            Duration::from_millis(20),
+            fast(),
+        );
+        t.begin_attempt(game.addr()).unwrap();
+        t.send(b"first").unwrap();
+        game.recv();
+        // The new target is another port on the relay's own IP: refused (the IP is the server's and not the proxy's).
+        let victim = UdpSocket::bind("127.0.0.2:0").unwrap();
+        victim.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let err = t.begin_attempt(victim.local_addr().unwrap()).unwrap_err();
+        assert!(
+            matches!(err, TransportError::Proxy(Socks5Error::RelayAddress(_))),
+            "{err:?}"
+        );
+        assert!(!t.is_associated());
+        assert_eq!(t.send(b"x").unwrap_err().kind(), io::ErrorKind::NotConnected);
+        assert!(
+            victim.recv_from(&mut [0u8; 16]).is_err(),
+            "nothing reached the redirect target"
+        );
+    }
+
+    /// Review F3 of 2.6b: an IPv6 relay for an IPv4-only target (and the reverse) could be the server's own host at its other
+    /// address. Refused for a relay on another host; the proxy's own IP is never judged.
+    #[test]
+    fn a_remote_relay_in_the_other_address_family_than_the_server_is_refused() {
+        let proxy: IpAddr = "92.204.171.83".parse().unwrap();
+        let refused = Err(Socks5Error::RelayAddress(
+            "the relay is in another address family than the game server (relay = public)",
+        ));
+        let v4_server = RelayTarget::new(v4("45.141.57.35:8308"));
+        let check = |relay: &str, t: &RelayTarget| check_relay_is_not_target(relay.parse().unwrap(), proxy, t);
+        assert_eq!(check("[2606:4700::1]:51234", &v4_server), refused);
+        assert_eq!(check("104.171.172.27:51234", &v4_server), Ok(()));
+        assert_eq!(
+            check("[::ffff:104.171.172.27]:51234", &v4_server),
+            Ok(()),
+            "mapped is IPv4"
+        );
+        let v6_server = RelayTarget::new("[2001:4860::8888]:8308".parse().unwrap());
+        assert_eq!(check("104.171.172.27:51234", &v6_server), refused);
+        assert_eq!(check("[2606:4700::1]:51234", &v6_server), Ok(()));
+        // The proxy's own IP is where we hold the control connection: not judged.
+        assert_eq!(
+            check_relay_is_not_target("92.204.171.83:51234".parse().unwrap(), proxy, &v6_server),
+            Ok(())
+        );
+        // Through the transport (loopback stands in for public with the hook): `[::1]` for an IPv4 game server.
+        let game = UdpSocket::bind("127.0.0.3:0").unwrap();
+        game.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let server = announcing(Bnd::Fixed("[::1]:5000".parse().unwrap()));
+        let mut t = Socks5UdpTransport::with_timeouts(
+            public_cfg(&server).with_test_loopback_relay(),
+            Duration::from_millis(20),
+            fast(),
+        );
+        let err = t.begin_attempt(game.local_addr().unwrap()).unwrap_err();
+        assert!(
+            matches!(err, TransportError::Proxy(Socks5Error::RelayAddress(_))) && err.is_fatal(),
+            "{err:?}"
+        );
+        assert!(!t.is_associated());
+        assert!(game.recv_from(&mut [0u8; 16]).is_err());
+    }
+
+    /// Review F5 of 2.6b: an announced relay IP that is one of this machine's own addresses is refused.
+    #[test]
+    fn public_mode_refuses_an_announced_address_that_is_one_of_this_machines_own() {
+        let cfg = ProxyConfig::new("t", "h", 1, None)
+            .unwrap()
+            .with_relay(RelayMode::Public);
+        let proxy: IpAddr = "92.204.171.83".parse().unwrap();
+        let announced: IpAddr = "104.171.172.27".parse().unwrap();
+        // A remote public address that is not ours passes; the same address when it is ours does not.
+        assert_eq!(
+            judge_relay_with(&cfg, Some(announced), proxy, |_| false),
+            Ok((announced, RelayHost::Remote))
+        );
+        assert!(matches!(
+            judge_relay_with(&cfg, Some(announced), proxy, |ip| ip == announced),
+            Err(Socks5Error::RelayAddress(t)) if t.contains("own addresses")
+        ));
+        // The real test is a bind: a documentation-range address is refused earlier by class, a public one we do not own is not local.
+        assert!(!is_local_address(announced));
+        // The proxy's own IP (SameAsProxy) is not subject to it.
+        assert_eq!(
+            judge_relay_with(&cfg, Some(proxy), proxy, |_| true),
+            Ok((proxy, RelayHost::SameAsProxy))
+        );
+    }
+
+    // --- task 2.6b: the UDP probe and `proxy-check` ---------------------------------------------------------------
+
+    fn server_with_dns() -> TestSocks5Server {
+        TestSocks5Server::start(crate::socks5_testserver::Config {
+            fake_dns: true,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn check_in_public_mode_probes_through_the_relay_and_reports_the_median_rtt() {
+        let server = server_with_dns();
+        let report = check(&public_cfg(&server), &fast()).unwrap();
+        assert_eq!(report.mode, RelayMode::Public);
+        assert_eq!(report.relay_host, RelayHost::SameAsProxy);
+        let probe = report.probe.expect("public mode probes");
+        assert_eq!((probe.sent, probe.replies), (5, 5));
+        assert!(probe.median < Duration::from_millis(300), "{probe:?}");
+        assert!(report.sessions.is_none());
+        // What the relay saw: five DNS queries to port 53 and nothing else; the game server was never named.
+        let wire = server.datagrams_from_clients();
+        assert_eq!(wire.len(), 5);
+        for (_, dg) in &wire {
+            let p = parse_udp(dg).unwrap();
+            let UdpSource::Ip(dst) = p.source else {
+                panic!("no domain expected")
+            };
+            assert_eq!(dst, DNS_PROBE_TARGET);
+        }
+        assert_eq!(server.tcp_accepts(), 1);
+    }
+
+    #[test]
+    fn check_reports_a_relay_on_another_host_and_its_rtt() {
+        let server = TestSocks5Server::start(crate::socks5_testserver::Config {
+            relay_ip: Some("127.0.0.2".parse().unwrap()),
+            fake_dns: true,
+            relay_delays: vec![Duration::from_millis(20)],
+            ..Default::default()
+        });
+        let report = check(&public_cfg(&server).with_test_loopback_relay(), &fast()).unwrap();
+        assert_eq!(report.relay_host, RelayHost::Remote);
+        let probe = report.probe.unwrap();
+        assert_eq!(probe.replies, 5);
+        assert!(
+            probe.median >= Duration::from_millis(20),
+            "the relay's delay shows: {probe:?}"
+        );
+    }
+
+    #[test]
+    fn check_without_the_hook_refuses_a_loopback_relay_and_never_probes() {
+        let server = TestSocks5Server::start(crate::socks5_testserver::Config {
+            relay_ip: Some("127.0.0.2".parse().unwrap()),
+            fake_dns: true,
+            ..Default::default()
+        });
+        let err = check(&public_cfg(&server), &fast()).unwrap_err();
+        assert!(matches!(err, Socks5Error::RelayAddress(_)), "{err:?}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(server.datagrams_from_clients().is_empty(), "no datagram went anywhere");
+    }
+
+    #[test]
+    fn check_refuses_a_relay_that_is_the_file_s_game_server_before_probing() {
+        // The proxy file's `for_server` stands in for the game server: the relay at 127.0.0.2 is its IP.
+        let server = TestSocks5Server::start(crate::socks5_testserver::Config {
+            relay_ip: Some("127.0.0.2".parse().unwrap()),
+            fake_dns: true,
+            ..Default::default()
+        });
+        let cfg = public_cfg(&server)
+            .with_test_loopback_relay()
+            .with_for_server("127.0.0.2:8303");
+        let err = check(&cfg, &fast()).unwrap_err();
+        assert!(matches!(err, Socks5Error::RelayAddress(_)), "{err:?}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(server.datagrams_from_clients().is_empty());
+        // And the relay's port equal to `for_server`'s port, on another IP, is refused the same way.
+        let server = TestSocks5Server::start(crate::socks5_testserver::Config {
+            bnd: Bnd::Fixed("127.0.0.2:4000".parse().unwrap()),
+            fake_dns: true,
+            ..Default::default()
+        });
+        let cfg = public_cfg(&server)
+            .with_test_loopback_relay()
+            .with_for_server("127.0.0.9:4000");
+        assert!(matches!(
+            check(&cfg, &fast()).unwrap_err(),
+            Socks5Error::RelayAddress(_)
+        ));
+        assert!(server.datagrams_from_clients().is_empty());
+    }
+
+    #[test]
+    fn a_relay_that_answers_no_probe_query_fails_the_check_without_being_fatal() {
+        // No fake DNS: the relay drops datagrams to anywhere but loopback, so nothing answers.
+        let server = TestSocks5Server::start(Default::default());
+        let t0 = Instant::now();
+        let err = check(&public_cfg(&server), &fast()).unwrap_err();
+        assert_eq!(err, Socks5Error::ProbeFailed);
+        assert!(!err.is_fatal());
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        // The default mode does not probe at all.
+        let report = check(&cfg_for(&server, None), &fast()).unwrap();
+        assert_eq!(report.mode, RelayMode::ProxyHostOnly);
+        assert!(report.probe.is_none());
+    }
+
+    // --- task 2.6b: session picking -------------------------------------------------------------------------------
+
+    fn session_server(delays: &[u64]) -> TestSocks5Server {
+        TestSocks5Server::start(crate::socks5_testserver::Config {
+            auth: Auth::UserPassSession("sess-".into(), "pw".into()),
+            fake_dns: true,
+            relay_delays: delays.iter().map(|d| Duration::from_millis(*d)).collect(),
+            ..Default::default()
+        })
+    }
+
+    fn session_cfg(server: &TestSocks5Server, pick: u8) -> ProxyConfig {
+        let a = server.addr();
+        ProxyConfig::new(
+            "t",
+            a.ip().to_string(),
+            a.port(),
+            Some(("sess-{session}".to_string(), "pw".to_string())),
+        )
+        .unwrap()
+        .with_session_pick(pick)
+        .unwrap()
+    }
+
+    #[test]
+    fn session_picking_keeps_the_session_with_the_lowest_rtt_and_reuses_it_after_a_loss() {
+        // Relay n gets delays[n]: the second session is the fast one.
+        let server = session_server(&[150, 10, 250, 90]);
+        let game = GameDouble::new();
+        let mut t = Socks5UdpTransport::with_timeouts(session_cfg(&server, 4), Duration::from_millis(20), fast());
+        t.begin_attempt(game.addr()).unwrap();
+        // Four proxy connections, no more, each with its own fresh token in the user name; none is the placeholder.
+        assert_eq!(server.tcp_accepts(), 4);
+        let users = server.users_seen();
+        assert_eq!(users.len(), 4);
+        for u in &users {
+            assert!(u.starts_with("sess-") && !u.contains('{'), "{u}");
+            assert_eq!(u.len(), "sess-".len() + 8, "{u}");
+        }
+        let distinct: std::collections::HashSet<_> = users.iter().collect();
+        assert_eq!(distinct.len(), 4, "a fresh token per session");
+        // The relay kept is the fast one's.
+        assert_eq!(t.assoc.as_ref().unwrap().relay, server.relay_addrs()[1]);
+        assert_eq!(t.associations_opened(), 1);
+        // And it carries the game.
+        t.send(b"ping").unwrap();
+        let (got, from) = game.recv();
+        assert_eq!(got, b"ping");
+        assert_eq!(from, server.relay_addrs()[1]);
+
+        // A loss: one new proxy connection, with the SAME session token (same exit), and no new pick.
+        t.reset_after_loss();
+        t.begin_attempt(game.addr()).unwrap();
+        assert_eq!(server.tcp_accepts(), 5);
+        let users = server.users_seen();
+        assert_eq!(users[4], users[1], "the winner's session is reused");
+        assert_eq!(t.associations_opened(), 2);
+    }
+
+    /// Review F1 of 2.6b: a mute relay costs about two proxy connections and well under the 15 s watchdog, and the failed
+    /// pick is remembered: the next attempt is one plain connection with a fresh token, not another pick.
+    #[test]
+    fn a_failed_pick_is_remembered_and_bounded_by_the_budget() {
+        // No fake DNS: the relay answers nothing, so every candidate fails its probe.
+        let server = TestSocks5Server::start(crate::socks5_testserver::Config {
+            auth: Auth::UserPassSession("sess-".into(), "pw".into()),
+            ..Default::default()
+        });
+        let mut t =
+            Socks5UdpTransport::with_timeouts(session_cfg(&server, 4), Duration::from_millis(20), Timeouts::default());
+        let t0 = Instant::now();
+        let err = t.begin_attempt(v4("127.0.0.1:9")).unwrap_err();
+        let took = t0.elapsed();
+        assert!(!err.is_fatal(), "{err:?}");
+        assert!(took < Duration::from_secs(8), "{took:?}");
+        assert!(
+            server.tcp_accepts() <= 2,
+            "{} proxy connections for a mute relay",
+            server.tcp_accepts()
+        );
+        assert!(!t.is_associated());
+        // The next attempt: no pick, exactly one connection, a fresh token, no probe.
+        let before = server.tcp_accepts();
+        t.begin_attempt(v4("127.0.0.1:9")).unwrap();
+        assert_eq!(server.tcp_accepts(), before + 1);
+        let users = server.users_seen();
+        assert!(
+            users.last().unwrap().starts_with("sess-") && !users.last().unwrap().contains('{'),
+            "{users:?}"
+        );
+        assert_eq!(
+            users.iter().collect::<std::collections::HashSet<_>>().len(),
+            users.len(),
+            "fresh tokens"
+        );
+        assert!(
+            server.datagrams_from_clients().len() <= 6,
+            "only probe datagrams, none for the plain connection"
+        );
+        // And a third attempt after a loss: still one connection, never a pick.
+        t.reset_after_loss();
+        t.begin_attempt(v4("127.0.0.1:9")).unwrap();
+        assert_eq!(server.tcp_accepts(), before + 2);
+    }
+
+    #[test]
+    fn a_session_that_fails_to_answer_is_skipped_not_fatal() {
+        // The first relay answers after 700 ms, longer than the 400 ms probe wait of `fast()`: no answer at all.
+        let server = session_server(&[700, 0]);
+        let (cand, _token, report) =
+            pick_session(&session_cfg(&server, 2), &fast(), &RelayTarget::new(v4("127.0.0.1:9"))).unwrap();
+        assert_eq!(report.rtts.len(), 2);
+        assert_eq!(report.rtts[0], None);
+        assert!(report.rtts[1].is_some());
+        assert_eq!(report.picked, 1);
+        assert_eq!(cand.est.relay, server.relay_addrs()[1]);
+    }
+
+    #[test]
+    fn a_wrong_password_stops_the_pick_after_one_proxy_connection() {
+        let server = session_server(&[0]);
+        let a = server.addr();
+        let cfg = ProxyConfig::new(
+            "t",
+            a.ip().to_string(),
+            a.port(),
+            Some(("sess-{session}".to_string(), "WRONG".to_string())),
+        )
+        .unwrap()
+        .with_session_pick(4)
+        .unwrap();
+        let mut t = Socks5UdpTransport::with_timeouts(cfg, Duration::from_millis(20), fast());
+        let err = t.begin_attempt(v4("127.0.0.1:9")).unwrap_err();
+        assert!(matches!(err, TransportError::Proxy(Socks5Error::AuthFailed)), "{err:?}");
+        assert!(err.is_fatal());
+        assert_eq!(
+            server.tcp_accepts(),
+            1,
+            "a wrong password is tried once, not four times"
+        );
+    }
+
+    #[test]
+    fn the_pick_report_has_round_trip_times_and_no_user_names() {
+        let server = session_server(&[120, 0, 240]);
+        let report = check(&session_cfg(&server, 3), &fast()).unwrap();
+        let sessions = report.sessions.as_ref().unwrap();
+        assert_eq!(sessions.rtts.len(), 3);
+        assert_eq!(sessions.picked, 1);
+        assert!(report.probe.is_some());
+        let text = format!("{report:?}");
+        for u in server.users_seen() {
+            assert!(!text.contains(&u), "{text}");
+        }
+        assert_eq!(server.tcp_accepts(), 3);
+    }
+
+    #[test]
+    fn the_user_name_template_reaches_the_wire_filled_and_a_plain_user_is_unchanged() {
+        // `associate` fills a placeholder with a fresh token even when called directly.
+        let server = session_server(&[0]);
+        associate(&session_cfg(&server, 2), &fast()).unwrap();
+        let sent = server.users_seen();
+        assert!(
+            sent[0].starts_with("sess-") && !sent[0].contains("{session}"),
+            "{sent:?}"
+        );
+        // An explicit token is used verbatim.
+        associate_session(&session_cfg(&server, 2), Some("abc12345"), &fast()).unwrap();
+        assert_eq!(server.users_seen()[1], "sess-abc12345");
+        // No placeholder: the user name is exactly what the file says.
+        let server = TestSocks5Server::start(crate::socks5_testserver::Config {
+            auth: Auth::UserPass("alice".into(), "wonderland".into()),
+            ..Default::default()
+        });
+        associate(&cfg_for(&server, Some(("alice", "wonderland"))), &fast()).unwrap();
+        assert_eq!(server.users_seen(), vec!["alice".to_string()]);
     }
 }

@@ -8,8 +8,8 @@
 //! the proxy/entry pairing is enforced in both directions before any connection is made.
 
 use ddai_client::live_servers::{LiveServerEntry, LiveServers};
-use ddai_client::proxy::ProxyConfig;
-use ddai_client::socks5_testserver::{Auth, Config, Stall, TestSocks5Server};
+use ddai_client::proxy::{ProxyConfig, RelayMode};
+use ddai_client::socks5_testserver::{Auth, Bnd, Config, Stall, TestSocks5Server};
 use ddai_client::{Client, ClientConfig, ClientEvent, GaveUpCategory, SessionEvent};
 use ddai_net::conn::{self, Connection};
 use ddai_net::huffman::Huffman;
@@ -61,7 +61,11 @@ struct GameDouble {
 
 impl GameDouble {
     fn start(reconnect_once: bool) -> Self {
-        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        Self::start_on("127.0.0.1", reconnect_once)
+    }
+
+    fn start_on(ip: &str, reconnect_once: bool) -> Self {
+        let socket = UdpSocket::bind((ip, 0)).unwrap();
         socket.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
         let addr = socket.local_addr().unwrap();
         let seen = Arc::new(Mutex::new(Seen::default()));
@@ -487,4 +491,95 @@ fn a_proxy_issued_for_another_server_is_refused_before_anything_is_sent() {
         |s| Some(proxy_cfg(s, None).with_for_server("45.141.57.35:8308")),
         "issued for another server",
     );
+}
+
+// --- task 2.6b: `relay = "public"`: a relay on another host ---------------------------------------------------------
+
+/// The whole driver through a relay on another loopback alias (the test hook makes loopback count as public): the
+/// game server sees only the relay's address, and the graceful CLOSE goes through it too.
+#[test]
+fn in_public_mode_the_session_goes_through_a_relay_on_another_host() {
+    let proxy = TestSocks5Server::start(Config {
+        relay_ip: Some("127.0.0.2".parse().unwrap()),
+        ..Default::default()
+    });
+    let game = GameDouble::start(false);
+    let cfg = config(
+        entry(game.addr, Some(PROXY)),
+        Some(
+            proxy_cfg(&proxy, None)
+                .with_relay(RelayMode::Public)
+                .with_test_loopback_relay()
+                .with_for_server(game.addr.to_string()),
+        ),
+    );
+    let mut client = Client::connect(game.addr, cfg);
+    let events = collect(&mut client, Duration::from_secs(5), |e| connected_count(e) >= 1);
+    assert_eq!(connected_count(&events), 1, "{events:?}");
+    client.disconnect();
+    client.join();
+    thread::sleep(Duration::from_millis(100));
+    let seen = game.seen.lock().unwrap();
+    assert!(!seen.senders.is_empty());
+    let relay = proxy.relay_addr();
+    assert_eq!(relay.ip(), "127.0.0.2".parse::<std::net::IpAddr>().unwrap());
+    assert!(
+        seen.senders.iter().all(|s| *s == relay),
+        "{:?} vs relay {relay}",
+        seen.senders
+    );
+    assert_eq!(seen.closes, 1);
+}
+
+/// A hostile proxy announcing the game server's own IP as its relay: the client stops (`ProxyRefused`, exit 4 in the
+/// bot) after one proxy connection, and not one datagram reaches the game server.
+#[test]
+fn in_public_mode_a_relay_that_is_the_game_server_stops_the_client_with_no_datagram() {
+    let game = GameDouble::start_on("127.0.0.3", false);
+    let proxy = TestSocks5Server::start(Config {
+        bnd: Bnd::Fixed(SocketAddr::new(game.addr.ip(), 5000)),
+        ..Default::default()
+    });
+    let cfg = config(
+        entry(game.addr, Some(PROXY)),
+        Some(
+            proxy_cfg(&proxy, None)
+                .with_relay(RelayMode::Public)
+                .with_test_loopback_relay(),
+        ),
+    );
+    let mut client = Client::connect(game.addr, cfg);
+    let events = collect(&mut client, Duration::from_secs(5), |e| gave_up(e).is_some());
+    let (reason, category) = gave_up(&events).expect("the driver gave up");
+    assert_eq!(category, GaveUpCategory::ProxyRefused);
+    assert!(reason.contains("game server itself"), "{reason}");
+    client.join();
+    thread::sleep(Duration::from_millis(1200));
+    assert_eq!(proxy.tcp_accepts(), 1, "no retry");
+    assert!(
+        game.seen.lock().unwrap().senders.is_empty(),
+        "nothing reached the game server"
+    );
+}
+
+/// Production behaviour (no test hook): a loopback relay is not a public address, so public mode refuses it as fatal.
+#[test]
+fn in_public_mode_a_loopback_relay_is_refused_like_any_non_public_address() {
+    let proxy = TestSocks5Server::start(Config {
+        relay_ip: Some("127.0.0.2".parse().unwrap()),
+        ..Default::default()
+    });
+    let game = GameDouble::start(false);
+    let cfg = config(
+        entry(game.addr, Some(PROXY)),
+        Some(proxy_cfg(&proxy, None).with_relay(RelayMode::Public)),
+    );
+    let mut client = Client::connect(game.addr, cfg);
+    let events = collect(&mut client, Duration::from_secs(5), |e| gave_up(e).is_some());
+    let (reason, category) = gave_up(&events).expect("the driver gave up");
+    assert_eq!(category, GaveUpCategory::ProxyRefused);
+    assert!(reason.contains("loopback"), "{reason}");
+    client.join();
+    assert_eq!(proxy.tcp_accepts(), 1);
+    assert!(game.seen.lock().unwrap().senders.is_empty());
 }

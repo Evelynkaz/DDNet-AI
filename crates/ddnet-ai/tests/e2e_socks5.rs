@@ -27,8 +27,23 @@
 //! 5. stops on SIGTERM with exit 0, no give-up, and the audit shows **0 chat** (no `Cl_Say`, not even `/kill`).
 //!
 //! Phase 2: `--brain circle` through the relay moves right then left (`tools/e2e/analyze_positions.py`).
+//!
+//! A second test (task 2.6b, `e2e_client_through_a_relay_on_another_host_in_public_mode`) puts the relay on **another
+//! loopback address** (127.0.0.2) in `relay = "public"` mode and joins a private server through it with the real driver
+//! (`Client::connect`): the server's own `status` must list the client at 127.0.0.2:<relay port>. It runs in this
+//! process because the test hook that makes loopback count as a public relay address exists only in the `test-util`
+//! build of the library and can never be set from a proxy file, so the `ddnet-ai` binary cannot be used for it. It never
+//! changes the map and never restarts the server; use a private server copy (`DDAI_E2E_SERVER=127.0.0.1:8393`,
+//! `DDAI_E2E_ECON_PORT=8394`, `DDAI_E2E_ECON_PASSWORD_FILE=<cfg>`):
+//!
+//! ```text
+//! DDAI_E2E=1 cargo test -p ddnet-ai --test e2e_socks5 e2e_client_through_a_relay -- --ignored --nocapture
+//! ```
 
+use ddai_client::live_servers::{LiveServerEntry, LiveServers};
+use ddai_client::proxy::{ProxyConfig, RelayMode};
 use ddai_client::socks5_testserver::{Auth, Config, TestSocks5Server};
+use ddai_client::{Client, ClientConfig, ClientEvent, SessionEvent};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -434,6 +449,87 @@ fn e2e_bot_through_a_loopback_socks5_relay() {
     eprintln!("phase 2 ok: {}", verdict.lines().last().unwrap_or(""));
     assert_eq!(proxy.associations(), 4);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "talks to a private local DDNet server; run with DDAI_E2E=1 (see the module docs)"]
+fn e2e_client_through_a_relay_on_another_host_in_public_mode() {
+    if std::env::var_os("DDAI_E2E").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        eprintln!("skipping: set DDAI_E2E=1 to run against a private local server");
+        return;
+    }
+    let server = server_addr();
+    let server_sock: std::net::SocketAddr = server.parse().expect("DDAI_E2E_SERVER is ip:port");
+    assert!(server_sock.ip().is_loopback(), "the e2e talks to a local server only");
+    assert!(
+        server_sees(nick()).is_none(),
+        "a client named {} is already on the server",
+        nick()
+    );
+    let proxy = TestSocks5Server::start(Config {
+        auth: Auth::UserPass(USER.into(), PASS.into()),
+        relay_ip: Some("127.0.0.2".parse().unwrap()),
+        ..Default::default()
+    });
+    let a = proxy.addr();
+    let cfg = ClientConfig {
+        name: nick().to_string(),
+        live_servers: LiveServers {
+            servers: vec![LiveServerEntry {
+                address: server.clone(),
+                nick: nick().to_string(),
+                purpose: "e2e socks5 public relay".to_string(),
+                ready: true,
+                proxy: Some("e2e".to_string()),
+            }],
+        },
+        proxy: Some(
+            ProxyConfig::new(
+                "e2e",
+                a.ip().to_string(),
+                a.port(),
+                Some((USER.to_string(), PASS.to_string())),
+            )
+            .unwrap()
+            .with_relay(RelayMode::Public)
+            .with_test_loopback_relay()
+            .with_for_server(server.clone()),
+        ),
+        ..ClientConfig::default()
+    };
+    let mut client = Client::connect(server_sock, cfg);
+    let end = Instant::now() + Duration::from_secs(30);
+    let (mut connected, mut positions) = (false, 0u32);
+    while Instant::now() < end && !(connected && positions >= 5) {
+        match client.recv_event(Duration::from_millis(100)) {
+            Some(ClientEvent::Session(ev)) if matches!(*ev, SessionEvent::Connected) => connected = true,
+            Some(ClientEvent::OwnPosition { .. }) => positions += 1,
+            Some(ClientEvent::GaveUp { reason, .. }) => panic!("the client gave up: {reason}"),
+            _ => {}
+        }
+    }
+    assert!(
+        connected && positions >= 5,
+        "no join through the relay: {connected} {positions}"
+    );
+    let relay = proxy.relay_addr();
+    assert_eq!(
+        relay.ip().to_string(),
+        "127.0.0.2",
+        "the relay is on another host than the proxy"
+    );
+    // The server's own view: the client's address is the relay's (IP and port), not the bot's socket.
+    let seen = server_sees(nick()).expect("the server lists the client");
+    eprintln!("server sees the client at {seen}; relay is {relay}");
+    assert_eq!(seen, relay.to_string(), "the server must see the relay's address");
+    client.disconnect();
+    client.join();
+    assert_eq!(proxy.associations(), 1);
+    assert_eq!(proxy.tcp_accepts(), 1);
+    assert!(
+        !proxy.datagrams_from_clients().is_empty(),
+        "the game traffic went through the relay"
+    );
 }
 
 fn tail(s: &str, n: usize) -> String {

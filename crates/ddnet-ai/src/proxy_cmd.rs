@@ -1,12 +1,15 @@
 //! `ddnet-ai proxy-check` and the proxy wiring shared by `play` and `record` (task 2.6, D-053 amendment).
 //!
 //! `proxy-check --proxy <name>` checks **only the proxy**: the TCP connect, the authentication, the `UDP ASSOCIATE`
-//! reply and the relay address. It opens no UDP socket and sends nothing to any game server. It prints `ok`,
+//! reply and the relay address, and says which relay rule applied (the file's `relay`). In the default mode it opens no
+//! UDP socket; in `relay = "public"` mode (task 2.6b) it also sends DNS queries for a neutral name to a public resolver
+//! through the relay and prints the median round-trip time. It never sends anything to a game server. It prints `ok`,
 //! `UDP not supported` or `auth failed` (and never the proxy's address or credentials).
 
 use clap::Args;
 use ddai_client::ClientConfig;
 use ddai_client::proxy;
+use ddai_client::proxy::RelayMode;
 use ddai_client::socks5::{self, ProxyCheck, RelayHost, Socks5Error, Timeouts};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -20,7 +23,7 @@ pub const EXIT_AUTH_FAILED: u8 = 4;
 
 #[derive(Debug, Args)]
 pub struct ProxyCheckArgs {
-    /// Proxy name: `<secrets-dir>/<name>-proxy.toml` (mode 0600, keys host, port, user, pass).
+    /// Proxy name: `<secrets-dir>/<name>-proxy.toml` (mode 0600, keys host, port, user, pass, and optionally for_server, relay, session_pick).
     #[arg(long)]
     pub proxy: String,
     /// Base data directory; the proxy file is read from `<data-dir>/secrets`. Defaults to `~/aiddnet/data`.
@@ -51,20 +54,49 @@ pub fn report(name: &str, result: &Result<ProxyCheck, Socks5Error>) -> (String, 
                      used instead (the usual handling of a proxy behind NAT)"
                         .to_string()
                 }
+                RelayHost::Remote => "on ANOTHER host than the proxy: accepted (a public unicast address)".to_string(),
+            };
+            let rule = match c.mode {
+                RelayMode::ProxyHostOnly => {
+                    "relay rule: proxy-host-only (default): datagrams go to the proxy's own host only"
+                }
+                RelayMode::Public => {
+                    "relay rule: public: a relay on another host is used only if it is a public unicast address, \
+                     none of the game server's IPs and not its port (the unit's cgroup filter must deny the \
+                     server's IPs, deploy/README.md)"
+                }
             };
             let auth = if c.authenticated {
                 "username/password accepted"
             } else {
                 "no authentication needed"
             };
-            (
-                format!(
-                    "proxy {name:?}: ok: TCP connect, {auth}, UDP ASSOCIATE accepted; relay {relay}, port {}. \
-                     Nothing was sent to any game server.",
-                    c.relay_port
-                ),
-                0,
-            )
+            let mut text = format!(
+                "proxy {name:?}: ok: TCP connect, {auth}, UDP ASSOCIATE accepted; relay {relay}, port {}. {rule}.",
+                c.relay_port
+            );
+            if let Some(p) = &c.probe {
+                text += &format!(
+                    " UDP through the relay works: {} of {} DNS queries to 1.1.1.1:53 answered, median RTT {} ms.",
+                    p.replies,
+                    p.sent,
+                    p.median.as_millis()
+                );
+            }
+            if let Some(s) = &c.sessions {
+                let list = s
+                    .rtts
+                    .iter()
+                    .map(|r| r.map_or_else(|| "failed".to_string(), |d| format!("{} ms", d.as_millis())))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                text += &format!(
+                    " Sessions tried (median RTT): {list}; session {} is the one kept.",
+                    s.picked + 1
+                );
+            }
+            text += " Nothing was sent to any game server.";
+            (text, 0)
         }
         Err(Socks5Error::UdpNotSupported) => (
             format!(
@@ -185,6 +217,9 @@ mod tests {
                 relay_host: RelayHost::SameAsProxy,
                 relay_port: 4242,
                 authenticated: true,
+                mode: RelayMode::ProxyHostOnly,
+                probe: None,
+                sessions: None,
             }),
         );
         let subst = report(
@@ -193,6 +228,9 @@ mod tests {
                 relay_host: RelayHost::Substituted,
                 relay_port: 4242,
                 authenticated: false,
+                mode: RelayMode::ProxyHostOnly,
+                probe: None,
+                sessions: None,
             }),
         );
         assert_eq!(subst.1, 0);
@@ -221,6 +259,69 @@ mod tests {
             for b in &codes[i + 1..] {
                 assert_ne!(a, b);
             }
+        }
+    }
+
+    #[test]
+    fn the_report_names_the_relay_rule_the_probe_and_the_sessions() {
+        use ddai_client::socks5::{ProbeReport, SessionReport};
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let default_mode = report(
+            "p",
+            &Ok(ProxyCheck {
+                relay_host: RelayHost::SameAsProxy,
+                relay_port: 1,
+                authenticated: false,
+                mode: RelayMode::ProxyHostOnly,
+                probe: None,
+                sessions: None,
+            }),
+        );
+        assert!(
+            default_mode.0.contains("relay rule: proxy-host-only"),
+            "{}",
+            default_mode.0
+        );
+        assert!(!default_mode.0.contains("median RTT"), "{}", default_mode.0);
+        let public = report(
+            "p",
+            &Ok(ProxyCheck {
+                relay_host: RelayHost::Remote,
+                relay_port: 4242,
+                authenticated: true,
+                mode: RelayMode::Public,
+                probe: Some(ProbeReport {
+                    sent: 5,
+                    replies: 4,
+                    median: ms(22),
+                }),
+                sessions: Some(SessionReport {
+                    rtts: vec![Some(ms(40)), None, Some(ms(22))],
+                    picked: 2,
+                }),
+            }),
+        );
+        assert_eq!(public.1, 0);
+        for want in [
+            "relay rule: public",
+            "ANOTHER host",
+            "4 of 5 DNS queries to 1.1.1.1:53 answered, median RTT 22 ms",
+            "Sessions tried (median RTT): 40 ms, failed, 22 ms; session 3 is the one kept",
+            "Nothing was sent to any game server",
+        ] {
+            assert!(public.0.contains(want), "{want:?} not in {}", public.0);
+        }
+        // A refused relay and an unanswered probe are plain failures (exit 1) that say why and print no address.
+        for e in [
+            Socks5Error::RelayAddress(
+                "the announced relay address is a private address (relay = public needs a public unicast address)",
+            ),
+            Socks5Error::ProbeFailed,
+        ] {
+            let (text, code) = report("p", &Err(e));
+            assert_eq!(code, 1);
+            assert!(text.contains("failed"), "{text}");
         }
     }
 }

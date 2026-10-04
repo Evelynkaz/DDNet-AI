@@ -8,6 +8,10 @@
 //!   the driver for a server (the driver re-checks the binding on every connection attempt, see
 //!   `crate::driver`).
 //! - The file must be a regular file with mode `0600` (no group/other bits) on Unix; anything else is refused.
+//! - Task 2.6b: `relay = "proxy-host-only" | "public"` (default the first) says whether a UDP relay the proxy announces
+//!   on **another host** may be used ([`RelayMode`], the rule is in `crate::relay_rule`), and `session_pick = 2..=4`
+//!   with a `{session}` placeholder in `user` makes the client try that many proxy sessions and keep the one with the
+//!   lowest UDP round-trip time.
 //! - Nothing from the file ever reaches a log line, a panic, a `Debug`/`Display` output or an error message:
 //!   host, port, user and password are all held as [`Secret`]s, [`ProxyConfig`]'s `Debug` prints only the
 //!   name, and every error here is built from key names and line numbers, never from values (a TOML syntax
@@ -16,7 +20,7 @@
 use crate::live_servers::{LiveServers, ProxyBindingError};
 use std::fmt;
 use std::io::Read;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
 /// A string that never prints: `Debug` and `Display` both show `<redacted>`. The only way to see the
@@ -68,6 +72,42 @@ impl fmt::Debug for ProxyAuth {
     }
 }
 
+/// Where the proxy's UDP relay may be (the `relay` key of the proxy file, task 2.6b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelayMode {
+    /// The default: datagrams go to the proxy's own IP; an announced relay on another host is replaced by the proxy's IP
+    /// (the announced port is kept).
+    #[default]
+    ProxyHostOnly,
+    /// An announced relay on another host is used when it is a public unicast address that is none of the game server's
+    /// IPs and whose port is neither 0 nor the server's (`crate::relay_rule`). The unit's cgroup filter then denies the
+    /// game server's IPs and nothing else (`deploy/README.md`).
+    Public,
+}
+
+impl RelayMode {
+    /// The value in the proxy file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RelayMode::ProxyHostOnly => "proxy-host-only",
+            RelayMode::Public => "public",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "proxy-host-only" => Some(RelayMode::ProxyHostOnly),
+            "public" => Some(RelayMode::Public),
+            _ => None,
+        }
+    }
+}
+
+/// The placeholder in `user` that `session_pick` fills with a fresh session token.
+pub const SESSION_PLACEHOLDER: &str = "{session}";
+/// The most sessions `session_pick` may try (each is one proxy TCP connection).
+pub const MAX_SESSION_PICK: u8 = 4;
+
 /// A SOCKS5 proxy the driver may tunnel the game's UDP through. The address is as secret as the
 /// credentials (it is the owner's, D-053), so it too is a [`Secret`] and only the `name` is ever shown.
 #[derive(Clone, PartialEq, Eq)]
@@ -79,6 +119,13 @@ pub struct ProxyConfig {
     /// The file's own `for_server` (`host:port`): the one server this proxy was issued for (D-053). `None` when
     /// the file has none (hand-built configs).
     for_server: Option<String>,
+    relay: RelayMode,
+    /// 0 or 1: off. 2..=4: how many sessions to try (needs [`SESSION_PLACEHOLDER`] in the user name).
+    session_pick: u8,
+    /// Test hook (feature `test-util` only, never set by the file parser): treat a loopback relay address as public, so
+    /// tests can put the relay on another loopback alias.
+    #[cfg(feature = "test-util")]
+    test_loopback_relay: bool,
 }
 
 impl fmt::Debug for ProxyConfig {
@@ -88,6 +135,8 @@ impl fmt::Debug for ProxyConfig {
             .field("endpoint", &"<redacted>")
             .field("auth", &self.auth.as_ref().map(|_| "<redacted>"))
             .field("for_server", &self.for_server.as_ref().map(|_| "<set>"))
+            .field("relay", &self.relay)
+            .field("session_pick", &self.session_pick)
             .finish()
     }
 }
@@ -131,7 +180,101 @@ impl ProxyConfig {
             port,
             auth,
             for_server: None,
+            relay: RelayMode::default(),
+            session_pick: 0,
+            #[cfg(feature = "test-util")]
+            test_loopback_relay: false,
         })
+    }
+
+    /// Sets the relay mode (the `relay` key of the file).
+    pub fn with_relay(mut self, relay: RelayMode) -> Self {
+        self.relay = relay;
+        self
+    }
+
+    /// Sets how many sessions to try (the `session_pick` key). `0` and `1` mean off; `2..=MAX_SESSION_PICK` need the
+    /// user name to contain [`SESSION_PLACEHOLDER`].
+    pub fn with_session_pick(mut self, n: u8) -> Result<Self, ProxyLoadError> {
+        if n > MAX_SESSION_PICK {
+            return Err(ProxyLoadError::Field("`session_pick` must be 0..=4"));
+        }
+        if n >= 2
+            && !self
+                .auth
+                .as_ref()
+                .is_some_and(|a| a.user.expose().contains(SESSION_PLACEHOLDER))
+        {
+            return Err(ProxyLoadError::Field("`session_pick` needs `{session}` in `user`"));
+        }
+        self.session_pick = n;
+        Ok(self)
+    }
+
+    /// Test hook: a loopback relay address counts as public (so the relay can sit on another loopback alias). Compiled
+    /// only with the `test-util` feature, which the production binary never enables, and never set from a file.
+    #[cfg(feature = "test-util")]
+    pub fn with_test_loopback_relay(mut self) -> Self {
+        self.test_loopback_relay = true;
+        self
+    }
+
+    pub fn relay_mode(&self) -> RelayMode {
+        self.relay
+    }
+
+    /// How many sessions to try at the start (`0` when picking is off).
+    pub fn session_pick(&self) -> u8 {
+        if self.session_pick >= 2 { self.session_pick } else { 0 }
+    }
+
+    /// Whether a loopback relay address may be treated as public (always `false` outside tests).
+    pub(crate) fn loopback_relay_allowed(&self) -> bool {
+        #[cfg(feature = "test-util")]
+        {
+            self.test_loopback_relay
+        }
+        #[cfg(not(feature = "test-util"))]
+        {
+            false
+        }
+    }
+
+    /// The user name to send: `user` with every [`SESSION_PLACEHOLDER`] replaced by `session` (a fresh random token
+    /// when `None`, so a literal `{session}` never goes on the wire).
+    pub(crate) fn user_for(&self, session: Option<&str>) -> Option<String> {
+        let user = self.auth.as_ref()?.user.expose();
+        if !user.contains(SESSION_PLACEHOLDER) {
+            return Some(user.to_string());
+        }
+        let fresh;
+        let token = match session {
+            Some(t) => t,
+            None => {
+                fresh = fresh_session_token(&[]);
+                &fresh
+            }
+        };
+        Some(user.replace(SESSION_PLACEHOLDER, token))
+    }
+
+    /// The IPs `for_server` resolves to, canonical (empty when the file has none or it does not resolve): the game server's
+    /// other addresses, which a relay must not be either. The launcher (task 5.9) also puts them into the unit's
+    /// `IPAddressDeny=` list for `relay = "public"`. Only addresses leave this type, never the text of the file.
+    pub fn for_server_ips(&self) -> Vec<IpAddr> {
+        let Some(for_server) = &self.for_server else {
+            return Vec::new();
+        };
+        for_server
+            .to_socket_addrs()
+            .map(|it| it.map(|a| a.ip().to_canonical()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The port of `for_server` when it is a literal `ip:port` (never resolved): lets `proxy-check`, which has no game
+    /// server in hand, apply the relay-port rule too.
+    pub(crate) fn for_server_port(&self) -> Option<u16> {
+        self.for_server.as_deref()?.parse::<SocketAddr>().ok().map(|a| a.port())
     }
 
     /// Pins the proxy to one server (`host:port`), as the `for_server` key of the file does.
@@ -191,6 +334,30 @@ impl ProxyConfig {
     }
 }
 
+/// A fresh session token: 8 characters from `[a-z0-9]`, different from every one in `used`. Randomness is from the
+/// standard library's per-process hasher keys mixed with the clock: a session id needs to be unique, not secret.
+pub(crate) fn fresh_session_token(used: &[String]) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    const ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    loop {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        let mut n = h.finish();
+        let mut token = String::with_capacity(8);
+        for _ in 0..8 {
+            token.push(char::from(ALPHABET[(n % 36) as usize]));
+            n /= 36;
+        }
+        if !used.contains(&token) {
+            return token;
+        }
+    }
+}
+
 /// A proxy name becomes part of a file name (`<name>-proxy.toml`), so it is restricted to `[A-Za-z0-9_-]`,
 /// 1 to 64 characters: no path separators, no dots, nothing that could leave the secrets directory.
 pub fn valid_proxy_name(name: &str) -> bool {
@@ -244,7 +411,9 @@ pub fn secrets_dir_for(data_dir: &Path) -> PathBuf {
 /// Loads `<secrets_dir>/<name>-proxy.toml`.
 ///
 /// Keys: `host` (string), `port` (integer), `user` and `pass` (strings, both or neither; `password` is
-/// accepted as an alias of `pass`), `for_server` (string, `host:port`, optional) and `note` (ignored). Which server
+/// accepted as an alias of `pass`), `for_server` (string, `host:port`, optional), `relay` (`"proxy-host-only"`, the
+/// default, or `"public"`, task 2.6b), `session_pick` (integer 0..=4, task 2.6b; 2..=4 needs `{session}` in `user`) and
+/// `note` (ignored). Which server
 /// gets the proxy is decided by the `proxy = "<name>"` field of the server's entry in `live-servers.toml`; when
 /// the file has `for_server` the proxy is **also** only usable for that server ([`ProxyConfig::allows`]).
 pub fn load_proxy(secrets_dir: &Path, name: &str) -> Result<ProxyConfig, ProxyLoadError> {
@@ -331,10 +500,38 @@ fn parse_proxy(name: &str, text: &str, path: &Path) -> Result<ProxyConfig, Proxy
     if for_server.as_deref().is_some_and(str::is_empty) {
         return Err(invalid("`for_server` is empty"));
     }
-    let cfg = ProxyConfig::new(name, host, port, auth).map_err(|e| match e {
-        ProxyLoadError::Field(reason) => invalid(reason),
-        other => other,
-    })?;
+    let relay = match table.get("relay") {
+        None => RelayMode::default(),
+        Some(toml::Value::String(s)) => {
+            RelayMode::parse(s).ok_or_else(|| invalid("`relay` must be \"proxy-host-only\" or \"public\""))?
+        }
+        Some(_) => return Err(invalid("`relay` must be a string")),
+    };
+    let session_pick = match table.get("session_pick") {
+        None => 0,
+        Some(toml::Value::Integer(n)) => u8::try_from(*n)
+            .ok()
+            .filter(|n| *n <= MAX_SESSION_PICK)
+            .ok_or_else(|| invalid("`session_pick` must be 0..=4"))?,
+        Some(_) => return Err(invalid("`session_pick` must be an integer")),
+    };
+    let has_placeholder = auth.as_ref().is_some_and(|(u, _)| u.contains(SESSION_PLACEHOLDER));
+    if has_placeholder && session_pick < 2 {
+        return Err(invalid(
+            "`user` has `{session}`: set `session_pick` to 2..=4 or remove it",
+        ));
+    }
+    let cfg = ProxyConfig::new(name, host, port, auth)
+        .map_err(|e| match e {
+            ProxyLoadError::Field(reason) => invalid(reason),
+            other => other,
+        })?
+        .with_relay(relay)
+        .with_session_pick(session_pick)
+        .map_err(|e| match e {
+            ProxyLoadError::Field(reason) => invalid(reason),
+            other => other,
+        })?;
     Ok(match for_server {
         Some(f) => cfg.with_for_server(f),
         None => cfg,
@@ -714,5 +911,151 @@ mod tests {
                 .unwrap()
                 .allows("1.2.3.4:5".parse().unwrap())
         );
+    }
+
+    // --- task 2.6b: `relay` and `session_pick` ---------------------------------------------------------------
+
+    fn load_body(body: &str) -> Result<ProxyConfig, ProxyLoadError> {
+        let dir = tempfile::tempdir().unwrap();
+        write_proxy(dir.path(), "r", body, 0o600);
+        load_proxy(dir.path(), "r")
+    }
+
+    #[test]
+    fn relay_defaults_to_proxy_host_only_and_reads_both_values() {
+        assert_eq!(
+            load_body("host = \"h\"\nport = 1\n").unwrap().relay_mode(),
+            RelayMode::ProxyHostOnly
+        );
+        assert_eq!(
+            load_body("host = \"h\"\nport = 1\nrelay = \"proxy-host-only\"\n")
+                .unwrap()
+                .relay_mode(),
+            RelayMode::ProxyHostOnly
+        );
+        let public = load_body("host = \"h\"\nport = 1\nrelay = \"public\"\n").unwrap();
+        assert_eq!(public.relay_mode(), RelayMode::Public);
+        assert_eq!(RelayMode::Public.as_str(), "public");
+        assert_eq!(RelayMode::ProxyHostOnly.as_str(), "proxy-host-only");
+        // The existing real file's shape (no `relay`) is unchanged: the default.
+        assert_eq!(load_body(&good_body()).unwrap().relay_mode(), RelayMode::ProxyHostOnly);
+    }
+
+    #[test]
+    fn a_bad_relay_value_is_refused_without_echoing_it() {
+        for body in [
+            "relay = \"Public\"\n",
+            "relay = \"any\"\n",
+            "relay = \"\"\n",
+            "relay = true\n",
+            "relay = 1\n",
+            "relay = [\"public\"]\n",
+        ] {
+            let err = load_body(&format!("host = \"h-secret-x\"\nport = 1\n{body}")).unwrap_err();
+            assert!(matches!(err, ProxyLoadError::Invalid { .. }), "{body}: {err:?}");
+            let text = format!("{err} {err:?}");
+            assert!(!text.contains("Public") && !text.contains("any"), "{text}");
+            assert!(!text.contains("h-secret-x"), "{text}");
+        }
+    }
+
+    #[test]
+    fn session_pick_needs_the_placeholder_and_the_placeholder_needs_session_pick() {
+        let with = |user: &str, extra: &str| {
+            load_body(&format!(
+                "host = \"h\"\nport = 1\nuser = \"{user}\"\npass = \"p\"\n{extra}"
+            ))
+        };
+        let ok = with("pre-{session}-post", "session_pick = 4\n").unwrap();
+        assert_eq!(ok.session_pick(), 4);
+        assert_eq!(with("u-{session}", "session_pick = 2\n").unwrap().session_pick(), 2);
+        // 0 and 1 mean off; a plain user name is fine with them.
+        assert_eq!(with("plain", "session_pick = 0\n").unwrap().session_pick(), 0);
+        assert_eq!(with("plain", "session_pick = 1\n").unwrap().session_pick(), 0);
+        assert_eq!(with("plain", "").unwrap().session_pick(), 0);
+        // Refused: picking without a placeholder, a placeholder without picking, too many, wrong types, no credentials.
+        for (user, extra) in [
+            ("plain", "session_pick = 3\n"),
+            ("u-{session}", ""),
+            ("u-{session}", "session_pick = 1\n"),
+            ("u-{session}", "session_pick = 0\n"),
+            ("u-{session}", "session_pick = 5\n"),
+            ("u-{session}", "session_pick = -1\n"),
+            ("u-{session}", "session_pick = 300\n"),
+            ("u-{session}", "session_pick = \"4\"\n"),
+            ("u-{session}", "session_pick = 2.0\n"),
+        ] {
+            let err = with(user, extra).unwrap_err();
+            assert!(matches!(err, ProxyLoadError::Invalid { .. }), "{user} {extra}: {err:?}");
+        }
+        let err = load_body("host = \"h\"\nport = 1\nsession_pick = 2\n").unwrap_err();
+        assert!(matches!(err, ProxyLoadError::Invalid { .. }), "{err:?}");
+        // The builder enforces the same.
+        let plain = ProxyConfig::new("t", "h", 1, Some(("u".into(), "p".into()))).unwrap();
+        assert!(plain.clone().with_session_pick(2).is_err());
+        assert!(plain.clone().with_session_pick(5).is_err());
+        assert!(plain.with_session_pick(1).is_ok());
+    }
+
+    #[test]
+    fn the_session_placeholder_is_filled_everywhere_and_never_sent_literally() {
+        let cfg = ProxyConfig::new("t", "h", 1, Some(("a-{session}-b-{session}".into(), "p".into())))
+            .unwrap()
+            .with_session_pick(2)
+            .unwrap();
+        assert_eq!(cfg.user_for(Some("tok12345")).unwrap(), "a-tok12345-b-tok12345");
+        let fresh = cfg.user_for(None).unwrap();
+        assert!(!fresh.contains("{session}") && fresh.starts_with("a-"), "{fresh}");
+        let plain = ProxyConfig::new("t", "h", 1, Some(("alice".into(), "p".into()))).unwrap();
+        assert_eq!(plain.user_for(Some("x")).unwrap(), "alice");
+        assert_eq!(ProxyConfig::new("t", "h", 1, None).unwrap().user_for(None), None);
+    }
+
+    #[test]
+    fn fresh_session_tokens_are_short_plain_and_distinct() {
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..200 {
+            let t = fresh_session_token(&seen);
+            assert_eq!(t.len(), 8, "{t}");
+            assert!(t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()), "{t}");
+            assert!(!seen.contains(&t));
+            seen.push(t);
+        }
+    }
+
+    #[test]
+    fn relay_and_session_pick_show_in_debug_but_user_and_host_do_not() {
+        let cfg = load_body(&format!(
+            "host = \"{SECRET_HOST}\"\nport = 1080\nuser = \"{SECRET_USER}-{{session}}\"\npass = \"{SECRET_PASS}\"\nrelay = \"public\"\nsession_pick = 3\n"
+        ))
+        .unwrap();
+        let text = format!("{cfg:?}{cfg:#?}");
+        assert_no_secret(&text);
+        assert!(text.contains("Public") && text.contains("session_pick"), "{text}");
+    }
+
+    #[test]
+    fn the_test_hook_is_not_set_by_any_file() {
+        let cfg = load_body("host = \"h\"\nport = 1\nrelay = \"public\"\n").unwrap();
+        assert!(!cfg.loopback_relay_allowed());
+        #[cfg(feature = "test-util")]
+        assert!(cfg.with_test_loopback_relay().loopback_relay_allowed());
+    }
+
+    #[test]
+    fn for_server_ips_and_port_are_read_without_printing() {
+        let pinned = ProxyConfig::new("p", "h", 1, None)
+            .unwrap()
+            .with_for_server("[::ffff:45.141.57.35]:8308");
+        assert_eq!(pinned.for_server_ips(), vec!["45.141.57.35".parse::<IpAddr>().unwrap()]);
+        assert_eq!(pinned.for_server_port(), Some(8308));
+        let none = ProxyConfig::new("p", "h", 1, None).unwrap();
+        assert!(none.for_server_ips().is_empty());
+        assert_eq!(none.for_server_port(), None);
+        let bad = ProxyConfig::new("p", "h", 1, None)
+            .unwrap()
+            .with_for_server("not an address");
+        assert!(bad.for_server_ips().is_empty());
+        assert_eq!(bad.for_server_port(), None);
     }
 }
