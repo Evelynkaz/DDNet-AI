@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::bc::HeadThresholds;
+use crate::bc::{HeadThresholds, HookView};
 use crate::brain::{FlyBrain, FlyBrainConfig};
 use crate::brain_config::{BrainConfig, parse_brain_config};
 use crate::config::FlyConfig;
@@ -26,9 +26,9 @@ use crate::encoder::{EncoderModel, EncoderParams};
 use crate::model::FlyModel;
 use crate::params::FlyParams;
 
-/// Version 2 added [`FlyBundle::thresholds`]; version 1 files (everything trained before the
-/// review of E-005) still load, with the default thresholds.
-pub const BUNDLE_FORMAT_VERSION: u32 = 2;
+/// Version 2 added [`FlyBundle::thresholds`], version 3 [`FlyBundle::hook_view`]; version 1 and 2 files
+/// (everything trained before 8.2b) still load, with the default thresholds / the shared hook view.
+pub const BUNDLE_FORMAT_VERSION: u32 = 3;
 
 /// Anything that can go wrong saving or loading a bundle; the message says what.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +73,25 @@ pub struct FlyBundle {
     pub meta: BundleMeta,
     /// Decision thresholds of the jump/hook/fire heads (format v2).
     pub thresholds: HeadThresholds,
+    /// How the hook head sees the own hook state (format v3); a masked model is played in two views.
+    pub hook_view: HookView,
+}
+
+/// The format-version-2 layout (no hook view), kept to read old files.
+#[derive(Deserialize)]
+struct FlyBundleV2 {
+    #[allow(dead_code)] // decoded to keep the layout; the version was peeked already
+    format_version: u32,
+    flyg_sha256: String,
+    flyg_path_hint: String,
+    brain_config_toml: String,
+    fly_config: FlyConfig,
+    fly_params: FlyParams,
+    encoder_params: EncoderParams,
+    decoder_params: DecoderParams,
+    calibration: DnCalibration,
+    meta: BundleMeta,
+    thresholds: HeadThresholds,
 }
 
 /// The format-version-1 layout (no thresholds), kept to read old files.
@@ -183,7 +202,7 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
     let bytes = read_zstd_bytes(path)?;
     match peek_version(path, &bytes)? {
         BUNDLE_FORMAT_VERSION => {
-            let b: FlyBundle = decode_payload(path, &bytes, "a v2 bundle")?;
+            let b: FlyBundle = decode_payload(path, &bytes, "a v3 bundle")?;
             b.thresholds
                 .validate()
                 .map_err(|e| BundleError(format!("{}: {e}", path.display())))?;
@@ -203,10 +222,31 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
                 calibration: b.calibration,
                 meta: b.meta,
                 thresholds: HeadThresholds::default(),
+                hook_view: HookView::Shared,
+            })
+        }
+        2 => {
+            let b: FlyBundleV2 = decode_payload(path, &bytes, "a v2 bundle")?;
+            b.thresholds
+                .validate()
+                .map_err(|e| BundleError(format!("{}: {e}", path.display())))?;
+            Ok(FlyBundle {
+                format_version: BUNDLE_FORMAT_VERSION,
+                flyg_sha256: b.flyg_sha256,
+                flyg_path_hint: b.flyg_path_hint,
+                brain_config_toml: b.brain_config_toml,
+                fly_config: b.fly_config,
+                fly_params: b.fly_params,
+                encoder_params: b.encoder_params,
+                decoder_params: b.decoder_params,
+                calibration: b.calibration,
+                meta: b.meta,
+                thresholds: b.thresholds,
+                hook_view: HookView::Shared,
             })
         }
         v => Err(BundleError(format!(
-            "{}: bundle format version {v} is not supported (expected 1 or {BUNDLE_FORMAT_VERSION})",
+            "{}: bundle format version {v} is not supported (expected 1 to {BUNDLE_FORMAT_VERSION})",
             path.display()
         ))),
     }
@@ -223,6 +263,7 @@ pub struct FlyBrainTemplate {
     calib: DnCalibration,
     brain_config: BrainConfig,
     thresholds: HeadThresholds,
+    hook_view: HookView,
     /// The resting state, warmed up once (each brain restores it on `reset`).
     rest: crate::state::FlyState,
     rest_converged: bool,
@@ -286,6 +327,7 @@ impl FlyBrainTemplate {
             calib: bundle.calibration,
             brain_config,
             thresholds: bundle.thresholds,
+            hook_view: bundle.hook_view,
             rest,
             rest_converged,
             meta: bundle.meta,
@@ -323,6 +365,11 @@ impl FlyBrainTemplate {
     pub fn thresholds(&self) -> HeadThresholds {
         self.thresholds
     }
+    /// How the hook head sees the own hook state; a masked model must be played in two views
+    /// ([`crate::two_view::TwoViewFly`], via [`FlyBrainTemplate::instantiate_played`]).
+    pub fn hook_view(&self) -> HookView {
+        self.hook_view
+    }
 
     /// A fresh brain (its own state and scratch buffers) over copies of the shared models.
     pub fn instantiate(&self, config: FlyBrainConfig) -> FlyBrain {
@@ -341,6 +388,20 @@ impl FlyBrainTemplate {
             brain.set_identity(name.clone(), sha256.clone());
         }
         brain
+    }
+
+    /// The brain to **play** with this bundle: a plain fly, or, for a model trained with the hook head masked
+    /// (`hook_view() == MaskedForHookHead`), the two-view brain ([`crate::two_view::TwoViewFly`]). The arena and the
+    /// live bot both come through here so that a masked bundle is never played single-view.
+    pub fn instantiate_played(&self, config: FlyBrainConfig) -> Box<dyn ddai_brain::Brain> {
+        if self.hook_view == HookView::MaskedForHookHead {
+            Box::new(crate::two_view::TwoViewFly::new(
+                self.instantiate(config.clone()),
+                self.instantiate(config),
+            ))
+        } else {
+            Box::new(self.instantiate(config))
+        }
     }
 
     /// Whether the template's one warm-up converged (a non-converged rest is still a usable

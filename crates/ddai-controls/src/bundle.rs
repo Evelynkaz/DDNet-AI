@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use ddai_fly::bc::HeadThresholds;
+use ddai_fly::bc::{HeadThresholds, HookView};
 use ddai_fly::bundle::{BundleError, BundleMeta, decode_payload, peek_version, read_zstd_bytes, write_zstd_postcard};
 use ddai_fly::encoder::RayGridConfig;
 use serde::{Deserialize, Serialize};
@@ -13,8 +13,9 @@ use crate::gru::Gru;
 use crate::mlp::Mlp;
 use crate::net::{NetKind, SeqNet};
 
-/// Version 2 added [`ControlBundle::thresholds`]; version 1 files still load (default thresholds).
-pub const CONTROL_FORMAT_VERSION: u32 = 2;
+/// Version 2 added [`ControlBundle::thresholds`], version 3 [`ControlBundle::hook_view`]; older files still load
+/// (default thresholds, shared hook view).
+pub const CONTROL_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlBundle {
@@ -27,6 +28,22 @@ pub struct ControlBundle {
     pub meta: BundleMeta,
     /// Decision thresholds of the jump/hook/fire heads (format v2).
     pub thresholds: HeadThresholds,
+    /// How the hook head sees the own hook state (format v3).
+    pub hook_view: HookView,
+}
+
+/// The format-version-2 layout (no hook view), kept to read old files.
+#[derive(Deserialize)]
+struct ControlBundleV2 {
+    #[allow(dead_code)] // decoded to keep the layout; the version was peeked already
+    format_version: u32,
+    kind: NetKind,
+    input_dim: usize,
+    hidden: usize,
+    ray_grid: RayGridConfig,
+    params: Vec<f32>,
+    meta: BundleMeta,
+    thresholds: HeadThresholds,
 }
 
 /// The format-version-1 layout (no thresholds), kept to read old files.
@@ -43,7 +60,13 @@ struct ControlBundleV1 {
 }
 
 impl ControlBundle {
-    pub fn from_net(net: &dyn SeqNet, ray_grid: RayGridConfig, meta: BundleMeta, thresholds: HeadThresholds) -> Self {
+    pub fn from_net(
+        net: &dyn SeqNet,
+        ray_grid: RayGridConfig,
+        meta: BundleMeta,
+        thresholds: HeadThresholds,
+        hook_view: HookView,
+    ) -> Self {
         ControlBundle {
             format_version: CONTROL_FORMAT_VERSION,
             kind: net.kind(),
@@ -53,6 +76,7 @@ impl ControlBundle {
             params: net.params().to_vec(),
             meta,
             thresholds,
+            hook_view,
         }
     }
 
@@ -89,7 +113,7 @@ pub fn load_control_bundle(path: &Path) -> Result<ControlBundle, BundleError> {
     let bytes = read_zstd_bytes(path)?;
     match peek_version(path, &bytes)? {
         CONTROL_FORMAT_VERSION => {
-            let b: ControlBundle = decode_payload(path, &bytes, "a v2 bundle")?;
+            let b: ControlBundle = decode_payload(path, &bytes, "a v3 bundle")?;
             b.thresholds
                 .validate()
                 .map_err(|e| BundleError(format!("{}: {e}", path.display())))?;
@@ -106,10 +130,28 @@ pub fn load_control_bundle(path: &Path) -> Result<ControlBundle, BundleError> {
                 params: b.params,
                 meta: b.meta,
                 thresholds: HeadThresholds::default(),
+                hook_view: HookView::Shared,
+            })
+        }
+        2 => {
+            let b: ControlBundleV2 = decode_payload(path, &bytes, "a v2 bundle")?;
+            b.thresholds
+                .validate()
+                .map_err(|e| BundleError(format!("{}: {e}", path.display())))?;
+            Ok(ControlBundle {
+                format_version: CONTROL_FORMAT_VERSION,
+                kind: b.kind,
+                input_dim: b.input_dim,
+                hidden: b.hidden,
+                ray_grid: b.ray_grid,
+                params: b.params,
+                meta: b.meta,
+                thresholds: b.thresholds,
+                hook_view: HookView::Shared,
             })
         }
         v => Err(BundleError(format!(
-            "{}: control bundle format version {v} is not supported (expected 1 or {CONTROL_FORMAT_VERSION})",
+            "{}: control bundle format version {v} is not supported (expected 1 to {CONTROL_FORMAT_VERSION})",
             path.display()
         ))),
     }
@@ -129,7 +171,13 @@ mod tests {
             Box::new(Gru::new(input_dim(&cfg), 2, 1)),
         ] {
             let path = dir.path().join(format!("{}.bin", net.kind().name()));
-            let b = ControlBundle::from_net(net.as_ref(), cfg, BundleMeta::default(), HeadThresholds::default());
+            let b = ControlBundle::from_net(
+                net.as_ref(),
+                cfg,
+                BundleMeta::default(),
+                HeadThresholds::default(),
+                HookView::Shared,
+            );
             save_control_bundle(&path, &b).unwrap();
             let back = load_control_bundle(&path).unwrap();
             assert_eq!(back, b);
@@ -142,6 +190,7 @@ mod tests {
             cfg,
             BundleMeta::default(),
             HeadThresholds::default(),
+            HookView::Shared,
         );
         b.params.pop();
         assert!(b.build().is_err());
@@ -150,9 +199,54 @@ mod tests {
             cfg,
             BundleMeta::default(),
             HeadThresholds::default(),
+            HookView::Shared,
         );
         b.params[0] = f32::NAN;
         assert!(b.build().is_err());
+    }
+
+    #[test]
+    fn the_hook_view_round_trips_and_version_two_files_load_with_the_shared_view() {
+        let cfg = RayGridConfig::default();
+        let dir = tempfile::tempdir().unwrap();
+        let net = Mlp::new(input_dim(&cfg), 3, 1);
+        let th = HeadThresholds {
+            jump: 0.6,
+            hook: 0.45,
+            fire: 0.55,
+        };
+        let path = dir.path().join("v3.bin");
+        let b = ControlBundle::from_net(&net, cfg, BundleMeta::default(), th, HookView::MaskedForHookHead);
+        save_control_bundle(&path, &b).unwrap();
+        let back = load_control_bundle(&path).unwrap();
+        assert_eq!((back.hook_view, back.thresholds), (HookView::MaskedForHookHead, th));
+
+        // A file written by the version-2 layout (8.2's calibrated checkpoints).
+        #[derive(Serialize)]
+        struct V2 {
+            format_version: u32,
+            kind: NetKind,
+            input_dim: usize,
+            hidden: usize,
+            ray_grid: RayGridConfig,
+            params: Vec<f32>,
+            meta: BundleMeta,
+            thresholds: HeadThresholds,
+        }
+        let v2 = V2 {
+            format_version: 2,
+            kind: net.kind(),
+            input_dim: net.input_dim(),
+            hidden: net.hidden(),
+            ray_grid: cfg,
+            params: net.params().to_vec(),
+            meta: BundleMeta::default(),
+            thresholds: th,
+        };
+        let old = dir.path().join("v2.bin");
+        write_zstd_postcard(&old, &v2, 3).unwrap();
+        let b = load_control_bundle(&old).unwrap();
+        assert_eq!((b.hook_view, b.thresholds), (HookView::Shared, th));
     }
 
     #[test]
@@ -166,7 +260,11 @@ mod tests {
             fire: 0.9,
         };
         let path = dir.path().join("v2.bin");
-        save_control_bundle(&path, &ControlBundle::from_net(&net, cfg, BundleMeta::default(), th)).unwrap();
+        save_control_bundle(
+            &path,
+            &ControlBundle::from_net(&net, cfg, BundleMeta::default(), th, HookView::Shared),
+        )
+        .unwrap();
         assert_eq!(load_control_bundle(&path).unwrap().thresholds, th);
 
         // A file written by the version-1 layout (what every E-005 checkpoint is).
@@ -196,12 +294,12 @@ mod tests {
         assert_eq!(b.build().unwrap().params(), net.params());
 
         // Unknown versions and invalid thresholds are refused.
-        let mut bad = ControlBundle::from_net(&net, cfg, BundleMeta::default(), th);
+        let mut bad = ControlBundle::from_net(&net, cfg, BundleMeta::default(), th, HookView::Shared);
         bad.format_version = 9;
         let p9 = dir.path().join("v9.bin");
         write_zstd_postcard(&p9, &bad, 3).unwrap();
         assert!(load_control_bundle(&p9).is_err());
-        let mut bad = ControlBundle::from_net(&net, cfg, BundleMeta::default(), th);
+        let mut bad = ControlBundle::from_net(&net, cfg, BundleMeta::default(), th, HookView::Shared);
         bad.thresholds.hook = 1.5;
         let pt = dir.path().join("bad-th.bin");
         write_zstd_postcard(&pt, &bad, 3).unwrap();

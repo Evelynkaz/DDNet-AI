@@ -339,3 +339,39 @@ fn the_brain_trait_viz_path_allocates_nothing() {
     assert!(frames > 0 && frames < 100, "decimated: {frames}");
     assert_eq!(info.count_total, 0, "{info:?}");
 }
+
+/// Review F10: a model played in two views (`HookView::MaskedForHookHead`, `instantiate_played`) allocates nothing per
+/// decision either: the masked observation is written into a scratch the brain keeps, not cloned.
+#[test]
+fn a_two_view_fly_decide_allocates_nothing() {
+    use ddai_fly::bc::HookView;
+    use ddai_fly::bundle::FlyBrainTemplate;
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, flyg) = ddai_fly::brain_fixtures::write_tiny_fly_bundle(dir.path(), HookView::MaskedForHookHead);
+    let template = FlyBrainTemplate::load(&bundle, Some(&flyg)).unwrap();
+    let mut brain = template.instantiate_played(FlyBrainConfig {
+        action_selection: ActionSelection::Argmax,
+        seed: 1,
+    });
+    assert!(brain.name().ends_with("+hookview"), "{}", brain.name());
+    let states = [ddai_brain::HOOK_IDLE, ddai_brain::HOOK_FLYING, ddai_brain::HOOK_GRABBED];
+    let observations: Vec<Observation> = (0..100)
+        .map(|i| {
+            let mut o = sample_observation(300.0 + i as f32);
+            o.self_state.hook_state = states[i % 3];
+            o
+        })
+        .collect();
+    // Warm-up (allowed to allocate: the scratch observation is created on the first decision).
+    let _ = brain.decide(&observations[0]);
+    let info = measure(|| {
+        for obs in &observations {
+            std::hint::black_box(brain.decide(obs));
+        }
+    });
+    assert_eq!(
+        info.count_total, 0,
+        "two-view decide must not allocate: {info:?} over 100 calls"
+    );
+    assert_eq!(info.count_current, 0, "nor deallocate: {info:?}");
+}

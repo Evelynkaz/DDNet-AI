@@ -7,6 +7,7 @@
 //! `#[cfg(test)]`-gated) so both this crate's own unit tests and its `tests/*.rs` integration
 //! tests can use it, matching [`crate::test_fixtures`]'s own convention.
 
+use crate::config::FlyConfig;
 use ddai_flyg::{
     Flyg, FlygEdges, FlygHeader, FlygNeuron, FlygType, InputChannelMapping, NeuronInputTotals, NeuronRole, NtClassUsed,
     OutputGroup, OutputMember, ReceptiveField, RoleCounts, Side, Sign, SignCounts, Summary, TypePair,
@@ -259,4 +260,300 @@ pub fn build_brain_flyg(
     };
     ddai_flyg::validate(&flyg).expect("test fixture must build a valid .flyg");
     flyg
+}
+
+/// A small but fully-wired fixture: 2 VPN types (opponent/wall), 1 AN type (grounded), 2 hidden
+/// neurons, and one output neuron per `DecoderConfig::default()` action — everything connected
+/// input -> hidden -> output, so a real signal actually reaches every decoder head.
+// A `vec![...]` literal here would need every field of every one of ~14 `FxNeuron`s
+// spelled out positionally with no per-neuron comment anchor -- individual `.push()`
+// calls (each right after its own explanatory comment) stay clearer for a fixture this
+// shaped, even though clippy's default heuristic can't tell the difference from
+// "just forgot the macro".
+pub fn tiny_brain_flyg() -> ddai_flyg::Flyg {
+    tiny_brain_flyg_with(false)
+}
+
+/// [`tiny_brain_flyg`], optionally with an `AN_HOOK` ascending neuron (the proprioception channel `own_hook`) wired
+/// strongly to the `DN_HOOK` neuron, so that the own hook state in the observation moves the hook probability: what a
+/// test of the masked hook view (`HookView::MaskedForHookHead`) needs, since masking changes nothing otherwise.
+#[allow(clippy::vec_init_then_push)]
+pub fn tiny_brain_flyg_with(own_hook: bool) -> ddai_flyg::Flyg {
+    let mut type_names = vec![
+        "VPN_OPP",
+        "VPN_WALL",
+        "AN_GROUND",
+        "HID",
+        "DN_LR",
+        "DN_STOP",
+        "DN_JUMP",
+        "DN_HOOK",
+        "DN_FIRE",
+        "DN_AIM",
+    ];
+    if own_hook {
+        type_names.push("AN_HOOK");
+    }
+    let types: Vec<FxType> = type_names
+        .iter()
+        .map(|&name| FxType {
+            name,
+            sign: Sign::Excitatory,
+        })
+        .collect();
+
+    let mut neurons = Vec::new();
+    // 0, 1: VPN_OPP L/R
+    neurons.push(FxNeuron {
+        type_index: 0,
+        role: NeuronRole::InputVisual,
+        side: Side::L,
+        full_connectome_in: 1000,
+        rf: (-45.0, 0.0),
+    });
+    neurons.push(FxNeuron {
+        type_index: 0,
+        role: NeuronRole::InputVisual,
+        side: Side::R,
+        full_connectome_in: 1000,
+        rf: (45.0, 0.0),
+    });
+    // 2, 3: VPN_WALL L/R
+    neurons.push(FxNeuron {
+        type_index: 1,
+        role: NeuronRole::InputVisual,
+        side: Side::L,
+        full_connectome_in: 1000,
+        rf: (-30.0, 0.0),
+    });
+    neurons.push(FxNeuron {
+        type_index: 1,
+        role: NeuronRole::InputVisual,
+        side: Side::R,
+        full_connectome_in: 1000,
+        rf: (30.0, 0.0),
+    });
+    // 4: AN_GROUND
+    neurons.push(FxNeuron {
+        type_index: 2,
+        role: NeuronRole::InputAscending,
+        side: Side::M,
+        full_connectome_in: 1000,
+        rf: (0.0, 0.0),
+    });
+    // 5, 6: HID x2
+    for _ in 0..2 {
+        neurons.push(FxNeuron {
+            type_index: 3,
+            role: NeuronRole::Hidden,
+            side: Side::M,
+            full_connectome_in: 1000,
+            rf: (0.0, 0.0),
+        });
+    }
+    // 7, 8: DN_LR L/R (a tied direction pair -- review round 1, F6).
+    neurons.push(FxNeuron {
+        type_index: 4,
+        role: NeuronRole::Output,
+        side: Side::L,
+        full_connectome_in: 1000,
+        rf: (0.0, 0.0),
+    });
+    neurons.push(FxNeuron {
+        type_index: 4,
+        role: NeuronRole::Output,
+        side: Side::R,
+        full_connectome_in: 1000,
+        rf: (0.0, 0.0),
+    });
+    // 9..14: one output neuron per remaining DN type.
+    for ti in 5..10 {
+        neurons.push(FxNeuron {
+            type_index: ti as u32,
+            role: NeuronRole::Output,
+            side: Side::M,
+            full_connectome_in: 1000,
+            rf: (0.0, 0.0),
+        });
+    }
+
+    let input_indices: Vec<u32> = (0..5).collect(); // VPN_OPP x2, VPN_WALL x2, AN_GROUND
+    let hidden_indices: Vec<u32> = (5..7).collect();
+    let output_indices: Vec<u32> = (7..14).collect(); // one output neuron per DN type (7 DN types)
+
+    let mut edges = Vec::new();
+    for &pre in &input_indices {
+        for &post in &hidden_indices {
+            edges.push(FxEdge {
+                pre,
+                post,
+                synapse_count: 5,
+            });
+        }
+    }
+    for &pre in &hidden_indices {
+        for &post in &output_indices {
+            edges.push(FxEdge {
+                pre,
+                post,
+                synapse_count: 5,
+            });
+        }
+    }
+
+    if own_hook {
+        // neuron 14 = AN_HOOK (appended last, so no other index moves); neuron 11 = the DN_HOOK output
+        neurons.push(FxNeuron {
+            type_index: (type_names.len() - 1) as u32,
+            role: NeuronRole::InputAscending,
+            side: Side::M,
+            full_connectome_in: 1000,
+            rf: (0.0, 0.0),
+        });
+        edges.push(FxEdge {
+            pre: 14,
+            post: 11,
+            synapse_count: 400,
+        });
+    }
+
+    let input_channels = vec![
+        FxInputChannel {
+            type_name: "VPN_OPP",
+            channels: vec!["opponent_position"],
+        },
+        FxInputChannel {
+            type_name: "VPN_WALL",
+            channels: vec!["walls"],
+        },
+    ];
+    let output_groups = vec![
+        FxOutputGroup {
+            action: "direction_left",
+            member_type_names: vec!["DN_LR"],
+            side_filter: Some(Side::L),
+        },
+        FxOutputGroup {
+            action: "direction_right",
+            member_type_names: vec!["DN_LR"],
+            side_filter: Some(Side::R),
+        },
+        FxOutputGroup {
+            action: "direction_stop",
+            member_type_names: vec!["DN_STOP"],
+            side_filter: None,
+        },
+        FxOutputGroup {
+            action: "jump",
+            member_type_names: vec!["DN_JUMP"],
+            side_filter: None,
+        },
+        FxOutputGroup {
+            action: "hook",
+            member_type_names: vec!["DN_HOOK"],
+            side_filter: None,
+        },
+        FxOutputGroup {
+            action: "fire",
+            member_type_names: vec!["DN_FIRE"],
+            side_filter: None,
+        },
+        FxOutputGroup {
+            action: "aim",
+            member_type_names: vec!["DN_AIM"],
+            side_filter: None,
+        },
+    ];
+
+    build_brain_flyg(&types, &neurons, &edges, &input_channels, &output_groups)
+}
+
+/// Writes the tiny fixture graph and a fly bundle for it (default parameters, `hook_view` as given) into `dir` and
+/// returns `(bundle path, flyg path)`: what a test needs to exercise the real bundle loaders (the arena's
+/// `ModelBrains`, the bot's `--fly-bundle`) without the local connectome data.
+pub fn write_tiny_fly_bundle(
+    dir: &std::path::Path,
+    hook_view: crate::bc::HookView,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    write_tiny_fly_bundle_with(dir, hook_view, FlyConfig::default().substeps_per_decision)
+}
+
+/// [`write_tiny_fly_bundle`] with `substeps_per_decision` set (the work-clock price of a proposal is
+/// `nnz x substeps x rate`, which rounds to 0 tee-ticks on the tiny graph unless the substeps are many).
+pub fn write_tiny_fly_bundle_with(
+    dir: &std::path::Path,
+    hook_view: crate::bc::HookView,
+    substeps_per_decision: u32,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    use crate::bc::HeadThresholds;
+    use crate::bundle::{BUNDLE_FORMAT_VERSION, BundleMeta, FlyBundle, save_bundle, sha256_hex_of_file};
+    use crate::decoder::{DecoderConfig, DecoderModel, DnCalibration};
+    use crate::encoder::{EncoderModel, EncoderParams, ProprioceptionConfig, RayGridConfig};
+    use crate::{FlyModel, FlyParams};
+
+    let flyg = tiny_brain_flyg_with(true);
+    let flyg_path = dir.join("tiny.flyg");
+    ddai_flyg::save(&flyg, &flyg_path).expect("writing the fixture graph");
+    let sha = sha256_hex_of_file(&flyg_path).expect("hashing the fixture graph");
+    let config = FlyConfig {
+        substeps_per_decision,
+        ..FlyConfig::default()
+    };
+    let params = FlyParams::init_default(&flyg, &config, 1);
+    let model = FlyModel::new(flyg, config, params.clone()).expect("fixture model");
+    let encoder = EncoderModel::new(
+        &model,
+        RayGridConfig::default(),
+        &ProprioceptionConfig {
+            grounded: vec!["AN_GROUND".to_string()],
+            own_hook: vec!["AN_HOOK".to_string()],
+            ..ProprioceptionConfig::default()
+        },
+    )
+    .expect("fixture encoder");
+    let decoder = DecoderModel::new(&model, DecoderConfig::default()).expect("fixture decoder");
+    // The hook head reads the DN_HOOK rate (which the own-hook input drives): idle -> p ~ 0.3, grabbed -> p ~ 0.8.
+    let mut decoder_params = decoder.init_default_params();
+    decoder_params.hook_w.fill(3.0);
+    decoder_params.hook_b = -2.0;
+    let brain_config_toml = {
+        #[derive(serde::Serialize)]
+        struct File {
+            ray_grid: RayGridConfig,
+            decoder: DecoderConfig,
+            world_model: crate::world_model::WorldModelConfig,
+            proprioception: ProprioceptionConfig,
+        }
+        toml::to_string(&File {
+            ray_grid: RayGridConfig::default(),
+            decoder: DecoderConfig::default(),
+            world_model: crate::world_model::WorldModelConfig::default(),
+            proprioception: ProprioceptionConfig {
+                grounded: vec!["AN_GROUND".to_string()],
+                own_hook: vec!["AN_HOOK".to_string()],
+                ..ProprioceptionConfig::default()
+            },
+        })
+        .expect("the fixture brain config serialises")
+    };
+    let bundle = FlyBundle {
+        format_version: BUNDLE_FORMAT_VERSION,
+        flyg_sha256: sha,
+        flyg_path_hint: flyg_path.to_string_lossy().into_owned(),
+        brain_config_toml,
+        fly_config: config,
+        fly_params: params,
+        encoder_params: EncoderParams::init_default(encoder.num_params()),
+        decoder_params,
+        calibration: DnCalibration {
+            mu: vec![0.0; model.num_outputs()],
+            sigma: vec![1.0; model.num_outputs()],
+        },
+        meta: BundleMeta::default(),
+        thresholds: HeadThresholds::default(),
+        hook_view,
+    };
+    let bundle_path = dir.join("tiny.bundle");
+    save_bundle(&bundle_path, &bundle).expect("writing the fixture bundle");
+    (bundle_path, flyg_path)
 }

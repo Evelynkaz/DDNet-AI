@@ -1060,6 +1060,7 @@ dependencies = [
  "ddai-brain",
  "ddai-fly",
  "ddai-physics",
+ "ddai-planner",
  "serde",
  "tempfile",
 ]
@@ -1335,6 +1336,7 @@ dependencies = [
  "ddai-brain",
  "ddai-client",
  "ddai-clip",
+ "ddai-controls",
  "ddai-dataset",
  "ddai-demo",
  "ddai-env",

@@ -346,6 +346,9 @@ pub struct HybridSpec {
     /// CLI: `--brain hybrid:fly:<bundle>`.
     #[serde(default)]
     pub fly_model: Option<String>,
+    /// `proposer = "mlp"` / `"gru"`: the trained control bundle that proposes (8.2b). CLI: `--brain hybrid:mlp:<bundle>`.
+    #[serde(default)]
+    pub control_model: Option<String>,
     /// Diagnostics: candidates and scores in the telemetry (`ddnet-ai arena scenarios --trace`).
     #[serde(default)]
     pub debug_dump: Option<bool>,

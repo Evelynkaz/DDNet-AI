@@ -93,6 +93,36 @@ impl HeadLogits {
     }
 }
 
+/// How a trained model sees the **own hook state** (the `own_hook` proprioception input) in the hook head.
+///
+/// A hook head that has the input learns "hook <=> my hook is already out" and never starts or releases a
+/// hook (E-005 review F2). `MaskedForHookHead` trains and plays the model in two views: the direction, jump,
+/// fire and aim heads read the full observation, the hook head reads the same observation with the own
+/// hook state hidden (it then has to decide from the opponent, the rays and the tiles). It costs two passes
+/// of the network per decision (two recurrent states for a stateful model).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HookView {
+    #[default]
+    Shared,
+    MaskedForHookHead,
+}
+
+/// `obs` with the own hook state hidden (reported as idle): what the hook head sees under
+/// [`HookView::MaskedForHookHead`]. Nothing but the `own_hook` proprioception input reads that field.
+pub fn mask_own_hook(obs: &ddai_brain::Observation) -> ddai_brain::Observation {
+    let mut o = obs.clone();
+    o.self_state.hook_state = ddai_brain::HOOK_IDLE;
+    o
+}
+
+/// The logits of the two views combined: the hook head from `masked`, everything else from `full`.
+pub fn combine_hook_view(full: &HeadLogits, masked: &HeadLogits) -> HeadLogits {
+    HeadLogits {
+        hook: masked.hook,
+        ..*full
+    }
+}
+
 /// `softmax` over three logits.
 pub fn softmax3(l: [f32; 3]) -> [f32; 3] {
     let m = l[0].max(l[1]).max(l[2]);
@@ -152,6 +182,10 @@ pub struct StepTargets {
     pub mask: HeadMask,
     /// Multiplies this decision's whole loss and gradient. `0` = no loss (burn-in).
     pub weight: f32,
+    /// Multiplies only the hook head's loss on this decision (`1` = nothing). Used to emphasise the
+    /// *start* and *release* decisions (label differs from the own hook being out), which a head that
+    /// copies the own-hook input gets wrong (E-005 review F2).
+    pub hook_scale: f32,
 }
 
 impl StepTargets {
@@ -166,6 +200,7 @@ impl StepTargets {
             soft: None,
             mask: HeadMask::NONE,
             weight: 0.0,
+            hook_scale: 1.0,
         }
     }
 }
@@ -310,7 +345,7 @@ pub fn head_loss_and_grad(logits: &HeadLogits, t: &StepTargets, cfg: &LossConfig
     if t.mask.hook {
         let tv = mixed_binary_target(t.hook, soft.map(|s| s.hook), mix, cfg.soft_smoothing);
         let (l, g) = weighted_bce(logits.hook, tv, cfg.pos_weight[1]);
-        let w = cfg.w_hook * t.weight;
+        let w = cfg.w_hook * t.weight * t.hook_scale;
         loss.hook = w * l;
         d.hook = w * g;
     }
@@ -351,6 +386,7 @@ mod tests {
             }),
             mask: HeadMask::ALL,
             weight: 1.7,
+            hook_scale: 1.0,
         }
     }
 
@@ -408,6 +444,69 @@ mod tests {
                 "{name}: analytic {analytic} vs numeric {numeric}"
             );
         }
+    }
+
+    #[test]
+    fn hook_scale_multiplies_only_the_hook_head() {
+        let c = cfg();
+        let base = targets();
+        let mut scaled = base;
+        scaled.hook_scale = 3.0;
+        let (l1, g1) = head_loss_and_grad(&logits(), &base, &c);
+        let (l3, g3) = head_loss_and_grad(&logits(), &scaled, &c);
+        assert!((l3.hook - 3.0 * l1.hook).abs() < 1e-6 && (g3.hook - 3.0 * g1.hook).abs() < 1e-6);
+        assert_eq!((l3.dir, l3.jump, l3.fire, l3.aim), (l1.dir, l1.jump, l1.fire, l1.aim));
+        assert_eq!(
+            (g3.dir, g3.jump, g3.fire, g3.aim_c),
+            (g1.dir, g1.jump, g1.fire, g1.aim_c)
+        );
+        assert!((l3.total - (l1.total + 2.0 * l1.hook)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_masked_view_hides_only_the_own_hook_and_combines_only_the_hook_head() {
+        use ddai_brain::{CharacterObservation, HOOK_GRABBED, HOOK_IDLE, Observation};
+        let map = std::sync::Arc::new(ddai_physics::map::MapData {
+            width: 2,
+            height: 2,
+            game: vec![Default::default(); 4],
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        });
+        let mut me = CharacterObservation::at_rest(0);
+        me.hook_state = HOOK_GRABBED;
+        let mut opp = CharacterObservation::at_rest(1);
+        opp.hook_state = HOOK_GRABBED;
+        let obs = Observation {
+            map,
+            tick: 7,
+            self_state: me,
+            others: vec![opp],
+            target_id: Some(1),
+            tuning: ddai_physics::tuning::TuningParams::default(),
+        };
+        let m = mask_own_hook(&obs);
+        assert_eq!(m.self_state.hook_state, HOOK_IDLE);
+        assert_eq!(
+            m.others[0].hook_state, HOOK_GRABBED,
+            "the opponent's hook stays visible"
+        );
+        assert_eq!((m.tick, m.target_id), (7, Some(1)));
+        assert_eq!(obs.self_state.hook_state, HOOK_GRABBED, "the original is untouched");
+        let (a, b) = (
+            logits(),
+            HeadLogits {
+                hook: -3.0,
+                jump: 9.0,
+                ..logits()
+            },
+        );
+        let c = combine_hook_view(&a, &b);
+        assert_eq!((c.hook, c.jump, c.dir, c.fire), (-3.0, a.jump, a.dir, a.fire));
     }
 
     #[test]

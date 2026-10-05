@@ -1,192 +1,11 @@
 use super::*;
-use crate::brain_fixtures::{FxEdge, FxInputChannel, FxNeuron, FxOutputGroup, FxType, build_brain_flyg};
+use crate::brain_fixtures::tiny_brain_flyg;
 use crate::config::FlyConfig;
 use crate::decoder::{DecoderConfig, DecoderModel, DnCalibration};
 use crate::encoder::{EncoderModel, EncoderParams, ProprioceptionConfig, RayGridConfig};
 use crate::params::FlyParams;
 use ddai_brain::{CharacterObservation, Observation};
-use ddai_flyg::{NeuronRole, Side, Sign};
 use std::sync::Arc;
-
-/// A small but fully-wired fixture: 2 VPN types (opponent/wall), 1 AN type (grounded), 2 hidden
-/// neurons, and one output neuron per `DecoderConfig::default()` action — everything connected
-/// input -> hidden -> output, so a real signal actually reaches every decoder head.
-// A `vec![...]` literal here would need every field of every one of ~14 `FxNeuron`s
-// spelled out positionally with no per-neuron comment anchor -- individual `.push()`
-// calls (each right after its own explanatory comment) stay clearer for a fixture this
-// shaped, even though clippy's default heuristic can't tell the difference from
-// "just forgot the macro".
-#[allow(clippy::vec_init_then_push)]
-fn tiny_brain_flyg() -> ddai_flyg::Flyg {
-    let type_names = [
-        "VPN_OPP",
-        "VPN_WALL",
-        "AN_GROUND",
-        "HID",
-        "DN_LR",
-        "DN_STOP",
-        "DN_JUMP",
-        "DN_HOOK",
-        "DN_FIRE",
-        "DN_AIM",
-    ];
-    let types: Vec<FxType> = type_names
-        .iter()
-        .map(|&name| FxType {
-            name,
-            sign: Sign::Excitatory,
-        })
-        .collect();
-
-    let mut neurons = Vec::new();
-    // 0, 1: VPN_OPP L/R
-    neurons.push(FxNeuron {
-        type_index: 0,
-        role: NeuronRole::InputVisual,
-        side: Side::L,
-        full_connectome_in: 1000,
-        rf: (-45.0, 0.0),
-    });
-    neurons.push(FxNeuron {
-        type_index: 0,
-        role: NeuronRole::InputVisual,
-        side: Side::R,
-        full_connectome_in: 1000,
-        rf: (45.0, 0.0),
-    });
-    // 2, 3: VPN_WALL L/R
-    neurons.push(FxNeuron {
-        type_index: 1,
-        role: NeuronRole::InputVisual,
-        side: Side::L,
-        full_connectome_in: 1000,
-        rf: (-30.0, 0.0),
-    });
-    neurons.push(FxNeuron {
-        type_index: 1,
-        role: NeuronRole::InputVisual,
-        side: Side::R,
-        full_connectome_in: 1000,
-        rf: (30.0, 0.0),
-    });
-    // 4: AN_GROUND
-    neurons.push(FxNeuron {
-        type_index: 2,
-        role: NeuronRole::InputAscending,
-        side: Side::M,
-        full_connectome_in: 1000,
-        rf: (0.0, 0.0),
-    });
-    // 5, 6: HID x2
-    for _ in 0..2 {
-        neurons.push(FxNeuron {
-            type_index: 3,
-            role: NeuronRole::Hidden,
-            side: Side::M,
-            full_connectome_in: 1000,
-            rf: (0.0, 0.0),
-        });
-    }
-    // 7, 8: DN_LR L/R (a tied direction pair -- review round 1, F6).
-    neurons.push(FxNeuron {
-        type_index: 4,
-        role: NeuronRole::Output,
-        side: Side::L,
-        full_connectome_in: 1000,
-        rf: (0.0, 0.0),
-    });
-    neurons.push(FxNeuron {
-        type_index: 4,
-        role: NeuronRole::Output,
-        side: Side::R,
-        full_connectome_in: 1000,
-        rf: (0.0, 0.0),
-    });
-    // 9..14: one output neuron per remaining DN type.
-    for ti in 5..type_names.len() {
-        neurons.push(FxNeuron {
-            type_index: ti as u32,
-            role: NeuronRole::Output,
-            side: Side::M,
-            full_connectome_in: 1000,
-            rf: (0.0, 0.0),
-        });
-    }
-
-    let input_indices: Vec<u32> = (0..5).collect(); // VPN_OPP x2, VPN_WALL x2, AN_GROUND
-    let hidden_indices: Vec<u32> = (5..7).collect();
-    let output_indices: Vec<u32> = (7..14).collect(); // one output neuron per DN type (7 DN types)
-
-    let mut edges = Vec::new();
-    for &pre in &input_indices {
-        for &post in &hidden_indices {
-            edges.push(FxEdge {
-                pre,
-                post,
-                synapse_count: 5,
-            });
-        }
-    }
-    for &pre in &hidden_indices {
-        for &post in &output_indices {
-            edges.push(FxEdge {
-                pre,
-                post,
-                synapse_count: 5,
-            });
-        }
-    }
-
-    let input_channels = vec![
-        FxInputChannel {
-            type_name: "VPN_OPP",
-            channels: vec!["opponent_position"],
-        },
-        FxInputChannel {
-            type_name: "VPN_WALL",
-            channels: vec!["walls"],
-        },
-    ];
-    let output_groups = vec![
-        FxOutputGroup {
-            action: "direction_left",
-            member_type_names: vec!["DN_LR"],
-            side_filter: Some(Side::L),
-        },
-        FxOutputGroup {
-            action: "direction_right",
-            member_type_names: vec!["DN_LR"],
-            side_filter: Some(Side::R),
-        },
-        FxOutputGroup {
-            action: "direction_stop",
-            member_type_names: vec!["DN_STOP"],
-            side_filter: None,
-        },
-        FxOutputGroup {
-            action: "jump",
-            member_type_names: vec!["DN_JUMP"],
-            side_filter: None,
-        },
-        FxOutputGroup {
-            action: "hook",
-            member_type_names: vec!["DN_HOOK"],
-            side_filter: None,
-        },
-        FxOutputGroup {
-            action: "fire",
-            member_type_names: vec!["DN_FIRE"],
-            side_filter: None,
-        },
-        FxOutputGroup {
-            action: "aim",
-            member_type_names: vec!["DN_AIM"],
-            side_filter: None,
-        },
-    ];
-
-    build_brain_flyg(&types, &neurons, &edges, &input_channels, &output_groups)
-}
 
 fn tiny_map() -> ddai_physics::map::MapData {
     ddai_physics::map::MapData {
@@ -502,4 +321,222 @@ fn a_reset_restarts_the_frames_decision_number_and_owes_no_frame() {
     let _ = brain.decide(&sample_observation(320.0));
     let f = crate::viz::decode_frame(brain.viz_frame_with(3, None).unwrap(), 10.0, 10.0).unwrap();
     assert_eq!((f.seq, f.tick), (1, 3));
+}
+
+/// 8.2b F1 (review F8): a bundle trained with the hook head masked is played in two views wherever a trained fly is
+/// played (`instantiate_played`, `FlyProposer::from_template`); a shared-view bundle stays a plain fly. The fixture's
+/// hook output is wired to the own-hook input, so masking MATTERS: the tests below fail if the second view is fed the
+/// unmasked observation or the proposer drops its second view.
+fn own_hook_templates() -> (crate::bundle::FlyBrainTemplate, crate::bundle::FlyBrainTemplate) {
+    use crate::bc::HookView;
+    use crate::bundle::FlyBrainTemplate;
+    let dir = tempfile::tempdir().unwrap();
+    let load = |view| {
+        let sub = dir.path().join(format!("{view:?}"));
+        std::fs::create_dir_all(&sub).unwrap();
+        let (bundle, flyg) = crate::brain_fixtures::write_tiny_fly_bundle(&sub, view);
+        FlyBrainTemplate::load(&bundle, Some(&flyg)).unwrap()
+    };
+    (load(HookView::Shared), load(HookView::MaskedForHookHead))
+}
+
+fn played_config() -> FlyBrainConfig {
+    FlyBrainConfig {
+        action_selection: ActionSelection::Argmax,
+        seed: 1,
+    }
+}
+
+/// 60 observations cycling the own hook state (idle / flying / grabbed) while the opponent moves.
+fn own_hook_observations() -> Vec<Observation> {
+    let states = [ddai_brain::HOOK_IDLE, ddai_brain::HOOK_FLYING, ddai_brain::HOOK_GRABBED];
+    (0..60)
+        .map(|i| {
+            let mut obs = sample_observation(340.0 + 4.0 * (i / 3) as f32);
+            obs.self_state.hook_state = states[i % 3];
+            obs
+        })
+        .collect()
+}
+
+#[test]
+fn a_masked_bundle_is_played_in_two_views_and_a_shared_one_is_not() {
+    use crate::bc::mask_own_hook;
+    let (shared, masked) = own_hook_templates();
+    assert!(!shared.instantiate_played(played_config()).name().ends_with("+hookview"));
+    assert!(!crate::proposer::FlyProposer::from_template(&shared, played_config(), 1).has_hook_view());
+    assert!(masked.instantiate_played(played_config()).name().ends_with("+hookview"));
+    assert!(crate::proposer::FlyProposer::from_template(&masked, played_config(), 1).has_hook_view());
+
+    let mut played = masked.instantiate_played(played_config());
+    let (mut full, mut hook_view) = (masked.instantiate(played_config()), masked.instantiate(played_config()));
+    let observations = own_hook_observations();
+    let reset = ddai_brain::ResetContext {
+        map: observations[0].map.clone(),
+        self_id: 0,
+        seed: 1,
+    };
+    played.reset(&reset);
+    full.reset(&reset);
+    hook_view.reset(&reset);
+    let (mut differ_in_prob, mut differ_in_hook) = (0, 0);
+    for (i, obs) in observations.iter().enumerate() {
+        let a = played.decide(obs);
+        let f = full.decide(obs);
+        let h = hook_view.decide(&mask_own_hook(obs));
+        // The played action = the full view's action with the hook of the second, masked-input view ...
+        assert_eq!(a, ddai_brain::Action { hook: h.hook, ..f }, "decision {i}");
+        // ... and the fixture makes that matter: the two views disagree about the hook probability, and sometimes about
+        // the hook itself, so a play that fed the second view the unmasked observation (or none) fails here.
+        let (pf, ph) = (
+            full.last_decoded().unwrap().hook_prob,
+            hook_view.last_decoded().unwrap().hook_prob,
+        );
+        differ_in_prob += usize::from((pf - ph).abs() > 1e-3);
+        differ_in_hook += usize::from(f.hook != h.hook);
+    }
+    assert!(
+        differ_in_prob > 20,
+        "masking must change the hook probability ({differ_in_prob}/60)"
+    );
+    assert!(
+        differ_in_hook > 5,
+        "masking must change the hook decision ({differ_in_hook}/60)"
+    );
+}
+
+/// Review F9: the work-clock price of a proposal is per network run, so a two-view proposer costs twice a one-view one
+/// (3.7a's `proposal_in_cap` takes that price off the search budget).
+#[test]
+fn a_masked_proposer_costs_two_views_on_the_work_clock() {
+    use crate::bc::HookView;
+    use crate::bundle::FlyBrainTemplate;
+    use crate::proposer::FlyProposer;
+    use ddai_planner::hybrid::Proposer;
+    let dir = tempfile::tempdir().unwrap();
+    // Many substeps, so that the price (nnz x substeps x rate) does not round to 0 tee-ticks on the tiny graph.
+    let load = |view: HookView| {
+        let sub = dir.path().join(format!("{view:?}"));
+        std::fs::create_dir_all(&sub).unwrap();
+        let (bundle, flyg) = crate::brain_fixtures::write_tiny_fly_bundle_with(&sub, view, 4000);
+        FlyBrainTemplate::load(&bundle, Some(&flyg)).unwrap()
+    };
+    let shared = FlyProposer::from_template(&load(HookView::Shared), played_config(), 1);
+    let masked = FlyProposer::from_template(&load(HookView::MaskedForHookHead), played_config(), 1);
+    assert!(shared.work_units() > 100, "{}", shared.work_units());
+    assert_eq!(masked.work_units(), 2 * shared.work_units());
+}
+
+/// Review F8 (round 3): the proposer's own path. A masked `FlyProposer`'s distribution takes its hook probability from
+/// the masked view (and every other head from the full one), a shared proposer's from its single network; the frame the
+/// proposer streams shows the played hook, its probability and both views' time.
+#[test]
+fn a_masked_proposer_builds_its_distribution_and_frame_from_the_masked_view() {
+    use crate::bc::mask_own_hook;
+    use crate::proposer::FlyProposer;
+    use ddai_planner::hybrid::Proposer;
+    let (shared, masked) = own_hook_templates();
+    let observations = own_hook_observations();
+    let reset = ddai_brain::ResetContext {
+        map: observations[0].map.clone(),
+        self_id: 0,
+        seed: 1,
+    };
+
+    let mut p = FlyProposer::from_template(&masked, played_config(), 1);
+    let mut single = FlyProposer::from_template(&shared, played_config(), 1);
+    let (mut full, mut hook_view) = (masked.instantiate(played_config()), masked.instantiate(played_config()));
+    let mut shared_net = shared.instantiate(played_config());
+    Proposer::reset(&mut p, &reset);
+    Proposer::reset(&mut single, &reset);
+    full.reset(&reset);
+    hook_view.reset(&reset);
+    shared_net.reset(&reset);
+    let layout = p.brain().viz_layout().clone();
+    let (mut differs, mut frames) = (0, 0);
+    for (i, obs) in observations.iter().enumerate() {
+        let d = p.distribution(obs).unwrap();
+        full.decide(obs);
+        let played = hook_view.decide(&mask_own_hook(obs));
+        let (f, h) = (full.last_decoded().unwrap(), hook_view.last_decoded().unwrap());
+        assert_eq!(
+            d.hook,
+            f64::from(h.hook_prob),
+            "decision {i}: the hook probability is the masked view's"
+        );
+        assert_eq!(
+            d.jump,
+            f64::from(f.jump_prob),
+            "decision {i}: the other heads are the full view's"
+        );
+        assert_eq!(d.direction, f.direction_probs.map(f64::from));
+        differs += usize::from((f.hook_prob - h.hook_prob).abs() > 1e-3);
+
+        // a one-view proposer: everything from its single network
+        let ds = single.distribution(obs).unwrap();
+        shared_net.decide(obs);
+        assert_eq!(
+            ds.hook,
+            f64::from(shared_net.last_decoded().unwrap().hook_prob),
+            "decision {i}"
+        );
+
+        if let Some(bytes) = Proposer::viz_frame(&mut p, i as u32, None) {
+            frames += 1;
+            let fr = crate::viz::decode_frame(bytes, layout.rate_max(), layout.z_clip()).unwrap();
+            let want_logit = (h.hook_prob / (1.0 - h.hook_prob)).ln();
+            assert!(
+                (fr.logits[4] - want_logit).abs() < 0.2,
+                "decision {i}: frame hook logit {} vs {want_logit}",
+                fr.logits[4]
+            );
+            assert_eq!(
+                fr.flags & crate::viz::flag::HOOK != 0,
+                played.hook,
+                "decision {i}: the played hook"
+            );
+            assert!(
+                u128::from(fr.latency_us) > p.brain().last_latency().as_micros(),
+                "decision {i}: the frame's latency covers both views"
+            );
+        }
+    }
+    assert!(
+        differs > 20,
+        "the views must disagree for this test to bite ({differs}/60)"
+    );
+    assert!(frames > 10, "the proposer streamed {frames} frames");
+}
+
+/// Review F8 (round 3, M9): the played-hook override of a two-view play belongs to one decision stream; `reset` starts a
+/// new episode and clears it, so a brain taken out of a two-view play never shows a stale hook or latency.
+#[test]
+fn a_played_hook_override_is_cleared_by_reset() {
+    let mut brain = make_brain(1, ActionSelection::Argmax);
+    let obs = sample_observation(400.0);
+    let reset = ddai_brain::ResetContext {
+        map: obs.map.clone(),
+        self_id: 0,
+        seed: 1,
+    };
+    brain.reset(&reset);
+    brain.decide(&obs);
+    let own = brain.last_decoded().unwrap().hook_prob;
+    brain.set_played_override(Some(PlayedOverride {
+        hook: true,
+        hook_prob: 0.987,
+        latency: Duration::from_millis(5),
+    }));
+    assert!(
+        brain.telemetry().unwrap().contains("\"hook_prob\":0.987"),
+        "the override is shown"
+    );
+    brain.reset(&reset);
+    brain.decide(&obs);
+    let json = brain.telemetry().unwrap();
+    assert!(
+        json.contains(&format!("\"hook_prob\":{own}")),
+        "after reset the brain shows its own hook: {json}"
+    );
+    assert!(!json.contains("0.987"), "{json}");
 }

@@ -227,6 +227,73 @@ fn trainer_steps_track_between_backends_and_do_not_depend_on_the_thread_count() 
     assert_eq!(p4, p_serial);
 }
 
+/// 8.2b's own-hook options (dropout of the own hook state, the start/release loss weight, the masked hook view,
+/// and the two combined) train the same through the batched backend as through the per-sequence one: one step
+/// (the gradient up to the optimiser) and a short run land on the same parameters and the same loss within the
+/// 7.2b tolerance. The masked view is a second batched forward/backward over the masked windows.
+#[test]
+fn own_hook_options_train_the_same_through_both_backends() {
+    use ddai_train::trainer::{OwnHookConfig, OwnHookMode};
+    let options = [
+        OwnHookConfig {
+            mode: OwnHookMode::Dropout,
+            dropout: 0.5,
+            switch_weight: 1.0,
+        },
+        OwnHookConfig {
+            mode: OwnHookMode::MaskHookHead,
+            ..OwnHookConfig::default()
+        },
+        OwnHookConfig {
+            switch_weight: 3.0,
+            ..OwnHookConfig::default()
+        },
+        OwnHookConfig {
+            mode: OwnHookMode::MaskHookHead,
+            switch_weight: 3.0,
+            ..OwnHookConfig::default()
+        },
+    ];
+    let run = |backend, own: &OwnHookConfig, steps: u64| {
+        let l = learner(backend, None)?;
+        let mut c = train_cfg(2);
+        c.own_hook = own.clone();
+        let mut t = Trainer::new(Box::new(l), c, Corpus::new(Vec::new()), corpus(8), None).unwrap();
+        let s = t.train_phase("bc", 0, steps, steps, &[], 0).unwrap();
+        Some((t.learner().params(), s.mean_loss_last_log))
+    };
+    for own in &options {
+        for steps in [1, 6] {
+            let Some(init) = learner(TrainBackend::Batched, None).map(|l| l.params()) else {
+                return;
+            };
+            let Some((p_seq, loss_seq)) = run(TrainBackend::PerSequence, own, steps) else {
+                eprintln!("note: fly-S-v1.flyg not found, skipping");
+                return;
+            };
+            let (p_bat, loss_bat) = run(TrainBackend::Batched, own, steps).unwrap();
+            assert!(loss_seq.is_finite() && loss_bat.is_finite(), "{own:?}");
+            assert!(
+                (loss_seq - loss_bat).abs() <= 1e-3 * loss_seq.abs().max(1.0),
+                "{own:?} after {steps} steps: loss per-seq {loss_seq} vs batched {loss_bat}"
+            );
+            let drift = rel_err(&p_bat, &p_seq);
+            let moved = rel_err(&p_seq, &init);
+            eprintln!("{own:?} after {steps} steps: parameters moved {moved:.2e}, backends differ by {drift:.2e}");
+            // The comparison means something only if the steps moved the parameters well beyond the backends' gap.
+            assert!(
+                moved > 100.0 * drift.max(1e-9),
+                "{own:?} after {steps} steps: moved {moved}, drift {drift}"
+            );
+            assert!(drift < 1e-3, "{own:?} after {steps} steps: {drift}");
+        }
+    }
+    // The option is not a no-op: the masked run differs from the unmasked one.
+    let (p_off, _) = run(TrainBackend::Batched, &OwnHookConfig::default(), 6).unwrap();
+    let (p_mask, _) = run(TrainBackend::Batched, &options[1], 6).unwrap();
+    assert_ne!(p_off, p_mask);
+}
+
 /// The opt-in speed options of task 7.2c through the trainer: `K` sub-batch engines track the
 /// single engine and are bitwise independent of the thread count; the stop-gradient burn-in
 /// trains (finite, different gradients) and is bitwise independent of the thread count too.

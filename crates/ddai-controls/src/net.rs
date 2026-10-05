@@ -130,6 +130,7 @@ pub(crate) mod testutil {
                 }),
                 mask: HeadMask::ALL,
                 weight: if t == 0 { 0.0 } else { 1.0 + 0.25 * t as f32 },
+                hook_scale: 1.0,
             })
             .collect()
     }

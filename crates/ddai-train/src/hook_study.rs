@@ -103,6 +103,10 @@ pub struct HookStudyConfig {
     pub demo_steps: u64,
     pub long_steps: u64,
     pub seed: u64,
+    /// Run the 2x2x2 factorial of the three changes 8.2 made together (distance-bin gains, 6x connectome learning
+    /// rate, `alpha_init` 4) instead of the E-005 arm list, so each factor's effect can be separated (E-005 review
+    /// F6). Every cell is one seed; the caller repeats the study over seeds.
+    pub factorial: bool,
 }
 
 struct Arm {
@@ -117,6 +121,33 @@ struct Arm {
     /// Connectome learning rates (`a`, `b`, `theta`) of the schedule arms; `None` = defaults.
     fly_lr: Option<f32>,
     alpha_init: f32,
+}
+
+/// The 2x2x2 factorial: `gains` (learned distance-bin gains), `lr6` (connectome learning rate 6x), `a4`
+/// (`alpha_init` 4; otherwise the default coupling). All cells use the long budget, the schedule optimiser and
+/// resting-state calibration, like the E-005 accepted arm.
+fn factorial_arms() -> Vec<Arm> {
+    let cell = |name: &'static str, gains: bool, lr6: bool, a4: bool| Arm {
+        name,
+        dist_gains: gains,
+        eight_bins: false,
+        demo_optimiser: false,
+        steps_long: true,
+        real_calibration: false,
+        hook_pos_weight: 1.0,
+        fly_lr: lr6.then_some(3e-3),
+        alpha_init: if a4 { 4.0 } else { 0.0 },
+    };
+    vec![
+        cell("f: no gains, lr 1x, alpha default", false, false, false),
+        cell("f: gains, lr 1x, alpha default", true, false, false),
+        cell("f: no gains, lr 6x, alpha default", false, true, false),
+        cell("f: gains, lr 6x, alpha default", true, true, false),
+        cell("f: no gains, lr 1x, alpha 4", false, false, true),
+        cell("f: gains, lr 1x, alpha 4", true, false, true),
+        cell("f: no gains, lr 6x, alpha 4", false, true, true),
+        cell("f: gains, lr 6x, alpha 4", true, true, true),
+    ]
 }
 
 /// Runs every arm; `log` gets one line per finished arm.
@@ -135,7 +166,8 @@ pub fn run_hook_study(cfg: &HookStudyConfig, log: &mut dyn FnMut(&str)) -> Resul
             corpus: Corpus::uniform(scenes(&other_map, 600, cfg.seed + 2, &demo_cfg)),
         },
     ];
-    let arms = [
+    let factorial_arms = factorial_arms();
+    let legacy_arms = [
         Arm {
             name: "7.3 as built (demo budget)",
             dist_gains: false,
@@ -269,8 +301,9 @@ pub fn run_hook_study(cfg: &HookStudyConfig, log: &mut dyn FnMut(&str)) -> Resul
             alpha_init: 4.0,
         },
     ];
+    let arms: &[Arm] = if cfg.factorial { &factorial_arms } else { &legacy_arms };
     let mut out = Vec::new();
-    for arm in &arms {
+    for arm in arms {
         let bc_path = match (arm.dist_gains, arm.eight_bins) {
             (_, true) => &cfg.brain_config_dist_gains_8,
             (true, false) => &cfg.brain_config_dist_gains,
@@ -403,6 +436,29 @@ fn run_arm(
 mod tests {
     use super::*;
     use crate::seq::testutil::room_map;
+
+    #[test]
+    fn the_factorial_has_every_combination_of_the_three_changes_exactly_once() {
+        let arms = factorial_arms();
+        assert_eq!(arms.len(), 8);
+        let mut seen = std::collections::BTreeSet::new();
+        for a in &arms {
+            // Everything but the three factors is held fixed.
+            assert!(!a.eight_bins && !a.demo_optimiser && a.steps_long && !a.real_calibration);
+            assert_eq!(a.hook_pos_weight, 1.0);
+            assert!(a.fly_lr.is_none_or(|lr| (lr - 3e-3).abs() < 1e-9));
+            assert!(a.alpha_init == 0.0 || a.alpha_init == 4.0);
+            seen.insert((a.dist_gains, a.fly_lr.is_some(), a.alpha_init == 4.0));
+        }
+        assert_eq!(seen.len(), 8, "2 x 2 x 2 distinct cells");
+        let names: std::collections::BTreeSet<&str> = arms.iter().map(|a| a.name).collect();
+        assert_eq!(names.len(), 8);
+        // The cell E-005 never ran: the 7.3 encoder (no gains) with the other two changes.
+        assert!(
+            arms.iter()
+                .any(|a| !a.dist_gains && a.fly_lr.is_some() && a.alpha_init == 4.0)
+        );
+    }
 
     #[test]
     fn scenes_repeat_one_observation_and_score_only_the_last_repetition() {

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use ddai_env::models::ModelBrains;
-use ddai_train::experiment::{JobConfig, load_env, run_collect_jobs};
+use ddai_train::experiment::{JobConfig, job_key, load_env, run_collect_jobs};
 use ddai_train::runner::{DaggerConfig, ExperimentConfig, ModelSpec, run_experiment};
 use ddai_train::store::TeacherStore;
 use ddai_train::teacher_data::TeacherDataConfig;
@@ -19,6 +19,8 @@ fn root() -> PathBuf {
 fn job(base_seed: u64, games: u32) -> JobConfig {
     JobConfig {
         arena: "pit".into(),
+        scenario: None,
+        only_success: false,
         games,
         opponents: vec!["scripted".into()],
         beta: 0.0,
@@ -60,6 +62,7 @@ fn tiny_experiment(tmp: &std::path::Path, dagger_jobs: Vec<JobConfig>) -> Experi
         brain_config: root().join("configs/fly/S-brain.toml").to_string_lossy().into_owned(),
         arenas_dir: root().join("configs/arenas").to_string_lossy().into_owned(),
         map_dir: "/nonexistent".into(),
+        scenarios_dir: None,
         run_dir: run_dir.to_string_lossy().into_owned(),
         teacher_base: vec![base.to_string_lossy().into_owned()],
         teacher_dagger: dagger.to_string_lossy().into_owned(),
@@ -88,6 +91,7 @@ fn tiny_experiment(tmp: &std::path::Path, dagger_jobs: Vec<JobConfig>) -> Experi
             jobs: dagger_jobs,
             eval_games: 4,
             eval_arenas: vec!["pit".into()],
+            select_arenas: Vec::new(),
             retrain_lr_scale: 0.5,
         },
     }
@@ -111,6 +115,7 @@ fn bc_then_a_dagger_round_writes_a_run_directory_and_resumes_as_a_no_op() {
         "checkpoints/final.bundle",
         "rounds/round-0.bundle",
         "rounds/round-1.bundle",
+        "checkpoints/selected.bundle",
     ] {
         assert!(run_dir.join(f).exists(), "missing {f}");
     }
@@ -120,6 +125,8 @@ fn bc_then_a_dagger_round_writes_a_run_directory_and_resumes_as_a_no_op() {
         "\"kind\":\"eval\"",
         "\"kind\":\"collect\"",
         "\"kind\":\"arena\"",
+        "\"kind\":\"selection\"",
+        "\"credited_win_rate\"",
     ] {
         assert!(metrics.contains(kind), "no {kind} line");
     }
@@ -255,4 +262,73 @@ fn a_run_killed_between_collection_jobs_collects_only_the_missing_ones_on_resume
     let chunks = done.manifest.chunks.len();
     run_experiment(&cfg, &mut |_| {}).unwrap();
     assert_eq!(TeacherStore::open(&dagger).unwrap().manifest.chunks.len(), chunks);
+}
+
+/// Scenario jobs in a dataset: episodes are stored under `scn:<id>` with the scenario's map, keyed by the job, and
+/// `only_success` keeps just the trials the teacher solved (T15a, a hook duel the planner never wins, yields none).
+#[test]
+fn scenario_jobs_are_stored_under_their_own_arena_and_can_keep_only_the_solved_trials() {
+    use ddai_train::experiment::load_env_with_scenarios;
+    use ddai_train::teacher_data::{TeacherDataConfig, load_teacher};
+    let tmp = tempfile::tempdir().unwrap();
+    let env = load_env_with_scenarios(
+        &root().join("configs/arenas"),
+        std::path::Path::new("/nonexistent"),
+        None,
+        Some(&root().join("configs/scenarios")),
+    )
+    .unwrap();
+    assert!(env.scenarios.contains_key("T12") && env.maps.contains_key("scn:T12"));
+    let mut store = TeacherStore::create(&tmp.path().join("s"), "s", "test").unwrap();
+    let scn = |id: &str, only_success: bool| JobConfig {
+        arena: String::new(),
+        scenario: Some(id.into()),
+        only_success,
+        games: 3,
+        opponents: Vec::new(),
+        beta: 0.0,
+        noise_prob: 0.0,
+        noise_len: (2, 6),
+        base_seed: 40,
+    };
+    let jobs = [scn("T12", true), scn("T15a", true)];
+    let sums = run_collect_jobs(&env, &mut store, &jobs, "teacher", 0, 2, &mut |_| {}).unwrap();
+    assert_eq!((sums[0].arena.as_str(), sums[0].games, sums[0].w), ("scn:T12", 3, 3));
+    assert_eq!(
+        sums[1].w + sums[1].t + sums[1].l + sums[1].d,
+        0,
+        "an unsolved scenario leaves nothing: {:?}",
+        sums[1]
+    );
+    assert_eq!(
+        store.manifest.arenas.len(),
+        2,
+        "both scenarios registered their arena entry"
+    );
+    assert_eq!(store.manifest.chunks.len(), 1, "only the solved scenario wrote chunks");
+    assert!(store.manifest.chunks[0].setup.contains("scn:T12") && store.manifest.chunks[0].setup.contains("ok-only"));
+    assert!(store.manifest.job_done(0, &job_key(&jobs[0])));
+
+    // They load as training sequences on the scenario's own map.
+    let split = load_teacher(
+        &store,
+        &store.chunks_of_round(None),
+        &env.maps,
+        &env.holdout_names(),
+        &TeacherDataConfig {
+            scenario_weight: 2.5,
+            val_mod: 0,
+            ..TeacherDataConfig::default()
+        },
+        2,
+    )
+    .unwrap();
+    assert_eq!(split.train.len(), 3);
+    let st = split.train[0].steps.iter().find(|s| s.weight > 0.0).unwrap();
+    assert_eq!(st.weight, 2.5, "scenario steps carry the scenario weight");
+    // What the student sees of the techniques is reported per scenario.
+    let corpus = ddai_train::seq::Corpus::new(split.train);
+    let line = ddai_train::runner::scenario_share_line(&corpus);
+    assert!(line.contains("scn:T12: 3 episodes"), "{line}");
+    assert!(line.contains("100.00%"), "all of this corpus is scenario data: {line}");
 }

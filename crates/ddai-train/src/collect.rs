@@ -18,9 +18,10 @@
 use std::sync::{Arc, Mutex};
 
 use ddai_brain::{Action, Brain, IVec2, Observation, ResetContext, WorldView};
-use ddai_env::arena::Arena;
+use ddai_env::arena::{Arena, BuiltWorld};
 use ddai_env::config::{BrainFactory, PlayerSpec, Rules};
 use ddai_env::game::{Layout, play_game};
+use ddai_env::scenario::{ScenarioDef, run_trial};
 use ddai_env::sim::PlayerSetup;
 use ddai_env::stats::GameResult;
 use ddai_fly::rng::SplitMix64;
@@ -268,6 +269,56 @@ pub fn collect(
         (0..job.games)
             .into_par_iter()
             .map(|g| collect_game(arena, arena_index, rules, job, g, factory))
+            .collect()
+    });
+    results.into_iter().collect()
+}
+
+/// Labels one trial of a technique scenario: the subject (tee 0) is the [`LabellingBrain`], the other tees
+/// are the scenario's own scripts. Trial `k` uses the start-state jitter of `(job.base_seed, k)`; the episode
+/// is a *win* when the scenario's success predicate holds and a timeout otherwise. Deterministic in
+/// `(job.base_seed, trial)` like an arena game.
+pub fn collect_scenario_trial(
+    def: &ScenarioDef,
+    world: &BuiltWorld,
+    arena_index: u16,
+    job: &CollectJob,
+    trial: u32,
+    factory: &BrainFactory,
+) -> Result<Episode, EnvError> {
+    let actor = job.actor.as_ref().map(factory).transpose()?;
+    let (labeller, log) = LabellingBrain::new(actor, job.mixing);
+    let lag = job.actor.as_ref().map_or(0, |a| a.lag);
+    let out = run_trial(def, world, Box::new(labeller), lag, job.base_seed, trial, true)?;
+    let steps = std::mem::take(&mut *log.lock().expect("step log"));
+    Ok(Episode {
+        arena: arena_index,
+        seed: job.base_seed.wrapping_add(u64::from(trial)),
+        players: def.tee.len() as u8,
+        outcome: if out.success { Outcome::Win } else { Outcome::Timeout },
+        end_tick: def.horizon,
+        steps,
+    })
+}
+
+/// All `job.games` trials of a scenario on `threads` workers (in trial order, so the result does not depend
+/// on the thread count).
+pub fn collect_scenario(
+    def: &ScenarioDef,
+    world: &BuiltWorld,
+    arena_index: u16,
+    job: &CollectJob,
+    factory: &BrainFactory,
+    threads: usize,
+) -> Result<Vec<Episode>, EnvError> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .build()
+        .map_err(|e| EnvError::new(format!("thread pool: {e}")))?;
+    let results: Vec<Result<Episode, EnvError>> = pool.install(|| {
+        (0..job.games)
+            .into_par_iter()
+            .map(|k| collect_scenario_trial(def, world, arena_index, job, k, factory))
             .collect()
     });
     results.into_iter().collect()

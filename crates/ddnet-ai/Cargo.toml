@@ -26,6 +26,7 @@ ddai-dataset = { path = "../ddai-dataset" }
 ddai-demo = { path = "../ddai-demo" }
 # Task 8.1: `arena` subcommand (the offline evaluation arena).
 ddai-env = { path = "../ddai-env" }
+ddai-controls = { path = "../ddai-controls" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-flyg = { path = "../ddai-flyg" }
 ddai-map = { path = "../ddai-map" }

@@ -121,6 +121,7 @@ fn bc_step_gradients_match_finite_differences_on_the_real_s_graph() {
             soft: Some(soft),
             mask: HeadMask::ALL,
             weight: 1.5,
+            hook_scale: 1.0,
         },
         StepTargets {
             dir: 0,
@@ -134,6 +135,7 @@ fn bc_step_gradients_match_finite_differences_on_the_real_s_graph() {
                 ..HeadMask::ALL
             },
             weight: 1.0,
+            hook_scale: 1.0,
         },
     ];
     let cfg = BcStepConfig {

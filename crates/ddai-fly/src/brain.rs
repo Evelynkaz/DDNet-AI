@@ -29,6 +29,14 @@ pub enum ActionSelection {
     Sampled,
 }
 
+/// What a two-view play shows in the viewer instead of one view's own values (see [`FlyBrain::set_played_override`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayedOverride {
+    pub hook: bool,
+    pub hook_prob: f32,
+    pub latency: Duration,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlyBrainConfig {
     pub action_selection: ActionSelection,
@@ -173,6 +181,9 @@ pub struct FlyBrain {
     last_action: Option<Action>,
     /// `(name, sha256)` of the bundle this fly was loaded from, shown by the viewer.
     identity: Option<(String, String)>,
+    /// What a two-view play ([`crate::two_view::TwoViewFly`]) shows instead of this view's own hook and latency, for
+    /// the current decision.
+    played_override: Option<PlayedOverride>,
 }
 
 impl FlyBrain {
@@ -238,7 +249,15 @@ impl FlyBrain {
             viz_seen: 0,
             last_action: None,
             identity: None,
+            played_override: None,
         }
+    }
+
+    /// For a two-view play: the viewer's frame and telemetry of the current decision show the **played** hook and its
+    /// probability (from the masked view) and the whole decision's latency (both views), not this view's own.
+    /// Cleared by `reset`; the player sets it after every decision.
+    pub fn set_played_override(&mut self, o: Option<PlayedOverride>) {
+        self.played_override = o;
     }
 
     /// Names the bundle this fly came from (name and sha256 only), for the viewer.
@@ -281,13 +300,19 @@ impl FlyBrain {
         if !self.viz.due() {
             return None;
         }
-        let (decoded, action) = (self.last_decoded?, self.last_action?);
+        let (mut decoded, mut action) = (self.last_decoded?, self.last_action?);
+        let mut latency = self.last_latency;
+        if let Some(o) = self.played_override {
+            action.hook = o.hook;
+            decoded.hook_prob = o.hook_prob;
+            latency = o.latency;
+        }
         self.calib
             .z_into(&self.last_dn_rates, self.decoder.config().z_clip, &mut self.viz_z);
         let inputs = FrameInputs {
             seq: self.decision_count as u32,
             tick,
-            latency_us: u32::try_from(self.last_latency.as_micros()).unwrap_or(u32::MAX),
+            latency_us: u32::try_from(latency.as_micros()).unwrap_or(u32::MAX),
             per_type_mean_rate: &self.last_per_type_mean_rate,
             dn_z: &self.viz_z,
             eye: &self.ray_features,
@@ -447,6 +472,7 @@ impl ddai_brain::Brain for FlyBrain {
         }
         self.last_decoded = None;
         self.last_action = None;
+        self.played_override = None;
         // A new episode: the frame's decision number restarts with it (`docs/formats.md` §27.1), and no frame is owed.
         self.decision_count = 0;
         self.viz_seen = 0;
@@ -503,8 +529,14 @@ impl ddai_brain::Brain for FlyBrain {
     }
 
     fn telemetry(&self) -> Option<String> {
-        let decoded = self.last_decoded?;
-        Some(self.build_telemetry(decoded).to_json())
+        let mut decoded = self.last_decoded?;
+        let mut t = self.build_telemetry(decoded);
+        if let Some(o) = self.played_override {
+            decoded.hook_prob = o.hook_prob;
+            t.decoded_action = decoded;
+            t.latency = o.latency;
+        }
+        Some(t.to_json())
     }
 
     fn viz_meta(&self) -> Option<String> {

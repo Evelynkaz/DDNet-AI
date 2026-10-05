@@ -20,7 +20,7 @@ use ddai_controls::features::{extract, input_dim};
 use ddai_controls::net::SeqNet;
 use ddai_fly::backward::BackwardIndex;
 use ddai_fly::batched::{BatchedEngine, BatchedPlan, TrainBackend};
-use ddai_fly::bc::{HeadLogits, HeadThresholds, LossConfig, StepLoss};
+use ddai_fly::bc::{HeadLogits, HeadThresholds, HookView, LossConfig, StepLoss, combine_hook_view};
 use ddai_fly::brain_bc::{BcSequence, BcStepConfig, BcStepOutput, BcWorkspace, brain_bc_forward, brain_bc_step};
 use ddai_fly::brain_bc_batched::brain_bc_batched_step;
 use ddai_fly::brain_config::{BrainConfig, parse_brain_config};
@@ -94,6 +94,21 @@ pub trait Learner: Send + Sync {
     /// The decision thresholds of the jump/hook/fire heads stored in the checkpoint.
     fn thresholds(&self) -> HeadThresholds;
     fn set_thresholds(&mut self, thresholds: HeadThresholds);
+    /// How the hook head sees the own hook state (stored in the checkpoint; the trainer sets it from its
+    /// configuration).
+    fn hook_view(&self) -> HookView;
+    fn set_hook_view(&mut self, view: HookView);
+
+    /// The logits the **playing** model would produce: under [`HookView::MaskedForHookHead`] the hook head
+    /// comes from a second pass over the observations with the own hook state hidden.
+    fn window_logits_played(&self, window: &Window) -> Vec<HeadLogits> {
+        let full = self.window_logits(window);
+        if self.hook_view() == HookView::Shared {
+            return full;
+        }
+        let masked = self.window_logits(&window.with_own_hook_masked());
+        full.iter().zip(&masked).map(|(f, m)| combine_hook_view(f, m)).collect()
+    }
     /// Writes the checkpoint the arena loads (`fly` bundle or control bundle).
     fn save(&self, path: &Path, meta: BundleMeta) -> LearnerResult<()>;
 }
@@ -308,6 +323,7 @@ pub struct FlyLearner {
     cfg: FlyTrainConfig,
     layout: Layout,
     thresholds: HeadThresholds,
+    hook_view: HookView,
     /// The batched engine (buffers + topology plan), present iff `cfg.backend` is `Batched`.
     batched: Option<Mutex<BatchedEngine>>,
 }
@@ -380,7 +396,7 @@ impl FlyLearner {
                 bundle.flyg_sha256
             ));
         }
-        let thresholds = bundle.thresholds;
+        let (thresholds, hook_view) = (bundle.thresholds, bundle.hook_view);
         let mut l = Self::build(
             flyg,
             flyg_path.to_path_buf(),
@@ -394,6 +410,7 @@ impl FlyLearner {
             cfg,
         )?;
         l.thresholds = thresholds;
+        l.hook_view = hook_view;
         l.refresh();
         Ok(l)
     }
@@ -463,6 +480,7 @@ impl FlyLearner {
             cfg,
             layout,
             thresholds: HeadThresholds::default(),
+            hook_view: HookView::Shared,
             batched,
         })
     }
@@ -494,6 +512,7 @@ impl FlyLearner {
             calibration: self.calib.clone(),
             meta,
             thresholds: self.thresholds,
+            hook_view: self.hook_view,
         }
     }
 
@@ -741,6 +760,14 @@ impl Learner for FlyLearner {
         self.thresholds = thresholds;
     }
 
+    fn hook_view(&self) -> HookView {
+        self.hook_view
+    }
+
+    fn set_hook_view(&mut self, view: HookView) {
+        self.hook_view = view;
+    }
+
     fn save(&self, path: &Path, meta: BundleMeta) -> LearnerResult<()> {
         save_bundle(path, &self.to_bundle(meta)).map_err(|e| e.to_string())
     }
@@ -754,6 +781,7 @@ pub struct ControlLearner {
     ray_grid: RayGridConfig,
     lr: f32,
     thresholds: HeadThresholds,
+    hook_view: HookView,
 }
 
 impl ControlLearner {
@@ -764,6 +792,7 @@ impl ControlLearner {
             ray_grid,
             lr,
             thresholds: HeadThresholds::default(),
+            hook_view: HookView::Shared,
         }
     }
 
@@ -833,10 +862,16 @@ impl Learner for ControlLearner {
     fn set_thresholds(&mut self, thresholds: HeadThresholds) {
         self.thresholds = thresholds;
     }
+    fn hook_view(&self) -> HookView {
+        self.hook_view
+    }
+    fn set_hook_view(&mut self, view: HookView) {
+        self.hook_view = view;
+    }
     fn save(&self, path: &Path, meta: BundleMeta) -> LearnerResult<()> {
         save_control_bundle(
             path,
-            &ControlBundle::from_net(self.net.as_ref(), self.ray_grid, meta, self.thresholds),
+            &ControlBundle::from_net(self.net.as_ref(), self.ray_grid, meta, self.thresholds, self.hook_view),
         )
         .map_err(|e| e.to_string())
     }

@@ -21,6 +21,8 @@ ddai-brain = { path = "../ddai-brain" }
 # its head loss (`ddai_fly::bc`), checkpoint helpers and aim-to-target conversion, so that "same
 # inputs, same outputs, same loss" is true by construction.
 ddai-fly = { path = "../ddai-fly" }
+# `ControlProposer`: a control network as the hybrid brain's proposing half (8.2b), like `ddai_fly::proposer::FlyProposer`.
+ddai-planner = { path = "../ddai-planner" }
 serde = { version = "1.0.229", features = ["derive"] }
 
 [dev-dependencies]

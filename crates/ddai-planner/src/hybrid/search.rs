@@ -664,6 +664,11 @@ impl HybridSearch {
         self.proposer.name()
     }
 
+    /// What the work clock charges for one `propose` call of this search's proposer (tee-tick equivalents).
+    pub fn proposer_work_units(&self) -> u64 {
+        self.proposer.work_units()
+    }
+
     /// The proposer, for the read-only visualisation stream (task 7.4).
     pub fn proposer(&self) -> &dyn Proposer {
         &*self.proposer

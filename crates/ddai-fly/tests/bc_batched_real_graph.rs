@@ -87,6 +87,7 @@ fn targets_for(rng: &mut SplitMix64, len: usize) -> Vec<StepTargets> {
                     ..HeadMask::ALL
                 },
                 weight: 0.5 + rng.next_f32_unit(),
+                hook_scale: 1.0,
             }
         })
         .collect()

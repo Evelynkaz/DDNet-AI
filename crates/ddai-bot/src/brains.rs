@@ -163,16 +163,19 @@ pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
     }
 }
 
+/// The hybrid the bot plays: wall clock, with the fly of `opts.fly_bundle` as its proposer when there is one.
+pub fn make_hybrid(opts: &BrainOptions) -> Result<HybridBrain, BrainError> {
+    let proposer: Box<dyn Proposer> = match &opts.fly_bundle {
+        Some(_) => Box::new(make_bundle_proposer(opts)?),
+        None => Box::new(NoProposer),
+    };
+    HybridBrain::new(hybrid_config(opts), ClockKind::Wall, proposer).map_err(BrainError::Hybrid)
+}
+
 /// Builds the brain. Not `Send`: the planner holds `Rc`s, so build it on the thread that plays.
 pub fn make_brain(kind: BrainKind, opts: &BrainOptions) -> Result<Box<dyn Brain>, BrainError> {
     Ok(match kind {
-        BrainKind::Hybrid => {
-            let proposer: Box<dyn Proposer> = match &opts.fly_bundle {
-                Some(_) => Box::new(FlyProposer::new(make_bundle_fly(opts)?, opts.seed)),
-                None => Box::new(NoProposer),
-            };
-            Box::new(HybridBrain::new(hybrid_config(opts), ClockKind::Wall, proposer).map_err(BrainError::Hybrid)?)
-        }
+        BrainKind::Hybrid => Box::new(make_hybrid(opts)?),
         BrainKind::Planner => Box::new(PlannerBrain::new(PlannerBrainConfig {
             preset: opts.planner_preset,
             mode: PlannerMode::Deadline {
@@ -182,23 +185,42 @@ pub fn make_brain(kind: BrainKind, opts: &BrainOptions) -> Result<Box<dyn Brain>
         })),
         BrainKind::Scripted => Box::new(ScriptedBrain::new()),
         BrainKind::Idle => Box::new(IdleBrain),
-        BrainKind::Fly => Box::new(make_fly(opts)?),
+        BrainKind::Fly => make_fly(opts)?,
     })
 }
 
-/// A fly with the weights of `opts.fly_bundle` (which must be set); remembers the bundle's name and hash for the web panel.
-fn make_bundle_fly(opts: &BrainOptions) -> Result<ddai_fly::brain::FlyBrain, BrainError> {
-    use ddai_fly::brain::{ActionSelection, FlyBrainConfig};
+/// The template of `opts.fly_bundle` (which must be set); remembers the bundle's name and hash for the web panel.
+fn load_bundle_template(opts: &BrainOptions) -> Result<ddai_fly::bundle::FlyBrainTemplate, BrainError> {
     let bundle = opts.fly_bundle.as_deref().expect("the caller checked");
-    let template = ddai_fly::bundle::FlyBrainTemplate::load(bundle, Some(&opts.fly_flyg))
-        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
-    Ok(template.instantiate(FlyBrainConfig {
-        action_selection: ActionSelection::Argmax,
-        seed: opts.seed,
-    }))
+    ddai_fly::bundle::FlyBrainTemplate::load(bundle, Some(&opts.fly_flyg))
+        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))
 }
 
-fn make_fly(opts: &BrainOptions) -> Result<ddai_fly::brain::FlyBrain, BrainError> {
+fn bundle_fly_config(opts: &BrainOptions) -> ddai_fly::brain::FlyBrainConfig {
+    ddai_fly::brain::FlyBrainConfig {
+        action_selection: ddai_fly::brain::ActionSelection::Argmax,
+        seed: opts.seed,
+    }
+}
+
+/// The hybrid's proposer over `opts.fly_bundle` (which must be set): a model trained with the hook head masked takes
+/// the hook probability of its proposals from its second view (`FlyProposer::from_template`).
+fn make_bundle_proposer(opts: &BrainOptions) -> Result<FlyProposer, BrainError> {
+    Ok(FlyProposer::from_template(
+        &load_bundle_template(opts)?,
+        bundle_fly_config(opts),
+        opts.seed,
+    ))
+}
+
+/// The brain that plays the weights of `opts.fly_bundle`, the way the bundle was trained: a model trained with the
+/// hook head masked (8.2b, `HookView::MaskedForHookHead`) is played in two views, exactly as in the arena
+/// (`FlyBrainTemplate::instantiate_played`); playing it single-view would be a policy nobody evaluated.
+fn make_bundle_fly(opts: &BrainOptions) -> Result<Box<dyn Brain>, BrainError> {
+    Ok(load_bundle_template(opts)?.instantiate_played(bundle_fly_config(opts)))
+}
+
+fn make_fly(opts: &BrainOptions) -> Result<Box<dyn Brain>, BrainError> {
     use ddai_fly::brain::{ActionSelection, FlyBrain, FlyBrainConfig};
     if opts.fly_bundle.is_some() {
         return make_bundle_fly(opts);
@@ -223,7 +245,7 @@ fn make_fly(opts: &BrainOptions) -> Result<ddai_fly::brain::FlyBrain, BrainError
         mu: vec![0.0; model.num_outputs()],
         sigma: vec![1.0; model.num_outputs()],
     };
-    Ok(FlyBrain::new(
+    Ok(Box::new(FlyBrain::new(
         model,
         encoder,
         encoder_params,
@@ -234,7 +256,7 @@ fn make_fly(opts: &BrainOptions) -> Result<ddai_fly::brain::FlyBrain, BrainError
             action_selection: ActionSelection::Argmax,
             seed: opts.seed,
         },
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -249,6 +271,131 @@ mod tests {
         assert_eq!(BrainKind::parse("nope"), None);
         assert!(BrainKind::Planner.has_own_shield() && BrainKind::Hybrid.has_own_shield());
         assert!(!BrainKind::Scripted.has_own_shield() && !BrainKind::Fly.has_own_shield());
+    }
+
+    /// 8.2b F1: the live bot plays a mask-hook bundle in two views, as the arena does (one code path,
+    /// `FlyBrainTemplate::instantiate_played`); the hybrid gets the second view for its proposer's hook too.
+    #[test]
+    fn the_bot_plays_a_masked_fly_bundle_in_two_views_like_the_arena() {
+        use ddai_fly::bc::{HookView, mask_own_hook};
+        use ddai_fly::brain::{ActionSelection, FlyBrainConfig};
+        use ddai_fly::bundle::FlyBrainTemplate;
+        let dir = tempfile::tempdir().unwrap();
+        let opts_for = |view: HookView| {
+            let sub = dir.path().join(format!("{view:?}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            let (bundle, flyg) = ddai_fly::brain_fixtures::write_tiny_fly_bundle(&sub, view);
+            BrainOptions {
+                fly_bundle: Some(bundle),
+                fly_flyg: flyg,
+                ..BrainOptions::default()
+            }
+        };
+        let (shared, masked) = (opts_for(HookView::Shared), opts_for(HookView::MaskedForHookHead));
+        assert!(
+            !make_brain(BrainKind::Fly, &shared)
+                .unwrap()
+                .name()
+                .ends_with("+hookview")
+        );
+        let mut bot = make_brain(BrainKind::Fly, &masked).unwrap();
+        assert!(bot.name().ends_with("+hookview"), "{}", bot.name());
+        // The bot's decisions are the arena's: the same template through the same entry point.
+        let template = FlyBrainTemplate::load(masked.fly_bundle.as_deref().unwrap(), Some(&masked.fly_flyg)).unwrap();
+        let cfg = FlyBrainConfig {
+            action_selection: ActionSelection::Argmax,
+            seed: masked.seed,
+        };
+        let mut arena = template.instantiate_played(cfg.clone());
+        let (mut full, mut hook_view) = (template.instantiate(cfg.clone()), template.instantiate(cfg));
+        let mut me = ddai_brain::CharacterObservation::at_rest(0);
+        me.pos = ddai_physics::vmath::Vec2::new(300.0, 300.0);
+        let map = std::sync::Arc::new(ddai_physics::map::MapData {
+            width: 20,
+            height: 20,
+            game: vec![Default::default(); 400],
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        });
+        let reset = ddai_brain::ResetContext {
+            map: map.clone(),
+            self_id: 0,
+            seed: 1,
+        };
+        bot.reset(&reset);
+        arena.reset(&reset);
+        full.reset(&reset);
+        hook_view.reset(&reset);
+        let states: Vec<i32> = (0..60)
+            .map(|i| [ddai_brain::HOOK_IDLE, ddai_brain::HOOK_FLYING, ddai_brain::HOOK_GRABBED][i % 3])
+            .collect();
+        let mut disagreements = 0;
+        for (i, &state) in states.iter().enumerate() {
+            let mut other = ddai_brain::CharacterObservation::at_rest(1);
+            other.pos = ddai_physics::vmath::Vec2::new(340.0 + 4.0 * (i / 3) as f32, 300.0);
+            let mut self_state = me;
+            self_state.hook_state = state;
+            let obs = ddai_brain::Observation {
+                map: map.clone(),
+                tick: i as i32,
+                self_state,
+                others: vec![other],
+                target_id: None,
+                tuning: ddai_physics::tuning::TuningParams::default(),
+            };
+            let (a_bot, a_arena) = (bot.decide(&obs), arena.decide(&obs));
+            let (f, h) = (full.decide(&obs), hook_view.decide(&mask_own_hook(&obs)));
+            assert_eq!(a_bot, a_arena, "decision {i}: the bot plays what the arena plays");
+            assert_eq!(a_bot, ddai_brain::Action { hook: h.hook, ..f }, "decision {i}");
+            disagreements += usize::from(f.hook != h.hook);
+        }
+        // The fixture's hook output follows the own hook input, so the views really disagree about the hook: a bot that
+        // fed the second view the unmasked observation (or played one view) would fail the equalities above.
+        assert!(
+            disagreements > 5,
+            "masking must change the hook decision ({disagreements}/{})",
+            states.len()
+        );
+        // The hybrid's fly proposer takes the hook probability from the second view as well ...
+        assert!(make_bundle_proposer(&masked).unwrap().has_hook_view());
+        assert!(!make_bundle_proposer(&shared).unwrap().has_hook_view());
+        // ... and the hybrid the bot really plays (`make_brain(Hybrid)` is `make_hybrid`) charges the work clock for both
+        // views: twice the price of a one-view proposer (many substeps, so that the price does not round to 0 on the
+        // tiny graph).
+        let priced = |view: HookView| {
+            let sub = dir.path().join(format!("priced-{view:?}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            let (bundle, flyg) = ddai_fly::brain_fixtures::write_tiny_fly_bundle_with(&sub, view, 4000);
+            let mut hybrid = make_hybrid(&BrainOptions {
+                fly_bundle: Some(bundle),
+                fly_flyg: flyg,
+                search_threads: Some(1),
+                ..BrainOptions::default()
+            })
+            .unwrap();
+            let before = hybrid.proposer_work_units();
+            // After a reset the proposer lives inside the search (the other arm of `proposer_work_units`).
+            hybrid.reset(&ddai_brain::ResetContext {
+                map: map.clone(),
+                self_id: 0,
+                seed: 1,
+            });
+            assert_eq!(hybrid.proposer_work_units(), before);
+            before
+        };
+        let one_view = priced(HookView::Shared);
+        assert!(one_view > 100, "{one_view}");
+        assert_eq!(priced(HookView::MaskedForHookHead), 2 * one_view);
+        assert_eq!(make_hybrid(&BrainOptions::default()).unwrap().proposer_work_units(), 0);
+        let opts = BrainOptions {
+            search_threads: Some(1),
+            ..masked
+        };
+        assert!(make_brain(BrainKind::Hybrid, &opts).is_ok());
     }
 
     #[test]
@@ -307,6 +454,17 @@ mod tests {
             };
             assert_eq!(hybrid_config(&opts).mirror, on);
             make_brain(BrainKind::Hybrid, &opts).expect("hybrid builds either way");
+            // The hybrid the bot really builds follows the option, with no proposer and with a fly proposer.
+            assert_eq!(make_hybrid(&opts).unwrap().config().mirror, on);
+            let dir = tempfile::tempdir().unwrap();
+            let (bundle, flyg) =
+                ddai_fly::brain_fixtures::write_tiny_fly_bundle(dir.path(), ddai_fly::bc::HookView::MaskedForHookHead);
+            let with_fly = BrainOptions {
+                fly_bundle: Some(bundle),
+                fly_flyg: flyg,
+                ..opts
+            };
+            assert_eq!(make_hybrid(&with_fly).unwrap().config().mirror, on);
         }
     }
 

@@ -1,0 +1,33 @@
+# E-008: the evaluation matrix of a trained brain (D-059 reporting: credited win rate, blocks/min, self-freezes/min).
+# Same conditions, seed and game counts as the matching E-005 rows (so `idle` and `scripted` baselines of E-005 apply
+# game for game); only the conditions E-008 reports: the three halls 1v1 (chillblock5-ruler is the clean holdout),
+# 1v2 and 1v3 on clb-left. The focal slot is replaced by `--brain fly:<bundle>` / `mlp:` / `gru:` / `hybrid:fly:`.
+#   ddnet-ai arena run --config configs/arena/e008-eval.toml --brain mlp:<bundle> --out <dir> --threads 3
+name = "E-008 evaluation"
+base_seed = 1
+games = 1000
+
+[[condition]]
+name = "clb-left vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right vs scripted"
+arena = "clb-right"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left 1v2 vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left 1v3 vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }, { brain = "scripted" }]

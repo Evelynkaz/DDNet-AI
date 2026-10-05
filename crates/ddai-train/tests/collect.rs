@@ -166,3 +166,47 @@ fn beta_one_makes_the_teacher_play_and_noise_marks_its_steps() {
     // Noise never changes what the teacher says about the state: label steps are still searched.
     assert!(steps.iter().all(|s| s.searched()));
 }
+
+/// Technique scenarios as teacher data: the labelled subject plays a scenario trial (synthetic map, no map files
+/// needed), the episode carries the scenario's tick horizon and a win when the success predicate held, and the
+/// trials come back identical at any thread count.
+#[test]
+fn scenario_trials_are_labelled_deterministically() {
+    use ddai_env::scenario::{ScenarioDef, load_world};
+    use ddai_train::collect::collect_scenario;
+    use ddai_train::types::Outcome;
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../configs/scenarios");
+    let defs = ScenarioDef::load_dir(&dir).expect("scenarios");
+    let def = defs.iter().find(|d| d.id == "T12").expect("T12 (freeze jump) exists");
+    let world = load_world(def, std::path::Path::new("/nonexistent")).expect("synthetic map");
+    let job = CollectJob {
+        arena: "scn:T12".into(),
+        games: 3,
+        opponents: Vec::new(),
+        actor: None,
+        mixing: Mixing::default(),
+        base_seed: 5,
+    };
+    let one = collect_scenario(def, &world, 0, &job, &builtin_brain, 1).expect("collect");
+    let three = collect_scenario(def, &world, 0, &job, &builtin_brain, 3).expect("collect");
+    assert_eq!(one, three, "trials do not depend on the thread count");
+    assert_eq!(one.len(), 3);
+    for (k, ep) in one.iter().enumerate() {
+        assert_eq!(ep.seed, 5 + k as u64);
+        assert_eq!(ep.end_tick, def.horizon);
+        assert_eq!(usize::from(ep.players), def.tee.len());
+        assert!(!ep.steps.is_empty());
+        assert!(
+            ep.steps.iter().all(|s| s.teacher_acted() || s.noise()),
+            "the teacher plays itself"
+        );
+    }
+    // T12 is a planner scenario (100/100): the teacher's trials are wins.
+    assert!(
+        one.iter().all(|e| e.outcome == Outcome::Win),
+        "{:?}",
+        one.iter().map(|e| e.outcome).collect::<Vec<_>>()
+    );
+    // Jitter differs between trials, so the visited states differ.
+    assert_ne!(one[0].steps[0].me.pos, one[1].steps[0].me.pos);
+}

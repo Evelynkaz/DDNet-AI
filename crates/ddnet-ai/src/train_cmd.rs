@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use clap::{Args, Subcommand};
 use ddai_env::output::git_info;
 use ddai_train::experiment::{CollectConfig, expand_home, run_collect};
-use ddai_train::runner::{ExperimentConfig, eval_bundle_offline, run_experiment};
+use ddai_train::runner::{ExperimentConfig, eval_bundle_offline, run_experiment_with};
 use ddai_train::store::TeacherStore;
 
 #[derive(Debug, Args)]
@@ -30,7 +30,7 @@ pub enum TrainCommand {
     Collect {
         #[arg(long)]
         config: PathBuf,
-        /// Overrides the config's worker threads (at most 6 on the shared machine).
+        /// Overrides the config's worker threads (at most 3 on the shared machine).
         #[arg(long)]
         threads: Option<usize>,
     },
@@ -38,9 +38,13 @@ pub enum TrainCommand {
     Run {
         #[arg(long)]
         config: PathBuf,
-        /// Overrides `train.threads` (at most 6 on the shared machine).
+        /// Overrides `train.threads` (at most 3 on the shared machine).
         #[arg(long)]
         threads: Option<usize>,
+        /// Resume even though the configuration differs from the one the run started with (the old
+        /// config is kept as `config-before-N.toml`).
+        #[arg(long)]
+        allow_config_change: bool,
     },
     /// Per-head held-out metrics of a checkpoint (JSON on stdout).
     Eval {
@@ -52,6 +56,52 @@ pub enum TrainCommand {
         /// model would store in its bundle) instead of the bundle's own thresholds.
         #[arg(long)]
         calibrate: bool,
+        /// Also write the bundle with the calibrated thresholds to this path (implies `--calibrate`).
+        #[arg(long)]
+        write_calibrated: Option<PathBuf>,
+    },
+    /// Writes a copy of a checkpoint with other decision thresholds (jump / hook / fire; any left out keeps the
+    /// checkpoint's own). The same weights at different thresholds can then be A/B-tested in the arena or scanned
+    /// for their in-play hook rates (E-005 review F9).
+    SetThresholds {
+        /// `fly`, `mlp` or `gru`.
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        jump: Option<f32>,
+        #[arg(long)]
+        hook: Option<f32>,
+        #[arg(long)]
+        fire: Option<f32>,
+    },
+    /// A model's hook behaviour in closed loop: start and release rates against the teacher's on the same
+    /// states (JSON on stdout). The model plays alone; the planner labels every state it visits.
+    HookPlay {
+        /// `fly:<bundle>`, `mlp:<bundle>`, `gru:<bundle>`.
+        #[arg(long)]
+        actor: String,
+        /// Comma-separated arenas (training arenas unless you mean to look at a holdout).
+        #[arg(long, default_value = "clb-left,pit")]
+        arenas: String,
+        #[arg(long, default_value_t = 100)]
+        games: u32,
+        /// Opponents of slot 1.. (comma-separated; default one scripted bot).
+        #[arg(long, default_value = "scripted")]
+        opponents: String,
+        #[arg(long, default_value_t = 7_000_000_000)]
+        seed: u64,
+        #[arg(long, default_value = "configs/arenas")]
+        arenas_dir: PathBuf,
+        #[arg(long)]
+        map_dir: Option<PathBuf>,
+        #[arg(long)]
+        flyg: Option<PathBuf>,
+        #[arg(long, default_value_t = 3)]
+        threads: usize,
     },
     /// The hook-head investigation on 7.3's synthetic task (task 8.2): one factor changed per arm.
     HookStudy {
@@ -71,8 +121,14 @@ pub enum TrainCommand {
         demo_steps: u64,
         #[arg(long, default_value_t = 1500)]
         long_steps: u64,
-        #[arg(long, default_value_t = 6)]
+        #[arg(long, default_value_t = 3)]
         threads: usize,
+        /// Run the 2x2x2 factorial (distance-bin gains x 6x connectome lr x alpha 4) instead of the E-005 arm list.
+        #[arg(long)]
+        factorial: bool,
+        /// Seed of scenes and initialisation (the study is repeated over seeds for uncertainty).
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -102,12 +158,17 @@ fn commit() -> String {
 pub fn run(args: TrainArgs) -> ExitCode {
     let result = match args.command {
         TrainCommand::Collect { config, threads } => collect_cmd(&config, threads),
-        TrainCommand::Run { config, threads } => run_cmd(&config, threads),
+        TrainCommand::Run {
+            config,
+            threads,
+            allow_config_change,
+        } => run_cmd(&config, threads, allow_config_change),
         TrainCommand::Eval {
             config,
             bundle,
             calibrate,
-        } => eval_cmd(&config, &bundle, calibrate),
+            write_calibrated,
+        } => eval_cmd(&config, &bundle, calibrate, write_calibrated.as_deref()),
         TrainCommand::HookStudy {
             flyg,
             brain_config,
@@ -118,6 +179,8 @@ pub fn run(args: TrainArgs) -> ExitCode {
             demo_steps,
             long_steps,
             threads,
+            factorial,
+            seed,
             out,
         } => {
             let cfg = ddai_train::hook_study::HookStudyConfig {
@@ -127,10 +190,11 @@ pub fn run(args: TrainArgs) -> ExitCode {
                 brain_config_dist_gains_8,
                 train_map: expand_home(&train_map.to_string_lossy()),
                 other_map: expand_home(&other_map.to_string_lossy()),
-                threads: threads.clamp(1, 6),
+                threads: threads.clamp(1, 3),
                 demo_steps,
                 long_steps,
-                seed: 1,
+                seed,
+                factorial,
             };
             ddai_train::hook_study::run_hook_study(&cfg, &mut |l| eprintln!("{l}")).and_then(|r| {
                 let json = serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?;
@@ -143,6 +207,35 @@ pub fn run(args: TrainArgs) -> ExitCode {
                 }
             })
         }
+        TrainCommand::SetThresholds {
+            kind,
+            bundle,
+            out,
+            jump,
+            hook,
+            fire,
+        } => set_thresholds_cmd(&kind, &bundle, &out, jump, hook, fire),
+        TrainCommand::HookPlay {
+            actor,
+            arenas,
+            games,
+            opponents,
+            seed,
+            arenas_dir,
+            map_dir,
+            flyg,
+            threads,
+        } => hook_play_cmd(
+            &actor,
+            &arenas,
+            games,
+            &opponents,
+            seed,
+            &arenas_dir,
+            map_dir,
+            flyg,
+            threads,
+        ),
         TrainCommand::Stats { dir } => stats_cmd(&dir),
         TrainCommand::Inspect { bundle, flyg } => inspect_cmd(&bundle, flyg.as_deref()),
         TrainCommand::Info { dir, verify } => info_cmd(&dir, verify),
@@ -156,13 +249,82 @@ pub fn run(args: TrainArgs) -> ExitCode {
     }
 }
 
+fn set_thresholds_cmd(
+    kind: &str,
+    bundle: &std::path::Path,
+    out: &std::path::Path,
+    jump: Option<f32>,
+    hook: Option<f32>,
+    fire: Option<f32>,
+) -> Result<(), String> {
+    let apply = |t: &mut ddai_fly::bc::HeadThresholds| -> Result<(), String> {
+        t.jump = jump.unwrap_or(t.jump);
+        t.hook = hook.unwrap_or(t.hook);
+        t.fire = fire.unwrap_or(t.fire);
+        t.validate()?;
+        eprintln!("thresholds jump/hook/fire: {:.3}/{:.3}/{:.3}", t.jump, t.hook, t.fire);
+        Ok(())
+    };
+    match kind {
+        "fly" => {
+            let mut b = ddai_fly::bundle::load_bundle(bundle).map_err(|e| e.to_string())?;
+            apply(&mut b.thresholds)?;
+            ddai_fly::bundle::save_bundle(out, &b).map_err(|e| e.to_string())
+        }
+        "mlp" | "gru" => {
+            let mut b = ddai_controls::bundle::load_control_bundle(bundle).map_err(|e| e.to_string())?;
+            apply(&mut b.thresholds)?;
+            ddai_controls::bundle::save_control_bundle(out, &b).map_err(|e| e.to_string())
+        }
+        other => Err(format!("unknown kind {other:?} (fly, mlp, gru)")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hook_play_cmd(
+    actor: &str,
+    arenas: &str,
+    games: u32,
+    opponents: &str,
+    seed: u64,
+    arenas_dir: &std::path::Path,
+    map_dir: Option<PathBuf>,
+    flyg: Option<PathBuf>,
+    threads: usize,
+) -> Result<(), String> {
+    let map_dir = map_dir.unwrap_or_else(|| {
+        std::env::var_os("HOME").map_or_else(|| PathBuf::from("maps"), |h| PathBuf::from(h).join("aiddnet/data/maps"))
+    });
+    let env = ddai_train::experiment::load_env(arenas_dir, &map_dir, flyg)?;
+    let split = |s: &str| {
+        s.split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>()
+    };
+    let evs = ddai_train::experiment::hook_play_eval(
+        &env,
+        actor,
+        &split(arenas),
+        &split(opponents),
+        ddai_train::experiment::HookPlayPlan {
+            games,
+            base_seed: seed,
+            threads: threads.clamp(1, 3),
+        },
+        &mut |l| eprintln!("{l}"),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&evs).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
 fn collect_cmd(path: &std::path::Path, threads: Option<usize>) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut cfg: CollectConfig = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     if let Some(t) = threads {
         cfg.threads = t;
     }
-    cfg.threads = cfg.threads.clamp(1, 6);
+    cfg.threads = cfg.threads.clamp(1, 3);
     let t0 = std::time::Instant::now();
     let summaries = run_collect(&cfg, &commit(), &mut |l| {
         eprintln!("[{:7.1}s] {l}", t0.elapsed().as_secs_f64())
@@ -221,14 +383,16 @@ fn load_experiment(path: &std::path::Path, threads: Option<usize>) -> Result<Exp
     if let Some(t) = threads {
         cfg.train.threads = t;
     }
-    cfg.train.threads = cfg.train.threads.clamp(1, 6);
+    cfg.train.threads = cfg.train.threads.clamp(1, 3);
     Ok(cfg)
 }
 
-fn run_cmd(path: &std::path::Path, threads: Option<usize>) -> Result<(), String> {
+fn run_cmd(path: &std::path::Path, threads: Option<usize>, allow_config_change: bool) -> Result<(), String> {
     let cfg = load_experiment(path, threads)?;
     let t0 = std::time::Instant::now();
-    run_experiment(&cfg, &mut |l| eprintln!("[{:8.1}s] {l}", t0.elapsed().as_secs_f64()))?;
+    run_experiment_with(&cfg, allow_config_change, &mut |l| {
+        eprintln!("[{:8.1}s] {l}", t0.elapsed().as_secs_f64());
+    })?;
     println!(
         "{}: done in {:.0} s, run directory {}",
         cfg.name,
@@ -238,9 +402,14 @@ fn run_cmd(path: &std::path::Path, threads: Option<usize>) -> Result<(), String>
     Ok(())
 }
 
-fn eval_cmd(path: &std::path::Path, bundle: &std::path::Path, calibrate: bool) -> Result<(), String> {
+fn eval_cmd(
+    path: &std::path::Path,
+    bundle: &std::path::Path,
+    calibrate: bool,
+    write_calibrated: Option<&std::path::Path>,
+) -> Result<(), String> {
     let cfg = load_experiment(path, None)?;
-    let recs = eval_bundle_offline(&cfg, bundle, calibrate, &mut |l| eprintln!("{l}"))?;
+    let recs = eval_bundle_offline(&cfg, bundle, calibrate, write_calibrated, &mut |l| eprintln!("{l}"))?;
     println!("{}", serde_json::to_string_pretty(&recs).map_err(|e| e.to_string())?);
     Ok(())
 }
@@ -352,14 +521,21 @@ fn stats_cmd(dir: &std::path::Path) -> Result<(), String> {
         }
     }
     println!(
-        "round | episodes W:L:D:T | unfrozen steps | student steps | agree dir/jump/hook/fire | student rate jump/hook/fire | teacher rate on the same states | hook start (own hook not out) student/teacher | hook release (own hook out) student/teacher | own hook out"
+        "round | episodes W:L:D:T | unfrozen steps | student steps | agree dir/jump/hook/fire | student rate jump/hook/fire | teacher rate on the same states | hook start (own hook not out) student/teacher | hook release (own hook out) student/teacher | own hook out | teacher keeps hook out: flying / on a player / on terrain"
     );
     for (r, a) in by_round {
         let f = |x: u64, n: u64| if n == 0 { 0.0 } else { 100.0 * x as f64 / n as f64 };
         let h = a.hook.report();
         let p = |x: Option<f64>| x.map_or_else(|| "-".to_string(), |v| format!("{:.1}", 100.0 * v));
+        let keep = |c: &ddai_train::play_stats::HookCounts| {
+            if c.n == 0 {
+                "-".to_string()
+            } else {
+                format!("{:.0}% of {}", 100.0 * c.teacher_hook as f64 / c.n as f64, c.n)
+            }
+        };
         println!(
-            "{r:>5} | {} {}:{}:{}:{} | {} | {} | {:.0}/{:.0}/{:.0}/{:.0}% | {:.1}/{:.1}/{:.1}% | {:.1}/{:.1}/{:.1}% | {}/{}% | {}/{}% | {:.0}%",
+            "{r:>5} | {} {}:{}:{}:{} | {} | {} | {:.0}/{:.0}/{:.0}/{:.0}% | {:.1}/{:.1}/{:.1}% | {:.1}/{:.1}/{:.1}% | {}/{}% | {}/{}% | {:.0}% | {} / {} / {}",
             a.episodes,
             a.outcomes[0],
             a.outcomes[1],
@@ -382,6 +558,9 @@ fn stats_cmd(dir: &std::path::Path) -> Result<(), String> {
             p(h.release_student),
             p(h.release_teacher),
             100.0 * h.out_share,
+            keep(&a.hook.out_flying),
+            keep(&a.hook.out_player),
+            keep(&a.hook.out_terrain),
         );
     }
     Ok(())

@@ -14,11 +14,14 @@ use std::sync::{Arc, Mutex};
 
 use ddai_brain::Brain;
 use ddai_controls::ControlTemplate;
+use ddai_fly::bc::HookView;
 use ddai_fly::brain::{ActionSelection, FlyBrainConfig};
 use ddai_fly::bundle::FlyBrainTemplate;
 
 use crate::EnvError;
 use crate::config::{HybridSpec, PlayerSpec, builtin_brain, hybrid_config};
+
+pub use ddai_fly::two_view::TwoViewBrain;
 
 enum Loaded {
     Fly(Arc<FlyBrainTemplate>),
@@ -46,6 +49,18 @@ fn split_kind(brain: &str) -> Option<(&str, &str)> {
 /// argument may end in `#sampled` to draw every head from its probabilities instead of taking the
 /// most likely value.
 pub fn player_from_arg(arg: &str) -> PlayerSpec {
+    // `hybrid:mlp:<bundle>` / `hybrid:gru:<bundle>`: the hybrid with a trained control network as its proposer.
+    for kind in ["mlp", "gru"] {
+        if let Some(path) = arg.strip_prefix(&format!("hybrid:{kind}:")) {
+            let mut spec = PlayerSpec::simple("hybrid");
+            spec.hybrid = Some(HybridSpec {
+                proposer: Some(kind.to_string()),
+                control_model: Some(expand_home(path).to_string_lossy().into_owned()),
+                ..HybridSpec::default()
+            });
+            return spec;
+        }
+    }
     // `hybrid:fly:<bundle>`: the hybrid brain with a trained fly as its proposer.
     if let Some(path) = arg.strip_prefix("hybrid:fly:") {
         let mut spec = PlayerSpec::simple("hybrid");
@@ -75,8 +90,10 @@ pub fn player_from_arg(arg: &str) -> PlayerSpec {
 /// `<run>/checkpoints/` or `<run>/rounds/` (`fly:.../e005-fly/checkpoints/final.bundle` becomes
 /// `e005-fly`, plus the `#sampled` marker when present), else the file stem or the argument itself.
 pub fn label_of_arg(arg: &str) -> String {
-    if let Some(path) = arg.strip_prefix("hybrid:fly:") {
-        return format!("hybrid+{}", label_of_arg(&format!("fly:{path}")));
+    for kind in ["fly", "mlp", "gru"] {
+        if let Some(path) = arg.strip_prefix(&format!("hybrid:{kind}:")) {
+            return format!("hybrid+{}", label_of_arg(&format!("{kind}:{path}")));
+        }
     }
     let Some((_, rest)) = split_kind(arg) else {
         return arg.to_string();
@@ -157,15 +174,16 @@ impl ModelBrains {
 
     /// The `hybrid` brain whose proposer is the fly: a trained bundle (`hybrid.fly_model`), or the
     /// untrained fly of the `.flyg` named by `model` (task 3.5: plumbing and cost only).
-    fn hybrid_with_fly(&self, spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
+    fn hybrid_with_fly(&self, spec: &PlayerSpec) -> Result<ddai_planner::hybrid::HybridBrain, EnvError> {
         let h = spec.hybrid.as_ref().expect("checked by the caller");
         let (cfg, clock) = hybrid_config(spec)?;
         let seed = 1;
-        let brain = if let Some(bundle) = &h.fly_model {
+        let proposer = if let Some(bundle) = &h.fly_model {
             let Loaded::Fly(t) = &*self.load("fly", bundle)? else {
                 return Err(EnvError::new("hybrid fly_model must be a fly bundle"));
             };
-            t.instantiate(FlyBrainConfig::default())
+            // A model trained with the hook head masked proposes through its second view (`from_template`).
+            ddai_fly::proposer::FlyProposer::from_template(t, FlyBrainConfig::default(), seed)
         } else {
             let flyg = spec.model.as_deref().ok_or_else(|| {
                 EnvError::new("hybrid with proposer = \"fly\" needs model = <.flyg path> or fly_model = <bundle>")
@@ -182,9 +200,33 @@ impl ModelBrains {
                 },
                 expand_home,
             );
-            ddai_fly::proposer::untrained_fly_brain(&flyg, &cfg_path, seed).map_err(EnvError::new)?
+            let brain = ddai_fly::proposer::untrained_fly_brain(&flyg, &cfg_path, seed).map_err(EnvError::new)?;
+            ddai_fly::proposer::FlyProposer::new(brain, seed)
         };
-        let proposer = Box::new(ddai_fly::proposer::FlyProposer::new(brain, seed));
+        let proposer = Box::new(proposer);
+        let hybrid = ddai_planner::hybrid::HybridBrain::new(cfg, clock, proposer).map_err(EnvError::new)?;
+        Ok(hybrid)
+    }
+
+    /// The `hybrid` brain whose proposer is a trained MLP or GRU (`hybrid.control_model`).
+    fn hybrid_with_control(&self, spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
+        let h = spec.hybrid.as_ref().expect("checked by the caller");
+        let kind = h.proposer_name();
+        let bundle = h.control_model.as_deref().ok_or_else(|| {
+            EnvError::new(format!(
+                "hybrid with proposer = {kind:?} needs control_model = <bundle>"
+            ))
+        })?;
+        let Loaded::Control(t) = &*self.load(kind, bundle)? else {
+            return Err(EnvError::new("hybrid control_model must be a control bundle"));
+        };
+        let (cfg, clock) = hybrid_config(spec)?;
+        let seed = 1;
+        let mut proposer = ddai_controls::proposer::ControlProposer::new(t.instantiate(), seed);
+        if t.hook_view() == HookView::MaskedForHookHead {
+            proposer = proposer.with_hook_brain(t.instantiate());
+        }
+        let proposer = Box::new(proposer);
         let hybrid = ddai_planner::hybrid::HybridBrain::new(cfg, clock, proposer).map_err(EnvError::new)?;
         Ok(Box::new(hybrid))
     }
@@ -193,7 +235,15 @@ impl ModelBrains {
     /// [`builtin_brain`].
     pub fn make(&self, spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
         if spec.brain == "hybrid" && spec.hybrid.as_ref().is_some_and(|h| h.proposer_name() == "fly") {
-            return self.hybrid_with_fly(spec);
+            return self.hybrid_with_fly(spec).map(|h| Box::new(h) as Box<dyn Brain>);
+        }
+        if spec.brain == "hybrid"
+            && spec
+                .hybrid
+                .as_ref()
+                .is_some_and(|h| matches!(h.proposer_name(), "mlp" | "gru"))
+        {
+            return self.hybrid_with_control(spec);
         }
         let (kind, path) = match split_kind(&spec.brain) {
             Some((k, p)) => (k, Some(p.to_string())),
@@ -215,11 +265,20 @@ impl ModelBrains {
             }
         };
         Ok(match &*self.load(kind, &path)? {
-            Loaded::Fly(t) => Box::new(t.instantiate(FlyBrainConfig {
+            Loaded::Fly(t) => t.instantiate_played(FlyBrainConfig {
                 action_selection: selection,
                 ..FlyBrainConfig::default()
-            })),
-            Loaded::Control(t) => Box::new(t.instantiate_with(selection)),
+            }),
+            Loaded::Control(t) => {
+                if t.hook_view() == HookView::MaskedForHookHead {
+                    Box::new(TwoViewBrain::new(
+                        Box::new(t.instantiate_with(selection)),
+                        Box::new(t.instantiate_with(selection)),
+                    ))
+                } else {
+                    Box::new(t.instantiate_with(selection))
+                }
+            }
         })
     }
 
@@ -298,5 +357,152 @@ mod tests {
         assert!(e.to_string().contains("needs a model path"), "{e}");
         let e = m.make(&player_from_arg("mlp:/definitely/not/here.bin")).err().unwrap();
         assert!(e.to_string().contains("mlp model"), "{e}");
+    }
+
+    /// A random MLP whose hook logit depends strongly on the own hook input (feature index `d - 4`): one
+    /// weight of the hook output row is large, so a model that sees the own hook state follows it.
+    fn own_hook_follower(hook_view: HookView) -> (tempfile::TempDir, String) {
+        use ddai_controls::bundle::{ControlBundle, save_control_bundle};
+        use ddai_controls::features::input_dim;
+        use ddai_controls::mlp::Mlp;
+        use ddai_controls::net::SeqNet;
+        use ddai_fly::bc::HeadThresholds;
+        use ddai_fly::bundle::BundleMeta;
+        use ddai_fly::encoder::RayGridConfig;
+        let cfg = RayGridConfig::default();
+        let d = input_dim(&cfg);
+        let mut net = Mlp::new(d, 4, 3);
+        // Hidden unit 0 reads the own-hook feature only; the hook head (output row 4 of 8) reads hidden unit 0.
+        let h = 4usize;
+        let p = net.params_mut();
+        p.fill(0.0);
+        p[d - 4] = 6.0; // W1[0][own_hook]
+        let head = h * d + h; // start of the head weights
+        p[head + 4 * h] = 6.0; // hook head, hidden unit 0
+        p[head + 8 * h + 4] = -3.0; // hook head bias: off unless the own hook is out
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.bundle");
+        let b = ControlBundle::from_net(&net, cfg, BundleMeta::default(), HeadThresholds::default(), hook_view);
+        save_control_bundle(&path, &b).unwrap();
+        let s = path.to_string_lossy().into_owned();
+        (dir, s)
+    }
+
+    fn obs_with_own_hook(state: i32) -> ddai_brain::Observation {
+        let map = std::sync::Arc::new(ddai_physics::map::MapData {
+            width: 4,
+            height: 4,
+            game: vec![Default::default(); 16],
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        });
+        let mut me = ddai_brain::CharacterObservation::at_rest(0);
+        me.hook_state = state;
+        ddai_brain::Observation {
+            map,
+            tick: 0,
+            self_state: me,
+            others: vec![ddai_brain::CharacterObservation::at_rest(1)],
+            target_id: Some(1),
+            tuning: ddai_physics::tuning::TuningParams::default(),
+        }
+    }
+
+    #[test]
+    fn a_model_trained_with_the_hook_head_masked_is_played_in_two_views() {
+        let reset = |b: &mut Box<dyn Brain>, obs: &ddai_brain::Observation| {
+            b.reset(&ddai_brain::ResetContext {
+                map: obs.map.clone(),
+                self_id: 0,
+                seed: 1,
+            });
+        };
+        let (_k1, shared) = own_hook_follower(HookView::Shared);
+        let (_k2, masked) = own_hook_follower(HookView::MaskedForHookHead);
+        let m = ModelBrains::new(None);
+        let (idle, grabbed) = (
+            obs_with_own_hook(ddai_brain::HOOK_IDLE),
+            obs_with_own_hook(ddai_brain::HOOK_GRABBED),
+        );
+
+        // A shared-view model follows its own hook state (the copycat shortcut, built in on purpose).
+        let mut b = m.make(&player_from_arg(&format!("mlp:{shared}"))).unwrap();
+        reset(&mut b, &idle);
+        let (a_idle, a_grabbed) = (b.decide(&idle), b.decide(&grabbed));
+        assert!(
+            !a_idle.hook && a_grabbed.hook,
+            "the shared model copies its own hook state"
+        );
+
+        // The masked one cannot: its hook head sees the observation without the own hook state.
+        let mut b = m.make(&player_from_arg(&format!("mlp:{masked}"))).unwrap();
+        assert!(b.name().ends_with("+hookview"), "{}", b.name());
+        reset(&mut b, &idle);
+        let (a_idle, a_grabbed) = (b.decide(&idle), b.decide(&grabbed));
+        assert_eq!(
+            a_idle.hook, a_grabbed.hook,
+            "the hook decision does not depend on the own hook state"
+        );
+        // A fly bundle path that is not a fly bundle is an error naming the problem.
+        let e = m.make(&player_from_arg(&format!("hybrid:fly:{masked}"))).err().unwrap();
+        assert!(e.to_string().contains("fly model"), "{e}");
+    }
+
+    #[test]
+    fn a_trained_control_can_be_the_hybrids_proposer() {
+        let (_k, shared) = own_hook_follower(HookView::Shared);
+        let spec = player_from_arg(&format!("hybrid:mlp:{shared}"));
+        let h = spec.hybrid.as_ref().unwrap();
+        assert_eq!((spec.brain.as_str(), h.proposer_name()), ("hybrid", "mlp"));
+        assert_eq!(h.control_model.as_deref(), Some(shared.as_str()));
+        assert_eq!(label_of_arg(&format!("hybrid:gru:{shared}")), "hybrid+m");
+        let m = ModelBrains::new(None);
+        let b = m.make(&spec).unwrap();
+        assert!(b.name().starts_with("hybrid"), "{}", b.name());
+        // A missing bundle is an error that names the problem, not a panic.
+        let e = m
+            .make(&player_from_arg("hybrid:gru:/definitely/not/here.bundle"))
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("gru model"), "{e}");
+        // A model trained with the hook head masked proposes through two views.
+        let (_k2, masked) = own_hook_follower(HookView::MaskedForHookHead);
+        let b = m.make(&player_from_arg(&format!("hybrid:mlp:{masked}"))).unwrap();
+        assert!(b.name().starts_with("hybrid"), "{}", b.name());
+    }
+
+    /// Review F8 (round 3): the arena's own wiring plays a masked FLY bundle in two views, standalone and as the hybrid's
+    /// proposer, and the work clock charges each network run (twice the price of a one-view proposer).
+    #[test]
+    fn a_masked_fly_bundle_is_played_in_two_views_by_the_arena_standalone_and_as_a_proposer() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = |view: HookView, substeps: u32| {
+            let sub = dir.path().join(format!("{view:?}-{substeps}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            let (b, _flyg) = ddai_fly::brain_fixtures::write_tiny_fly_bundle_with(&sub, view, substeps);
+            b.to_string_lossy().into_owned()
+        };
+        let m = ModelBrains::new(None);
+        let name = |view: HookView| {
+            m.make(&player_from_arg(&format!("fly:{}", bundle(view, 4))))
+                .unwrap()
+                .name()
+                .to_string()
+        };
+        assert!(name(HookView::MaskedForHookHead).ends_with("+hookview"));
+        assert!(!name(HookView::Shared).ends_with("+hookview"));
+
+        // Many substeps, so that the proposal price (nnz x substeps x rate) does not round to 0 on the tiny graph.
+        let units = |view: HookView| {
+            let spec = player_from_arg(&format!("hybrid:fly:{}", bundle(view, 4000)));
+            m.hybrid_with_fly(&spec).unwrap().proposer_work_units()
+        };
+        let one_view = units(HookView::Shared);
+        assert!(one_view > 100, "{one_view}");
+        assert_eq!(units(HookView::MaskedForHookHead), 2 * one_view);
     }
 }

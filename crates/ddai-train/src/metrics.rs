@@ -500,6 +500,7 @@ mod tests {
             soft: None,
             mask,
             weight,
+            hook_scale: 1.0,
         };
         let w = Window {
             observations: vec![obs.clone(), obs.clone(), obs],
@@ -609,6 +610,7 @@ mod tests {
             soft: None,
             mask: HeadMask::ALL,
             weight: 1.0,
+            hook_scale: 1.0,
         };
         let logit = |p: f32| HeadLogits {
             hook: (p / (1.0 - p)).ln(),
@@ -714,6 +716,7 @@ mod tests {
             soft: None,
             mask: HeadMask::ALL,
             weight: 1.0,
+            hook_scale: 1.0,
         };
         let w = Window {
             observations: vec![obs(0), obs(HOOK_FLYING), obs(HOOK_GRABBED), obs(0)],

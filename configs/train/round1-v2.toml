@@ -1,0 +1,199 @@
+# Round-1 teacher data for 8.2b (E-008): 1vN games and technique scenarios, added to round0-v1 (the E-005 data).
+# * 1v2 / 1v3 on the training arenas (clb-left, pit, platform), some with exploration-noise bursts. Holdout arenas are
+#   never collected here (clb-right and chillblock5-ruler stay evaluation-only).
+# * Technique scenarios the fixed-iteration planner solves on training maps (planner pass >= 80% over 100 trials,
+#   E-008: T1, T3, T4, T6, T7, T9, T10, T11, T12, T13, T17; plus T14, the wall hook, 63%): the teacher plays 300 jittered
+#   trials per scenario and only the solved trials are kept (technique demonstrations). T2 (55%), T5 (77%), T15a/b, T16
+#   and T18 (0%) are not collected. Seeds are far from the scenario evaluation seeds, but the start states are the
+#   same family: the T-pass rates of a model trained on this are in-distribution for these scenarios (E-008, "Техники по
+#   запускам": T1 and T7 pass 1-13 of 100 trials for 5 of 6 MLP-w runs trained with them, against 1 of 12 without; T4, which
+#   carries most of the E-008 technique sum, passes without scenario data too).
+name = "round1-v2"
+out = "~/aiddnet/data/datasets/teacher/round1-v2"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+scenarios_dir = "configs/scenarios"
+threads = 3
+round = 0
+actor = "teacher"
+
+[[job]]
+arena = "clb-left"
+games = 1200
+opponents = ["scripted", "scripted"]
+base_seed = 110000000
+[[job]]
+arena = "clb-left"
+games = 600
+opponents = ["scripted", "scripted"]
+noise_prob = 0.04
+base_seed = 120000000
+[[job]]
+arena = "clb-left"
+games = 800
+opponents = ["scripted", "scripted", "scripted"]
+base_seed = 130000000
+[[job]]
+arena = "pit"
+games = 300
+opponents = ["scripted", "scripted"]
+base_seed = 140000000
+[[job]]
+arena = "pit"
+games = 150
+opponents = ["scripted", "scripted"]
+noise_prob = 0.04
+base_seed = 150000000
+[[job]]
+arena = "pit"
+games = 200
+opponents = ["scripted", "scripted", "scripted"]
+base_seed = 160000000
+[[job]]
+arena = "platform"
+games = 300
+opponents = ["scripted", "scripted"]
+base_seed = 170000000
+[[job]]
+arena = "platform"
+games = 150
+opponents = ["scripted", "scripted"]
+noise_prob = 0.04
+base_seed = 180000000
+[[job]]
+arena = "platform"
+games = 200
+opponents = ["scripted", "scripted", "scripted"]
+base_seed = 190000000
+[[job]]
+scenario = "T1"
+games = 300
+only_success = true
+base_seed = 200000000
+[[job]]
+scenario = "T1"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 210000000
+[[job]]
+scenario = "T3"
+games = 300
+only_success = true
+base_seed = 220000000
+[[job]]
+scenario = "T3"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 230000000
+[[job]]
+scenario = "T4"
+games = 300
+only_success = true
+base_seed = 240000000
+[[job]]
+scenario = "T4"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 250000000
+[[job]]
+scenario = "T6"
+games = 300
+only_success = true
+base_seed = 260000000
+[[job]]
+scenario = "T6"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 270000000
+[[job]]
+scenario = "T7"
+games = 300
+only_success = true
+base_seed = 280000000
+[[job]]
+scenario = "T7"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 290000000
+[[job]]
+scenario = "T9"
+games = 300
+only_success = true
+base_seed = 300000000
+[[job]]
+scenario = "T9"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 310000000
+[[job]]
+scenario = "T10"
+games = 300
+only_success = true
+base_seed = 320000000
+[[job]]
+scenario = "T10"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 330000000
+[[job]]
+scenario = "T11"
+games = 300
+only_success = true
+base_seed = 340000000
+[[job]]
+scenario = "T11"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 350000000
+[[job]]
+scenario = "T12"
+games = 300
+only_success = true
+base_seed = 360000000
+[[job]]
+scenario = "T12"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 370000000
+[[job]]
+scenario = "T13"
+games = 300
+only_success = true
+base_seed = 380000000
+[[job]]
+scenario = "T13"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 390000000
+[[job]]
+scenario = "T14"
+games = 300
+only_success = true
+base_seed = 400000000
+[[job]]
+scenario = "T14"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 410000000
+[[job]]
+scenario = "T17"
+games = 300
+only_success = true
+base_seed = 420000000
+[[job]]
+scenario = "T17"
+games = 150
+only_success = true
+noise_prob = 0.04
+base_seed = 430000000

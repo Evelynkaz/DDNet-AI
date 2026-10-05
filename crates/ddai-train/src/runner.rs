@@ -30,7 +30,7 @@ use ddai_fly::rng::SplitMix64;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::experiment::{Env, JobConfig, JobSummary, expand_home, job_key, load_env, run_collect_jobs};
+use crate::experiment::{Env, JobConfig, JobSummary, expand_home, job_key, load_env_with_scenarios, run_collect_jobs};
 use crate::human::{HumanConfig, load_human};
 use crate::learner::{ControlLearner, FlyLearner, FlyTrainConfig, Learner};
 use crate::play_stats::round_hook_play;
@@ -72,6 +72,10 @@ pub struct DaggerConfig {
     pub eval_games: u32,
     #[serde(default)]
     pub eval_arenas: Vec<String>,
+    /// Arenas the checkpoint is selected on (credited win rate); empty = the training arenas among
+    /// `eval_arenas`. A holdout arena listed here is refused.
+    #[serde(default)]
+    pub select_arenas: Vec<String>,
     #[serde(default = "default_lr_scale")]
     pub retrain_lr_scale: f32,
 }
@@ -89,6 +93,7 @@ impl Default for DaggerConfig {
             jobs: Vec::new(),
             eval_games: 0,
             eval_arenas: Vec::new(),
+            select_arenas: Vec::new(),
             retrain_lr_scale: default_lr_scale(),
         }
     }
@@ -102,6 +107,9 @@ pub struct ExperimentConfig {
     pub brain_config: String,
     pub arenas_dir: String,
     pub map_dir: String,
+    /// Technique scenarios the DAgger jobs may label (`scenario = "T1"`); none by default.
+    #[serde(default)]
+    pub scenarios_dir: Option<String>,
     pub run_dir: String,
     /// Read-only teacher datasets (the shared round-0 data).
     pub teacher_base: Vec<String>,
@@ -126,6 +134,8 @@ pub struct Data {
     pub teacher_train: Vec<Seq>,
     pub human_train: Vec<Seq>,
     pub eval_sets: Vec<EvalSet>,
+    /// Chunks of the DAgger store that are already in these corpora (a round loads only the rest).
+    pub dagger_chunks: HashSet<usize>,
 }
 
 fn by_arena(seqs: Vec<Seq>) -> BTreeMap<String, Vec<Seq>> {
@@ -183,7 +193,7 @@ pub fn load_data(
         } = load_teacher(
             &store,
             &store_chunks(&store),
-            &env.arenas,
+            &env.maps,
             &holdout,
             &cfg.teacher_data,
             threads,
@@ -206,7 +216,7 @@ pub fn load_data(
     } = load_teacher(
         dagger,
         &store_chunks(dagger),
-        &env.arenas,
+        &env.maps,
         &holdout,
         &cfg.teacher_data,
         threads,
@@ -249,6 +259,11 @@ pub fn load_data(
             "human data: {}",
             serde_json::to_string(&data.stats).unwrap_or_default()
         ));
+        log(&format!(
+            "human data, Copy Love Box family (D-057): {:.1}% of the scored training steps, {:.1}% of the training sampling weight (after the per-demo caps and the weights)",
+            100.0 * data.stats.step_share_of("Copy"),
+            100.0 * data.stats.weight_share_of("Copy")
+        ));
         human_train = data.train;
         eval_sets.push(EvalSet {
             name: "human-val".into(),
@@ -267,13 +282,55 @@ pub fn load_data(
         teacher_train,
         human_train,
         eval_sets,
+        dagger_chunks: store_chunks(dagger).into_iter().collect(),
     })
 }
 
-/// Puts freshly loaded teacher evaluation sets in front of the (unchanged) human ones.
-fn replace_teacher_sets(sets: &mut Vec<EvalSet>, teacher: Vec<EvalSet>) {
-    sets.retain(|s| s.name.starts_with("human"));
-    sets.splice(0..0, teacher);
+/// Loads the chunks of the DAgger store that are not in the corpora yet (a new round's, plus any left over from
+/// a partly collected round that was loaded when the run started) into training / validation / holdout
+/// sequences, and marks them loaded. A round used to rebuild the whole teacher side (base data included) from
+/// disk while the old corpus was still alive; now the corpus only grows.
+fn load_new_dagger_chunks(
+    cfg: &ExperimentConfig,
+    env: &Env,
+    dagger: &TeacherStore,
+    loaded: &mut HashSet<usize>,
+) -> Result<TeacherSplit, String> {
+    let fresh: Vec<usize> = store_chunks(dagger)
+        .into_iter()
+        .filter(|c| !loaded.contains(c))
+        .collect();
+    let split = load_teacher(
+        dagger,
+        &fresh,
+        &env.maps,
+        &env.holdout_names(),
+        &cfg.teacher_data,
+        cfg.train.threads,
+    )
+    .map_err(|e| e.to_string())?;
+    loaded.extend(fresh);
+    Ok(split)
+}
+
+/// Adds a round's validation and holdout episodes to the evaluation sets (creating the set on first use).
+fn append_eval_sets(sets: &mut Vec<EvalSet>, val: Vec<Seq>, holdout: Vec<Seq>) {
+    let mut add = |name: String, seqs: Vec<Seq>| {
+        if seqs.is_empty() {
+            return;
+        }
+        match sets.iter_mut().find(|s| s.name == name) {
+            Some(s) => s.corpus.append_uniform(seqs),
+            None => sets.push(EvalSet {
+                name,
+                corpus: Corpus::uniform(seqs),
+            }),
+        }
+    };
+    add("dagger-val".to_string(), val);
+    for (arena, seqs) in by_arena(holdout) {
+        add(format!("teacher-holdout:{arena}"), seqs);
+    }
 }
 
 fn clone_seq(s: &Seq) -> Seq {
@@ -293,6 +350,44 @@ fn calibration_windows(corpus: &Corpus, n: usize, len: usize, seed: u64) -> Vec<
     (0..n)
         .map(|_| corpus.sample_window(&mut rng, len, 0, false).observations)
         .collect()
+}
+
+/// How much of the teacher corpus is technique-scenario data (`scn:T*`): episodes, scored decisions and share of the
+/// sampling weight, per scenario. (E-008: what the student actually sees of each technique.)
+pub fn scenario_share_line(teacher: &Corpus) -> String {
+    let mut by: std::collections::BTreeMap<String, (usize, usize, f64)> = std::collections::BTreeMap::new();
+    let mut total = 0.0f64;
+    for s in &teacher.seqs {
+        let w: f64 = s.steps.iter().map(|st| f64::from(st.weight.max(0.0))).sum();
+        total += w;
+        if let crate::seq::Source::Teacher { arena, .. } = &s.source
+            && arena.starts_with("scn:")
+        {
+            let e = by.entry(arena.clone()).or_default();
+            e.0 += 1;
+            e.1 += s.steps.iter().filter(|st| st.weight > 0.0).count();
+            e.2 += w;
+        }
+    }
+    let scn_w: f64 = by.values().map(|e| e.2).sum();
+    let detail: Vec<String> = by
+        .iter()
+        .map(|(k, (n, steps, w))| {
+            format!(
+                "{k}: {n} episodes / {steps} steps / {:.2}%",
+                100.0 * w / total.max(1e-9)
+            )
+        })
+        .collect();
+    format!(
+        "teacher corpus: technique scenarios are {:.2}% of the sampling weight ({})",
+        100.0 * scn_w / total.max(1e-9),
+        if detail.is_empty() {
+            "none".to_string()
+        } else {
+            detail.join("; ")
+        }
+    )
 }
 
 fn pct_opt(x: Option<f64>) -> String {
@@ -349,6 +444,7 @@ pub fn learner_from_bundle(cfg: &ExperimentConfig, path: &Path) -> Result<Box<dy
             let net = b.build().map_err(|e| e.to_string())?;
             let mut l = ControlLearner::new(net, b.ray_grid, cfg.model.lr);
             l.set_thresholds(b.thresholds);
+            l.set_hook_view(b.hook_view);
             Ok(Box::new(l))
         }
     }
@@ -366,6 +462,9 @@ pub struct ArenaEval {
     pub t: u32,
     pub win_rate: Option<[f64; 3]>,
     pub win_rate_all: Option<[f64; 3]>,
+    /// Games won by the player's own credited block over all games (D-059), with its Wilson interval.
+    pub credited_win_rate: Option<[f64; 3]>,
+    pub credited_w: u32,
     pub self_freezes_per_min: f64,
     pub blocks_per_min: f64,
     pub decide_us_p50: Option<u32>,
@@ -417,6 +516,8 @@ pub fn arena_eval(
         t: s.tally.t,
         win_rate: s.win_rate.map(|r| [r.p, r.lo, r.hi]),
         win_rate_all: s.win_rate_all.map(|r| [r.p, r.lo, r.hi]),
+        credited_win_rate: s.credited_win_rate.map(|r| [r.p, r.lo, r.hi]),
+        credited_w: s.credited_w,
         self_freezes_per_min: s.self_freezes_per_min,
         blocks_per_min: s.blocks_per_min,
         decide_us_p50: p0.and_then(|p| p.decide_us_p50),
@@ -428,6 +529,93 @@ fn actor_spec(cfg: &ExperimentConfig, bundle: &Path) -> PlayerSpec {
     let mut s = PlayerSpec::simple(&cfg.model.kind);
     s.model = Some(bundle.to_string_lossy().into_owned());
     s
+}
+
+/// The arenas whose evaluation of `phase` is already in `metrics.jsonl`.
+fn evaluated_arenas(run: &RunDir, phase: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    if let Ok(text) = std::fs::read_to_string(run.path("metrics.jsonl")) {
+        for line in text.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+                && v["kind"] == "arena"
+                && v["phase"] == phase
+                && let Some(a) = v["eval"]["arena"].as_str()
+            {
+                out.insert(a.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Per phase (`bc`, `dagger-1`, ...) the mean credited win rate over `arenas` (every one of them must have
+/// been evaluated in that phase), in the order the phases were evaluated.
+pub fn credited_by_phase(run: &RunDir, arenas: &[String]) -> Vec<(String, f64)> {
+    let mut by_phase: Vec<(String, Vec<(String, f64)>)> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(run.path("metrics.jsonl")) {
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if v["kind"] != "arena" {
+                continue;
+            }
+            let (Some(phase), Some(arena), Some(rate)) = (
+                v["phase"].as_str(),
+                v["eval"]["arena"].as_str(),
+                v["eval"]["credited_win_rate"][0].as_f64(),
+            ) else {
+                continue;
+            };
+            if !arenas.iter().any(|a| a == arena) {
+                continue;
+            }
+            match by_phase.iter_mut().find(|(p, _)| p == phase) {
+                Some((_, list)) => {
+                    if !list.iter().any(|(a, _)| a == arena) {
+                        list.push((arena.to_string(), rate));
+                    }
+                }
+                None => by_phase.push((phase.to_string(), vec![(arena.to_string(), rate)])),
+            }
+        }
+    }
+    by_phase
+        .into_iter()
+        .filter(|(_, list)| list.len() == arenas.len())
+        .map(|(p, list)| (p, list.iter().map(|(_, r)| r).sum::<f64>() / list.len() as f64))
+        .collect()
+}
+
+/// The bundle file a phase's evaluation was made on.
+fn phase_bundle(run: &RunDir, phase: &str) -> Option<PathBuf> {
+    let n: u32 = if phase == "bc" {
+        0
+    } else {
+        phase.strip_prefix("dagger-")?.parse().ok()?
+    };
+    Some(run.path(&format!("rounds/round-{n}.bundle")))
+}
+
+/// The phase chosen by [`select_checkpoint`] and the table it chose from (phase, mean credited win rate).
+pub type Selection = (String, Vec<(String, f64)>);
+
+/// Picks the round to keep by the credited win rate on the **training** arenas only (never a holdout:
+/// selecting on those would leak them), ties to the later round, and copies it to `checkpoints/selected.bundle`.
+/// Returns the chosen phase and the table it chose from.
+pub fn select_checkpoint(run: &RunDir, select_arenas: &[String]) -> Result<Option<Selection>, String> {
+    let table = credited_by_phase(run, select_arenas);
+    let Some((best, _)) = table
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(p, s)| (p.clone(), *s))
+    else {
+        return Ok(None);
+    };
+    // `max_by` keeps the last of equal maxima, i.e. the later round.
+    let src = phase_bundle(run, &best).ok_or_else(|| format!("unknown phase {best:?}"))?;
+    std::fs::copy(&src, run.checkpoint("selected.bundle")).map_err(|e| format!("{}: {e}", src.display()))?;
+    Ok(Some((best, table)))
 }
 
 fn eval_arenas(
@@ -443,7 +631,11 @@ fn eval_arenas(
         return Ok(());
     }
     let spec = actor_spec(cfg, bundle);
+    let done = evaluated_arenas(run, phase);
     for (i, arena) in cfg.dagger.eval_arenas.iter().enumerate() {
+        if done.contains(arena) {
+            continue; // a resumed run does not repeat (or double-log) an evaluation it already made
+        }
         let ev = arena_eval(
             env,
             &spec,
@@ -454,11 +646,17 @@ fn eval_arenas(
             cfg.train.threads,
         )?;
         log(&format!(
-            "arena eval {phase} {arena}: {}:{}:{}:{} win {}",
+            "arena eval {phase} {arena}: {}:{}:{}:{} credited {} win {}",
             ev.w,
             ev.l,
             ev.d,
             ev.t,
+            ev.credited_win_rate.map_or("n/a".to_string(), |r| format!(
+                "{:.1}% [{:.1}; {:.1}]",
+                100.0 * r[0],
+                100.0 * r[1],
+                100.0 * r[2]
+            )),
             ev.win_rate.map_or("n/a".to_string(), |r| format!(
                 "{:.1}% [{:.1}; {:.1}]",
                 100.0 * r[0],
@@ -477,35 +675,108 @@ fn commit_of_source() -> String {
     if dirty { format!("{c}+dirty") } else { c }
 }
 
-/// Refuses to resume a run with fly options that change its gradient (task 7.2c): the backend and
-/// the batched sub-engine count `K` (both change the f32 summation order of the batch gradient) and
-/// the stop-gradient burn-in (truncated BPTT). `stored` is the run directory's `config.toml`,
-/// `new` the config of this invocation. There is no `--allow-config-change` on this build: restore
-/// the values or start a new run directory.
-pub fn check_resume_compat(stored: &FlyTrainConfig, new: &FlyTrainConfig) -> Result<(), String> {
+/// Fields that may change between a kill and the resume without changing what the run computes (thread
+/// counts, logging cadence, how many step bundles are kept, the run directory's own path).
+fn normalised_for_resume(cfg: &ExperimentConfig) -> ExperimentConfig {
+    let mut c = cfg.clone();
+    c.train.threads = 0;
+    c.train.log_every = 0;
+    c.train.keep_checkpoints = 0;
+    c.run_dir = String::new();
+    c.eval_every = 0;
+    // K = 0 and K = 1 are the same single engine (7.2c accepted that change on resume).
+    c.fly.batched_subengines = c.fly.batched_subengines.max(1);
+    c
+}
+
+/// The top-level sections of two configs that differ (the message of a refused resume).
+fn differing_sections(old: &ExperimentConfig, new: &ExperimentConfig) -> Vec<String> {
+    let (Ok(a), Ok(b)) = (toml::Value::try_from(old), toml::Value::try_from(new)) else {
+        return vec!["(not comparable)".to_string()];
+    };
+    let (Some(a), Some(b)) = (a.as_table(), b.as_table()) else {
+        return Vec::new();
+    };
+    let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter().filter(|k| a.get(*k) != b.get(*k)).cloned().collect()
+}
+
+/// The fly options of task 7.2c that change the gradient (the backend, the batched sub-engine count `K`, the
+/// stop-gradient burn-in), named as `fly.<key> <old> -> <new>` for the message of a refused resume.
+fn gradient_option_changes(old: &FlyTrainConfig, new: &FlyTrainConfig) -> Vec<String> {
     let mut diffs = Vec::new();
-    if stored.backend != new.backend {
-        diffs.push(format!("fly.backend {:?} -> {:?}", stored.backend, new.backend));
+    if old.backend != new.backend {
+        diffs.push(format!("fly.backend {:?} -> {:?}", old.backend, new.backend));
     }
     let k = |c: &FlyTrainConfig| c.batched_subengines.max(1);
-    if k(stored) != k(new) {
-        diffs.push(format!("fly.batched_subengines {} -> {}", k(stored), k(new)));
+    if k(old) != k(new) {
+        diffs.push(format!("fly.batched_subengines {} -> {}", k(old), k(new)));
     }
-    if stored.batched_stop_grad_decisions != new.batched_stop_grad_decisions {
+    if old.batched_stop_grad_decisions != new.batched_stop_grad_decisions {
         diffs.push(format!(
             "fly.batched_stop_grad_decisions {} -> {}",
-            stored.batched_stop_grad_decisions, new.batched_stop_grad_decisions
+            old.batched_stop_grad_decisions, new.batched_stop_grad_decisions
         ));
     }
-    if diffs.is_empty() {
-        return Ok(());
+    diffs
+}
+
+/// Records the configuration the run is about to execute: `config.toml` always holds the config of the
+/// **current** (re)start, and every earlier different one is kept as `config-before-<n>.toml` (E-005 review F8:
+/// `e005-mlp-w` ran a DAgger schedule its `config.toml` did not describe). Resuming a run that has started
+/// with a config that differs in anything but [`normalised_for_resume`]'s fields is refused unless
+/// `allow_change` (the new config is then recorded and the change is logged).
+pub fn record_config(
+    run: &RunDir,
+    cfg: &ExperimentConfig,
+    allow_change: bool,
+    log: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    let path = run.path("config.toml");
+    let text = toml::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+    if path.exists() {
+        let old_text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        if old_text == text {
+            return Ok(());
+        }
+        let started = run.path("state.bin").exists();
+        match toml::from_str::<ExperimentConfig>(&old_text) {
+            Ok(old) if started && normalised_for_resume(&old) != normalised_for_resume(cfg) => {
+                let mut sections = differing_sections(&normalised_for_resume(&old), &normalised_for_resume(cfg));
+                let gradient = gradient_option_changes(&old.fly, &cfg.fly);
+                if !gradient.is_empty() {
+                    // Task 7.2c's options change the f32 summation order / the truncation of the gradient: name them.
+                    sections.push(format!("gradient options: {}", gradient.join(", ")));
+                }
+                if !allow_change {
+                    return Err(format!(
+                        "refusing to resume {}: the configuration differs from the one this run started with in {sections:?} \
+                         (re-run with --allow-config-change to accept it; the old config is kept)",
+                        run.path("").display()
+                    ));
+                }
+                log(&format!(
+                    "WARNING: resuming with a changed configuration ({sections:?})"
+                ));
+            }
+            Ok(_) => {}
+            Err(_) if started && !allow_change => {
+                return Err(format!(
+                    "refusing to resume {}: its config.toml cannot be parsed to compare (re-run with --allow-config-change)",
+                    run.path("").display()
+                ));
+            }
+            Err(_) => {}
+        }
+        let mut n = 1;
+        while run.path(&format!("config-before-{n}.toml")).exists() {
+            n += 1;
+        }
+        std::fs::rename(&path, run.path(&format!("config-before-{n}.toml"))).map_err(|e| e.to_string())?;
     }
-    Err(format!(
-        "refusing to resume: the run directory's config.toml differs from this config in settings that change \
-         the gradient ({}). Restore the old values to continue the run, or start a new run directory \
-         (there is no --allow-config-change on this build).",
-        diffs.join(", ")
-    ))
+    std::fs::write(&path, text).map_err(|e| e.to_string())
 }
 
 /// Warnings about fly options that do nothing or train nothing (printed at start).
@@ -533,33 +804,30 @@ pub fn fly_config_warnings(cfg: &ExperimentConfig) -> Vec<String> {
     w
 }
 
-/// Runs (or resumes) an experiment end to end.
+/// Runs (or resumes) an experiment end to end; refuses to resume under a changed configuration.
 pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Result<(), String> {
-    let env = load_env(
+    run_experiment_with(cfg, false, log)
+}
+
+/// [`run_experiment`] with the option to accept a changed configuration on resume.
+pub fn run_experiment_with(
+    cfg: &ExperimentConfig,
+    allow_config_change: bool,
+    log: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    let env = load_env_with_scenarios(
         &expand_home(&cfg.arenas_dir),
         &expand_home(&cfg.map_dir),
         Some(expand_home(&cfg.flyg)),
+        cfg.scenarios_dir.as_deref().map(expand_home).as_deref(),
     )?;
     let run_root = expand_home(&cfg.run_dir);
     let run = RunDir::create(&run_root).map_err(|e| e.to_string())?;
-    let cfg_path = run.path("config.toml");
+    select_arenas(cfg, &env)?; // a holdout selection arena is refused before anything is trained
     for w in fly_config_warnings(cfg) {
         log(&format!("warning: {w}"));
     }
-    if cfg_path.exists() && run.path("state.bin").exists() {
-        // A resume: the options that change the gradient must match what the run started with.
-        let stored = std::fs::read_to_string(&cfg_path).map_err(|e| e.to_string())?;
-        match toml::from_str::<ExperimentConfig>(&stored) {
-            Ok(old) => check_resume_compat(&old.fly, &cfg.fly)?,
-            Err(e) => log(&format!(
-                "warning: cannot parse the run's config.toml, resume options unchecked: {e}"
-            )),
-        }
-    }
-    if !cfg_path.exists() {
-        std::fs::write(&cfg_path, toml::to_string_pretty(cfg).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    }
+    record_config(&run, cfg, allow_config_change, log)?;
     let mut dagger_store = TeacherStore::open_or_create(
         &expand_home(&cfg.teacher_dagger),
         &format!("{}-dagger", cfg.name),
@@ -576,6 +844,7 @@ pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Resu
         teacher_corpus.scored_steps(),
         human_corpus.scored_steps()
     ));
+    log(&scenario_share_line(&teacher_corpus));
 
     let last_bundle = run.checkpoint("last.bundle");
     let learner = if last_bundle.exists() && run.path("state.bin").exists() {
@@ -612,18 +881,22 @@ pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Resu
         ));
         std::fs::create_dir_all(run.path("rounds")).map_err(|e| e.to_string())?;
         std::fs::copy(&last_bundle, run.path("rounds/round-0.bundle")).map_err(|e| e.to_string())?;
+    } else if !run.path("rounds/round-0.bundle").exists() && last_bundle.exists() && rounds == 0 {
+        std::fs::create_dir_all(run.path("rounds")).map_err(|e| e.to_string())?;
+        std::fs::copy(&last_bundle, run.path("rounds/round-0.bundle")).map_err(|e| e.to_string())?;
+    }
+
+    // The BC checkpoint's arena evaluation (a resumed run completes one the kill interrupted).
+    if run.path("rounds/round-0.bundle").exists() {
         eval_arenas(
             cfg,
             &env,
             &run,
             &run.path("rounds/round-0.bundle"),
             "bc",
-            trainer.step,
+            cfg.bc_steps,
             log,
         )?;
-    } else if !run.path("rounds/round-0.bundle").exists() && last_bundle.exists() && rounds == 0 {
-        std::fs::create_dir_all(run.path("rounds")).map_err(|e| e.to_string())?;
-        std::fs::copy(&last_bundle, run.path("rounds/round-0.bundle")).map_err(|e| e.to_string())?;
     }
 
     // DAgger rounds.
@@ -631,6 +904,10 @@ pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Resu
         let phase_first = cfg.bc_steps + u64::from(r - 1) * cfg.dagger.steps_per_round;
         let phase_end = phase_first + cfg.dagger.steps_per_round;
         if trainer.step >= phase_end {
+            let done_bundle = run.path(&format!("rounds/round-{r}.bundle"));
+            if done_bundle.exists() {
+                eval_arenas(cfg, &env, &run, &done_bundle, &format!("dagger-{r}"), phase_end, log)?;
+            }
             continue;
         }
         let actor_bundle = run.path(&format!("rounds/round-{}.bundle", r - 1));
@@ -655,6 +932,16 @@ pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Resu
                     ..j.clone()
                 })
                 .collect();
+            let expected: Vec<String> = jobs.iter().map(job_key).collect();
+            let unexpected = dagger_store.manifest.unexpected_job_keys(r, &expected);
+            if !unexpected.is_empty() {
+                log(&format!(
+                    "WARNING: round {r} already holds jobs the current config does not list (changed seed, games or noise \
+                     length?); they stay in the dataset and the listed jobs are collected next to them: {unexpected:?}"
+                ));
+                run.append_metrics(&json!({"kind": "warning", "round": r, "unexpected_job_keys": unexpected}))
+                    .map_err(|e| e.to_string())?;
+            }
             let already = jobs
                 .iter()
                 .filter(|j| dagger_store.manifest.job_done(r, &job_key(j)))
@@ -686,18 +973,24 @@ pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Resu
             ));
             run.append_metrics(&json!({"kind": "hook_play", "round": r, "counts": hook, "report": report}))
                 .map_err(|e| e.to_string())?;
-            // Aggregate: base + every DAgger round so far.
-            let fresh = load_data(cfg, &env, &dagger_store, false, &mut |_| {})?;
-            trainer.set_teacher(Corpus::new(fresh.teacher_train));
-            replace_teacher_sets(&mut data.eval_sets, fresh.eval_sets);
+            // Aggregate: the corpus grows by this round's episodes.
+            let fresh = load_new_dagger_chunks(cfg, &env, &dagger_store, &mut data.dagger_chunks)?;
+            trainer.append_teacher(fresh.train);
+            append_eval_sets(&mut data.eval_sets, fresh.val, fresh.holdout);
             log(&format!(
                 "round {r}: teacher corpus now {} scored decisions",
                 trainer.teacher_steps()
             ));
-        } else if trainer.step == phase_first {
-            let fresh = load_data(cfg, &env, &dagger_store, false, &mut |_| {})?;
-            trainer.set_teacher(Corpus::new(fresh.teacher_train));
-            replace_teacher_sets(&mut data.eval_sets, fresh.eval_sets);
+            let scen_round: (usize, u64) = summaries
+                .iter()
+                .filter(|j| j.arena.starts_with("scn:"))
+                .fold((0, 0), |a, j| (a.0 + j.games as usize, a.1 + j.steps));
+            if scen_round.0 > 0 {
+                log(&format!(
+                    "round {r}: the student's technique-scenario episodes this round: {} trials, {} decisions labelled",
+                    scen_round.0, scen_round.1
+                ));
+            }
         }
         let saved_scale = trainer.cfg.lr_scale;
         trainer.cfg.lr_scale = saved_scale * cfg.dagger.retrain_lr_scale;
@@ -732,25 +1025,74 @@ pub fn run_experiment(cfg: &ExperimentConfig, log: &mut dyn FnMut(&str)) -> Resu
         )?;
     }
     std::fs::copy(&last_bundle, run.checkpoint("final.bundle")).map_err(|e| e.to_string())?;
+    // The checkpoint to use: the round with the best credited win rate on the training arenas.
+    let select = select_arenas(cfg, &env)?;
+    if let Some((phase, table)) = select_checkpoint(&run, &select)? {
+        let logged = std::fs::read_to_string(run.path("metrics.jsonl")).is_ok_and(|t| {
+            t.lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .rfind(|v| v["kind"] == "selection")
+                .is_some_and(|v| v["phase"] == phase.as_str() && v["table"] == json!(table))
+        });
+        if !logged {
+            log(&format!(
+                "selected {phase} by credited win rate on {select:?}: {table:?}"
+            ));
+            run.append_metrics(&json!({"kind": "selection", "phase": phase, "arenas": select, "table": table}))
+                .map_err(|e| e.to_string())?;
+        }
+    }
     run.write_status(&json!({"phase": "done", "step": trainer.step}))
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// The arenas the checkpoint is selected on: `dagger.select_arenas`, else every evaluation arena that is a
+/// training arena (never a holdout).
+fn select_arenas(cfg: &ExperimentConfig, env: &Env) -> Result<Vec<String>, String> {
+    if !cfg.dagger.select_arenas.is_empty() {
+        for a in &cfg.dagger.select_arenas {
+            let arena = env
+                .arenas
+                .get(a)
+                .ok_or_else(|| format!("dagger.select_arenas: unknown arena {a:?}"))?;
+            if arena.tag.label() != "train" {
+                return Err(format!(
+                    "dagger.select_arenas: {a:?} is a {} arena; selecting a checkpoint on it would leak it",
+                    arena.tag.label()
+                ));
+            }
+        }
+        return Ok(cfg.dagger.select_arenas.clone());
+    }
+    Ok(cfg
+        .dagger
+        .eval_arenas
+        .iter()
+        .filter(|a| env.arenas.get(*a).is_some_and(|x| x.tag.label() == "train"))
+        .cloned()
+        .collect())
 }
 
 /// Offline per-head metrics of a bundle on the held-out sets of an experiment config.
 ///
 /// With `calibrate`, the rate-matched thresholds are fitted on the validation sets first and the
 /// report is at those (otherwise at the bundle's own thresholds, `0.5` for a v1 bundle).
+///
+/// `write_calibrated` (implies `calibrate`) also writes the bundle with those thresholds to a new file: the
+/// same weights at calibrated and at `0.5` thresholds can then be A/B-tested in the arena (review F9).
 pub fn eval_bundle_offline(
     cfg: &ExperimentConfig,
     bundle: &Path,
     calibrate: bool,
+    write_calibrated: Option<&Path>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Vec<crate::trainer::EvalRecord>, String> {
-    let env = load_env(
+    let env = load_env_with_scenarios(
         &expand_home(&cfg.arenas_dir),
         &expand_home(&cfg.map_dir),
         Some(expand_home(&cfg.flyg)),
+        cfg.scenarios_dir.as_deref().map(expand_home).as_deref(),
     )?;
     let dagger_store = TeacherStore::open_or_create(
         &expand_home(&cfg.teacher_dagger),
@@ -768,7 +1110,7 @@ pub fn eval_bundle_offline(
         None,
     )
     .map_err(|e| e.to_string())?;
-    if calibrate {
+    if calibrate || write_calibrated.is_some() {
         trainer
             .calibrate_thresholds("eval", &data.eval_sets)
             .map_err(|e| e.to_string())?;
@@ -777,6 +1119,15 @@ pub fn eval_bundle_offline(
             "rate-matched thresholds jump/hook/fire: {:.3}/{:.3}/{:.3}",
             t.jump, t.hook, t.fire
         ));
+        if let Some(out) = write_calibrated {
+            let meta = if cfg.model.kind == "fly" {
+                load_bundle(bundle).map_err(|e| e.to_string())?.meta
+            } else {
+                load_control_bundle(bundle).map_err(|e| e.to_string())?.meta
+            };
+            trainer.learner().save(out, meta)?;
+            log(&format!("wrote {}", out.display()));
+        }
     }
     Ok(trainer.evaluate(&data.eval_sets))
 }
@@ -788,6 +1139,158 @@ pub fn final_bundle(cfg: &ExperimentConfig) -> PathBuf {
 
 #[allow(dead_code)]
 fn _keep(_: Arc<()>, _: BundleMeta) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> ExperimentConfig {
+        ExperimentConfig {
+            name: "t".into(),
+            model: ModelSpec {
+                kind: "mlp".into(),
+                hidden: 4,
+                lr: 1e-3,
+            },
+            flyg: String::new(),
+            brain_config: String::new(),
+            arenas_dir: String::new(),
+            map_dir: String::new(),
+            scenarios_dir: None,
+            run_dir: String::new(),
+            teacher_base: Vec::new(),
+            teacher_dagger: String::new(),
+            train: TrainConfig::default(),
+            fly: FlyTrainConfig::default(),
+            teacher_data: TeacherDataConfig::default(),
+            human: None,
+            bc_steps: 10,
+            eval_every: 0,
+            dagger: DaggerConfig {
+                betas: vec![0.5, 0.25],
+                ..DaggerConfig::default()
+            },
+        }
+    }
+
+    fn arena_line(phase: &str, arena: &str, credited: f64) -> String {
+        json!({"kind": "arena", "phase": phase, "step": 1, "eval": {"arena": arena, "credited_win_rate": [credited, 0.0, 1.0]}})
+            .to_string()
+    }
+
+    #[test]
+    fn the_checkpoint_is_selected_by_credited_wins_on_the_given_training_arenas_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = RunDir::create(dir.path()).unwrap();
+        std::fs::create_dir_all(run.path("rounds")).unwrap();
+        for n in 0..3 {
+            std::fs::write(run.path(&format!("rounds/round-{n}.bundle")), format!("bundle {n}")).unwrap();
+        }
+        // The holdout arena would pick round 1; the training arenas pick round 2 (round 1 lacks `pit`).
+        let lines = [
+            arena_line("bc", "clb-left", 0.30),
+            arena_line("bc", "pit", 0.10),
+            arena_line("bc", "chillblock5-ruler", 0.20),
+            arena_line("dagger-1", "clb-left", 0.50),
+            arena_line("dagger-1", "chillblock5-ruler", 0.90),
+            arena_line("dagger-2", "clb-left", 0.45),
+            arena_line("dagger-2", "pit", 0.45),
+            arena_line("dagger-2", "chillblock5-ruler", 0.05),
+        ];
+        std::fs::write(run.path("metrics.jsonl"), lines.join("\n") + "\n").unwrap();
+        let arenas = vec!["clb-left".to_string(), "pit".to_string()];
+        let table = credited_by_phase(&run, &arenas);
+        assert_eq!(
+            table.len(),
+            2,
+            "a phase missing a selection arena is not a candidate: {table:?}"
+        );
+        assert!((table[0].1 - 0.20).abs() < 1e-9 && (table[1].1 - 0.45).abs() < 1e-9);
+        let (phase, _) = select_checkpoint(&run, &arenas).unwrap().unwrap();
+        assert_eq!(phase, "dagger-2");
+        assert_eq!(
+            std::fs::read_to_string(run.checkpoint("selected.bundle")).unwrap(),
+            "bundle 2"
+        );
+        // Ties go to the later round; nothing to choose from is not an error.
+        let tie = [
+            arena_line("bc", "clb-left", 0.4),
+            arena_line("dagger-1", "clb-left", 0.4),
+        ];
+        std::fs::write(run.path("metrics.jsonl"), tie.join("\n") + "\n").unwrap();
+        let (phase, _) = select_checkpoint(&run, &["clb-left".to_string()]).unwrap().unwrap();
+        assert_eq!(phase, "dagger-1");
+        std::fs::write(run.path("metrics.jsonl"), "").unwrap();
+        assert!(select_checkpoint(&run, &arenas).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_config_of_every_restart_is_recorded_and_a_changed_resume_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = RunDir::create(dir.path()).unwrap();
+        let log = std::cell::RefCell::new(Vec::<String>::new());
+        let mut sink = |l: &str| log.borrow_mut().push(l.to_string());
+        let a = cfg();
+        // A fresh run records its config.
+        record_config(&run, &a, false, &mut sink).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(run.path("config.toml")).unwrap(),
+            toml::to_string_pretty(&a).unwrap()
+        );
+        // Before the run has started (no state.bin) any change just replaces the file and keeps the old one.
+        let mut b = a.clone();
+        b.dagger.betas = vec![0.5, 0.3, 0.15];
+        record_config(&run, &b, false, &mut sink).unwrap();
+        assert!(run.path("config-before-1.toml").exists());
+        assert!(
+            std::fs::read_to_string(run.path("config.toml"))
+                .unwrap()
+                .contains("0.15")
+        );
+
+        // Once the run has state, a change in what it computes is refused and the files stay as they were.
+        std::fs::write(run.path("state.bin"), b"x").unwrap();
+        let mut c = b.clone();
+        c.dagger.betas = vec![0.5, 0.25, 0.0];
+        let err = record_config(&run, &c, false, &mut sink).unwrap_err();
+        assert!(err.contains("dagger") && err.contains("--allow-config-change"), "{err}");
+        assert!(
+            std::fs::read_to_string(run.path("config.toml"))
+                .unwrap()
+                .contains("0.15")
+        );
+        assert!(!run.path("config-before-2.toml").exists());
+
+        // Thread counts and logging cadence are free to change on resume.
+        let mut d = b.clone();
+        d.train.threads = 1;
+        d.train.log_every = 7;
+        record_config(&run, &d, false, &mut sink).unwrap();
+        assert!(
+            run.path("config-before-2.toml").exists(),
+            "the previous version is kept"
+        );
+
+        // The change can be accepted explicitly; it is logged and the old config kept.
+        record_config(&run, &c, true, &mut sink).unwrap();
+        assert!(run.path("config-before-3.toml").exists());
+        assert!(
+            std::fs::read_to_string(run.path("config.toml"))
+                .unwrap()
+                .contains("0.0")
+        );
+        assert!(
+            log.borrow()
+                .iter()
+                .any(|l| l.contains("WARNING") && l.contains("dagger")),
+            "{:?}",
+            log.borrow()
+        );
+        // The same config again is a no-op.
+        record_config(&run, &c, false, &mut sink).unwrap();
+        assert!(!run.path("config-before-4.toml").exists());
+    }
+}
 
 #[cfg(test)]
 mod resume_checks {
@@ -804,23 +1307,6 @@ mod resume_checks {
         }
     }
 
-    #[test]
-    fn resume_refuses_a_changed_k_stop_gradient_or_backend_and_names_them() {
-        assert!(check_resume_compat(&batched(4, 6), &batched(4, 6)).is_ok());
-        // an old config.toml (no keys) resumes under the defaults; K = 0 means 1
-        assert!(check_resume_compat(&FlyTrainConfig::default(), &FlyTrainConfig::default()).is_ok());
-        assert!(check_resume_compat(&batched(0, 0), &batched(1, 0)).is_ok());
-        let e = check_resume_compat(&batched(1, 0), &batched(4, 0)).unwrap_err();
-        assert!(
-            e.contains("batched_subengines 1 -> 4") && e.contains("refusing to resume"),
-            "{e}"
-        );
-        let e = check_resume_compat(&batched(1, 0), &batched(1, 6)).unwrap_err();
-        assert!(e.contains("batched_stop_grad_decisions 0 -> 6"), "{e}");
-        let e = check_resume_compat(&FlyTrainConfig::default(), &batched(1, 0)).unwrap_err();
-        assert!(e.contains("fly.backend"), "{e}");
-    }
-
     fn experiment(fly: FlyTrainConfig, window_len: usize) -> ExperimentConfig {
         let text = "name = \"t\"\nflyg = \"f\"\nbrain_config = \"b\"\narenas_dir = \"a\"\nmap_dir = \"m\"\nrun_dir = \"r\"\n\
              teacher_base = []\nteacher_dagger = \"d\"\nbc_steps = 1\n[model]\nkind = \"fly\"\n";
@@ -828,6 +1314,48 @@ mod resume_checks {
         cfg.fly = fly;
         cfg.train.window_len = window_len;
         cfg
+    }
+
+    /// Task 7.2c's gradient-changing options (backend, K sub-engines, stop-gradient burn-in) are covered by
+    /// `record_config` (8.2b): a resume that changes any of them is refused, and `--allow-config-change` accepts it.
+    #[test]
+    fn a_resume_that_changes_the_backend_k_or_stop_gradient_is_refused_by_record_config() {
+        let mut sink = |_: &str| {};
+        for (old, new) in [
+            (FlyTrainConfig::default(), batched(1, 0)),
+            (batched(1, 0), batched(4, 0)),
+            (batched(1, 0), batched(1, 6)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let run = RunDir::create(dir.path()).unwrap();
+            record_config(&run, &experiment(old, 32), false, &mut sink).unwrap();
+            std::fs::write(run.path("state.bin"), b"x").unwrap(); // the run has started
+            let e = record_config(&run, &experiment(new.clone(), 32), false, &mut sink).unwrap_err();
+            assert!(e.contains("refusing to resume") && e.contains("fly"), "{e}");
+            record_config(&run, &experiment(new, 32), true, &mut sink).unwrap();
+            assert!(run.path("config-before-1.toml").exists());
+        }
+        // K = 0 and K = 1 are the same single engine: not a change.
+        let dir = tempfile::tempdir().unwrap();
+        let run = RunDir::create(dir.path()).unwrap();
+        record_config(&run, &experiment(batched(0, 0), 32), false, &mut sink).unwrap();
+        std::fs::write(run.path("state.bin"), b"x").unwrap();
+        record_config(&run, &experiment(batched(1, 0), 32), false, &mut sink).unwrap();
+        // A config.toml written before 7.2c has none of the new keys: it resumes under the defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let run = RunDir::create(dir.path()).unwrap();
+        let mut value = toml::Value::try_from(experiment(FlyTrainConfig::default(), 32)).unwrap();
+        let fly = value.get_mut("fly").and_then(toml::Value::as_table_mut).unwrap();
+        for key in ["backend", "batched_subengines", "batched_stop_grad_decisions"] {
+            fly.remove(key);
+        }
+        let old_text = toml::to_string_pretty(&value).unwrap();
+        for key in ["batched_subengines", "batched_stop_grad_decisions"] {
+            assert!(!old_text.contains(key), "{key} is still in the old config text");
+        }
+        std::fs::write(run.path("config.toml"), old_text).unwrap();
+        std::fs::write(run.path("state.bin"), b"x").unwrap();
+        record_config(&run, &experiment(FlyTrainConfig::default(), 32), false, &mut sink).unwrap();
     }
 
     #[test]

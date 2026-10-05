@@ -88,6 +88,17 @@ impl Window {
     pub fn is_empty(&self) -> bool {
         self.observations.is_empty()
     }
+    /// The same window with every observation's own hook state hidden (the hook head's view under
+    /// `HookView::MaskedForHookHead`); targets are unchanged.
+    pub fn with_own_hook_masked(&self) -> Window {
+        Window {
+            observations: self.observations.iter().map(ddai_fly::bc::mask_own_hook).collect(),
+            targets: self.targets.clone(),
+            start: self.start,
+            mirrored: self.mirrored,
+        }
+    }
+
     /// Number of decisions that carry a loss.
     pub fn scored(&self) -> usize {
         self.targets.iter().filter(|t| t.weight > 0.0).count()
@@ -151,6 +162,7 @@ pub fn targets_of(step: &SeqStep, weight: f32, mirror: bool) -> StepTargets {
         soft,
         mask: step.mask,
         weight,
+        hook_scale: 1.0,
     }
 }
 
@@ -224,6 +236,36 @@ impl Corpus {
             }
         }
         Corpus::new(seqs)
+    }
+
+    /// Adds sequences (their positively weighted steps become anchors) without touching the existing ones:
+    /// a DAgger round grows the teacher corpus by its own episodes instead of rebuilding it from the data
+    /// of every round so far.
+    pub fn append(&mut self, more: Vec<Seq>) {
+        let mut total = self.cumulative.last().copied().unwrap_or(0.0);
+        let base = self.seqs.len();
+        for (k, s) in more.iter().enumerate() {
+            for (ti, st) in s.steps.iter().enumerate() {
+                if st.weight > 0.0 {
+                    total += f64::from(st.weight);
+                    self.anchors.push(((base + k) as u32, ti as u32));
+                    self.cumulative.push(total);
+                }
+            }
+        }
+        self.seqs.extend(more);
+    }
+
+    /// [`Corpus::append`] for an evaluation corpus: every positive weight becomes `1`.
+    pub fn append_uniform(&mut self, mut more: Vec<Seq>) {
+        for s in &mut more {
+            for st in &mut s.steps {
+                if st.weight > 0.0 {
+                    st.weight = 1.0;
+                }
+            }
+        }
+        self.append(more);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -368,6 +410,28 @@ mod tests {
         assert_eq!((w.len(), w.start), (10, 0));
         assert_eq!(w.targets[3].weight, 0.0);
         assert_eq!(w.scored(), 9);
+    }
+
+    #[test]
+    fn appending_sequences_equals_building_the_corpus_from_all_of_them() {
+        let all: Vec<Seq> = vec![testutil::seq(20), testutil::seq(35), testutil::seq(12)];
+        let rebuilt = Corpus::new(vec![testutil::seq(20), testutil::seq(35), testutil::seq(12)]);
+        let mut grown = Corpus::new(vec![testutil::seq(20)]);
+        grown.append(all.into_iter().skip(1).collect());
+        assert_eq!(
+            (grown.scored_steps(), grown.seqs.len()),
+            (rebuilt.scored_steps(), rebuilt.seqs.len())
+        );
+        assert!((grown.total_weight() - rebuilt.total_weight()).abs() < 1e-9);
+        let (mut a, mut b) = (SplitMix64::new(5), SplitMix64::new(5));
+        for _ in 0..200 {
+            assert_eq!(grown.sample_anchor(&mut a), rebuilt.sample_anchor(&mut b));
+        }
+        let mut ev = Corpus::uniform(vec![testutil::seq(10)]);
+        let mut heavy = testutil::seq(10);
+        heavy.steps.iter_mut().for_each(|s| s.weight = 7.0);
+        ev.append_uniform(vec![heavy]);
+        assert_eq!(ev.total_weight(), 20.0, "appended evaluation sequences are uniform too");
     }
 
     #[test]

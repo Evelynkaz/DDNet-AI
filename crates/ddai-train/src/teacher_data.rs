@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use ddai_dataset::types::char_flags;
-use ddai_env::arena::Arena;
 use ddai_fly::bc::HeadMask;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -30,6 +29,9 @@ pub struct TeacherDataConfig {
     pub default_round_weight: f32,
     /// Weight of steps played under exploration noise (their labels are still the clean teacher's).
     pub noise_weight: f32,
+    /// Multiplier of the steps of technique-scenario episodes (`scn:T*` arenas): they are short and rare
+    /// next to full games, so they can be drawn more often.
+    pub scenario_weight: f32,
 }
 
 impl Default for TeacherDataConfig {
@@ -39,6 +41,7 @@ impl Default for TeacherDataConfig {
             round_weights: Vec::new(),
             default_round_weight: 1.0,
             noise_weight: 1.0,
+            scenario_weight: 1.0,
         }
     }
 }
@@ -58,17 +61,14 @@ pub struct TeacherSplit {
     pub holdout: Vec<Seq>,
 }
 
-/// One arena's map entry, by arena name.
-pub fn map_entries(arenas: &BTreeMap<String, Arena>) -> BTreeMap<String, Arc<MapEntry>> {
-    arenas
-        .iter()
-        .map(|(name, a)| (name.clone(), MapEntry::new(a.map.clone())))
-        .collect()
-}
-
 /// Turns one episode into a sequence (see the module docs for the weights).
 pub fn episode_to_seq(ep: &Episode, map: &Arc<MapEntry>, round: u32, cfg: &TeacherDataConfig, arena: &str) -> Seq {
-    let base = cfg.round_weight(round);
+    let base = cfg.round_weight(round)
+        * if arena.starts_with("scn:") {
+            cfg.scenario_weight
+        } else {
+            1.0
+        };
     let steps = ep
         .steps
         .iter()
@@ -106,18 +106,17 @@ pub fn episode_to_seq(ep: &Episode, map: &Arc<MapEntry>, round: u32, cfg: &Teach
     }
 }
 
-/// Loads the given chunks of `store` into train / validation / holdout sequences. `arenas` gives
-/// the maps (by arena name, as recorded in the store's manifest); `holdout` names the arenas that
-/// are evaluation-only.
+/// Loads the given chunks of `store` into train / validation / holdout sequences. `maps` gives
+/// the maps (by arena or `scn:` scenario name, as recorded in the store's manifest); `holdout` names the
+/// arenas that are evaluation-only.
 pub fn load_teacher(
     store: &TeacherStore,
     chunks: &[usize],
-    arenas: &BTreeMap<String, Arena>,
+    maps: &BTreeMap<String, Arc<MapEntry>>,
     holdout: &HashSet<String>,
     cfg: &TeacherDataConfig,
     threads: usize,
 ) -> Result<TeacherSplit, StoreError> {
-    let maps = map_entries(arenas);
     let manifest = &store.manifest;
     for a in &manifest.arenas {
         if !maps.contains_key(&a.name) {

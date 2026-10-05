@@ -382,6 +382,16 @@ impl HybridBrain {
             .map_or_else(Vec::new, |s| s.debug_oracle(ctx, plans, predicted))
     }
 
+    /// What the work clock charges for one proposal of this brain's proposer, in tee-tick equivalents (0 without a
+    /// proposer): the price the arena takes off the search budget under `proposal_in_cap` (task 3.7a, D-080).
+    pub fn proposer_work_units(&self) -> u64 {
+        match (self.search.as_ref(), self.proposer.as_ref()) {
+            (Some(search), _) => search.proposer_work_units(),
+            (None, Some(proposer)) => proposer.work_units(),
+            (None, None) => 0,
+        }
+    }
+
     pub fn config(&self) -> &HybridConfig {
         &self.cfg
     }

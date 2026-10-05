@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ddai_brain::{Action, Brain, Observation, ResetContext};
-use ddai_fly::bc::HeadThresholds;
+use ddai_fly::bc::{HeadLogits, HeadThresholds, HookView};
 use ddai_fly::brain::ActionSelection;
 use ddai_fly::brain::aim_angle_to_target;
 use ddai_fly::bundle::{BundleError, BundleMeta};
@@ -32,6 +32,8 @@ pub struct ControlBrain {
     selection: ActionSelection,
     thresholds: HeadThresholds,
     rng: SplitMix64,
+    /// The head logits of the last decision (`None` before the first / after a reset).
+    last_logits: Option<HeadLogits>,
 }
 
 impl ControlBrain {
@@ -59,7 +61,13 @@ impl ControlBrain {
             selection,
             thresholds: HeadThresholds::default(),
             rng: SplitMix64::new(0),
+            last_logits: None,
         }
+    }
+
+    /// The head logits of the most recent `decide()` (a hybrid proposer turns their probabilities into plans).
+    pub fn last_logits(&self) -> Option<&HeadLogits> {
+        self.last_logits.as_ref()
     }
 
     /// Decision thresholds of the jump/hook/fire heads under argmax selection (default `0.5`).
@@ -77,12 +85,14 @@ impl Brain for ControlBrain {
     fn reset(&mut self, ctx: &ResetContext) {
         self.rng = SplitMix64::new(ctx.seed);
         self.state.fill(0.0);
+        self.last_logits = None;
     }
 
     fn decide(&mut self, obs: &Observation) -> Action {
         let t0 = Instant::now();
         extract(obs, &self.ray_grid, &mut self.scratch, &mut self.x);
         let l = self.net.step(&mut self.state, &self.x);
+        self.last_logits = Some(l);
         let p = l.dir_probs();
         let (best, jump, hook, fire) = match self.selection {
             ActionSelection::Argmax => (
@@ -131,6 +141,7 @@ pub struct ControlTemplate {
     net: Arc<dyn SeqNet>,
     ray_grid: RayGridConfig,
     thresholds: HeadThresholds,
+    hook_view: HookView,
     pub meta: BundleMeta,
 }
 
@@ -140,8 +151,14 @@ impl ControlTemplate {
             net,
             ray_grid,
             thresholds: HeadThresholds::default(),
+            hook_view: HookView::Shared,
             meta,
         }
+    }
+
+    /// How the hook head sees the own hook state (a masked model must be played in two views).
+    pub fn hook_view(&self) -> HookView {
+        self.hook_view
     }
 
     /// The same template with calibrated decision thresholds.
@@ -169,6 +186,7 @@ impl ControlTemplate {
             net,
             ray_grid: b.ray_grid,
             thresholds: b.thresholds,
+            hook_view: b.hook_view,
             meta: b.meta,
         })
     }

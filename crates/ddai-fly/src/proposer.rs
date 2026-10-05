@@ -42,6 +42,9 @@ pub fn proposal_tee_ticks(brain: &FlyBrain) -> u64 {
 /// The fly as a [`Proposer`].
 pub struct FlyProposer {
     brain: FlyBrain,
+    /// A second fly for the hook head (`HookView::MaskedForHookHead`): it sees the observation with the own hook
+    /// state hidden and supplies the hook probability; everything else comes from `brain`.
+    hook_brain: Option<FlyBrain>,
     rng: SplitMix64,
     name: String,
     /// The work-clock price of one `propose` call, in tee-tick equivalents.
@@ -56,6 +59,7 @@ impl FlyProposer {
         FlyProposer {
             units: proposal_tee_ticks(&brain),
             brain,
+            hook_brain: None,
             rng: SplitMix64::new(seed),
             name: "fly".to_string(),
             last_decide_us: 0,
@@ -63,8 +67,72 @@ impl FlyProposer {
         }
     }
 
+    /// A proposer over a trained bundle, played the way the bundle was trained: a model with the hook head masked
+    /// (`HookView::MaskedForHookHead`) gets its second view for the hook probability.
+    pub fn from_template(template: &crate::bundle::FlyBrainTemplate, config: FlyBrainConfig, seed: u64) -> FlyProposer {
+        let masked = template.hook_view() == crate::bc::HookView::MaskedForHookHead;
+        let hook_brain = masked.then(|| template.instantiate(config.clone()));
+        let p = FlyProposer::new(template.instantiate(config), seed);
+        match hook_brain {
+            Some(h) => p.with_hook_brain(h),
+            None => p,
+        }
+    }
+
     pub fn brain(&self) -> &FlyBrain {
         &self.brain
+    }
+
+    /// Whether the hook probability comes from a second, masked view.
+    pub fn has_hook_view(&self) -> bool {
+        self.hook_brain.is_some()
+    }
+
+    /// The action distribution of one decision: the fly's heads, with the hook probability from the second, masked view
+    /// when there is one (and then the viewer's frame shows that played hook and both views' time). `None` before the
+    /// fly has decoded anything.
+    pub fn distribution(&mut self, obs: &ddai_brain::Observation) -> Option<ActionDistribution> {
+        let t0 = std::time::Instant::now();
+        let _ = self.brain.decide(obs);
+        let hook_view = self.hook_brain.as_mut().map(|h| {
+            let masked = crate::bc::mask_own_hook(obs);
+            let played = h.decide(&masked);
+            (played.hook, h.last_decoded().map(|d| d.hook_prob))
+        });
+        self.last_decide_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.decisions += 1;
+        let d = *self.brain.last_decoded()?;
+        let mut hook_prob = d.hook_prob;
+        if let (Some(h), Some((hook, Some(p)))) = (&self.hook_brain, hook_view) {
+            hook_prob = p;
+            // The viewer's frame shows the hook the proposal is built from (the masked view's own decision) and both
+            // views' time.
+            self.brain.set_played_override(Some(crate::brain::PlayedOverride {
+                hook,
+                hook_prob: p,
+                latency: self.brain.last_latency() + h.last_latency(),
+            }));
+        }
+        // The fly's aim angle uses the ring convention `(cos a, -sin a)`; the planner's angles are
+        // `atan2(dy, dx)` with y down, hence the sign.
+        Some(ActionDistribution {
+            direction: d.direction_probs.map(f64::from),
+            jump: f64::from(d.jump_prob),
+            hook: f64::from(hook_prob),
+            fire: f64::from(d.fire_prob),
+            aim_angle: -f64::from(d.aim_angle),
+        })
+    }
+
+    /// A proposer for a model played in two views: `hook_brain` decides the hook probability.
+    ///
+    /// The second view is a second network run per proposal, so its price (`proposal_tee_ticks`) is added to the
+    /// work-clock price: a masked proposer costs twice a shared one (3.7a's `proposal_in_cap` takes that price off
+    /// the search budget; one view's price would hand a two-view proposer free search time).
+    pub fn with_hook_brain(mut self, hook_brain: FlyBrain) -> FlyProposer {
+        self.units += proposal_tee_ticks(&hook_brain);
+        self.hook_brain = Some(hook_brain);
+        self
     }
 }
 
@@ -75,25 +143,15 @@ impl Proposer for FlyProposer {
 
     fn reset(&mut self, ctx: &ResetContext) {
         self.brain.reset(ctx);
+        if let Some(h) = &mut self.hook_brain {
+            h.reset(ctx);
+        }
         self.rng = SplitMix64::new(ctx.seed ^ 0xF1F1_F1F1);
     }
 
     fn propose(&mut self, ctx: &ProposeCtx<'_>, out: &mut Vec<Vec<PlanStep>>) {
-        let t0 = std::time::Instant::now();
-        let _ = self.brain.decide(ctx.obs);
-        self.last_decide_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
-        self.decisions += 1;
-        let Some(d) = self.brain.last_decoded() else {
+        let Some(dist) = self.distribution(ctx.obs) else {
             return;
-        };
-        // The fly's aim angle uses the ring convention `(cos a, -sin a)`; the planner's angles are
-        // `atan2(dy, dx)` with y down, hence the sign.
-        let dist = ActionDistribution {
-            direction: d.direction_probs.map(f64::from),
-            jump: f64::from(d.jump_prob),
-            hook: f64::from(d.hook_prob),
-            fire: f64::from(d.fire_prob),
-            aim_angle: -f64::from(d.aim_angle),
         };
         let rng = &mut self.rng;
         plans_from_distribution(&dist, ctx.steps, ctx.k, &mut || f64::from(rng.next_f32_unit()), out);

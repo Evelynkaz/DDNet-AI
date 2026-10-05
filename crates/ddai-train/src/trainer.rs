@@ -16,7 +16,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use ddai_fly::bc::{LossConfig, StepLoss};
+use ddai_brain::{HOOK_FLYING, HOOK_GRABBED, HOOK_IDLE};
+use ddai_fly::bc::{HookView, LossConfig, StepLoss};
 use ddai_fly::bundle::{BundleMeta, read_zstd_postcard, write_zstd_postcard};
 use ddai_fly::rng::SplitMix64;
 use rayon::prelude::*;
@@ -25,7 +26,92 @@ use serde_json::{Value, json};
 
 use crate::learner::{Learner, WindowStats, Workspace};
 use crate::metrics::{HeadReport, MetricsAccumulator};
-use crate::seq::{Corpus, Window};
+use crate::seq::{Corpus, Seq, Window};
+
+/// How the own hook state (the `own_hook` input) reaches the hook head during training (E-005 review F2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnHookMode {
+    /// Nothing special: the model sees its own hook state everywhere (the 8.2 baseline).
+    #[default]
+    Off,
+    /// With probability `dropout` per decision the own hook state is hidden from the whole model
+    /// while training (never at play): the model cannot lean on it alone.
+    Dropout,
+    /// The hook head is trained and played on the observation with the own hook state hidden; the other
+    /// heads keep it (two passes, see `ddai_fly::bc::HookView`).
+    MaskHookHead,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OwnHookConfig {
+    pub mode: OwnHookMode,
+    /// Probability of hiding the own hook state at one decision (mode `dropout`).
+    pub dropout: f32,
+    /// Multiplier of the hook head's loss on **start and release decisions** (the label disagrees with
+    /// the own hook being out); `1` = off.
+    pub switch_weight: f32,
+}
+
+impl Default for OwnHookConfig {
+    fn default() -> Self {
+        OwnHookConfig {
+            mode: OwnHookMode::Off,
+            dropout: 0.4,
+            switch_weight: 1.0,
+        }
+    }
+}
+
+impl OwnHookConfig {
+    pub fn view(&self) -> HookView {
+        match self.mode {
+            OwnHookMode::MaskHookHead => HookView::MaskedForHookHead,
+            _ => HookView::Shared,
+        }
+    }
+}
+
+/// The two loss configurations of the masked-hook-head training (`own_hook.mode = "mask_hook_head"`): the first
+/// drops the hook head (it runs on the full observation), the second keeps only the hook head (it runs on the
+/// observation with the own hook state hidden). Shared by the per-sequence and the batched path.
+fn two_view_losses(loss: &LossConfig) -> (LossConfig, LossConfig) {
+    let mut full = *loss;
+    full.w_hook = 0.0;
+    let mut hook = *loss;
+    (hook.w_dir, hook.w_jump, hook.w_fire, hook.w_aim) = (0.0, 0.0, 0.0, 0.0);
+    (full, hook)
+}
+
+/// Applies the own-hook options to a freshly sampled window: marks the start/release decisions for the
+/// hook head's extra weight, hides the own hook state at random decisions (`dropout`), and returns the
+/// masked copy for the second view (`mask_hook_head`). The draws come only from `rng` and only in the
+/// `dropout` mode, so every other mode keeps the batch's random stream untouched.
+pub fn prepare_own_hook(window: &mut Window, cfg: &OwnHookConfig, rng: &mut SplitMix64) -> Option<Window> {
+    if (cfg.switch_weight - 1.0).abs() > f32::EPSILON {
+        for (t, o) in window.targets.iter_mut().zip(&window.observations) {
+            if t.weight > 0.0 && t.mask.hook {
+                let out = matches!(o.self_state.hook_state, HOOK_FLYING | HOOK_GRABBED);
+                if t.hook != out {
+                    t.hook_scale = cfg.switch_weight;
+                }
+            }
+        }
+    }
+    match cfg.mode {
+        OwnHookMode::Off => None,
+        OwnHookMode::Dropout => {
+            for o in &mut window.observations {
+                if rng.next_f32_unit() < cfg.dropout {
+                    o.self_state.hook_state = HOOK_IDLE;
+                }
+            }
+            None
+        }
+        OwnHookMode::MaskHookHead => Some(window.with_own_hook_masked()),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -44,6 +130,7 @@ pub struct TrainConfig {
     pub grad_clip: f32,
     pub threads: usize,
     pub loss: LossConfig,
+    pub own_hook: OwnHookConfig,
     /// Refresh the learner's derived state (the fly's resting state) this often.
     pub refresh_every: u64,
     pub log_every: u64,
@@ -65,9 +152,10 @@ impl Default for TrainConfig {
             grad_clip: 1.0,
             threads: 6,
             loss: LossConfig::default(),
+            own_hook: OwnHookConfig::default(),
             refresh_every: 25,
             log_every: 50,
-            eval_windows: 300,
+            eval_windows: 600,
             keep_checkpoints: 3,
         }
     }
@@ -263,6 +351,8 @@ impl Trainer {
             .num_threads(cfg.threads.max(1))
             .build()
             .map_err(|e| TrainError(format!("thread pool: {e}")))?;
+        let mut learner = learner;
+        learner.set_hook_view(cfg.own_hook.view());
         let n = learner.num_params();
         let base_lrs = learner.base_lrs();
         Ok(Trainer {
@@ -289,6 +379,10 @@ impl Trainer {
     }
     pub fn set_teacher(&mut self, teacher: Corpus) {
         self.teacher = teacher;
+    }
+    /// Adds a DAgger round's episodes to the teacher corpus.
+    pub fn append_teacher(&mut self, seqs: Vec<Seq>) {
+        self.teacher.append(seqs);
     }
     pub fn teacher_steps(&self) -> usize {
         self.teacher.scored_steps()
@@ -364,36 +458,22 @@ impl Trainer {
     }
 
     /// Training window `i` of batch `step`, deterministic in `(seed, step, i)`, plus the optional
-    /// *second view* of it (the window with a different observation for a second loss pass; always
-    /// `None` in this tree). The **one** place that turns a batch index into a window, shared by
-    /// the per-sequence and the batched path, so whatever is done to a freshly sampled window
-    /// (augmentation, own-hook treatment, ...) applies to both backends.
-    ///
-    /// TODO(8.2b merge): 8.2b's own-hook treatment goes right after `sample_window` here:
-    /// `let masked = prepare_own_hook(&mut window, &cfg.own_hook, &mut rng);` and `(window,
-    /// masked)` is returned (its per-sequence two-view loss stays in `batch`). The batched path
-    /// refuses a second view ([`Trainer::batch_batched`]) and the options that need one
-    /// ([`Trainer::ensure_batched_supported`]) until `Learner::batch_grad` implements them.
+    /// *second view* of it (the window with the own hook state hidden, for the hook head under
+    /// `own_hook.mode = "mask_hook_head"`; `None` otherwise). The **one** place that turns a batch
+    /// index into a window, shared by the per-sequence and the batched path, so whatever is done to a
+    /// freshly sampled window (augmentation, own-hook treatment) applies to both backends: the
+    /// own-hook options (`prepare_own_hook`: start/release loss weight, dropout of the own hook state,
+    /// the masked second view) are applied here, right after sampling. Both backends run the second view
+    /// as a second loss pass over the batch (`batch`, `batch_batched`).
     fn training_window(&self, step: u64, i: usize, mirror: bool) -> (Window, Option<Window>) {
         let cfg = &self.cfg;
         let mut rng = SplitMix64::new(mix(cfg.seed, step, i as u64));
         let use_human = !self.human.is_empty() && (self.teacher.is_empty() || rng.next_f32_unit() < cfg.human_fraction);
         let corpus = if use_human { &self.human } else { &self.teacher };
         let flip = mirror && rng.next_f32_unit() < 0.5;
-        let window = corpus.sample_window(&mut rng, cfg.window_len, cfg.burn_in, flip);
-        (window, None)
-    }
-
-    /// Refuses the batched backend for training options it does not implement, so that it can
-    /// never silently train something other than what the per-sequence backend would.
-    ///
-    /// TODO(8.2b merge): `TrainConfig` gets an `own_hook` section there (`mode`, `dropout`,
-    /// `switch_weight`). Until the batched path supports it, this must return an error when
-    /// `cfg.own_hook.mode != OwnHookMode::Off` or `cfg.own_hook.switch_weight != 1.0`; whichever
-    /// of 7.2b/8.2b merges second adds that condition (or implements the option in
-    /// `batch_grad` and deletes this hook point). There is nothing to refuse in this tree.
-    fn ensure_batched_supported(&self) -> Result<(), TrainError> {
-        Ok(())
+        let mut window = corpus.sample_window(&mut rng, cfg.window_len, cfg.burn_in, flip);
+        let masked = prepare_own_hook(&mut window, &cfg.own_hook, &mut rng);
+        (window, masked)
     }
 
     /// One batch: summed (unnormalised) gradient and stats, deterministic in `(seed, step)`.
@@ -411,9 +491,20 @@ impl Trainer {
                 .map_init(
                     || learner.new_workspace(cfg.window_len),
                     |ws: &mut Workspace, i| {
-                        let (window, _second_view) = self.training_window(step, i, mirror);
+                        let (window, masked) = self.training_window(step, i, mirror);
                         let mut grad = vec![0.0f32; n];
-                        let stats = learner.window_grad(&window, &cfg.loss, ws, &mut grad);
+                        let stats = match &masked {
+                            None => learner.window_grad(&window, &cfg.loss, ws, &mut grad),
+                            Some(m) => {
+                                // Two views: everything but the hook head on the full observation, the
+                                // hook head on the masked one. One normaliser (the full pass's).
+                                let (loss_full, loss_hook) = two_view_losses(&cfg.loss);
+                                let mut stats = learner.window_grad(&window, &loss_full, ws, &mut grad);
+                                let hook = learner.window_grad(m, &loss_hook, ws, &mut grad);
+                                stats.loss.add(&hook.loss);
+                                stats
+                            }
+                        };
                         (grad, stats, window.len())
                     },
                 )
@@ -438,37 +529,54 @@ impl Trainer {
     /// (same per-`(seed, step, index)` sampling), but forward/backward run once over the whole
     /// batch instead of once per window.
     fn batch_batched(&self, step: u64) -> Result<(Vec<f32>, WindowStats, usize), TrainError> {
-        self.ensure_batched_supported()?;
         let cfg = &self.cfg;
         let learner = self.learner.as_ref();
         let n = learner.num_params();
         let mirror = learner.mirror_augment();
-        let windows = self.pool.install(|| {
+        let pairs: Vec<(Window, Option<Window>)> = self.pool.install(|| {
             (0..cfg.batch_windows)
                 .into_par_iter()
-                .map(|i| {
-                    let (window, second_view) = self.training_window(step, i, mirror);
-                    if second_view.is_some() {
-                        return Err(TrainError(
-                            "the batched backend does not support a second window view (own-hook mask_hook_head)"
-                                .into(),
-                        ));
-                    }
-                    Ok(window)
-                })
-                .collect::<Result<Vec<Window>, TrainError>>()
-        })?;
+                .map(|i| self.training_window(step, i, mirror))
+                .collect()
+        });
+        let masked = pairs.iter().filter(|(_, m)| m.is_some()).count();
+        if masked != 0 && masked != pairs.len() {
+            return Err(TrainError(
+                "own_hook mask_hook_head: every window of a batch must have a masked view or none".into(),
+            ));
+        }
+        let (windows, second): (Vec<Window>, Vec<Option<Window>>) = pairs.into_iter().unzip();
         let mut grad = vec![0.0f32; n];
-        let per_window = self
-            .pool
-            .install(|| learner.batch_grad(&windows, &cfg.loss, &mut grad))?;
         let mut stats = WindowStats::default();
         let mut decisions = 0;
-        for (s, w) in per_window.iter().zip(&windows) {
-            stats.loss.add(&s.loss);
-            stats.weight_sum += s.weight_sum;
-            stats.activity_loss += s.activity_loss;
-            decisions += w.len();
+        if masked == 0 {
+            let per_window = self
+                .pool
+                .install(|| learner.batch_grad(&windows, &cfg.loss, &mut grad))?;
+            for (s, w) in per_window.iter().zip(&windows) {
+                stats.loss.add(&s.loss);
+                stats.weight_sum += s.weight_sum;
+                stats.activity_loss += s.activity_loss;
+                decisions += w.len();
+            }
+        } else {
+            // Two views, as in the per-sequence path: everything but the hook head on the full
+            // observation, the hook head on the masked one; one normaliser (the full pass's).
+            let (loss_full, loss_hook) = two_view_losses(&cfg.loss);
+            let views: Vec<Window> = second.into_iter().flatten().collect();
+            let full = self
+                .pool
+                .install(|| learner.batch_grad(&windows, &loss_full, &mut grad))?;
+            let hook = self
+                .pool
+                .install(|| learner.batch_grad(&views, &loss_hook, &mut grad))?;
+            for ((s, h), w) in full.iter().zip(&hook).zip(&windows) {
+                stats.loss.add(&s.loss);
+                stats.loss.add(&h.loss);
+                stats.weight_sum += s.weight_sum;
+                stats.activity_loss += s.activity_loss;
+                decisions += w.len();
+            }
         }
         Ok((grad, stats, decisions))
     }
@@ -611,7 +719,7 @@ impl Trainer {
         let mut total = MetricsAccumulator::new();
         let mut used = Vec::new();
         for set in eval.iter().filter(|s| CALIBRATION_SETS.contains(&s.name.as_str())) {
-            if let Some(acc) = accumulate_set(self.learner.as_ref(), set, &self.cfg, &self.pool) {
+            if let Some(acc) = accumulate_set(self.learner.as_ref(), set, &self.cfg, &self.pool, WindowHalf::Fit) {
                 total.merge(acc);
                 used.push(set.name.clone());
             }
@@ -654,6 +762,28 @@ impl Trainer {
 /// ones the decision thresholds are calibrated on.
 pub const CALIBRATION_SETS: [&str; 2] = ["teacher-val", "dagger-val"];
 
+/// Which of a set's fixed evaluation windows to use. Thresholds are fitted on the **even** windows
+/// ([`WindowHalf::Fit`]) and the calibration sets are reported on the **odd** ones
+/// ([`WindowHalf::Report`]), so a reported press rate is out-of-fit (E-005 review F9: the thresholds used to
+/// be fitted and then reported on the same windows, which made the jump/fire rate matches true by
+/// construction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowHalf {
+    All,
+    Fit,
+    Report,
+}
+
+impl WindowHalf {
+    fn includes(self, i: usize) -> bool {
+        match self {
+            WindowHalf::All => true,
+            WindowHalf::Fit => i.is_multiple_of(2),
+            WindowHalf::Report => i % 2 == 1,
+        }
+    }
+}
+
 /// The scores of `learner` on `set` over the fixed evaluation windows (`None` for an empty set),
 /// with the learner's own decision thresholds for the point metrics.
 pub fn accumulate_set(
@@ -661,6 +791,7 @@ pub fn accumulate_set(
     set: &EvalSet,
     cfg: &TrainConfig,
     pool: &rayon::ThreadPool,
+    half: WindowHalf,
 ) -> Option<MetricsAccumulator> {
     if set.corpus.is_empty() {
         return None;
@@ -672,11 +803,13 @@ pub fn accumulate_set(
     let thresholds = learner.thresholds();
     let per_window: Vec<MetricsAccumulator> = pool.install(|| {
         (0..cfg.eval_windows)
+            .filter(|&i| half.includes(i))
+            .collect::<Vec<usize>>()
             .into_par_iter()
             .map(|i| {
                 let mut rng = SplitMix64::new(mix(0xE7A1_5EED ^ name_hash, 0, i as u64));
                 let w = set.corpus.sample_window(&mut rng, cfg.window_len, cfg.burn_in, false);
-                let logits = learner.window_logits(&w);
+                let logits = learner.window_logits_played(&w);
                 let mut acc = MetricsAccumulator::with_thresholds(thresholds);
                 acc.add_window(&w, &logits);
                 acc
@@ -692,8 +825,15 @@ pub fn accumulate_set(
 
 /// Metrics of `learner` on `set` (see [`Trainer::evaluate`]).
 pub fn evaluate_set(learner: &dyn Learner, set: &EvalSet, cfg: &TrainConfig, pool: &rayon::ThreadPool) -> EvalRecord {
+    // The sets thresholds are fitted on are reported on the windows that were not used for the fit.
+    let half = if CALIBRATION_SETS.contains(&set.name.as_str()) {
+        WindowHalf::Report
+    } else {
+        WindowHalf::All
+    };
     EvalRecord {
         set: set.name.clone(),
-        report: accumulate_set(learner, set, cfg, pool).map_or_else(HeadReport::default, MetricsAccumulator::finish),
+        report: accumulate_set(learner, set, cfg, pool, half)
+            .map_or_else(HeadReport::default, MetricsAccumulator::finish),
     }
 }

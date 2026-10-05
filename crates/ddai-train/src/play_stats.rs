@@ -32,6 +32,12 @@ pub struct HookCounts {
 pub struct HookPlay {
     pub not_out: HookCounts,
     pub out: HookCounts,
+    /// `out` split by what the hook is doing: still flying, grabbed onto a player, grabbed onto terrain. The
+    /// teacher's release decision depends on this (it lets go of a hook that has done its job), and the
+    /// models' inputs carry only "out" as one scalar (E-008: why release is not learnable from them).
+    pub out_flying: HookCounts,
+    pub out_player: HookCounts,
+    pub out_terrain: HookCounts,
 }
 
 /// Rates derived from [`HookPlay`] (`None` where the state never occurred).
@@ -58,15 +64,32 @@ impl HookPlay {
                 continue;
             }
             let out = matches!(i32::from(s.me.hook_state), HOOK_FLYING | HOOK_GRABBED);
-            let c = if out { &mut self.out } else { &mut self.not_out };
-            c.n += 1;
-            c.student_hook += u64::from(s.played.hook);
-            c.teacher_hook += u64::from(s.label.hook);
+            let add = |c: &mut HookCounts| {
+                c.n += 1;
+                c.student_hook += u64::from(s.played.hook);
+                c.teacher_hook += u64::from(s.label.hook);
+            };
+            add(if out { &mut self.out } else { &mut self.not_out });
+            if out {
+                if i32::from(s.me.hook_state) == HOOK_FLYING {
+                    add(&mut self.out_flying);
+                } else if s.me.hooked_player >= 0 {
+                    add(&mut self.out_player);
+                } else {
+                    add(&mut self.out_terrain);
+                }
+            }
         }
     }
 
     pub fn merge(&mut self, other: &HookPlay) {
-        for (a, b) in [(&mut self.not_out, &other.not_out), (&mut self.out, &other.out)] {
+        for (a, b) in [
+            (&mut self.not_out, &other.not_out),
+            (&mut self.out, &other.out),
+            (&mut self.out_flying, &other.out_flying),
+            (&mut self.out_player, &other.out_player),
+            (&mut self.out_terrain, &other.out_terrain),
+        ] {
             a.n += b.n;
             a.student_hook += b.student_hook;
             a.teacher_hook += b.teacher_hook;
@@ -171,6 +194,29 @@ mod tests {
         assert!((r.out_share - 2.0 / 6.0).abs() < 1e-12);
         assert_eq!((r.start_student, r.start_teacher), (Some(0.0), Some(0.5)));
         assert_eq!((r.release_student, r.release_teacher), (Some(0.0), Some(0.5)));
+    }
+
+    #[test]
+    fn a_hook_that_is_out_is_split_into_flying_grabbed_on_a_player_and_grabbed_on_terrain() {
+        let mut flying = step(HOOK_FLYING, false, 0, true, true);
+        flying.me.hooked_player = -1;
+        let mut on_player = step(HOOK_GRABBED, false, 0, false, true);
+        on_player.me.hooked_player = 1;
+        let mut on_wall = step(HOOK_GRABBED, false, 0, false, true);
+        on_wall.me.hooked_player = -1;
+        let ep = episode(vec![flying, on_player.clone(), on_player, on_wall]);
+        let h = hook_play_of([&ep]);
+        assert_eq!((h.out.n, h.out_flying.n, h.out_player.n, h.out_terrain.n), (4, 1, 2, 1));
+        // The teacher keeps a flying hook out and lets go of grabbed ones; the student never lets go.
+        assert_eq!(
+            (
+                h.out_flying.teacher_hook,
+                h.out_player.teacher_hook,
+                h.out_terrain.teacher_hook
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(h.out_player.student_hook, 2);
     }
 
     #[test]

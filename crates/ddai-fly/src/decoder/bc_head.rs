@@ -304,6 +304,7 @@ mod tests {
             soft: None,
             mask: HeadMask::ALL,
             weight: 1.0,
+            hook_scale: 1.0,
         };
         let cfg = LossConfig {
             soft_mix: 0.0,
@@ -360,6 +361,7 @@ mod tests {
                 ..HeadMask::ALL
             },
             weight: 2.0,
+            hook_scale: 1.0,
         };
         let cfg = LossConfig {
             w_dir: 1.0,

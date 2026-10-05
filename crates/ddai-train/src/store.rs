@@ -85,6 +85,19 @@ impl TeacherManifest {
         chunks.peek().is_some() && chunks.all(|c| c.job_key.is_empty())
     }
 
+    /// Job keys written into `round` that are not in `expected` (a resumed run whose job list changed:
+    /// jobs of another length or seed are already in the dataset and would be collected next to the
+    /// new ones, so the caller warns).
+    pub fn unexpected_job_keys(&self, round: u32, expected: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for c in self.chunks.iter().filter(|c| c.round == round && !c.job_key.is_empty()) {
+            if !expected.contains(&c.job_key) && !out.contains(&c.job_key) {
+                out.push(c.job_key.clone());
+            }
+        }
+        out
+    }
+
     /// Whether the job `key` of `round` has its chunks in the dataset.
     pub fn job_done(&self, round: u32, key: &str) -> bool {
         !key.is_empty() && self.chunks.iter().any(|c| c.round == round && c.job_key == key)
@@ -407,6 +420,27 @@ mod tests {
         s.mark_round_complete(1).unwrap();
         assert!(TeacherStore::open(dir.path()).unwrap().manifest.round_complete(1));
         assert_eq!(s.manifest.rounds_complete, vec![1]);
+    }
+
+    #[test]
+    fn unexpected_job_keys_name_the_jobs_a_changed_config_no_longer_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = TeacherStore::create(dir.path(), "t", "abc").unwrap();
+        s.append(1, "a", "x", "pit|seed=5|games=2|noise_len=2-6", vec![episode(1, 5)])
+            .unwrap();
+        s.append(1, "a", "x", "pit|seed=6|games=2|noise_len=2-6", vec![episode(2, 5)])
+            .unwrap();
+        s.append(2, "a", "x", "pit|seed=9|games=2|noise_len=2-6", vec![episode(3, 5)])
+            .unwrap();
+        let expected = vec!["pit|seed=5|games=2|noise_len=2-6".to_string()];
+        assert_eq!(
+            s.manifest.unexpected_job_keys(1, &expected),
+            vec!["pit|seed=6|games=2|noise_len=2-6".to_string()]
+        );
+        assert!(s.manifest.unexpected_job_keys(3, &expected).is_empty());
+        // Legacy chunks without a key are never reported.
+        s.append(3, "a", "x", "", vec![episode(4, 5)]).unwrap();
+        assert!(s.manifest.unexpected_job_keys(3, &expected).is_empty());
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod features;
 pub mod gru;
 pub mod mlp;
 pub mod net;
+pub mod proposer;
 
 pub use brain::{ControlBrain, ControlTemplate};
 pub use bundle::{ControlBundle, load_control_bundle, save_control_bundle};
