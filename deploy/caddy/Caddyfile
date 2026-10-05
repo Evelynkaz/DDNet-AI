@@ -53,8 +53,11 @@
 	# naming the only three paths `encode` even runs on — deliberately not `encode`'s own `match`
 	# sub-block, which matches on the *response* (Content-Type), and whose built-in default
 	# would otherwise happily compress `application/json`/`text/*` API responses too.
-	@static path / /app.css /app.js /game.css /ddmap.js /ddtee.js /game.js /launch.js /launch.css
+	@static path / /app.css /app.js /game.css /ddmap.js /ddtee.js /game.js /launch.js /launch.css /say.js /say.css /fly.js /train.js
 	encode @static zstd gzip
+	# The page and its scripts change on every deploy and carry no version in their URLs: make the browser
+	# re-fetch them instead of showing an old page after an update (2026-10-05, the owner saw a stale site).
+	header @static Cache-Control "no-cache"
 
 	header {
 		# HSTS (acceptance criterion 1: max-age >= 1 year, no preload — preload is a one-way,
