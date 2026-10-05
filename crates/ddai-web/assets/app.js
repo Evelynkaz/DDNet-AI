@@ -17,6 +17,13 @@
   var wsStateEl = document.getElementById("ws-state");
   var botStateEl = document.getElementById("bot-state");
   var uptimeEl = document.getElementById("uptime");
+  // Task 5.11: the words of the `status` message's `bot_state` (from the live bridge); a word this page does not know is shown as it is.
+  var BOT_STATE_TEXT = {
+    in_game: "в игре",
+    connecting: "запущен, не в игре",
+    stopped: "не запущен",
+    demo: "показ (не настоящая игра)",
+  };
   var tabbar = document.getElementById("tabbar");
   var tabStatusButton = document.getElementById("tab-status");
   var tabGameButton = document.getElementById("tab-game");
@@ -67,6 +74,7 @@
     tabBotButton.classList.toggle("active", name === "bot");
     if (name === "game") {
       GameView.onShown();
+      SayCard.onShown();
     }
     if (name === "bot") {
       BotPanel.onShown();
@@ -177,7 +185,7 @@
           setConnected(true);
           break;
         case "status":
-          botStateEl.textContent = msg.bot_state;
+          botStateEl.textContent = BOT_STATE_TEXT[msg.bot_state] || msg.bot_state;
           uptimeEl.textContent = formatUptime(msg.uptime_s);
           break;
         case "map":
@@ -711,8 +719,8 @@
     function setBusy(on) {
       busy = on;
       document.querySelectorAll("#bot-view button").forEach(function (b) {
-        // The «Запуск» card (launch.js) and the chat input (say.js) manage their own buttons.
-        if (b.id !== "cmd-kill" && !b.closest("#launch-mount") && !b.closest("#say-mount")) {
+        // The «Запуск» card (launch.js) manages its own buttons; the pointer to the chat input always works.
+        if (b.id !== "cmd-kill" && b.id !== "bot-to-chat" && !b.closest("#launch-mount")) {
           b.disabled = on;
         }
       });
@@ -918,7 +926,11 @@
     }
 
     LaunchCard.mount(el("launch-mount"), api);
-    SayCard.mount(el("say-mount"), api);
+    // Task 5.11: the chat input sits under the chat panel of the «Игра» tab (it needs this `api`: session and CSRF token).
+    SayCard.mount(el("game-say-mount"), api, { embedded: true });
+    el("bot-to-chat").addEventListener("click", function () {
+      showTab("game");
+    });
     bindCommands();
     bindRelations();
     return { onShown: onShown, onHidden: onHidden, setDemo: setDemo };

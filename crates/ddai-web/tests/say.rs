@@ -463,7 +463,10 @@ async fn the_chat_inputs_assets_are_served_and_the_page_mounts_them() {
     let page = send(server.addr, Req::new("GET", "/"));
     let html = String::from_utf8(page.body).unwrap();
     assert!(html.contains(r#"src="/say.js""#) && html.contains(r#"href="/say.css""#));
-    assert!(html.contains(r#"id="say-mount""#));
+    // task 5.11: the input is mounted under the chat panel of the «Игра» tab, the «Бот» tab has only a pointer to it
+    assert!(html.contains(r#"id="game-say-mount""#));
+    assert!(!html.contains(r#"id="say-mount""#));
+    assert!(html.contains(r#"id="bot-to-chat""#));
     for (path, ctype, needle) in [
         ("/say.js", "text/javascript", "SayCard"),
         ("/say.css", "text/css", ".say-card"),

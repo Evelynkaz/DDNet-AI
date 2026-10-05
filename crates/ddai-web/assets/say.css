@@ -1,4 +1,4 @@
-/* Task 4.9: the chat input (the «Чат» card of the «Бот» tab; later under the chat panel of the «Игра» tab). Everything is scoped under
+/* Task 4.9: the chat input; since task 5.11 it sits under the chat panel of the «Игра» tab (embedded, no card of its own). Everything is scoped under
    `.say-card`; no global element is restyled. The colours come from the page's own tokens (--muted, --ok, --danger) so a restyled theme
    carries over. */
 
@@ -67,4 +67,68 @@
 .say-card.say-embedded {
   margin: 0;
   padding: 0;
+}
+
+/* Task 5.11: embedded under the chat panel of the «Игра» tab, in 5.10's dark glass: a compact row like the client's chat line, the same
+   translucent field as the chat log above it. The window's own side margins come from `.game-view .card > :not(h2)`. */
+.say-card.say-embedded .say-form {
+  gap: 4px;
+  margin: 8px 0 0;
+}
+
+.say-card.say-embedded .say-input {
+  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+}
+
+.say-card.say-embedded .say-input::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.say-card.say-embedded .say-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.say-card.say-embedded .say-send {
+  min-height: 36px;
+  min-width: 5.2rem;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+.say-card.say-embedded .say-opts {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.say-card.say-embedded .say-team input {
+  margin: 0;
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.say-card.say-embedded .say-result {
+  min-height: 0;
+  font-size: 0.78rem;
+}
+
+/* the bot takes no lines from the site (chat_disabled): the field shows it */
+.say-card .say-locked .say-input,
+.say-card .say-locked .say-team {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* A phone: 16 px in a field keeps the browser from zooming the page when it is focused. */
+@media (max-width: 760px) {
+  .say-card.say-embedded .say-input {
+    font-size: 1rem;
+  }
 }

@@ -48,7 +48,8 @@ async function loginStatusLogout(page: Page, screenshotPath: string) {
   // real TLS-terminating proxy, not a loopback connection to a freshly-spawned process.
   await expect(page.locator("#status-view")).toBeVisible({ timeout: 15_000 });
   await expect(page.locator("#ws-state")).toHaveText("подключено", { timeout: 15_000 });
-  await expect(page.locator("#bot-state")).toHaveText("idle", { timeout: 15_000 });
+  // whatever the real deployment is doing right now: a state of the bot (task 5.11; "idle" is a deployment older than that)
+  await expect(page.locator("#bot-state")).toHaveText(/^(в игре|запущен, не в игре|не запущен|показ \(не настоящая игра\)|idle)$/, { timeout: 15_000 });
 
   await page.screenshot({ path: screenshotPath });
 

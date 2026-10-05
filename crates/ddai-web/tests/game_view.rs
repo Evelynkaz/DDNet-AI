@@ -123,6 +123,11 @@ impl FakeBot {
         FakeBot { tx, task }
     }
 
+    /// One `STATUS` message (kind 5) with the given JSON.
+    fn status(&self, json: &str) {
+        self.tx.send(msg(5, json.as_bytes())).unwrap();
+    }
+
     fn chat(&self, team: i32, cid: i32, name: &str, text: &str) {
         let json = serde_json::json!({"team": team, "cid": cid, "name": name, "text": text});
         self.tx.send(msg(8, json.to_string().as_bytes())).unwrap();
@@ -463,12 +468,37 @@ async fn without_a_data_directory_the_graphics_are_not_found_and_the_scene_still
     assert_eq!(get(&rig.server, &cookie, "/assets/game.png").status, 404);
 }
 
+// ---- the bot's state on the «Статус» tab (task 5.11) ----------------------------------------------------------
+
+/// The `status` message's `bot_state` follows the bridge: stopped before any `STATUS`, `connecting` while the bot says it is not in
+/// a game, `in_game` once it is (and for an older bot that does not say), and `stopped` again when its `STATUS` stops coming.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_status_message_tells_the_real_state_of_the_bot() {
+    let rig = rig().await;
+    let mut ws = connect(&rig.server).await;
+    let state = |v: &serde_json::Value, word: &str| v["type"] == "status" && v["bot_state"] == word;
+    // no STATUS has come: nothing is known to run
+    let s = next_where(&mut ws, |v| v["type"] == "status").await;
+    assert_eq!(s["bot_state"], "stopped");
+    assert!(s["uptime_s"].as_u64().is_some());
+    rig.bot.status(r#"{"tick":1,"connected":false}"#);
+    next_where(&mut ws, |v| state(v, "connecting")).await;
+    rig.bot.status(r#"{"tick":2,"connected":true}"#);
+    next_where(&mut ws, |v| state(v, "in_game")).await;
+    // an older bot's STATUS has no `connected`
+    rig.bot.status(r#"{"tick":3,"alive":true}"#);
+    next_where(&mut ws, |v| state(v, "in_game")).await;
+    // the bot goes quiet (crashed, stopped): after STATUS_STALE the site no longer calls it running
+    next_where(&mut ws, |v| state(v, "stopped")).await;
+}
+
 // ---- the page itself ---------------------------------------------------------------------------------------
 
 /// The scripts of the tab are served with the site's headers, never build markup from game data (no `innerHTML` and friends),
-/// and the chat can only be read: the page has no input that could write chat and no message of that kind in its scripts.
+/// and the panel's own code only reads the chat: it has no input and no message that could write chat in its scripts, and its
+/// markup holds nothing but the empty mount where `say.js` (D-094, task 4.9) builds the owner's input.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_game_scripts_and_page_never_turn_game_text_into_markup_and_the_chat_has_no_input() {
+async fn the_game_scripts_and_page_never_turn_game_text_into_markup_and_only_say_js_has_a_chat_input() {
     let rig = rig().await;
     let addr = rig.server.addr;
     let mut scripts = String::new();
@@ -529,8 +559,19 @@ async fn the_game_scripts_and_page_never_turn_game_text_into_markup_and_the_chat
     let chat = &game[game.find("chat-card").unwrap()..];
     let chat = &chat[..chat.find("</section>").unwrap()];
     for banned in ["<input", "<textarea", "<form", "contenteditable"] {
-        assert!(!chat.contains(banned), "the chat card is read-only: {banned}");
+        assert!(
+            !chat.contains(banned),
+            "the chat card's markup has no input of its own: {banned}"
+        );
     }
+    assert!(
+        chat.contains(r#"<div id="game-say-mount" class="game-say"></div>"#),
+        "the owner's input is mounted by say.js under the chat log"
+    );
+    assert!(
+        chat.find("id=\"chat-log\"").unwrap() < chat.find("id=\"game-say-mount\"").unwrap(),
+        "the input is under the log"
+    );
     assert!(
         !page.contains(" style=") && !page.contains(" onclick=") && !page.contains(" onerror="),
         "no inline styles or handlers (CSP)"

@@ -622,20 +622,45 @@
   }
 
   .chat-card {
-    flex: 1 1 200px;
+    flex: 1 0 auto;
     min-height: 200px;
     display: flex;
     flex-direction: column;
   }
 
   .chat-card .chat-log {
-    flex: 1;
+    flex: 1 1 120px;
     max-height: none;
     min-height: 120px;
   }
 
   .player-list {
     max-height: 220px;
+  }
+
+  /* The side column scrolls (above) rather than cutting its cards: only the chat card grows and gives way. */
+  .gb-card,
+  .players-card {
+    flex-shrink: 0;
+  }
+}
+
+/* A short window (a laptop, 720 to 820 px): the chat log gives way first, so the input under it stays in view; the roster is shorter. */
+@media (min-width: 1000px) and (max-height: 820px) {
+  .chat-card .chat-log {
+    flex-basis: 64px;
+    min-height: 64px;
+  }
+
+  .player-list {
+    max-height: 120px;
+  }
+}
+
+@media (min-width: 1000px) and (max-height: 740px) {
+  .chat-card .chat-log {
+    flex-basis: 40px;
+    min-height: 40px;
   }
 }
 

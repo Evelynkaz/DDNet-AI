@@ -2,8 +2,8 @@
    the scoreboard and HUD, and a read-only chat. The WebSocket messages arrive from app.js; this file owns the tab.
 
    Everything that came from the game (names, clans, chat text, the map's own names) is only ever written with
-   `textContent` or drawn on a canvas, never into markup (a test checks that these files build no markup from text). The page never
-   sends chat: there is no input for it, and the server has no route that would take it (D-007).
+   `textContent` or drawn on a canvas, never into markup (a test checks that these files build no markup from text). This file never
+   sends chat and has no input for it: the owner's line is the separate say.js (D-094), mounted under the chat panel (task 5.11).
 
    Portions derived from DDNet (zlib license) and from Wranked1/DDNet-AI (GPL-3.0) src/bot/webView.ts: the name plates,
    the freeze bars, the scoreboard metrics and the HUD layout. This is an altered version, not the original software. */

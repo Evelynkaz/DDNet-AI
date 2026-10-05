@@ -1,6 +1,8 @@
 // The «Игра» tab (task 5.10) in a real browser: the real Copy Love Box map drawn with its own layers, tilesets and quads, real
-// tees from the stock skins, the owner's bot highlighted and followed by default, a read-only chat that treats hostile text as
-// text, the scoreboard, the entities overlay, free camera, and the phone layout.
+// tees from the stock skins, the owner's bot highlighted and followed by default, a chat panel that treats hostile text as
+// text, the scoreboard, the entities overlay, free camera, and the phone layout. Task 5.11: the owner's chat input under the chat
+// panel (Enter sends, the fake bot's control socket takes the line and the game "repeats" it, refusals show inline, the phone
+// layout) and the real state of the bot on the «Статус» tab.
 //
 // Drives a real `ddnet-ai web` (built beforehand: `cargo build -p ddnet-ai`) on an ephemeral port in a scratch data directory,
 // fed by the scripted FAKE bot of support/gamebot.mjs over a real Unix socket. The DDNet graphics come from the local DDNet
@@ -80,6 +82,7 @@ const DEV_FILES: Record<string, [string, string]> = {
   "/": ["index.html", "text/html"], "/app.css": ["app.css", "text/css"], "/game.css": ["game.css", "text/css"],
   "/app.js": ["app.js", "text/javascript"], "/game.js": ["game.js", "text/javascript"], "/ddmap.js": ["ddmap.js", "text/javascript"],
   "/ddtee.js": ["ddtee.js", "text/javascript"], "/fly.js": ["fly.js", "text/javascript"], "/train.js": ["train.js", "text/javascript"],
+  "/say.js": ["say.js", "text/javascript"], "/say.css": ["say.css", "text/css"], "/launch.js": ["launch.js", "text/javascript"], "/launch.css": ["launch.css", "text/css"],
 };
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' wss:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
@@ -504,4 +507,202 @@ test("the «Бот» tab with the launcher card renders under the theme (desktop
     await page.screenshot({ path: path.join(SHOTS, `5.10-r1-${name}-bot-launcher.png`), fullPage: name === "phone" });
     expect(problems.filter((p) => p.startsWith(`bot-${name}`))).toEqual([]);
   }
+});
+
+// ---- task 5.11: the owner's chat input under the chat panel (D-094) and the bot's real state on «Статус» ------------------------
+// The site limits the owner's lines itself (two in 3 s, ten a minute), so these tests send few lines, three seconds apart.
+
+const SAY_GAP_MS = 3200;
+
+async function sayLine(page: Page, text: string, how: "enter" | "button" = "enter") {
+  const input = page.locator("#game-say-mount .say-input");
+  await input.fill(text);
+  if (how === "enter") await input.press("Enter");
+  else await page.locator("#game-say-mount .say-send").click({ force: true });
+}
+
+test("the chat input sits under the chat panel; Enter sends, the line reaches the bot and comes back in the log", async ({ browser }) => {
+  const page = await newPage(browser);
+  watch(page, "say");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openGame(page, stack.baseUrl);
+  const mount = page.locator("#game-say-mount");
+  await expect(mount.locator("form.say-form .say-input")).toBeVisible();
+  await expect(mount.locator(".say-send")).toBeDisabled(); // nothing typed yet
+  await expect(mount.locator(".say-team")).toContainText("Командный чат");
+  await expect(mount.locator(".say-count")).toHaveText("0 / 255");
+  // inside the chat card, below the log; the hint says what is true now
+  await expect(page.locator(".chat-card #game-say-mount")).toHaveCount(1);
+  const log = await page.locator("#chat-log").boundingBox();
+  const inp = await mount.locator(".say-input").boundingBox();
+  expect(inp!.y).toBeGreaterThan(log!.y + log!.height - 1);
+  const hint = await page.locator(".chat-card .hint").first().innerText();
+  expect(hint).toContain("Бот сам в чат не пишет");
+  expect(hint).not.toContain("Только чтение");
+  // The «Бот» tab no longer carries a second input, only a pointer back here.
+  expect(await page.locator("#bot-view .say-input").count()).toBe(0);
+
+  const before = stack.bot.control.length;
+  await mount.locator(".say-input").fill("привет <b>всем</b> & co");
+  await expect(mount.locator(".say-count")).toHaveText(/^\d+ \/ 255$/);
+  await expect(mount.locator(".say-send")).toBeEnabled();
+  await mount.locator(".say-input").press("Enter");
+  await expect(mount.locator(".say-result.ok")).toContainText("Принято");
+  await expect(mount.locator(".say-input")).toHaveValue("");
+  expect(stack.bot.control.length).toBe(before + 1);
+  const cmd = stack.bot.control[stack.bot.control.length - 1].cmd;
+  expect(cmd).toEqual({ type: "say", team: false, text: "привет <b>всем</b> & co" });
+  // The bot's line is in the panel only when the game server repeats it (the fake bot does, a moment later), as text.
+  await expect(page.locator("#chat-log .chat-line", { hasText: "привет <b>всем</b> & co" })).toHaveCount(1);
+  await expect(page.locator("#chat-log .chat-line", { hasText: "Муха" }).last()).toBeVisible();
+  expect(await page.locator("#chat-log b").count()).toBe(0);
+
+  // The team toggle; the button works as well as Enter.
+  await page.waitForTimeout(SAY_GAP_MS);
+  await mount.locator(".say-team input").check();
+  await sayLine(page, "держим левый вб", "button");
+  await expect(mount.locator(".say-result.ok")).toContainText("Принято");
+  expect(stack.bot.control[stack.bot.control.length - 1].cmd).toEqual({ type: "say", team: true, text: "держим левый вб" });
+  await expect(page.locator("#chat-log .chat-team", { hasText: "держим левый вб" })).toHaveCount(1);
+
+  // A line the page itself refuses (a command) says why, stays in the box, and never reaches the bot.
+  const n = stack.bot.control.length;
+  await sayLine(page, "/kill");
+  await expect(mount.locator(".say-result.bad")).toContainText("Команды");
+  await expect(mount.locator(".say-input")).toHaveValue("/kill");
+  await page.waitForTimeout(300);
+  expect(stack.bot.control.length).toBe(n);
+  await page.screenshot({ path: path.join(SHOTS, "5.11-desktop-say.png") });
+  expect(problems.filter((p) => p.startsWith("say:"))).toEqual([]);
+});
+
+test("refusals show inline: not in game, rate limited, queue full, and chat disabled locks the field until the tab is shown again", async ({ browser }) => {
+  const page = await newPage(browser);
+  watch(page, "say-refuse");
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openGame(page, stack.baseUrl);
+  const mount = page.locator("#game-say-mount");
+  const input = mount.locator(".say-input");
+  const result = mount.locator(".say-result");
+  try {
+    for (const [mode, text] of [
+      ["not_in_game", "не в игре"],
+      ["rate_limited", "Слишком часто"],
+      ["queue_full", "Уже ждут три сообщения"],
+    ] as const) {
+      stack.bot.sayMode = mode;
+      await sayLine(page, `проба ${mode}`);
+      await expect(result).toHaveClass(/bad/);
+      await expect(result).toContainText(text);
+      await expect(input).toHaveValue(`проба ${mode}`); // kept for a retry
+      await expect(input).toBeEnabled();
+      await page.waitForTimeout(SAY_GAP_MS);
+    }
+    // chat_disabled: the bot runs with --no-owner-chat. The field says so and is locked.
+    stack.bot.sayMode = "chat_disabled";
+    await sayLine(page, "ещё одна");
+    await expect(result).toContainText("выключен");
+    await expect(input).toBeDisabled();
+    await expect(mount.locator(".say-send")).toBeDisabled();
+    await expect(mount.locator(".say-team input")).toBeDisabled();
+    await page.screenshot({ path: path.join(SHOTS, "5.11-desktop-say-disabled.png") });
+    // Back on the tab later (the bot may have been restarted): the field is usable again, and a line goes through once the bot takes them.
+    stack.bot.sayMode = "ok";
+    await page.locator("#tab-bot").click({ force: true });
+    await expect(page.locator("#bot-view")).toBeVisible();
+    await page.locator("#bot-to-chat").click({ force: true }); // the pointer on the «Бот» tab leads back here
+    await expect(page.locator("#game-view")).toBeVisible();
+    await expect(input).toBeEnabled();
+    await expect(result).toHaveText("");
+    await page.waitForTimeout(SAY_GAP_MS);
+    await sayLine(page, "снова можно");
+    await expect(result).toHaveClass(/ok/);
+  } finally {
+    stack.bot.sayMode = "ok";
+  }
+  // Each refused request (409, 429) shows up twice, as a response and as a console error: those four are the point of this test, anything else is a problem.
+  const refusals = problems.filter((p) => p.startsWith("say-refuse") && /HTTP (409|429) .*\/api\/bot\/say|status of (409|429)/.test(p));
+  expect(refusals).toHaveLength(8);
+  problems.splice(0, problems.length, ...problems.filter((p) => !refusals.includes(p)));
+  expect(problems.filter((p) => p.startsWith("say-refuse"))).toEqual([]);
+});
+
+test("phone: the chat input fits the screen, the field is 16 px (no zoom on focus), no sideways scroll", async ({ browser }) => {
+  const page = await newPage(browser, { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+  watch(page, "say-phone");
+  await openGame(page, stack.baseUrl);
+  const mount = page.locator("#game-say-mount");
+  await mount.scrollIntoViewIfNeeded();
+  await expect(mount.locator(".say-input")).toBeVisible();
+  const f = await mount.locator(".say-input").evaluate((n) => parseFloat(getComputedStyle(n).fontSize));
+  expect(f).toBeGreaterThanOrEqual(16);
+  const view = page.viewportSize()!;
+  for (const sel of [".say-input", ".say-send", ".say-team", ".say-count"]) {
+    const b = await mount.locator(sel).boundingBox();
+    expect(b!.x, sel).toBeGreaterThanOrEqual(0);
+    expect(b!.x + b!.width, sel).toBeLessThanOrEqual(view.width);
+  }
+  const bt = await mount.locator(".say-send").boundingBox();
+  expect(bt!.height).toBeGreaterThanOrEqual(34); // a thumb-sized target
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const sayWait = SAY_GAP_MS;
+  await page.waitForTimeout(sayWait);
+  await mount.locator(".say-input").fill("с телефона");
+  await mount.locator(".say-input").press("Enter");
+  await expect(mount.locator(".say-result.ok")).toBeVisible();
+  await expect(page.locator("#chat-log .chat-line", { hasText: "с телефона" })).toHaveCount(1);
+  await mount.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(SHOTS, "5.11-phone-say.png") });
+  expect(problems.filter((p) => p.startsWith("say-phone"))).toEqual([]);
+});
+
+test("«Статус» shows the real state of the bot, not a constant", async ({ browser }) => {
+  const page = await newPage(browser);
+  watch(page, "state");
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(stack.baseUrl);
+  await expect(page.locator("#tabbar")).toBeVisible({ timeout: 40_000 });
+  await page.locator("#tab-status").click({ force: true });
+  await expect(page.locator("#status-view")).toBeVisible();
+  await expect(page.locator("#ws-state")).toHaveText("подключено");
+  // The fake bot's STATUS says it is in the game.
+  await expect(page.locator("#bot-state")).toHaveText("в игре");
+  // It keeps running but leaves the game (a lost connection): the tab follows within a few seconds.
+  try {
+    stack.bot.connected = false;
+    await expect(page.locator("#bot-state")).toHaveText("запущен, не в игре", { timeout: 15_000 });
+    await page.screenshot({ path: path.join(SHOTS, "5.11-status-connecting.png") });
+  } finally {
+    stack.bot.connected = true;
+  }
+  await expect(page.locator("#bot-state")).toHaveText("в игре", { timeout: 15_000 });
+  expect(problems.filter((p) => p.startsWith("state:"))).toEqual([]);
+});
+
+// Review 5.11 (F1): in a short desktop window the side column's cards are not cut (the bot card keeps its buttons, the roster scrolls
+// inside itself) and the chat input under the log stays inside the window; the chat log is what gives way.
+test("short desktop windows: no card of the side column is clipped and the chat input stays in view", async ({ browser }) => {
+  const page = await newPage(browser);
+  watch(page, "short");
+  await openGame(page, stack.baseUrl);
+  await expect(page.locator("#player-list .player-row")).toHaveCount(5);
+  await expect(page.locator("#game-say-mount .say-input")).toBeVisible();
+  for (const [w, h] of [[1280, 720], [1280, 800], [1440, 900], [1920, 1080]] as const) {
+    await page.setViewportSize({ width: w, height: h });
+    await page.waitForTimeout(800);
+    const r = await page.evaluate(() => {
+      const cards = [...document.querySelectorAll<HTMLElement>(".side-col > .card")].map((c) => ({ cls: c.className, client: c.clientHeight, content: c.scrollHeight }));
+      const links = document.querySelector(".gb-links")!.getBoundingClientRect();
+      const bot = document.querySelector(".gb-card")!.getBoundingClientRect();
+      const mount = document.getElementById("game-say-mount")!.getBoundingClientRect();
+      const chat = document.querySelector(".chat-card")!.getBoundingClientRect();
+      return { cards, linksInBot: links.bottom <= bot.bottom + 1, mountInChat: mount.bottom <= chat.bottom + 1, mountBottom: mount.bottom, vh: window.innerHeight };
+    });
+    for (const c of r.cards) expect(c.content, `${w}x${h} ${c.cls} is clipped`).toBeLessThanOrEqual(c.client + 1);
+    expect(r.linksInBot, `${w}x${h}: the bot card's buttons`).toBe(true);
+    expect(r.mountInChat, `${w}x${h}: the input is inside the chat card`).toBe(true);
+    expect(r.mountBottom, `${w}x${h}: the input is in the window`).toBeLessThanOrEqual(r.vh);
+    await page.screenshot({ path: path.join(SHOTS, `5.11-side-col-${w}x${h}.png`) });
+  }
+  expect(problems.filter((p) => p.startsWith("short:"))).toEqual([]);
 });

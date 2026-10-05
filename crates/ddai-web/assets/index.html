@@ -117,9 +117,12 @@
 
           <section class="card chat-card" aria-labelledby="ch-title">
             <h2 id="ch-title">Чат <span class="count" id="chat-count"></span></h2>
-            <p class="hint">Только чтение: бот в чат не пишет ничего.</p>
+            <p class="hint">Бот сам в чат не пишет; здесь можно написать от его имени.</p>
             <div id="chat-log" class="chat-log" role="log" aria-live="polite" tabindex="0"></div>
             <p id="chat-empty" class="hint">Пока тихо.</p>
+            <!-- Task 5.11 (D-094): the owner's chat input (assets/say.js builds the form into this mount). It is the only way the site says
+                 anything in the game chat; its own lines come back in the log above when the server repeats them. -->
+            <div id="game-say-mount" class="game-say"></div>
           </section>
 
           <p class="credits">Графика карты и тий: DDNet (CC BY-SA 3.0, © DDNet и Teeworlds, <span class="nowrap">ddnet.org</span>), берётся с локального клиента, в репозиторий не входит.</p>
@@ -140,9 +143,13 @@
       <!-- Task 5.9: the «Запуск» card (assets/launch.js builds it into this mount; start/stop the bot, choose its brain). -->
       <div id="launch-mount"></div>
 
-      <!-- Task 4.9 (D-090): the chat input (assets/say.js builds it into this mount): what the owner types here, the bot says in the game
-           chat. To be moved under the chat panel of the «Игра» tab (SayCard.mount(root, api, { embedded: true }); crates/ddai-web/README.md). -->
-      <div id="say-mount"></div>
+      <!-- Task 4.9 (D-094), moved by task 5.11: the chat input lives under the chat panel of the «Игра» tab (assets/say.js, embedded);
+           here only a pointer to it, so there is one input and one place for its refusals. -->
+      <section class="card" aria-labelledby="bot-chat-title">
+        <h2 id="bot-chat-title">Чат</h2>
+        <p class="hint">Поле ввода в игровой чат теперь на вкладке «Игра», прямо под панелью чата: то, что вы там напишете, бот скажет в игре.</p>
+        <button type="button" class="alt" id="bot-to-chat">К чату ▸</button>
+      </section>
 
       <section class="card" aria-labelledby="bot-status-title">
         <h2 id="bot-status-title">Состояние</h2>
@@ -166,7 +173,7 @@
 
       <section class="card" id="bot-cmd-card" aria-labelledby="bot-cmd-title">
         <h2 id="bot-cmd-title">Команды</h2>
-        <p class="hint">Бот никогда не пишет в игровой чат: здесь нет ни одной команды, которая могла бы это сделать.</p>
+        <p class="hint">Бот сам в игровой чат не пишет: здесь нет ни одной команды, которая могла бы это сделать. Строку в чат владелец набирает на вкладке «Игра», под чатом.</p>
         <p id="cmd-demo-note" class="hint demo-note" hidden>
           Команды отключены: сейчас на сайте показ (муха на арене), настоящего бота нет. Команды идут только живому боту и никогда не
           уходят в показ.

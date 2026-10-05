@@ -91,7 +91,8 @@ async function loginStatusLogout(page: Page, screenshotPath: string) {
 
   await expect(page.locator("#status-view")).toBeVisible();
   await expect(page.locator("#ws-state")).toHaveText("подключено", { timeout: 5_000 });
-  await expect(page.locator("#bot-state")).toHaveText("idle", { timeout: 5_000 });
+  // no bot is running here: the state comes from the live bridge (task 5.11), it used to be a constant "idle"
+  await expect(page.locator("#bot-state")).toHaveText("не запущен", { timeout: 5_000 });
 
   await page.screenshot({ path: screenshotPath });
 

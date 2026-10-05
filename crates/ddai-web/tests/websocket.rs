@@ -118,7 +118,8 @@ async fn authenticated_upgrade_succeeds_and_sends_hello_then_status() {
 
     let status = next_json(&mut ws).await;
     assert_eq!(status["type"], "status");
-    assert_eq!(status["bot_state"], "idle");
+    // a site with no bridge has no bot (task 5.11: the word comes from the live bridge, it used to be a constant "idle")
+    assert_eq!(status["bot_state"], "stopped");
     assert!(status["uptime_s"].as_u64().is_some());
 }
 

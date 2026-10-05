@@ -51,7 +51,7 @@ and the fly against three scripted sparring partners, `Spar1` to `Spar3`. No oth
     <td><img src="docs/img/game-zoom.png" alt="The Game tab: zoomed, with the scoreboard and chat"></td>
   </tr>
   <tr>
-    <td><sub><b>Game, zoomed.</b> The bot is marked with a ring and a "BOT" badge, name plates have a constant size, the scoreboard (the "Табло" button or Tab) is open, and the chat lines are the ones the owner typed on the site.</sub></td>
+    <td><sub><b>Game, zoomed.</b> The bot is marked with a ring and a "BOT" badge, name plates have a constant size, the scoreboard (the "Табло" button or Tab) is open, and the chat lines are the ones the owner typed in the input under the chat panel.</sub></td>
   </tr>
 </table>
 
@@ -62,7 +62,7 @@ and the fly against three scripted sparring partners, `Spar1` to `Spar3`. No oth
     <td width="33%"><img src="docs/img/phone-game.png" alt="The Game tab on a phone"></td>
   </tr>
   <tr>
-    <td><sub><b>Bot.</b> The "Запуск" (launch) card (server, brain, duration, sparring), the "Чат" (chat) card (it says only what the owner typed) and the bot state.</sub></td>
+    <td><sub><b>Bot.</b> The "Запуск" (launch) card (server, brain, duration, sparring), the "Чат" (chat) card (a pointer to the input under the chat panel of the Game tab: the bot says only what the owner typed) and the bot state.</sub></td>
     <td><sub><b>Fly.</b> What the network sees and decides: the "eye" (a ray grid), the action, the activity of neuron groups. It shows whether the fly's proposal was played.</sub></td>
     <td><sub><b>Phone</b> (390×844). The same Game tab: the map, the event feed and the bot card.</sub></td>
   </tr>
@@ -75,7 +75,7 @@ and the fly against three scripted sparring partners, `Spar1` to `Spar3`. No oth
   </tr>
   <tr>
     <td><sub><b>Training.</b> Read-only: runs, loss and metric curves with the DAgger round markers, comparison of up to 4 runs. These are the E-005 runs.</sub></td>
-    <td><sub><b>Status.</b> The login and state of the web page itself: the connection and the uptime.</sub></td>
+    <td><sub><b>Status.</b> The login and state of the web page itself: the connection, the bot's state ("in game", "not running", …) and the uptime.</sub></td>
   </tr>
 </table>
 

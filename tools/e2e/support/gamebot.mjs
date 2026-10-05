@@ -3,6 +3,11 @@
 // map cache, never from git) with a few tees that walk, jump, hook, freeze and aim, says some chat, and sends the status.
 // No game server, no DDNet connection of any kind.
 //
+// Task 5.11: with `controlSock` it also listens on a control socket (docs/formats.md §26) and answers the owner's `say` the way the real bot
+// does: accepted (and, after a moment, the line comes back as a chat line of the bot, as the game server repeats it), or refused with a
+// reason picked by the test (`bot.sayMode`: "ok" | "not_in_game" | "chat_disabled" | "rate_limited" | "queue_full"). Every request is
+// recorded in `bot.control`; the text of a refused line is never echoed.
+//
 // Used by game-view.spec.ts and by game-stack.mjs (a stack for looking at the page by hand).
 
 import crypto from "node:crypto";
@@ -58,11 +63,16 @@ export function frameBytes(tick, chars) {
  *   ownId       the owner's bot (the status says so)
  */
 export function startGameBot(options) {
-  const { sock, mapFile, mapName, mapW, mapH, tees, chat = [], ownId = 0, hz = 25 } = options;
+  const { sock, controlSock, mapFile, mapName, mapW, mapH, tees, chat = [], ownId = 0, hz = 25 } = options;
   const mapBytes = fs.readFileSync(mapFile);
   const sha = crypto.createHash("sha256").update(mapBytes).digest("hex");
   const clients = new Set();
   const received = { subscriptions: [] };
+  const control = [];
+  const ownName = (tees.find((t) => t.id === ownId) ?? {}).name ?? "bot";
+  let sayMode = "ok";
+  let connected = true; // the status's `connected` (the session is in the game)
+  let sayEchoMs = 400;
   let tick = 100000;
   const t0 = Date.now();
 
@@ -136,7 +146,7 @@ export function startGameBot(options) {
       JSON.stringify({
         tick, own: ownId, target: options.targetId ?? 1, mode: "fight", brain: "hybrid", alive: true, frozen: p.frozen,
         blocks: 7, blocked_by: 2, self_kills: 0, decisions: 99, collapsed: 0, decide_p50_us: 800, decide_p99_us: 4100,
-        brain_p99_us: 3900, overhead_p99_us: 200, telemetry: null, connected: true, server: "127.0.0.1:8303", map: mapName,
+        brain_p99_us: 3900, overhead_p99_us: 200, telemetry: null, connected, server: "127.0.0.1:8303", map: mapName,
         name: "bot", clan: "Neuroset", skin: "default", target_tag: "c1-0a1b2c3d", wb: "WB: auto", goto: "", deaths: 4,
         clips_saved: 2, kill_cooldown_ticks: 0,
       }),
@@ -164,6 +174,44 @@ export function startGameBot(options) {
   fs.rmSync(sock, { force: true });
   server.listen(sock);
 
+  let controlServer = null;
+  if (controlSock) {
+    controlServer = net.createServer((conn) => {
+      let buf = "";
+      conn.on("error", () => {});
+      conn.on("data", (chunk) => {
+        buf += chunk.toString();
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          const req = JSON.parse(line);
+          control.push(req);
+          const cmd = req.cmd;
+          let reply = { v: 1, ok: true, text: `did ${cmd.type}` };
+          if (cmd.type === "say") {
+            if (sayMode === "ok") {
+              reply = { v: 1, ok: true, text: "accepted: it will be said in about 1 s" };
+              const text = cmd.text;
+              const team = cmd.team ? 1 : 0;
+              setTimeout(() => sayChat(team, ownId, ownName, text), sayEchoMs);
+            } else {
+              reply = { v: 1, ok: false, text: `refused: ${sayMode}`, data: { reason: sayMode } };
+            }
+          }
+          conn.write(JSON.stringify(reply) + "\n");
+        }
+      });
+    });
+    fs.rmSync(controlSock, { force: true });
+    controlServer.listen(controlSock);
+  }
+
+  function sayChat(team, cid, name, text) {
+    const m = message(8, Buffer.from(JSON.stringify({ team, cid, name, text })));
+    for (const c of clients) c.write(m);
+  }
+
   const timer = setInterval(() => {
     const now = Date.now();
     tick += Math.round(1000 / hz / TICK_MS);
@@ -179,15 +227,20 @@ export function startGameBot(options) {
   return {
     sha,
     received,
-    say(team, cid, name, text) {
-      const m = message(8, Buffer.from(JSON.stringify({ team, cid, name, text })));
-      for (const c of clients) c.write(m);
+    control,
+    set sayMode(v) {
+      sayMode = v;
     },
+    set connected(v) {
+      connected = v;
+    },
+    say: sayChat,
     close() {
       clearInterval(timer);
       clearInterval(statusTimer);
       for (const c of clients) c.destroy();
       server.close();
+      controlServer?.close();
     },
   };
 }

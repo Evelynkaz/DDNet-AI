@@ -8,7 +8,9 @@
 //
 // Integration: `SayCard.mount(rootElement, api, options)`; `api(method, path, body)` resolves `{status, data}` and carries the session and
 // the CSRF token (app.js's own helper). `options.embedded: true` draws the bare form without a card and a heading, for placing it under
-// the chat panel of the «Игра» tab (docs: crates/ddai-web/README.md, "Чат: ввод"). `onShown()` / `onHidden()` are optional hooks for the tab.
+// the chat panel of the «Игра» tab (docs: crates/ddai-web/README.md, "Чат: строка владельца идёт в игровой чат"). `onShown()` / `onHidden()` are hooks for the tab.
+// Task 5.11: when the bot answers `chat_disabled` (it runs with `--no-owner-chat`) the form is locked and says so until the tab is shown again
+// (the flag only changes with a restart of the bot, so asking again on every line would be noise).
 (function () {
   "use strict";
 
@@ -116,6 +118,7 @@
     var root = null;
     var ui = {};
     var busy = false;
+    var locked = false; // the bot says it takes no lines from the site (`chat_disabled`)
 
     function setResult(text, ok) {
       ui.result.textContent = text || "";
@@ -129,7 +132,21 @@
     }
 
     function updateButton() {
-      ui.send.disabled = busy || ui.input.value.trim().length === 0;
+      ui.send.disabled = busy || locked || ui.input.value.trim().length === 0;
+    }
+
+    // The form shows the bot's refusal to take lines as a state, not only as the answer to one line.
+    function setLocked(on, text) {
+      locked = on;
+      ui.input.disabled = on;
+      ui.team.disabled = on;
+      ui.form.className = "say-form" + (on ? " say-locked" : "");
+      if (on) {
+        setResult(text, false);
+      } else if (ui.result.className.indexOf("bad") >= 0) {
+        setResult("", true);
+      }
+      updateButton();
     }
 
     function send() {
@@ -149,6 +166,9 @@
         .then(function (res) {
           var r = reply(res);
           setResult(r.text, r.ok);
+          if (res.data && res.data.reason === "chat_disabled") {
+            setLocked(true, r.text);
+          }
           if (r.ok) {
             ui.input.value = "";
             updateCount();
@@ -181,6 +201,7 @@
         );
       }
       var form = el("form", "say-form");
+      ui.form = form;
       form.setAttribute("autocomplete", "off");
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
@@ -230,10 +251,15 @@
       root = rootEl;
       api = apiFn;
       busy = false;
+      locked = false;
       build(!!(options && options.embedded));
     }
 
-    function onShown() {}
+    function onShown() {
+      if (locked) {
+        setLocked(false);
+      }
+    }
 
     function onHidden() {}
 

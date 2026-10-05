@@ -26,7 +26,7 @@ export async function startStack(opts = {}) {
   const out = execFileSync(BINARY, ["web-passwd", "--data-dir", dataDir, "--show"], { encoding: "utf8" });
   const password = out.match(/^password: (\S+)$/m)[1];
   const sock = path.join(dataDir, "bot", "live.sock");
-  const bot = startGameBot({ sock, ...opts.bot });
+  const bot = startGameBot({ sock, controlSock: path.join(dataDir, "bot", "control.sock"), ...opts.bot });
   const args = ["web", "--listen", "127.0.0.1:0", "--data-dir", dataDir, "--bot-socket", sock, "--maps-dir", MAPS];
   if (opts.ddnetData !== null) args.push("--ddnet-data", opts.ddnetData ?? DDNET_DATA);
   const proc = spawn(BINARY, args, { stdio: ["ignore", "pipe", "pipe"] });

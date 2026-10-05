@@ -14,6 +14,7 @@ use tokio::sync::broadcast;
 use tokio::time::{interval, interval_at};
 
 use crate::auth::session::SessionId;
+use crate::http::bot::STATUS_STALE;
 use crate::live::chat::ChatLine;
 use crate::live::hub::{FlySubscription, HubEvent, LiveHub};
 use crate::live::source::{GameEvent, MapMeta, PlayerMeta, ReplayControl, ReplayStatus, SourceKind};
@@ -41,6 +42,47 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// browser answers our pings with automatically) for this long, the connection is considered
 /// dead and closed.
 const IDLE_CLOSE_AFTER: Duration = Duration::from_secs(45);
+
+/// What the `status` message's `bot_state` says about the bot (task 5.11; the page turns each word into text):
+/// `"demo"` (the site shows the fly's demo, no real bot), `"in_game"` (a fresh `STATUS` from the live bridge, the session is in
+/// the game), `"connecting"` (a fresh `STATUS` that says `connected: false`: the bot runs but is not in a game yet or any more) and
+/// `"stopped"` (no bridge, no `STATUS`, or none for [`STATUS_STALE`]: nothing runs). An older bot's `STATUS` has no `connected`
+/// field and counts as in the game (the page reads it the same way).
+fn bot_state_word(source: Option<SourceKind>, status: Option<(Duration, &str)>) -> &'static str {
+    match source {
+        Some(SourceKind::Demo) => return "demo",
+        Some(SourceKind::None) => return "stopped",
+        Some(SourceKind::Live) | None => {}
+    }
+    let Some((age, json)) = status else {
+        return "stopped";
+    };
+    if age > STATUS_STALE {
+        return "stopped";
+    }
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(serde_json::Value::Object(o)) => {
+            if o.get("connected").and_then(serde_json::Value::as_bool) == Some(false) {
+                "connecting"
+            } else {
+                "in_game"
+            }
+        }
+        _ => "stopped",
+    }
+}
+
+/// [`bot_state_word`] from the live hub (a site without a bridge has no bot to speak of).
+fn bot_state(state: &SharedState) -> &'static str {
+    let Some(hub) = &state.live_hub else {
+        return "stopped";
+    };
+    let status = hub.latest_bot_status();
+    bot_state_word(
+        hub.latest_source().map(|(kind, _)| kind),
+        status.as_ref().map(|(age, json)| (*age, json.as_str())),
+    )
+}
 
 /// A `Map`/`Players`/`Events`/`ReplayStatus`/`Error` message's JSON shape (acceptance criterion
 /// 1's WS topics). Wire field names are deliberately terse (`w`/`h`/`t`) to match the task's own
@@ -485,7 +527,7 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, session_id: Se
                 }
                 let status = ServerMessage::Status {
                     uptime_s: state.uptime_secs(),
-                    bot_state: "idle",
+                    bot_state: bot_state(&state),
                 };
                 if send_json(&mut socket, &status).await.is_err() {
                     break;
@@ -708,12 +750,60 @@ mod tests {
     fn status_serializes_with_type_tag() {
         let json = serde_json::to_value(ServerMessage::Status {
             uptime_s: 7,
-            bot_state: "idle",
+            bot_state: "in_game",
         })
         .unwrap();
         assert_eq!(json["type"], "status");
         assert_eq!(json["uptime_s"], 7);
-        assert_eq!(json["bot_state"], "idle");
+        assert_eq!(json["bot_state"], "in_game");
+    }
+
+    const FRESH: Duration = Duration::from_millis(400);
+
+    #[test]
+    fn the_bot_state_follows_the_live_status() {
+        let word = bot_state_word;
+        // a fresh STATUS that says the session is in the game, or does not say (an older bot): in the game
+        assert_eq!(
+            word(None, Some((FRESH, r#"{"connected":true,"alive":true}"#))),
+            "in_game"
+        );
+        assert_eq!(
+            word(Some(SourceKind::Live), Some((FRESH, r#"{"connected":true}"#))),
+            "in_game"
+        );
+        assert_eq!(word(None, Some((FRESH, r#"{"alive":false,"frozen":true}"#))), "in_game");
+        assert_eq!(word(None, Some((FRESH, r#"{"connected":null}"#))), "in_game");
+        // running but not in a game
+        assert_eq!(word(None, Some((FRESH, r#"{"connected":false}"#))), "connecting");
+        assert_eq!(
+            word(Some(SourceKind::Live), Some((FRESH, r#"{"connected":false}"#))),
+            "connecting"
+        );
+        // nothing runs: no STATUS yet, one older than STATUS_STALE (exactly that old still counts), or one that is not an object
+        assert_eq!(word(None, None), "stopped");
+        assert_eq!(word(Some(SourceKind::Live), None), "stopped");
+        assert_eq!(word(None, Some((STATUS_STALE, r#"{"connected":true}"#))), "in_game");
+        assert_eq!(
+            word(
+                None,
+                Some((STATUS_STALE + Duration::from_millis(1), r#"{"connected":true}"#))
+            ),
+            "stopped"
+        );
+        assert_eq!(word(None, Some((FRESH, "null"))), "stopped");
+        assert_eq!(word(None, Some((FRESH, "not json"))), "stopped");
+        assert_eq!(word(None, Some((FRESH, "[1]"))), "stopped");
+        // the demo on show is never a bot, whatever STATUS is around; no source at all is not a running bot
+        assert_eq!(word(Some(SourceKind::Demo), None), "demo");
+        assert_eq!(
+            word(Some(SourceKind::Demo), Some((FRESH, r#"{"connected":true}"#))),
+            "demo"
+        );
+        assert_eq!(
+            word(Some(SourceKind::None), Some((FRESH, r#"{"connected":true}"#))),
+            "stopped"
+        );
     }
 
     #[test]
