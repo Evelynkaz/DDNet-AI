@@ -298,12 +298,13 @@ async fn a_line_the_web_refuses_never_reaches_the_bot_and_costs_no_rate_limit_sl
         (serde_json::json!({"text": "a\nb"}), "control"),
         (serde_json::json!({"text": "a\u{0}b"}), "control"),
         (serde_json::json!({"text": "a\u{1b}[31m"}), "control"),
-        (serde_json::json!({"text": "/kill"}), "command"),
-        (serde_json::json!({"text": "  /w someone hi"}), "command"),
-        (serde_json::json!({"text": "//"}), "command"),
-        (serde_json::json!({"text": "\u{2800}/kill"}), "command"),
-        (serde_json::json!({"text": "\u{3000}\u{00A0}/w x y"}), "command"),
         (serde_json::json!({"text": "\u{200B}/kill"}), "control"),
+        (serde_json::json!({"text": "\u{FEFF}/w someone hi"}), "control"),
+        (serde_json::json!({"text": "/w x\ny"}), "control"),
+        (
+            serde_json::json!({"text": format!("/w x {}", "a".repeat(255))}),
+            "too_long",
+        ),
         (serde_json::json!({"text": "\u{FEFF}hello"}), "control"),
         (serde_json::json!({"text": "hi \u{202E}there"}), "control"),
         (
@@ -347,6 +348,51 @@ async fn a_line_the_web_refuses_never_reaches_the_bot_and_costs_no_rate_limit_sl
         "and the limit is untouched"
     );
     assert_eq!(bot.count(), 1);
+}
+
+/// Task 4.9b: a line that starts with `/` is a server command the owner typed: the route takes it like any line (trimmed, the same
+/// pacing, the same checks) and hands the bot the very text, in all chat or team chat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_server_command_is_taken_like_any_line_and_reaches_the_bot_as_typed() {
+    let server = TestServer::start().await;
+    let bot = taking_bot(&control_socket(&server));
+    let l = login(&server);
+    // two lines: the web's own burst limit is two in three seconds
+    let cases = [(false, "/spec", "/spec"), (false, "  /emote happy  ", "/emote happy")];
+    for (team, typed, sent) in cases {
+        let r = say(&server, &l, &serde_json::json!({"team": team, "text": typed}));
+        assert_eq!(r.status, 200, "{typed:?}: {:?}", r.json());
+        assert_eq!(r.json()["ok"], true);
+        assert!(
+            !r.json().to_string().contains(sent),
+            "the answer never repeats the text"
+        );
+        let reqs = bot.requests();
+        let ControlCommand::Say { team: t, text } = &reqs.last().unwrap().cmd else {
+            panic!("{reqs:?}")
+        };
+        assert_eq!((*t, text.as_str()), (team, sent));
+    }
+    assert_eq!(bot.count(), 2);
+}
+
+/// Everything else that is refused stays refused behind a slash: the trap line has no slash, but invisible characters, line breaks and
+/// the length limit apply to commands as to any line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_commands_that_are_refused_are_refused_for_the_usual_reasons() {
+    let server = TestServer::start().await;
+    let bot = taking_bot(&control_socket(&server));
+    let l = login(&server);
+    for (text, detail) in [
+        ("\u{200B}/kill", "control"),
+        ("/kill\u{200B}", "control"),
+        ("/emote\nhappy", "control"),
+        ("/w x \u{0}", "control"),
+    ] {
+        let r = say(&server, &l, &serde_json::json!({ "text": text }));
+        assert_eq!((r.status, r.json()["detail"].as_str()), (400, Some(detail)), "{text:?}");
+    }
+    assert_eq!(bot.count(), 0);
 }
 
 // ---- the route's own rate limit -------------------------------------------------------------------

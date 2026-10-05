@@ -143,7 +143,8 @@ pub fn check(payload: &[u8], registry: &Registry) -> Result<(), GuardError> {
 
 /// [`check`] with the session's one-shot owner-chat authorisations (task 4.9, D-094): a `Cl_Say` also passes when `auth` holds an
 /// authorisation for exactly these bytes **and** the bytes are the canonical encoding of an [`OwnerSay`] (so a validated line:
-/// trimmed, no control character, no leading `/`, at most 255 bytes, team 0 or 1). The authorisation is consumed either way.
+/// trimmed, no control or invisible character, at most 255 bytes, team 0 or 1; a leading `/` is allowed since 4.9b, the owner's
+/// decision of 2026-10-05). The authorisation is consumed either way, also when the bytes are the typed `/kill` of D-078.
 pub fn check_authorised(payload: &[u8], registry: &Registry, auth: &mut OwnerSayAuth) -> Result<(), GuardError> {
     let mut unpacker = Unpacker::new(payload);
     let (id, sys) = unpack_msg_id(&mut unpacker, registry.uuids()).map_err(|_| GuardError::Undecodable)?;
@@ -156,11 +157,12 @@ pub fn check_authorised(payload: &[u8], registry: &Registry, auth: &mut OwnerSay
             // byte, no team chat). D-094: and for an owner's website line, only against a one-shot authorisation the session
             // recorded for these very bytes. Everything else with this id is chat and stays refused.
             if numbered == ddai_net::generated::messages::id::NETMSGTYPE_CL_SAY {
+                // `take` first, so the authorisation is spent even when the structural check then refuses, and also when these are
+                // the bytes of the typed `/kill` (the owner's own `/kill`, 4.9b, has the same bytes and must not leave one behind).
+                let authorised = auth.take(payload);
                 if ServerCommand::recognise(payload) == Some(ServerCommand::Kill) {
                     return Ok(());
                 }
-                // `take` first, so the authorisation is spent even when the structural check then refuses.
-                let authorised = auth.take(payload);
                 return if authorised && OwnerSay::is_canonical(payload) {
                     Ok(())
                 } else {
@@ -336,6 +338,48 @@ mod tests {
         }
     }
 
+    /// Task 4.9b: an owner's command line passes only against its authorisation, like any owner line; the owner's `/kill` has the bytes of
+    /// the D-078 fallback, passes by either path, and the authorisation is spent so none is left behind.
+    #[test]
+    fn an_owner_command_passes_only_against_its_authorisation() {
+        let registry = Registry::new();
+        for (team, text) in [
+            (false, "/emote happy"),
+            (false, "/spec"),
+            (true, "/w Name hi"),
+            (true, "/kill"),
+        ] {
+            let payload = owner_say(team, text).payload();
+            assert!(check(payload.as_bytes(), &registry).is_err(), "{text}: unauthorised");
+            let mut auth = OwnerSayAuth::new();
+            auth.grant(&payload);
+            assert!(
+                check_authorised(payload.as_bytes(), &registry, &mut auth).is_ok(),
+                "{text}"
+            );
+            assert_eq!(auth.pending(), 0, "{text}: consumed");
+            assert!(
+                check_authorised(payload.as_bytes(), &registry, &mut auth).is_err(),
+                "{text}: a replay is refused"
+            );
+        }
+        // the owner's all-chat `/kill` is the very bytes of the fallback: it passes with or without an authorisation, and spends it
+        let kill = owner_say(false, "/kill").payload();
+        assert_eq!(kill.as_bytes(), ServerCommand::Kill.payload().as_slice());
+        let mut auth = OwnerSayAuth::new();
+        auth.grant(&kill);
+        assert!(check_authorised(kill.as_bytes(), &registry, &mut auth).is_ok());
+        assert_eq!(
+            auth.pending(),
+            0,
+            "the authorisation is spent, not left to a later `/kill`"
+        );
+        assert!(
+            check_authorised(kill.as_bytes(), &registry, &mut auth).is_ok(),
+            "the fallback's own /kill"
+        );
+    }
+
     /// An authorisation is for exact bytes: another text, the other team flag or a longer line is not covered by it.
     #[test]
     fn an_authorisation_covers_only_its_exact_bytes() {
@@ -388,7 +432,7 @@ mod tests {
         let long = "x".repeat(300);
         for bytes in [
             hand_built_say(0, "/kill "),
-            hand_built_say(0, "/w someone secret"),
+            hand_built_say(0, "\u{200B}/w someone secret"),
             hand_built_say(0, " padded"),
             hand_built_say(0, ""),
             hand_built_say(0, "a\u{1}b"),

@@ -22,9 +22,16 @@
 //!
 //! **What [`OwnerText::new`] checks** (the same rules back [`OwnerText::check`]): the text is trimmed (Rust whitespace and DDNet's
 //! `str_utf8_isspace` set), not empty, at most [`MAX_OWNER_TEXT_BYTES`] bytes, free of control characters, line breaks, and of the
-//! invisible and direction-changing format characters (zero-width and bidi marks, the word joiner, the BOM, the Hangul fillers), does not
-//! start with `/` (after skipping the same spaces, so a server that skips leading space cannot run it as a command either), and is not
-//! the one string 20.1 uses as a bot trap (`xd sure chillerbot.png is lyfe`).
+//! invisible and direction-changing format characters (zero-width and bidi marks, the word joiner, the BOM, the Hangul fillers), and is
+//! not the one string 20.1 uses as a bot trap (`xd sure chillerbot.png is lyfe`).
+//!
+//! **A leading `/` is allowed (task 4.9b, the owner's decision of 2026-10-05, amending D-094).** D-094 first refused it so that no server
+//! command could come from the site; the owner now wants to use the server's commands (`/spec`, `/pause`, `/emote`, `/w`, `/team`, ...)
+//! from the website. Nothing else changed: only owner-typed lines, the capability, the one-shot authorisation, the pacing, the length
+//! limit, the refusals above and the length-only logs. The text is still trimmed (DDNet's whitespace), so what is sent starts with the
+//! `/` the owner typed; a `/` hidden behind an invisible character is refused as before (the invisible character is). The owner's `/kill`
+//! is an owner line like any other (audit label `Cl_Say(owner)`); the bot's own typed `/kill` fallback (D-078) is a separate path
+//! ([`crate::server_command::ServerCommand`], label `Cl_Say(/kill)`).
 //!
 //! The byte limit: 255 bytes is the smaller of DDNet 20.1's two. The server keeps `MAX_CHAT_LENGTH` (256) code points minus the
 //! terminator (`gamecontext.cpp`, `OnSayNetMessage`: it cuts the line at the 256th code point); the client's chat box is a
@@ -41,7 +48,7 @@
 //!
 //! ```compile_fail,E0603
 //! // `OwnerText` has a private field: it cannot be built without `OwnerText::new`'s checks.
-//! let _ = ddai_net::owner_chat::OwnerText("/kill".to_string());
+//! let _ = ddai_net::owner_chat::OwnerText("hello".to_string());
 //! ```
 //!
 //! ```compile_fail,E0603
@@ -123,8 +130,6 @@ pub enum OwnerTextError {
     TooLong,
     #[error("the message has a control character, a line break or an invisible formatting character")]
     Control,
-    #[error("the message starts with '/': commands are not sent from the site")]
-    Command,
     #[error("the message is one the server treats as a bot marker")]
     Reserved,
 }
@@ -189,11 +194,6 @@ fn validate(raw: &str) -> Result<&str, OwnerTextError> {
     }
     if text.chars().any(|c| c.is_control() || is_line_break(c)) {
         return Err(OwnerTextError::Control);
-    }
-    // After the trim nothing leading is left to skip, but the check is made on the skipped form on purpose: it must hold whatever the
-    // trim above is changed to.
-    if text.trim_start_matches(is_space).starts_with('/') {
-        return Err(OwnerTextError::Command);
     }
     if text == SERVER_BOT_TRAP {
         return Err(OwnerTextError::Reserved);
@@ -355,11 +355,7 @@ mod tests {
             "a trailing newline is whitespace, trimmed"
         );
         assert_eq!(new("a  b").unwrap().as_str(), "a  b", "inner spaces stay");
-        assert_eq!(
-            new("hi /kill").unwrap().as_str(),
-            "hi /kill",
-            "a slash that is not first is text"
-        );
+        assert_eq!(new("hi /kill").unwrap().as_str(), "hi /kill");
         assert_eq!(new("!kill").unwrap().as_str(), "!kill");
     }
 
@@ -412,21 +408,68 @@ mod tests {
         }
     }
 
+    /// Task 4.9b: a leading `/` is allowed (the owner's decision of 2026-10-05): server commands from the site, text unchanged.
     #[test]
-    fn a_leading_slash_is_refused_whatever_comes_before_it() {
+    fn a_leading_slash_is_accepted_and_the_text_is_kept_as_typed() {
         for s in [
+            "/spec",
+            "/pause",
+            "/emote happy",
+            "/w Name hi",
+            "/team 1",
+            "/me waves",
+            "/rank",
             "/kill",
             "/",
-            "/help",
-            "/w someone hi",
-            "  /kill",
-            "\t/kill  ",
             "//kill",
             "/ kill",
-            "\n/kill",
         ] {
-            assert_eq!(new(s).unwrap_err(), OwnerTextError::Command, "{s:?}");
+            assert_eq!(new(s).unwrap().as_str(), s, "{s:?}");
         }
+        // the trim is DDNet's: leading and trailing spaces go, the slash is the first character that is sent
+        assert_eq!(new("  /kill").unwrap().as_str(), "/kill");
+        assert_eq!(new("\t/w someone hi  ").unwrap().as_str(), "/w someone hi");
+        assert_eq!(new("\n/spec").unwrap().as_str(), "/spec");
+        assert_eq!(new("\u{3000}/pause").unwrap().as_str(), "/pause");
+        // every command is still a team-flag line and still goes through the length limit
+        let long = format!("/w x {}", "a".repeat(MAX_OWNER_TEXT_BYTES));
+        assert_eq!(new(&long).unwrap_err(), OwnerTextError::TooLong);
+        assert_eq!(new("/w x ").unwrap().as_str(), "/w x");
+    }
+
+    /// A command is refused for the same reasons any other line is: control and invisible characters (also hiding in front of the
+    /// slash), line breaks inside it, and the trap string. A slash does not make any of these acceptable.
+    #[test]
+    fn a_command_is_refused_for_the_reasons_any_line_is() {
+        for s in [
+            "\u{200B}/kill",
+            "\u{FEFF}/spec",
+            "\u{202E}/pause",
+            "\u{2060}/w x y",
+            "\u{3164}/kill",
+            "/ki\u{200B}ll",
+            "/kill\u{200B}",
+            "/w x\nhi",
+            "/w x\r\n/kill",
+            "/emote\0",
+            "/kill\u{1b}[31m",
+            "/a\u{2028}b",
+        ] {
+            assert_eq!(new(s).unwrap_err(), OwnerTextError::Control, "{s:?}");
+        }
+        assert_eq!(new("/").unwrap().len(), 1);
+        assert_eq!(new("  /  ").unwrap().as_str(), "/");
+        assert_eq!(new("   ").unwrap_err(), OwnerTextError::Empty);
+        assert_eq!(
+            new(&format!("/{}", "a".repeat(MAX_OWNER_TEXT_BYTES))).unwrap_err(),
+            OwnerTextError::TooLong
+        );
+        assert_eq!(
+            new(&format!("/{}", "a".repeat(MAX_OWNER_TEXT_BYTES - 1)))
+                .unwrap()
+                .len(),
+            MAX_OWNER_TEXT_BYTES
+        );
     }
 
     #[test]
@@ -512,21 +555,22 @@ mod tests {
         assert!(new("😀 ok").is_ok());
     }
 
-    /// F3: a command stays a command behind any of the spaces DDNet itself skips or trims (`str_utf8_isspace`).
+    /// F3 (4.9b): DDNet's own spaces in front of a command are trimmed, so the line that is sent starts with the `/`; trailing ones are
+    /// cut as the server cuts them. Nothing hides behind them: a space-only line is empty.
     #[test]
-    fn a_leading_slash_is_found_behind_every_space_ddnet_knows() {
+    fn ddnet_spaces_around_a_command_are_trimmed() {
         for c in [
             '\u{0085}', '\u{00A0}', '\u{034F}', '\u{1680}', '\u{2000}', '\u{200A}', '\u{2028}', '\u{202F}', '\u{205F}',
             '\u{206A}', '\u{206F}', '\u{2800}', '\u{3000}', '\u{FE00}', '\u{FE0F}', '\u{FFF9}', '\u{FFFC}', ' ', '\t',
             '\n',
         ] {
-            for s in [format!("{c}/kill"), format!("{c}{c}/w someone hi"), format!(" {c} /")] {
-                assert_eq!(
-                    new(&s).unwrap_err(),
-                    OwnerTextError::Command,
-                    "U+{:04X} in {s:?}",
-                    u32::from(c)
-                );
+            for (raw, want) in [
+                (format!("{c}/kill"), "/kill"),
+                (format!("{c}{c}/w someone hi"), "/w someone hi"),
+                (format!(" {c} /"), "/"),
+                (format!("/spec{c}"), "/spec"),
+            ] {
+                assert_eq!(new(&raw).unwrap().as_str(), want, "U+{:04X} in {raw:?}", u32::from(c));
             }
             // and trailing ones are cut, as the server cuts them
             assert_eq!(new(&format!("gg{c}")).unwrap().as_str(), "gg", "U+{:04X}", u32::from(c));
@@ -588,10 +632,16 @@ mod tests {
     fn is_canonical_takes_only_the_canonical_encoding() {
         let ok = OwnerSay::new(false, new("hello").unwrap()).payload().into_bytes();
         assert!(OwnerSay::is_canonical(&ok));
+        // a command is a canonical owner line too (4.9b), in either chat
+        for (team, text) in [(0, "/spec"), (0, "/emote happy"), (1, "/w Name hi"), (0, "/kill")] {
+            assert!(OwnerSay::is_canonical(&say_bytes(team, text)), "{text}");
+        }
         // what a hand-built Cl_Say could look like instead
         let refused: Vec<(&str, Vec<u8>)> = vec![
-            ("slash command", say_bytes(0, "/kill")),
-            ("slash command, team", say_bytes(1, "/w x y")),
+            ("untrimmed command", say_bytes(0, " /kill")),
+            ("untrimmed command end", say_bytes(1, "/w x y ")),
+            ("hidden command", say_bytes(0, "\u{200B}/kill")),
+            ("the bot trap", say_bytes(0, SERVER_BOT_TRAP)),
             ("untrimmed", say_bytes(0, " hello")),
             ("untrimmed end", say_bytes(0, "hello ")),
             ("empty", say_bytes(0, "")),
@@ -620,11 +670,23 @@ mod tests {
         assert!(!OwnerSay::is_canonical(&[0xff; 8]));
     }
 
-    /// The `/kill` payload is a valid `Cl_Say` but not an owner line: the two paths stay apart.
+    /// 4.9b: the owner may type `/kill`, and its wire bytes are the very bytes of the bot's own `/kill` fallback (D-078): the two are told
+    /// apart by the path (the type that made the payload and the audit label `Cl_Say(owner)` / `Cl_Say(/kill)`), not by the bytes.
     #[test]
-    fn the_kill_command_is_not_an_owner_line() {
-        let kill = crate::server_command::ServerCommand::Kill.payload();
-        assert!(!OwnerSay::is_canonical(&kill));
+    fn the_owners_slash_kill_has_the_fallbacks_bytes_but_is_made_apart() {
+        let fallback = crate::server_command::ServerCommand::Kill.payload();
+        let owner = OwnerSay::new(false, new("/kill").unwrap()).payload().into_bytes();
+        assert_eq!(owner, fallback, "the same Cl_Say bytes");
+        assert!(OwnerSay::is_canonical(&fallback));
+        assert_eq!(
+            crate::server_command::ServerCommand::recognise(&owner),
+            Some(crate::server_command::ServerCommand::Kill)
+        );
+        // with the team flag it is an owner line only
+        let team_kill = OwnerSay::new(true, new("/kill").unwrap()).payload().into_bytes();
+        assert_ne!(team_kill, fallback);
+        assert_eq!(crate::server_command::ServerCommand::recognise(&team_kill), None);
+        assert!(OwnerSay::is_canonical(&team_kill));
     }
 
     /// Whatever bytes arrive, `decode` never panics, and what it accepts re-encodes to itself.

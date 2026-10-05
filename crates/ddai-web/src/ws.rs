@@ -45,7 +45,8 @@ const IDLE_CLOSE_AFTER: Duration = Duration::from_secs(45);
 
 /// What the `status` message's `bot_state` says about the bot (task 5.11; the page turns each word into text):
 /// `"demo"` (the site shows the fly's demo, no real bot), `"in_game"` (a fresh `STATUS` from the live bridge, the session is in
-/// the game), `"connecting"` (a fresh `STATUS` that says `connected: false`: the bot runs but is not in a game yet or any more) and
+/// the game), `"paused"` (task 4.9b: the status says `paused: true`, the server has paused the bot, the owner's `/pause` or `/spec`),
+/// `"connecting"` (a fresh `STATUS` that says `connected: false`: the bot runs but is not in a game yet or any more) and
 /// `"stopped"` (no bridge, no `STATUS`, or none for [`STATUS_STALE`]: nothing runs). An older bot's `STATUS` has no `connected`
 /// field and counts as in the game (the page reads it the same way).
 fn bot_state_word(source: Option<SourceKind>, status: Option<(Duration, &str)>) -> &'static str {
@@ -64,6 +65,8 @@ fn bot_state_word(source: Option<SourceKind>, status: Option<(Duration, &str)>) 
         Ok(serde_json::Value::Object(o)) => {
             if o.get("connected").and_then(serde_json::Value::as_bool) == Some(false) {
                 "connecting"
+            } else if o.get("paused").and_then(serde_json::Value::as_bool) == Some(true) {
+                "paused"
             } else {
                 "in_game"
             }
@@ -774,6 +777,19 @@ mod tests {
         );
         assert_eq!(word(None, Some((FRESH, r#"{"alive":false,"frozen":true}"#))), "in_game");
         assert_eq!(word(None, Some((FRESH, r#"{"connected":null}"#))), "in_game");
+        // 4.9b: the server has paused the bot (the owner's /pause or /spec); not in a game wins over a pause flag
+        assert_eq!(
+            word(None, Some((FRESH, r#"{"connected":true,"paused":true}"#))),
+            "paused"
+        );
+        assert_eq!(
+            word(None, Some((FRESH, r#"{"connected":true,"paused":false}"#))),
+            "in_game"
+        );
+        assert_eq!(
+            word(None, Some((FRESH, r#"{"connected":false,"paused":true}"#))),
+            "connecting"
+        );
         // running but not in a game
         assert_eq!(word(None, Some((FRESH, r#"{"connected":false}"#))), "connecting");
         assert_eq!(

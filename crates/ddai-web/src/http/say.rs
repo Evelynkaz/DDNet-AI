@@ -1,13 +1,15 @@
 //! `POST /api/bot/say` (task 4.9, D-094): the owner types a line on the authenticated website and the bot says it in the game chat.
 //!
-//! The only chat the bot may send is the typed `/kill` fallback (D-078) and this. Nothing is automatic.
+//! The only chat the bot may send is the typed `/kill` fallback (D-078) and this. Nothing is automatic. Since task 4.9b (the owner's
+//! decision of 2026-10-05, amending D-094) a line may start with `/`: it is then a server command (`/spec`, `/emote`, `/w`, ...) typed by
+//! the owner, and goes through exactly the same checks and pacing as any other line.
 //!
 //! **Behind everything the other bot POSTs are behind** (D-070): the session (`401`), the strict same-origin check (`403`), the CSRF
 //! token (`403`) and a JSON body (`415`), in that order ([`super::bot::authorize_post`]).
 //!
 //! **Validated twice.** Here, with `OwnerText::normalise` (the very rules the bot applies, and no sendable value is made here: only the
 //! bot's dispatcher holds the `OwnerChannel` that makes an `OwnerText`; not empty, at most 255 bytes, no control or invisible
-//! character or line break, no leading `/`, trimmed), before anything is sent; and again by the bot, which also paces the lines (3 s
+//! character or line break, not the server's bot-trap line, trimmed), before anything is sent; and again by the bot, which also paces the lines (3 s
 //! apart, 10 a minute, a queue of 3) and says nothing while it is not in the game. What goes to the control socket is the trimmed text.
 //!
 //! **Its own rate limit**, kept here ([`crate::config::WebConfig::say_burst`] in [`say_burst_window`], and
@@ -50,7 +52,6 @@ fn detail_of(e: OwnerTextError) -> &'static str {
         OwnerTextError::Empty => "empty",
         OwnerTextError::TooLong => "too_long",
         OwnerTextError::Control => "control",
-        OwnerTextError::Command => "command",
         OwnerTextError::Reserved => "reserved",
     }
 }

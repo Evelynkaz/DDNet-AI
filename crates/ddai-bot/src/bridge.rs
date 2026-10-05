@@ -264,6 +264,9 @@ pub struct StatusMessage {
     pub clips_saved: u64,
     /// Ticks until `Cl_Kill` is allowed again, in server ticks (50 per second: the cooldown is 500 ticks = 10 s); 0: now.
     pub kill_cooldown_ticks: i32,
+    /// Additive since task 4.9b: the server has paused the bot (its own `DDNetPlayer` flag `SPEC`/`PAUSED`: the owner's `/pause` or
+    /// `/spec`); the bot idles until the flag clears. The site shows «на паузе».
+    pub paused: bool,
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -799,6 +802,7 @@ mod tests {
             deaths: 2,
             clips_saved: 1,
             kill_cooldown_ticks: 120,
+            paused: false,
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);

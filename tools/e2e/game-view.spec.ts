@@ -565,11 +565,21 @@ test("the chat input sits under the chat panel; Enter sends, the line reaches th
   expect(stack.bot.control[stack.bot.control.length - 1].cmd).toEqual({ type: "say", team: true, text: "держим левый вб" });
   await expect(page.locator("#chat-log .chat-team", { hasText: "держим левый вб" })).toHaveCount(1);
 
-  // A line the page itself refuses (a command) says why, stays in the box, and never reaches the bot.
+  // Task 4.9b: a line that starts with "/" is a server command the owner typed: it is sent as typed, like any line (the page says what
+  // /spec and /pause do under the input). The server does not repeat a command in the chat, so only the request is checked.
+  await expect(mount.locator(".say-note")).toHaveText("/spec и /pause ставят бота на паузу; повторите команду — продолжит");
+  await page.waitForTimeout(SAY_GAP_MS);
+  await mount.locator(".say-team input").uncheck();
+  await sayLine(page, "  /emote happy ");
+  await expect(mount.locator(".say-result.ok")).toContainText("Принято");
+  await expect(mount.locator(".say-input")).toHaveValue("");
+  expect(stack.bot.control[stack.bot.control.length - 1].cmd).toEqual({ type: "say", team: false, text: "/emote happy" });
+
+  // A line the page itself refuses (an invisible character hiding in front of a command) says why, stays in the box, and never reaches the bot.
   const n = stack.bot.control.length;
-  await sayLine(page, "/kill");
-  await expect(mount.locator(".say-result.bad")).toContainText("Команды");
-  await expect(mount.locator(".say-input")).toHaveValue("/kill");
+  await sayLine(page, "\u200b/kill");
+  await expect(mount.locator(".say-result.bad")).toContainText("невидимые");
+  await expect(mount.locator(".say-input")).toHaveValue("\u200b/kill");
   await page.waitForTimeout(300);
   expect(stack.bot.control.length).toBe(n);
   await page.screenshot({ path: path.join(SHOTS, "5.11-desktop-say.png") });

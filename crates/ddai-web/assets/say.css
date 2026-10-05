@@ -26,6 +26,12 @@
   min-width: 6rem;
 }
 
+.say-card .say-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .say-card .say-opts {
   display: flex;
   align-items: center;
@@ -103,6 +109,11 @@
 
 .say-card.say-embedded .say-opts {
   font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.say-card.say-embedded .say-note {
+  font-size: 0.72rem;
   color: rgba(255, 255, 255, 0.72);
 }
 

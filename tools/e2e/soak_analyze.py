@@ -45,7 +45,9 @@ MAX_DEAD_KILLS_IN_A_ROW = 3
 # Task 4.6 (D-078): the one chat-channel message the bot may send, as the outgoing audit labels it (`ddai_client::session::SERVER_COMMAND_KILL_LABEL`).
 KILL_COMMAND_LABEL = "Cl_Say(/kill)"
 # Task 4.9 (D-094): the owner's website chat, as the outgoing audit labels it (`ddai_client::session::OWNER_SAY_LABEL`). Allowed only
-# against the report's own `owner_chat` numbers (see `analyze_chat`).
+# against the report's own `owner_chat` numbers (see `analyze_chat`). Task 4.9b: a line the owner typed that starts with "/" (a server
+# command: /spec, /emote, /w, even /kill) is such a line too and carries this label, never the fallback's: the audit knows the path
+# that sent it, not the text, and the text is never in a report.
 OWNER_SAY_LABEL = "Cl_Say(owner)"
 SLOPE_WINDOW_S = 5 * 3600.0
 SLOPE_LIMIT_MIB_WEEK = 50.0
@@ -666,7 +668,8 @@ def analyze_chat(res, log, report, console_text):
     )
     # The owner's lines (task 4.9): the bot says them only when the owner types them on the website, so a run with none must show none,
     # and a run with some must account for each: the wire count is at most what the runner handed to the client (`owner_chat.sent`;
-    # a line can still be dropped by a session that left the game in between), and none was refused by the allow-list.
+    # a line can still be dropped by a session that left the game in between), and none was refused by the allow-list. A server command
+    # the owner typed (task 4.9b, `/kill` included) is one of these lines and not the bot's own `/kill` fallback, which is judged below.
     owner = out.get(OWNER_SAY_LABEL)
     if owner is not None:
         counts = (report or {}).get("owner_chat")
@@ -1184,6 +1187,8 @@ def selftest():
         ("more owner lines on the wire than the owner chat sent fail", {"owner_wire": 4, "owner_report": {"accepted": 3, "sent": 3, "refused": 0, "dropped": 0}}, "Cl_Say(owner)"),
         ("an owner line the allow-list refused fails", {"owner_wire": 2, "owner_refused": 1, "owner_report": {"accepted": 3, "sent": 3, "refused": 0, "dropped": 0}}, "Cl_Say(owner)"),
         ("owner lines with no owner_chat numbers in the report fail", {"owner_wire": 1}, "Cl_Say(owner)"),
+        ("an owner's own /kill is an owner line next to the fallback's /kill: both pass (task 4.9b)", {"owner_wire": 2, "cmd_kills": 1, "owner_report": {"accepted": 2, "sent": 2, "refused": 0, "dropped": 0}}, None),
+        ("an owner's /kill counted as the fallback's (no Cl_Kill decision of the bot behind it) fails (task 4.9b)", {"owner_wire": 1, "stray_cmd": True, "owner_report": {"accepted": 1, "sent": 1, "refused": 0, "dropped": 0}}, "/kill on the wire"),
         ("another Cl_Say label beside the owner's still fails", {"owner_wire": 1, "chat": True, "owner_report": {"accepted": 1, "sent": 1, "refused": 0, "dropped": 0}}, "0 chat"),
         ("panic fails", {"panic": True}, "no panic"),
         ("unbounded clips fail", {"clips": 60}, "clips bounded"),

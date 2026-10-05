@@ -146,6 +146,9 @@ impl Bot {
                 CommandReply::ok("joining the game")
             }
             BotCommand::Kill => {
+                if self.paused {
+                    return CommandReply::err("paused by the server: no kill sent");
+                }
                 if !self.unstick.cooldown_ready(self.last_tick) {
                     return CommandReply::err("reset is on cooldown");
                 }
@@ -178,7 +181,8 @@ impl Bot {
         if self.pending_kill {
             self.pending_kill = false;
             let tick = snap.tick;
-            if !out.kill && self.unstick.cooldown_ready(tick) {
+            // Paused by the server (task 4.9b): no kill at all, the operator's included (it is dropped, not kept for later).
+            if !self.paused && !out.kill && self.unstick.cooldown_ready(tick) {
                 self.unstick.note_external_kill(tick);
                 self.hooks.navigator.kill_sent(tick, false);
                 self.stats.self_kills += 1;

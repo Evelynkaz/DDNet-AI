@@ -1,4 +1,5 @@
 // Task 4.9 (D-094): the chat input — the owner types a line on the website and the bot says it in the game chat.
+// Task 4.9b: a line may start with "/": it is then a server command (/spec, /emote, /w, ...) the owner typed, sent like any other line.
 //
 // The only chat the bot may send is the typed /kill fallback and this. The page only asks: `POST /api/bot/say` ({team, text}) checks the
 // session, the CSRF token and the Origin, validates the text, and hands it to the bot, which validates it again, paces it (3 s apart, at most
@@ -14,7 +15,11 @@
 (function () {
   "use strict";
 
-  var DDNET_SPACE = /^[\s\u0085\u00a0\u034f\u1680\u2000-\u200f\u2028-\u202f\u205f-\u2064\u206a-\u206f\u2800\u3000\ufe00-\ufe0f\ufff9-\ufffc]+/;
+  // What the bot trims at both ends (`is_space` in ddai_net::owner_chat): Rust's whitespace plus DDNet's `str_utf8_isspace` set, so a line
+  // padded with U+2800 or U+FE0F is judged (and sent) as the bot will judge it. The invisible and direction-changing characters are not
+  // trimmed here: they are refused wherever they stand, before the trim, as the bot does.
+  var DDNET_TRIM = /^[\s\u0085\u00a0\u034f\u1680\u2000-\u200a\u2028-\u202f\u205f\u2060-\u2064\u206a-\u206f\u2800\u3000\ufe00-\ufe0f\ufff9-\ufffc]+|[\s\u0085\u00a0\u034f\u1680\u2000-\u200a\u2028-\u202f\u205f\u2060-\u2064\u206a-\u206f\u2800\u3000\ufe00-\ufe0f\ufff9-\ufffc]+$/g;
+  var INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u180e\u115f\u1160\u3164\uffa0]/;
   var MAX_BYTES = 255; // the smaller of DDNet 20.1's server and client limits (ddai_net::owner_chat::MAX_OWNER_TEXT_BYTES)
 
   var REASON_TEXT = {
@@ -42,7 +47,6 @@
     empty: "Пустое сообщение.",
     too_long: "Слишком длинное: не больше " + MAX_BYTES + " байт.",
     control: "В сообщении есть управляющие, невидимые символы или перевод строки.",
-    command: "Команды (строки с «/» в начале) отсюда не отправляются.",
     reserved: "Эта строка у сервера служебная (признак бота): её сказать нельзя.",
   };
 
@@ -72,9 +76,16 @@
     return unescape(encodeURIComponent(s)).length;
   }
 
+  function ddnetTrim(s) {
+    return s.replace(DDNET_TRIM, "");
+  }
+
   // The page's own pre-check, the same rules as the server's (the server decides): returns a detail code or null.
   function check(raw) {
-    var text = raw.trim();
+    if (INVISIBLE.test(raw)) {
+      return "control"; // refused anywhere, also at the ends where the trim would hide it (as the bot does)
+    }
+    var text = ddnetTrim(raw);
     if (text.length === 0) {
       return "empty";
     }
@@ -84,10 +95,6 @@
     // eslint-disable-next-line no-control-regex
     if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u180e\u115f\u1160\u3164\uffa0]/.test(text)) {
       return "control";
-    }
-    // DDNet's own "space" (str_utf8_isspace) is skipped before the slash is looked for, as the server does.
-    if (text.replace(DDNET_SPACE, "").charAt(0) === "/") {
-      return "command";
     }
     if (text === "xd sure chillerbot.png is lyfe") {
       return "reserved";
@@ -126,13 +133,13 @@
     }
 
     function updateCount() {
-      var n = byteLength(ui.input.value.trim());
+      var n = byteLength(ddnetTrim(ui.input.value));
       ui.count.textContent = n + " / " + MAX_BYTES;
       ui.count.className = "say-count" + (n > MAX_BYTES ? " bad" : "");
     }
 
     function updateButton() {
-      ui.send.disabled = busy || locked || ui.input.value.trim().length === 0;
+      ui.send.disabled = busy || locked || ddnetTrim(ui.input.value).length === 0;
     }
 
     // The form shows the bot's refusal to take lines as a state, not only as the answer to one line.
@@ -162,7 +169,7 @@
       busy = true;
       updateButton();
       setResult("Отправка…", true);
-      api("POST", "/api/bot/say", { team: ui.team.checked, text: raw.trim() })
+      api("POST", "/api/bot/say", { team: ui.team.checked, text: ddnetTrim(raw) })
         .then(function (res) {
           var r = reply(res);
           setResult(r.text, r.ok);
@@ -227,6 +234,11 @@
       row.appendChild(ui.input);
       row.appendChild(ui.send);
       form.appendChild(row);
+
+      // 4.9b: a line that starts with "/" is a server command; /spec and /pause pause the bot on the server (it does not stop, and stays
+      // paused until the command is typed again).
+      ui.note = el("p", "say-note", "/spec и /pause ставят бота на паузу; повторите команду — продолжит");
+      form.appendChild(ui.note);
 
       var opts = el("div", "say-opts");
       var teamLabel = el("label", "say-team");

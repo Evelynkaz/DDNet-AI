@@ -20,6 +20,7 @@
   // Task 5.11: the words of the `status` message's `bot_state` (from the live bridge); a word this page does not know is shown as it is.
   var BOT_STATE_TEXT = {
     in_game: "в игре",
+    paused: "на паузе",
     connecting: "запущен, не в игре",
     stopped: "не запущен",
     demo: "показ (не настоящая игра)",
@@ -620,7 +621,10 @@
       }
       dot.classList.toggle("dot-on", !!s.connected);
       dot.classList.toggle("dot-off", !s.connected);
-      setText("bot-conn-text", s.connected ? "В игре" : "Бот запущен, но не в игре (подключается или ждёт)");
+      setText(
+        "bot-conn-text",
+        !s.connected ? "Бот запущен, но не в игре (подключается или ждёт)" : s.paused ? "На паузе (сервер: /pause или /spec владельца; повторите команду)" : "В игре"
+      );
       setText("bs-server", s.server || "—");
       setText("bs-map", s.map || "—");
       setText("bs-mode", MODE_LABELS[s.mode] || s.mode || "—");

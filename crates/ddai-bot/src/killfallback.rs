@@ -160,6 +160,24 @@ impl KillFallback {
         true
     }
 
+    /// The owner's own line starting with `/` was sent (task 4.9b: a server command typed on the website, `/kill` among them). The bot
+    /// did not decide it, so whatever it does to the life must not be credited to the bot's `/kill` that may still be in flight: that
+    /// `/kill` is forgotten as a candidate for the threshold ([`KillFallback::on_life_started`] then learns nothing). Nothing else
+    /// changes: the owner's lines never count as a `/kill` of the fallback (no cooldown, no per-life count, no new awaited kill).
+    pub fn on_owner_command(&mut self) {
+        self.command_tick = None;
+        self.dead_tick = None;
+    }
+
+    /// The server paused the bot (task 4.9b): whatever kill was awaited, and any `/kill` in flight, is forgotten. Cooldown and the
+    /// per-life count stay (a pause is no reason to lift them).
+    pub fn cancel_pending(&mut self) {
+        self.awaiting = None;
+        self.sent_for = false;
+        self.command_tick = None;
+        self.dead_tick = None;
+    }
+
     /// The bot stopped asking for this life (too many `/kill`s without a death).
     pub fn gave_up(&self) -> bool {
         self.gave_up
@@ -313,6 +331,57 @@ mod tests {
         assert!(f.on_life_started(552).is_some());
     }
 
+    /// 4.9b: the owner may type `/kill` on the site. That line is the owner's (counted as `Cl_Say(owner)`, never the fallback), so a life it
+    /// ends is not something the bot learned the kill-protection threshold from, even while a fallback `/kill` of the bot's own is in
+    /// flight.
+    #[test]
+    fn an_owner_typed_command_is_never_learned_as_a_threshold() {
+        let life_start = 1000;
+        let dropped_kill = life_start + 3000 * 21;
+        // (a) the owner's /kill alone: no fallback `/kill` was sent, so nothing can be learned
+        let mut f = KillFallback::new();
+        f.on_life_started(life_start);
+        f.on_owner_command();
+        f.on_dead(dropped_kill);
+        assert_eq!(f.on_life_started(dropped_kill + 2), None);
+        assert!(!f.poll(dropped_kill + 100), "and it does not make the bot send one");
+        // (b) the bot's own `/kill` is still in flight (no effect yet) when the owner's `/kill` ends the life within the effect window:
+        // without the owner's line this would be credited to the fallback, with it nothing is learned
+        for owner_types in [false, true] {
+            let mut f = KillFallback::new();
+            f.on_life_started(life_start);
+            f.on_protocol_kill(dropped_kill);
+            assert!(f.poll(dropped_kill + EFFECT_WAIT_TICKS), "the fallback's /kill");
+            if owner_types {
+                f.on_owner_command();
+            }
+            f.on_dead(dropped_kill + EFFECT_WAIT_TICKS + 10);
+            let learned = f.on_life_started(dropped_kill + EFFECT_WAIT_TICKS + 12);
+            assert_eq!(
+                learned.is_some(),
+                !owner_types,
+                "owner_types {owner_types}: {learned:?}"
+            );
+        }
+        // (c) the owner's line does not disturb the fallback's own accounting: its cooldown, its count and its awaited kill stay
+        let mut f = KillFallback::new();
+        f.on_life_started(0);
+        f.on_protocol_kill(1000);
+        f.on_owner_command();
+        assert_eq!(
+            polled(&mut f, 1000, 2000),
+            vec![1000 + EFFECT_WAIT_TICKS],
+            "still exactly one /kill"
+        );
+        f.on_owner_command();
+        f.on_protocol_kill(1600);
+        assert_eq!(
+            polled(&mut f, 1600, 3000),
+            vec![1600 + EFFECT_WAIT_TICKS],
+            "the cooldown held"
+        );
+    }
+
     #[test]
     fn only_the_systems_notice_counts() {
         assert!(is_kill_protection_notice(
@@ -326,5 +395,16 @@ mod tests {
         assert!(!is_kill_protection_notice(-1, "kill protection enabled"));
         assert!(!is_kill_protection_notice(-1, "hello"));
         assert!(!is_kill_protection_notice(-1, ""));
+        // 4.9b: the server's answers to the owner's commands are system lines too, and none of them is the notice
+        for reply in [
+            "Emote commands are: /emote surprise /emote blink",
+            "DDraceNetwork Mod. Version: 20.1",
+            "Unknown command: nosuch",
+            "You are force-paused for 30 seconds.",
+            "Kicked (spam)",
+            "You have been banned",
+        ] {
+            assert!(!is_kill_protection_notice(-1, reply), "{reply}");
+        }
     }
 }

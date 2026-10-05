@@ -2122,6 +2122,57 @@ mod duplicate_connected_invariant_tests {
     }
 }
 
+/// Task 4.9b: the owner can type server commands, and the server answers them with system chat lines (`Sv_Chat`, client id -1). Chat text
+/// is only ever chat: whatever it says ("Kicked", "You have been banned", "Server shutdown"), it is never a disconnect, so it can never
+/// make the driver treat the session as kicked, banned or lost. Only `NETMSG_CLOSE` does (`SessionEvent::Disconnected`).
+#[cfg(test)]
+mod command_replies_are_chat_not_a_kick_tests {
+    use super::*;
+    use crate::session::{ClientConfig, Session};
+    use ddai_net::generated::messages::{GameMsg, SvChat};
+
+    #[test]
+    fn command_replies_are_chat_not_a_kick() {
+        let (events_tx, events_rx) = event_channel::channel();
+        let mut session = Session::new(ClientConfig::default());
+        let replies = [
+            (-1, "Kicked (spam)"),
+            (-1, "You have been banned for 5 minutes (VPN)"),
+            (-1, "Server shutdown"),
+            (-1, "This server is full"),
+            (-1, "Kill Protection enabled. If you really want to kill, type /kill"),
+            (-1, "You are force-paused for 30 seconds."),
+            (-1, "Unknown command: nosuch"),
+            (3, "kicked ban vpn timeout"),
+        ];
+        for (client_id, message) in replies {
+            let ev = SessionEvent::GameMessage(GameMsg::SvChat(SvChat {
+                team: 0,
+                client_id,
+                message: message.to_string(),
+            }));
+            let outcome = handle_session_event(ev, &mut session, &ClientConfig::default(), Duration::ZERO, &events_tx);
+            assert!(
+                outcome.is_none(),
+                "chat {message:?} must not end the connection: {outcome:?}"
+            );
+        }
+        // every line was forwarded as the chat it is, and nothing else came with it
+        let mut forwarded = 0;
+        while let Some(ev) = events_rx.try_recv() {
+            match ev {
+                ClientEvent::Session(inner) if matches!(*inner, SessionEvent::GameMessage(GameMsg::SvChat(_))) => {
+                    forwarded += 1;
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        assert_eq!(forwarded, replies.len());
+        // and a real close with the same words is what the classification keeps final
+        assert!(!should_reconnect_after_peer_close("Kicked (spam)"));
+    }
+}
+
 #[cfg(test)]
 mod give_up_message_tests {
     use super::*;

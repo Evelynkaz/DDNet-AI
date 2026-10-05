@@ -334,6 +334,10 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         }
         // The owner's lines whose turn has come (at most one per pass; none outside the game).
         if let Some(say) = owner_chat.poll(started.elapsed(), bot.is_connected()) {
+            if say.text.as_str().starts_with('/') {
+                // A server command typed by the owner (4.9b, `/kill` among them) is not the `/kill` fallback of D-078.
+                bot.on_owner_command();
+            }
             client.owner_say(say);
         }
         for line in cfg.nav_handle.drain_replies() {
@@ -643,6 +647,15 @@ fn log_event(e: &BotEvent) {
         BotEvent::Joining { tick } => tracing::info!(tick, "in the spectators: asking to join"),
         BotEvent::JoinGaveUp { tick } => tracing::warn!(tick, "still a spectator after all tries: not asking again"),
         BotEvent::MovedToSpectators { tick } => tracing::error!(tick, "moved to the spectators after having played"),
+        BotEvent::PausedByServer { tick } => {
+            tracing::info!(
+                tick,
+                "paused by the server: owner /pause or /spec (the bot idles until it is repeated)"
+            )
+        }
+        BotEvent::ResumedByServer { tick } => {
+            tracing::info!(tick, "resumed: the server's pause is over, the bot plays again")
+        }
         BotEvent::PredictionClamped {
             tick,
             wanted_ahead,
@@ -698,6 +711,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         deaths: s.stats.deaths,
         clips_saved: bot.stats().clips_saved,
         kill_cooldown_ticks: bot.kill_cooldown_ticks(),
+        paused: bot.paused(),
     }
 }
 

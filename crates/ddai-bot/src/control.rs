@@ -790,11 +790,10 @@ mod tests {
         let channel = OwnerChannel::mint_for_tests();
         for (text, why) in [
             ("", OwnerTextError::Empty),
-            ("/kill", OwnerTextError::Command),
             ("a\nb", OwnerTextError::Control),
             (&"x".repeat(256), OwnerTextError::TooLong),
             ("\u{200B}/kill", OwnerTextError::Control),
-            ("\u{2800}/w someone hi", OwnerTextError::Command),
+            ("\u{3164}/w someone hi", OwnerTextError::Control),
             ("xd sure chillerbot.png is lyfe", OwnerTextError::Reserved),
         ] {
             let c = ControlCommand::Say {
@@ -834,15 +833,30 @@ mod tests {
             Some(serde_json::json!({"reason": "none"})),
             "the bot's data is relayed"
         );
-        for bad in ["/kill", "", "a\nb", &"x".repeat(300)] {
+        for bad in ["\u{200B}/kill", "", "a\nb", &"x".repeat(300)] {
             let r = d.handle_line(&say(false, bad));
             assert!(!r.ok);
             assert_eq!(r.code, Some(ReplyCode::BadRequest), "{bad:?}");
             assert!(!r.text.contains("kill") || bad.is_empty(), "{}", r.text);
         }
+        // 4.9b: a server command is a chat line like any other and reaches the bot as the very text, trimmed
+        let cmd = d.handle_line(&say(false, " /emote happy "));
+        assert!(cmd.ok && cmd.code.is_none(), "{cmd:?}");
         thread::sleep(Duration::from_millis(30));
         let seen = bot.seen();
-        assert_eq!(seen.len(), 1, "only the valid line reached the bot: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            2,
+            "the valid line and the command reached the bot, nothing else: {seen:?}"
+        );
+        let BotCommand::Say {
+            team: false,
+            text: cmd_text,
+        } = &seen[1]
+        else {
+            panic!("{seen:?}")
+        };
+        assert_eq!(cmd_text.as_str(), "/emote happy");
         let BotCommand::Say { team, text } = &seen[0] else {
             panic!("{seen:?}")
         };
@@ -855,7 +869,9 @@ mod tests {
             assert!(!e.to_line().contains("SECRET"), "{}", e.to_line());
             assert!(e.cmd == "say:team" || e.cmd == "say:all", "{}", e.cmd);
         }
-        assert!(entries[1..].iter().all(|e| e.outcome == Outcome::BadRequest));
+        assert!(entries[1..5].iter().all(|e| e.outcome == Outcome::BadRequest));
+        assert_eq!(entries[5].outcome, Outcome::Ok, "the command line");
+        assert_eq!(entries.len(), 6);
     }
 
     /// F4 (task 4.9): the emergency switch. Without the owner channel every `say` is refused with `chat_disabled` (a plain refusal, not

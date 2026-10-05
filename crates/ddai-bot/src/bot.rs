@@ -51,6 +51,7 @@ use std::time::{Duration, Instant};
 use ddai_brain::{Action, Brain, IVec2, LiveContext, Observation, ResetContext, WorldView};
 use ddai_client::LiveWorldSnapshot;
 use ddai_clip::format::{BotRec, ClipEvent, KillWhy};
+use ddai_net::generated::enums::explayerflagflag;
 use ddai_net::generated::objects::PlayerInput as NetInput;
 use ddai_physics::core::{MAX_CLIENTS, PlayerInput as PhysInput, WEAPON_HAMMER};
 use ddai_physics::map::MapData;
@@ -254,6 +255,14 @@ pub enum BotEvent {
     MovedToSpectators {
         tick: i32,
     },
+    /// The server paused us (our own `DDNetPlayer` flag `SPEC` or `PAUSED`: the owner's `/pause` or `/spec`, task 4.9b): the bot idles.
+    PausedByServer {
+        tick: i32,
+    },
+    /// The server's pause flag cleared: the bot plays again.
+    ResumedByServer {
+        tick: i32,
+    },
     RosterChanged {
         players: usize,
     },
@@ -392,6 +401,8 @@ pub struct Bot {
     mode: Mode,
     last_tick: i32,
     was_alive: bool,
+    /// Our own `DDNetPlayer` flag `SPEC` or `PAUSED` is set (task 4.9b): the bot idles until it clears.
+    paused: bool,
     lives: u64,
     join: JoinState,
     /// Whether our tee has existed on the current map (a later spectator state is then a move).
@@ -465,6 +476,7 @@ impl Bot {
             mode,
             last_tick: -1,
             was_alive: false,
+            paused: false,
             lives: 0,
             join: JoinState::default(),
             played_on_map: false,
@@ -720,6 +732,7 @@ impl Bot {
         self.clipper.reset();
         self.sent.clear();
         self.was_alive = false;
+        self.paused = false;
         self.last_tick = -1;
     }
 
@@ -735,6 +748,8 @@ impl Bot {
         self.last_tick = -1;
         self.killfb.reset();
         self.fb_lives = self.lives;
+        // The server's pause is judged again from the next snapshot (task 4.9b).
+        self.paused = false;
         // `join` is deliberately kept: its cap is per run.
         self.played_on_map = false;
     }
@@ -742,6 +757,11 @@ impl Bot {
     /// `SessionEvent::InGame`: the session entered the game.
     pub fn on_in_game(&mut self) {
         self.connected = true;
+    }
+
+    /// Whether the server has paused us (the owner's `/pause` or `/spec`): the bot idles and the web status says so.
+    pub fn paused(&self) -> bool {
+        self.paused
     }
 
     /// Whether the session is in the game (the web status's "connected").
@@ -763,9 +783,21 @@ impl Bot {
         self.killfb.on_notice();
     }
 
+    /// A line the owner typed on the website and that starts with `/` (a server command) was just sent (task 4.9b). It is the owner's,
+    /// not the fallback's (D-078): whatever it does to our life (`/kill`, `/spec`, `/team`) is not the bot's `/kill` taking effect, so
+    /// the fallback forgets its in-flight `/kill` as a candidate for the learned threshold.
+    pub fn on_owner_command(&mut self) {
+        self.killfb.on_owner_command();
+    }
+
     /// The `/kill` fallback's step of one snapshot: a new life or a dead tee settles an awaited kill, a protocol kill of this
     /// snapshot is awaited, and [`Output::kill_command`] is set when the fallback is due.
     fn kill_fallback_step(&mut self, tick: i32, out: &mut Output) {
+        if self.paused {
+            // Paused by the server (task 4.9b): no `Cl_Kill` is decided, so nothing is awaited and no `/kill` follows.
+            self.killfb.cancel_pending();
+            return;
+        }
         if self.lives != self.fb_lives {
             self.fb_lives = self.lives;
             if let Some(l) = self.killfb.on_life_started(tick) {
@@ -1046,6 +1078,7 @@ impl Bot {
             kill_why,
             wants_spectate,
             join_grace_until,
+            paused,
             ..
         } = self;
         let (Some(live), Some(plan), Some(obs), Some(grid)) =
@@ -1094,6 +1127,51 @@ impl Bot {
             push_event(events, e);
         }
 
+        // 4b. paused by the server (task 4.9b): our own `DDNetPlayer` flag `SPEC` or `PAUSED` (the owner's `/pause` or `/spec`; to a
+        // modern client the server keeps the team, so this is not the move to the spectators of D-058, which is team -1 and still stops
+        // the bot). Read **before** the tee is looked for: with `sv_pauseable 1`, a practice team or an admin `force_pause` the server
+        // removes a still, grounded tee in the very snapshot that sets the flag. While it is set nothing is decided: the brain is not
+        // asked, the input is neutral, no kill is requested (no unstick, no navigation, no `/kill` fallback), no death is counted and no
+        // respawn reported (the tee that is gone is paused, not dead), and no timer of those advances (they are reset on resume).
+        let server_pause = players
+            .get(own_id)
+            .is_some_and(|s| s.team != -1 && s.ex_flags & (explayerflagflag::SPEC | explayerflagflag::PAUSED) != 0);
+        if server_pause != *paused {
+            *paused = server_pause;
+            if server_pause {
+                push_event(events, BotEvent::PausedByServer { tick });
+            } else {
+                push_event(events, BotEvent::ResumedByServer { tick });
+                // Back in play: tick-based memory of the time before the pause is meaningless (the frozen clock, the stuck anchor, the
+                // kill cooldown), the walk and the target are stale, and the last input was never acted on.
+                unstick.reset_ticks();
+                hooks.navigator.respawned();
+                wander.respawned();
+                picker.set_target(-1);
+                encoder.reset_edges();
+                *last_sent = PhysInput::default();
+            }
+        }
+        if *paused {
+            let own = tees.get(own_id).copied();
+            if own.is_some() {
+                *played_on_map = true;
+                *join_grace_until = None;
+            }
+            stats.idle_decisions += 1;
+            out.input = Some(encoder.idle());
+            *status = make_status(
+                tick,
+                own_id,
+                *mode,
+                own.as_ref(),
+                picker.target(),
+                clock.stats(),
+                *stats,
+            );
+            return out;
+        }
+
         // 5. dead / absent / spectating.
         let Some(own) = tees.get(own_id).copied() else {
             if *was_alive {
@@ -1125,7 +1203,6 @@ impl Bot {
         };
         *played_on_map = true;
         *join_grace_until = None; // a tee: the join went through
-
         // 6. first frame of a life.
         if !*was_alive {
             *was_alive = true;

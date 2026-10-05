@@ -539,6 +539,244 @@ fn the_servers_notice_sends_the_slash_kill_at_once() {
     });
 }
 
+/// Task 4.9b: the owner's `/pause` or `/spec` sets our own `DDNetPlayer` flag `PAUSED` / `SPEC` (the team and the tee stay in the snapshot).
+/// While it is set the bot idles: neutral input, no `Cl_Kill`, no `/kill`, however long the unstick and fallback conditions have been met;
+/// when it clears the bot plays again, with no stale timer making it kill at once.
+#[test]
+fn a_bot_paused_by_the_server_idles_and_never_kills_and_resumes_when_the_flag_clears() {
+    use ddai_net::generated::enums::explayerflagflag::{PAUSED, SPEC};
+    for flag in [PAUSED, SPEC] {
+        support::big_stack(move || {
+            let (mut bot, mut sc, _) = setup_on(
+                room(&[(35, 38, FREEZE), (35, 37, FREEZE)]),
+                vec![tee(0, 35 * 32 + 16), tee(1, 2000)],
+                Relations::new(),
+                BrainKind::Planner,
+            );
+            sc.tee_mut(0).y = 37 * 32 + 16;
+            run_active(&mut bot, &mut sc, &[1], 3);
+            // The conditions are met: a frozen bot that the server never respawns decides to kill (and, with the server's notice, to
+            // send `/kill`) when it is not paused.
+            let mut free_kills = 0;
+            let mut free_commands = 0;
+            for _ in 0..700 {
+                sc.tee_mut(0).frozen = true;
+                wiggle(&mut sc, 1);
+                let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+                free_kills += usize::from(out.kill);
+                free_commands += usize::from(out.kill_command);
+                if out.kill {
+                    bot.on_kill_protection_notice();
+                }
+            }
+            assert!(
+                free_kills >= 1 && free_commands >= 1,
+                "kills {free_kills}, commands {free_commands}"
+            );
+            let _ = bot.drain_events().count();
+            // Paused: the same frozen bot, a long time (more than the unstick and the fallback ever need).
+            sc.player_mut(0).ex_flags = flag;
+            let mut checked = 0;
+            for _ in 0..1500 {
+                sc.tee_mut(0).frozen = true;
+                wiggle(&mut sc, 1);
+                let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+                assert!(
+                    !out.kill && !out.kill_command && out.set_team.is_none(),
+                    "flag {flag}: {out:?}"
+                );
+                let input = out.input.expect("an idle input, every snapshot");
+                assert_eq!(
+                    (input.direction, input.jump, input.hook, input.fire & 1),
+                    (0, 0, 0, 0),
+                    "flag {flag}: neutral"
+                );
+                checked += 1;
+            }
+            assert_eq!(checked, 1500);
+            assert!(bot.paused());
+            let evs: Vec<_> = bot.drain_events().collect();
+            assert_eq!(
+                evs.iter()
+                    .filter(|e| matches!(e, BotEvent::PausedByServer { .. }))
+                    .count(),
+                1,
+                "reported once: {evs:?}"
+            );
+            assert!(!evs.iter().any(|e| matches!(
+                e,
+                BotEvent::Killed { .. } | BotEvent::KillFallback { .. } | BotEvent::MovedToSpectators { .. }
+            )));
+            assert!(
+                bot.stop_reason().is_none(),
+                "a pause is not the move to the spectators of D-058"
+            );
+            // Resumed: the flag clears, the bot plays on, and the pause did not leave a timer that kills it at once.
+            sc.player_mut(0).ex_flags = 0;
+            let mut first_kill = None;
+            for i in 0..700 {
+                sc.tee_mut(0).frozen = true;
+                wiggle(&mut sc, 1);
+                let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+                if first_kill.is_none() && out.kill {
+                    first_kill = Some(i);
+                }
+            }
+            assert!(!bot.paused());
+            assert!(
+                first_kill.is_some_and(|i| i >= 50),
+                "it plays again, and a kill needs its conditions anew after the pause: {first_kill:?}"
+            );
+            let evs: Vec<_> = bot.drain_events().collect();
+            assert_eq!(
+                evs.iter()
+                    .filter(|e| matches!(e, BotEvent::ResumedByServer { .. }))
+                    .count(),
+                1
+            );
+        });
+    }
+}
+
+/// 4.9b review F1: with `sv_pauseable 1`, a practice team or an admin `force_pause` the server removes a still, grounded tee in the very
+/// snapshot that sets the `SPEC` flag. The bot must see the pause without a tee: `paused`, no kill (not even the operator's `!kill`, which
+/// is told so), no death counted, no respawn reported, and on resume no stale timer kills it at once.
+#[test]
+fn a_pause_that_removes_the_tee_in_the_same_snapshot_is_still_a_pause() {
+    use ddai_bot::BotCommand;
+    use ddai_net::generated::enums::explayerflagflag::SPEC;
+    support::big_stack(|| {
+        let (mut bot, mut sc, _) = setup_on(
+            room(&[(35, 38, FREEZE), (35, 37, FREEZE)]),
+            vec![tee(0, 35 * 32 + 16), tee(1, 2000)],
+            Relations::new(),
+            BrainKind::Planner,
+        );
+        sc.tee_mut(0).y = 37 * 32 + 16;
+        run_active(&mut bot, &mut sc, &[1], 3);
+        // frozen and not respawned for a while: the unstick's clock has been running
+        for _ in 0..120 {
+            sc.tee_mut(0).frozen = true;
+            wiggle(&mut sc, 1);
+            run(&mut bot, &mut sc, 1);
+        }
+        let deaths_before = bot.stats().deaths;
+        let _ = bot.drain_events().count();
+        // the same snapshot: the flag is set and our tee is gone
+        let own = sc.tees.remove(0);
+        sc.player_mut(0).ex_flags = SPEC;
+        let mut told = None;
+        for i in 0..400 {
+            if i == 10 {
+                told = Some(bot.command(BotCommand::Kill));
+            }
+            wiggle(&mut sc, 1);
+            let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+            assert!(
+                !out.kill && !out.kill_command && out.set_team.is_none(),
+                "snapshot {i}: {out:?}"
+            );
+            assert!(bot.paused(), "snapshot {i}: paused without a tee");
+        }
+        let told = told.unwrap();
+        assert!(!told.ok && told.text.contains("paused by the server"), "{told:?}");
+        assert_eq!(bot.stats().deaths, deaths_before, "a paused tee is not a death");
+        assert!(bot.stop_reason().is_none());
+        let evs: Vec<_> = bot.drain_events().collect();
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, BotEvent::PausedByServer { .. }))
+                .count(),
+            1,
+            "{evs:?}"
+        );
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                BotEvent::Respawned { .. } | BotEvent::Killed { .. } | BotEvent::MovedToSpectators { .. }
+            )),
+            "{evs:?}"
+        );
+        // resume: the tee is back (still frozen), the flag clears
+        sc.tees.insert(0, own);
+        sc.player_mut(0).ex_flags = 0;
+        let mut first_kill = None;
+        for i in 0..400 {
+            sc.tee_mut(0).frozen = true;
+            wiggle(&mut sc, 1);
+            let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+            if first_kill.is_none() && out.kill {
+                first_kill = Some(i);
+            }
+        }
+        assert!(!bot.paused());
+        assert!(
+            first_kill.is_some_and(|i| i >= 50),
+            "the time of the pause is not frozen time: {first_kill:?}"
+        );
+        let evs: Vec<_> = bot.drain_events().collect();
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, BotEvent::ResumedByServer { .. }))
+                .count(),
+            1,
+            "{evs:?}"
+        );
+        assert_eq!(
+            bot.stats().deaths,
+            deaths_before,
+            "no death was ever counted for the pause"
+        );
+    });
+}
+
+/// 4.9b review F2: the pause is forgotten with the world (map change) and with the connection, not left to a tee that may never come.
+#[test]
+fn the_pause_does_not_outlive_a_map_change_or_a_disconnect() {
+    use ddai_net::generated::enums::explayerflagflag::SPEC;
+    for disconnect in [false, true] {
+        support::big_stack(move || {
+            let (mut bot, mut sc, _) = setup(vec![tee(0, 1000), tee(1, 1100)], Relations::new());
+            run_active(&mut bot, &mut sc, &[1], 6);
+            sc.player_mut(0).ex_flags = SPEC;
+            run_active(&mut bot, &mut sc, &[1], 3);
+            assert!(bot.paused());
+            if disconnect {
+                bot.on_disconnected();
+            } else {
+                let map = sc.map.clone();
+                bot.on_map_changing();
+                bot.on_map_loaded(map);
+            }
+            assert!(!bot.paused(), "disconnect {disconnect}: cleared at once");
+            // joining again, in the spectators with no tee and no flag: not "paused"
+            sc.tees.remove(0);
+            sc.player_mut(0).ex_flags = 0;
+            sc.player_mut(0).team = -1;
+            sc.tick = 10;
+            run(&mut bot, &mut sc, 30);
+            assert!(!bot.paused(), "disconnect {disconnect}");
+        });
+    }
+}
+
+/// A real move to the spectators (team -1) is not a pause: D-058 still stops the bot, even with a pause flag around.
+#[test]
+fn a_pause_flag_does_not_hide_a_move_to_the_spectators() {
+    support::big_stack(|| {
+        let (mut bot, mut sc, _) = setup(vec![tee(0, 1000), tee(1, 1100)], Relations::new());
+        run_active(&mut bot, &mut sc, &[1], 6);
+        sc.tees.remove(0);
+        sc.player_mut(0).team = -1;
+        sc.player_mut(0).ex_flags = ddai_net::generated::enums::explayerflagflag::SPEC;
+        for _ in 0..10 {
+            run(&mut bot, &mut sc, 1);
+        }
+        assert_eq!(bot.stop_reason(), Some(ddai_bot::bot::StopReason::MovedToSpectators));
+        assert!(!bot.paused());
+    });
+}
+
 #[test]
 fn a_free_bot_standing_still_with_a_target_gets_unstuck_but_not_without_one() {
     support::big_stack(|| {

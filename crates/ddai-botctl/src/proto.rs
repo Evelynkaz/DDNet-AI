@@ -6,7 +6,7 @@
 //!
 //! **Chat only as the owner typed it.** [`ControlCommand`] is a closed enum. Exactly one variant carries text to the game
 //! server, [`ControlCommand::Say`] (task 4.9, D-094: a line the owner typed on the authenticated website), and its text is
-//! judged by `ddai_net::owner_chat::OwnerText::check` (non-empty, at most 255 bytes, no control or invisible character, no leading `/`)
+//! judged by `ddai_net::owner_chat::OwnerText::check` (non-empty, at most 255 bytes, no control or invisible character; a leading `/` is allowed since 4.9b, the owner's decision of 2026-10-05)
 //! on the web side ([`ControlCommand::validate`]), which makes no value, **and again** on the bot side, where the control dispatcher
 //! (the one holder of the process's `OwnerChannel`) alone can turn it into an `OwnerText`, before it can become a `BotCommand`. The only other
 //! free text is [`ControlCommand::Clip`]'s note, which goes into a clip *file* (and its name) on the bot's disk. Unknown fields
@@ -521,14 +521,25 @@ mod tests {
         bad(&"a".repeat(256), OwnerTextError::TooLong);
         bad("a\nb", OwnerTextError::Control);
         bad("a\u{0}b", OwnerTextError::Control);
-        bad("/kill", OwnerTextError::Command);
-        bad("  /kill", OwnerTextError::Command);
-        bad("/w someone hi", OwnerTextError::Command);
-        // and a request that carries it is validated as a whole
-        let req = ControlRequest::new("ab", say("/kill"));
-        assert_eq!(req.validate(), Err(Invalid::Say(OwnerTextError::Command)));
-        // the refusal never repeats the text
-        let msg = Invalid::Say(OwnerTextError::Command).to_string();
+        bad("\u{200B}/kill", OwnerTextError::Control);
+        bad("xd sure chillerbot.png is lyfe", OwnerTextError::Reserved);
+        // 4.9b: server commands are lines like any other
+        for cmd in [
+            "/spec",
+            "/pause",
+            "/emote happy",
+            "/w Name hi",
+            "/team 1",
+            "/kill",
+            "  /kill  ",
+        ] {
+            assert_eq!(say(cmd).validate(), Ok(()), "{cmd:?}");
+            assert_eq!(ControlRequest::new("ab", say(cmd)).validate(), Ok(()), "{cmd:?}");
+        }
+        // a request that carries a refused text is refused as a whole, and the refusal never repeats the text
+        let req = ControlRequest::new("ab", say("\u{200B}/kill"));
+        assert_eq!(req.validate(), Err(Invalid::Say(OwnerTextError::Control)));
+        let msg = Invalid::Say(OwnerTextError::Control).to_string();
         assert!(!msg.contains("kill"), "{msg}");
     }
 
