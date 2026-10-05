@@ -1,0 +1,24 @@
+# work-clock: default-rate
+# Task 3.8 (D-095, E-019): does our hybrid (main defaults: 4 ms of WORK, the 5 ms cap, no proposer, the opponent model on) beat the
+# competitor's CURRENT planner (upstream af49dfb, 2026-10-02)? This config is the arm "old": the OLD fixed planner (c3c619d, the planner ported in 3.2: preset normal).
+# The same three D-059 halls and the same seeds (3001..3400) in every arm, so the games pair up for McNemar; none of these seeds was used while the
+# hybrid or the v2 planner was developed (E-017 used 1..400, 1001..1400 and 2001..2400).
+#   ddnet-ai arena run --config configs/arena/e019-old.toml --out ~/aiddnet/data/runs/E-019/old --threads 3
+name = "E-019: hybrid vs the OLD fixed planner (c3c619d, the planner ported in 3.2: preset normal), seeds 3001.."
+base_seed = 3001
+games = 400
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK vs old"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK vs old"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK vs old"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]

@@ -15,7 +15,9 @@
 
 #![cfg(feature = "ts-parity")]
 
-use ddai_planner::config::{OpponentModel, PlannerConfig};
+mod common;
+
+use ddai_planner::config::PlannerConfig;
 use ddai_planner::memory::FreezeMemory;
 use ddai_planner::plan_world::{PlanCollision, PlanWorld};
 use ddai_planner::planner::{PlanStep, Planner};
@@ -311,6 +313,17 @@ fn apply_scenario<W: PlanWorld>(planner: &mut Planner<W>, world: &mut W, sc: &Sc
     }
     planner.set_overrides(match sc.overrides.as_deref() {
         Some("wb") => Some(Box::new(ddai_planner::config::wb_overrides) as Box<dyn Fn(PlannerConfig) -> PlannerConfig>),
+        // af49dfb: the overrides a wayblock hall applies by role (`wbPlanOverrides`): the plain ones and the guard's plan per side.
+        Some("wbv2") => Some(Box::new(ddai_planner::config::wb_overrides_v2)),
+        Some("guardl") => Some(Box::new(|b| {
+            ddai_planner::config::wb_guard_plan(ddai_planner::config::wb_overrides_v2(b), -1, false)
+        })),
+        Some("guardr") => Some(Box::new(|b| {
+            ddai_planner::config::wb_guard_plan(ddai_planner::config::wb_overrides_v2(b), 1, false)
+        })),
+        Some("guardchain") => Some(Box::new(|b| {
+            ddai_planner::config::wb_guard_plan(ddai_planner::config::wb_overrides_v2(b), -1, true)
+        })),
         Some(other) => panic!("unknown scenario override {other}"),
         None => None,
     });
@@ -414,6 +427,10 @@ struct LastInfoJson {
     enemy_out: i32,
 }
 
+fn classic_version() -> String {
+    "classic".to_string()
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 // Test-only deserialization enum, one value per JSON line -- not a hot path, so the size gap
@@ -427,6 +444,9 @@ enum Line {
         map_sha256: String,
         preset: String,
         opponent: String,
+        /// `"classic"` (upstream c3c619d) when the dump has no such field (the first corpus), else the generator's reference.
+        #[serde(rename = "plannerVersion", default = "classic_version")]
+        planner_version: String,
     },
     Case {
         tick: i64,
@@ -445,26 +465,6 @@ enum Line {
         candidate_log: Vec<CandidateJson>,
         hidden: HiddenJson,
     },
-}
-
-fn build_cfg(preset: &str, opponent: &str) -> PlannerConfig {
-    use ddai_planner::config::{preset_low_cpu, preset_normal, preset_strong_wb, wb_overrides};
-    let mut cfg = match preset {
-        "normal" => preset_normal(),
-        "low" => preset_low_cpu(),
-        "strong" => preset_strong_wb(preset_normal()),
-        "wb" => wb_overrides(preset_normal()),
-        other => panic!("unknown preset {other}"),
-    };
-    match opponent {
-        "hold" => {}
-        "react" => cfg.opponent_model = OpponentModel::React,
-        "mix" => cfg.opponent_mix = true,
-        other => panic!("unknown opponent model {other}"),
-    }
-    cfg.budget_ms = 0.0;
-    cfg.hard_ms = 0.0;
-    cfg
 }
 
 /// Review round 1, F11: an earlier revision skipped `player_flags`/`next_weapon`/`prev_weapon` --
@@ -512,6 +512,7 @@ fn replay_file(path: &Path) -> (usize, Option<Mismatch>) {
                 map_sha256: sha,
                 preset,
                 opponent,
+                planner_version,
             } => {
                 let bytes = std::fs::read(&mp).unwrap_or_else(|e| panic!("reading map {mp}: {e}"));
                 let actual_sha = {
@@ -523,7 +524,7 @@ fn replay_file(path: &Path) -> (usize, Option<Mismatch>) {
                 assert_eq!(actual_sha, sha, "map file changed since the dump was generated: {mp}");
                 let loaded = ddai_tsworld::load_map_bytes(&bytes).unwrap_or_else(|e| panic!("loading map {mp}: {e:?}"));
                 collision = Some(loaded.collision);
-                cfg = Some(build_cfg(&preset, &opponent));
+                cfg = Some(common::build_cfg(&planner_version, &preset, &opponent));
                 map_path = Some(mp);
                 map_sha256 = Some(sha);
             }

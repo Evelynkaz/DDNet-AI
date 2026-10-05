@@ -33,6 +33,8 @@ DDAI_NAV_DUMP=<дамп> cargo test -p ddai-nav --features ts-parity --release -
 это `af49dfb` или новее); по `hall` Rust-тест решает, что проигрывать (дамп `c3c619d` — частично: маршруты, мёртвая зона, спавны,
 выбор стороны, зоны; переходы, споты и навигатор `af49dfb` изменил намеренно).
 
-**Планировщик.** `planner.ts`, `seal.ts` и `throwLines.ts` апстрим тоже менял, но Rust-порты планировщика (`ddai-planner`,
-`ddai-tsworld`) сверяются **с `c3c619d`**: их корпуса не пересоздаются, пока задача 3.8 не перенесёт новый планировщик. Для них
-`DDAI_TS_REF` не ставят.
+**Планировщик (задача 3.8).** `planner.ts`, `seal.ts` и `throwLines.ts` апстрим тоже менял. Корпуса `ddai-planner` теперь двух версий: прежний
+(`c3c619d`, `DDAI_TS_REF` не ставят) и новый для `af49dfb` (`DDAI_TS_REF=~/aiddnet/data/scratch/ts-af49dfb`, скрипт `run-planner-corpus-v2.sh`:
+`gen-planner-dump.mjs`, `gen-planner-freerun.mjs`, `gen-v2-component-dump.mjs`; дампы — `~/aiddnet/data/traces/planner-af49dfb/`). В заголовке
+дампа планировщика поле `plannerVersion` (`classic` / `upstream-2026-10-02`; нет поля — `classic`) выбирает конфигурацию в Rust-тесте. Команды и
+результаты — «Версии планировщика» в `crates/ddai-planner/README.md`.

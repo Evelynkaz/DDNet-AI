@@ -24,6 +24,8 @@ pub static HAMMER_STRENGTH: LazyLock<f64> = LazyLock::new(|| tune(1.0));
 pub static VELRAMP_START: LazyLock<f64> = LazyLock::new(|| tune(550.0));
 pub static VELRAMP_RANGE: LazyLock<f64> = LazyLock::new(|| tune(2000.0));
 pub static VELRAMP_CURVATURE: LazyLock<f64> = LazyLock::new(|| tune(1.4));
+/// `TUNING.hookFireSpeed` (`ropeIntercept`, task 3.8).
+pub static HOOK_FIRE_SPEED: LazyLock<f64> = LazyLock::new(|| tune(80.0));
 pub static GROUND_CONTROL_SPEED: LazyLock<f64> = LazyLock::new(|| tune(10.0));
 
 // --- Tile ids (`tuning.ts:68-98`), game layer numeric convention every backend shares ----------

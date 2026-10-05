@@ -14,8 +14,9 @@
 
 #![cfg(feature = "ts-parity")]
 
+mod common;
+
 use ddai_jsmath::Rng;
-use ddai_planner::config::{OpponentModel, PlannerConfig};
 use ddai_planner::plan_world::PlanWorld;
 use ddai_planner::planner::Planner;
 use ddai_planner::scripted::scripted_action;
@@ -72,6 +73,10 @@ struct SpawnJson {
     y: f64,
 }
 
+fn classic_version() -> String {
+    "classic".to_string()
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 // Test-only deserialization enum, one value per JSON line -- not a hot path, so the size gap
@@ -86,6 +91,8 @@ enum Line {
         seed: u32,
         preset: String,
         opponent: String,
+        #[serde(rename = "plannerVersion", default = "classic_version")]
+        planner_version: String,
         #[serde(rename = "selfSpawn")]
         self_spawn: SpawnJson,
         #[serde(rename = "enemySpawn")]
@@ -97,26 +104,6 @@ enum Line {
         #[serde(rename = "lastInfo")]
         last_info: LastInfoJson,
     },
-}
-
-fn build_cfg(preset: &str, opponent: &str) -> PlannerConfig {
-    use ddai_planner::config::{preset_low_cpu, preset_normal, preset_strong_wb, wb_overrides};
-    let mut cfg = match preset {
-        "normal" => preset_normal(),
-        "low" => preset_low_cpu(),
-        "strong" => preset_strong_wb(preset_normal()),
-        "wb" => wb_overrides(preset_normal()),
-        other => panic!("unknown preset {other}"),
-    };
-    match opponent {
-        "hold" => {}
-        "react" => cfg.opponent_model = OpponentModel::React,
-        "mix" => cfg.opponent_mix = true,
-        other => panic!("unknown opponent model {other}"),
-    }
-    cfg.budget_ms = 0.0;
-    cfg.hard_ms = 0.0;
-    cfg
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -138,6 +125,7 @@ fn replay_file(path: &std::path::Path) -> (usize, Option<String>) {
         seed,
         preset,
         opponent,
+        planner_version,
         self_spawn,
         enemy_spawn,
     } = serde_json::from_str(meta_line).unwrap_or_else(|e| panic!("{}: bad meta line: {e}", path.display()))
@@ -158,7 +146,7 @@ fn replay_file(path: &std::path::Path) -> (usize, Option<String>) {
     );
     let loaded = ddai_tsworld::load_map_bytes(&bytes).unwrap_or_else(|e| panic!("loading map {map_path}: {e:?}"));
 
-    let cfg = build_cfg(&preset, &opponent);
+    let cfg = common::build_cfg(&planner_version, &preset, &opponent);
     let mut planner: Planner<ddai_tsworld::SimWorld> = Planner::new(cfg);
     planner.set_search_seed(seed);
 

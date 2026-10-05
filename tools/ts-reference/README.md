@@ -50,6 +50,11 @@ node gen-planner-dump.mjs --map synthetic:arena --seed 13 --cases 220 --preset n
 `node_modules` нужен **любому** запуску `gen-nav-dump.mjs` (он импортирует `src/bot/bot.ts` → `teeworlds`) и ничему
 больше: планировщик, компоненты, `tsworld`-генераторы и `rng_probe.mjs` работают на одном Node без `npm ci`.
 
+**Второй эталон (задача 3.8).** Переменная `DDAI_TS_REF=<каталог с src/>` направляет генераторы `tools/ts-trace/*.mjs` на другую выгрузку
+апстрима (по умолчанию — эта, закреплённая на `c3c619d`; без переменной вывод генераторов прежний). Для планировщика релиза 2026-10-02
+(`af49dfb`): `git -C ~/aiddnet/ref/DDNet-AI-upstream archive af49dfb src package.json package-lock.json | tar -x -C ~/aiddnet/data/scratch/ts-af49dfb`,
+затем `tools/ts-trace/run-planner-corpus-v2.sh` (см. «Версии планировщика» в `crates/ddai-planner/README.md`).
+
 Полные команды перегенерации корпусов и запуска паритетных тестов:
 
 - планировщик, компоненты, free-run — `crates/ddai-planner/README.md` («Как перегенерировать корпус паритета»);

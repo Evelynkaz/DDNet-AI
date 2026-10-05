@@ -28,7 +28,10 @@ import { writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { SimWorld, loadMapCollision, teeStateJson, inputJson, f64Bits, bitsToF64, sha256File, tsCoreCommit, TS_REF } from "./lib.mjs";
 
-const { Planner } = await import(`${TS_REF}/src/plan/planner.ts`);
+const { Planner, PLANNER_DEFAULTS } = await import(`${TS_REF}/src/plan/planner.ts`);
+// Task 3.8: upstream af49dfb (release 2026-10-02) added `hookExactGate`/`hookSnapAim`/`hookKeepFlying`/`ropeCeilingCost`/`wallDir`/
+// `airChain` to the planner; the reference chosen by `DDAI_TS_REF` says which planner this run dumps.
+const PLANNER_V2 = PLANNER_DEFAULTS.hookExactGate !== undefined;
 const { scriptedAction } = await import(`${TS_REF}/src/env/scripted.ts`);
 const { Rng } = await import(`${TS_REF}/src/nn/rng.ts`);
 const { emptyInput } = await import(`${TS_REF}/src/core/types.ts`);
@@ -115,6 +118,13 @@ if (scenarioKind !== "baseline" && scenarioKind !== "full") {
 // dumped corpus actually contains `shielded=true` cases at a realistic rate (review: "raise
 // shielded share to >= 10%"; baseline corpora had it at ~0.1%).
 const dangerBias = Number(args["danger-bias"] ?? "0");
+// Task 3.8: shares of cases forced into the situations the v2 planner code is about (default 0 = off, nothing drawn):
+// `--frozen-enemy P`: the enemy is frozen (40..199 ticks left) -- the frozen-throw seeds, `frozenTargetSteps`, `wallDir`;
+// `--hook-us P`: the enemy hooks us and we fly upward -- `ropeCeilingCost`.
+const frozenEnemyProb = Number(args["frozen-enemy"] ?? "0");
+const hookUsProb = Number(args["hook-us"] ?? "0");
+// `--hook-flying P`: our own hook is in flight toward the enemy (`hookKeepFlying`'s `polishRope` branch).
+const hookFlyingProb = Number(args["hook-flying"] ?? "0");
 if (!mapArg || !outPath) {
   console.error(
     "usage: gen-planner-dump.mjs --map <path|synthetic:name> --seed <u32> --cases <n> --preset <p> --opponent <o> --out <path> [--scenario baseline|full] [--danger-bias 0..1]",
@@ -125,7 +135,26 @@ if (!mapArg || !outPath) {
 // --- presets (docs/research/orig-plan.md §1.2) -- budgetMs/hardMs always forced to 0 (D-017). ---
 const PRESET_BASE = { thirdTeeExposure: 0, memoryTrust: 0.9, frozenThrow: 3, explain: true };
 const WB_OVER = { noThawRope: true, frozenThrow: 3, airJumpCost: 0.3, launchExactReach: 100 };
+// af49dfb: `WB_PLAN_OVERRIDES` also names `launchExposure 1.0, jumplessHazardCost 0.15`; `LIVE_PLANNER_CFG` adds `launchExposure 1.5,
+// jumplessHazardCost 0.4`; the wayblock guard's plan (`wbGuardPlan`) adds `wallDir`, `frozenTargetSteps 16` (and `airChain`).
+const WB_OVER_V2 = { ...WB_OVER, launchExposure: 1.0, jumplessHazardCost: 0.15 };
+const LIVE_V2 = { launchExposure: 1.5, jumplessHazardCost: 0.4 };
+const guardPlan = (base, wallDir, airChain) => ({ wallDir, frozenTargetSteps: 16, ...(airChain ? { airChain: true } : {}), ...base });
 function presetConfig(name) {
+  if (PLANNER_V2) {
+    switch (name) {
+      case "live":
+        return { ...PRESET_BASE, ...LIVE_V2 };
+      case "wblive":
+        return { ...PRESET_BASE, ...LIVE_V2, ...WB_OVER_V2 };
+      case "guardl":
+        return guardPlan({ ...PRESET_BASE, ...LIVE_V2, ...WB_OVER_V2 }, -1, false);
+      case "guardr":
+        return guardPlan({ ...PRESET_BASE, ...WB_OVER_V2 }, 1, false);
+      case "guardchain":
+        return guardPlan({ ...PRESET_BASE, ...LIVE_V2, ...WB_OVER_V2 }, -1, true);
+    }
+  }
   switch (name) {
     case "normal":
       return { ...PRESET_BASE };
@@ -288,7 +317,27 @@ function buildScenario(rng) {
     const p = pick();
     extraTees.push({ id: 2 + i, ...vecBits(p), frozen: i < 2, freezeTicksLeft: i < 2 ? 200 : 0 });
   }
-  return { kind: "full", goal, thirds, frozenBystanders, spareBystanders, band, memoryNotes, overrides: "wb", extraTees };
+  // af49dfb: the wayblock overrides the live bot applies in a hall, by role (`wbPlanOverrides`): plain, or the guard's plan per side.
+  const overrides = PLANNER_V2 ? ["wb", "wbv2", "guardl", "guardr", "guardchain"][Math.floor(rng.nextFloat() * 5)] : "wb";
+  return { kind: "full", goal, thirds, frozenBystanders, spareBystanders, band, memoryNotes, overrides, extraTees };
+}
+function overridesFor(name) {
+  switch (name) {
+    case null:
+      return null;
+    case "wb":
+      return WB_OVER;
+    case "wbv2":
+      return WB_OVER_V2;
+    case "guardl":
+      return guardPlan(WB_OVER_V2, -1, false);
+    case "guardr":
+      return guardPlan(WB_OVER_V2, 1, false);
+    case "guardchain":
+      return guardPlan(WB_OVER_V2, -1, true);
+    default:
+      throw new Error(`unknown overrides ${name}`);
+  }
 }
 function applyScenario(planner, sim, sc) {
   const bitsToXy = (o, xk, yk) => ({ x: bitsToF64(o[xk]), y: bitsToF64(o[yk]) });
@@ -318,7 +367,7 @@ function applyScenario(planner, sim, sc) {
   } else {
     planner.setFreezeMemory(null);
   }
-  planner.setOverrides(sc.overrides === "wb" ? WB_OVER : null);
+  planner.setOverrides(overridesFor(sc.overrides));
   for (const t of sc.extraTees) {
     const p = bitsToXy(t, "xBits", "yBits");
     if (sim.getTee(t.id) === undefined) sim.addTee(t.id, p);
@@ -344,6 +393,8 @@ writeFileSync(
     preset: presetName,
     opponent: opponentName,
     config: cfg,
+    plannerVersion: PLANNER_V2 ? "upstream-2026-10-02" : "classic",
+    tsRef: TS_REF,
     tsCoreCommit: tsCoreCommit(),
     node: process.version,
     v8: process.versions.v8,
@@ -373,7 +424,7 @@ for (let tick = 0; cases.length < wantCases && tick < maxTicks; tick++) {
 
   if (tick % sampleEvery !== 0) continue;
   let self = driver.getTee(0);
-  const enemy = driver.getTee(1);
+  let enemy = driver.getTee(1);
   if (self === undefined || enemy === undefined || !self.alive || !enemy.alive) continue;
 
   const scenarioRng = new Rng((((tick + 1) * 2654435761) ^ (seed * 97)) >>> 0);
@@ -402,6 +453,33 @@ for (let tick = 0; cases.length < wantCases && tick < maxTicks; tick++) {
       frozen: false,
       freezeTicksLeft: 0,
     };
+  }
+
+  // Task 3.8: forced v2 situations (only when asked for; nothing is drawn otherwise, so the old corpus recipe is unchanged).
+  if (hookFlyingProb > 0) {
+    const flyRng = new Rng((((tick + 13) * 69069) ^ (seed * 257)) >>> 0);
+    if (flyRng.nextFloat() < hookFlyingProb) {
+      const dx = enemy.pos.x - self.pos.x;
+      const dy = enemy.pos.y - self.pos.y;
+      const n = Math.hypot(dx, dy) || 1;
+      // A hook flies 80 px per tick from the body's edge (42 px out): 42 + 80k px after k ticks, up to the reach.
+      const out = Math.min(380, 42 + 80 * Math.floor(flyRng.nextFloat() * 5));
+      self = { ...self, frozen: false, freezeTicksLeft: 0, hookState: 4, hookedPlayer: -1, hookPos: { x: self.pos.x + (dx / n) * out, y: self.pos.y + (dy / n) * out }, hookDir: { x: dx / n, y: dy / n } };
+      enemy = { ...enemy, frozen: false, freezeTicksLeft: 0 };
+    }
+  }
+  if (frozenEnemyProb > 0 || hookUsProb > 0) {
+    const forced = new Rng((((tick + 7) * 40503) ^ (seed * 131)) >>> 0);
+    if (frozenEnemyProb > 0 && forced.nextFloat() < frozenEnemyProb) {
+      enemy = { ...enemy, frozen: true, freezeTicksLeft: 40 + Math.floor(forced.nextFloat() * 160), hookState: 0, hookedPlayer: -1 };
+    }
+    if (hookUsProb > 0 && forced.nextFloat() < hookUsProb) {
+      const dx = self.pos.x - enemy.pos.x;
+      const dy = self.pos.y - enemy.pos.y;
+      const n = Math.hypot(dx, dy) || 1;
+      enemy = { ...enemy, frozen: false, freezeTicksLeft: 0, hookState: 5, hookedPlayer: 0, hookPos: { x: self.pos.x, y: self.pos.y }, hookDir: { x: dx / n, y: dy / n } };
+      self = { ...self, frozen: false, freezeTicksLeft: 0, vel: { x: self.vel.x, y: -(4 + forced.nextFloat() * 10) } };
+    }
   }
 
   // --- the actual parity-relevant call: fresh Planner, fresh SimWorld, addTee(self) then

@@ -227,6 +227,90 @@ for preset in normal wb strong; do for opponent in hold react; do
 done; done
 ```
 
+## Версии планировщика (задача 3.8, D-095, E-019)
+
+Конкурент выпустил `af49dfb` (релиз 2026-10-02) с переписанным планировщиком. Наш порт сделан с `c3c619d`; теперь в крейте **две версии**,
+выбираются конфигом (`config::PlannerVersion`). Полная инвентаризация изменений и «живая» конфигурация конкурента —
+`docs/research/planner-2026-10-02.md`.
+
+| | `PlannerVersion::Classic` (`c3c619d`) | `PlannerVersion::Upstream20261002` (`af49dfb`) |
+|---|---|---|
+| Как включить | `PlannerConfig::default()`, `preset_normal()` и остальные прежние пресеты — **ничего не менялось** | `cfg.with_version(PlannerVersion::Upstream20261002)`; пресеты `preset_normal_v2()`, `preset_live_v2()`; арена: `preset = "normal-v2"` / `"live-v2"` |
+| Точный бросок крюка | нет (шлюз «в пределах двух размеров от прямой») | `hook_exact_gate` (`ropeIntercept` + ближайшая точка отрезка), `hook_snap_aim` (поворот броска до 0,35 рад на точку встречи), `hook_keep_flying` (`polishRope` при летящем крюке) |
+| Потолок | нет | `rope_ceiling_cost = 1` (`ceiling_field`): штраф, пока крюк жертвы тянет нас вверх в потолок из фриза/смерти |
+| Стена ВБ | нет | `wall_dir` ±1: `wall_swing_lines` (и `air_chain_lines` при `air_chain`) к броскам по замороженной жертве; `wb_guard_plan` собирает план стража (`wallDir`, `frozenTargetSteps 16`) |
+| Запечатанность | `seal::sealed_in` | + `seal::sealed_in_passive` (тий ничего не делает; замороженный должен коснуться фриза, пока заморожен) |
+| Живая конфигурация | `preset_normal()` = `LIVE_PLANNER_CFG` c3c619d | `preset_live_v2()` = `LIVE_PLANNER_CFG` af49dfb (`launchExposure 1.5`, `jumplessHazardCost 0.4`); `preset_normal_v2()` — без этих двух; `wb_overrides_v2` возвращает `1.0`/`0.15` поверх живой конфигурации |
+
+Старый планировщик **не менялся**: в `PlannerConfig::default()` четыре переключателя v2 выключены (`false`/`0`), все новые ветки кода закрыты ими;
+`hybrid::*` по-прежнему строится на `preset_normal()` и не видит v2 (его собственные вызовы `hook_allowed`/`step_to_input` — без прицельной привязки).
+Корпус старой версии после правок: **0 расхождений** (19 360 решений в 70 файлах, 3 604 в 10 свободных играх — те же числа, что до 3.8).
+
+### Паритет версии `af49dfb`
+
+Эталон — настоящий TS `af49dfb` (`~/aiddnet/data/scratch/ts-af49dfb`, `DDAI_TS_REF`, см. `tools/ts-reference/README.md`); генераторы те же, что у
+старого корпуса, с добавками (все по умолчанию выключены): `gen-planner-dump.mjs` — пресеты `live`/`wblive`/`guardl`/`guardr`/`guardchain`,
+`--frozen-enemy P` (враг заморожен), `--hook-us P` (враг держит нас крюком, мы летим вверх), в сценарии `full` случайные роли ВБ
+(`wb`/`wbv2`/`guardl`/`guardr`/`guardchain`); `gen-planner-freerun.mjs` — те же пресеты; новый `gen-v2-component-dump.mjs` — поэлементно
+`ceilingField` (вся сетка), `ropeIntercept`, `wallSwingLines`, `airChainLines`, `sealedIn(passive)`. Дампы — `~/aiddnet/data/traces/planner-af49dfb/`.
+
+| Набор | Размер | Расхождений |
+|---|---|---|
+| teacher-forced (`tf/`): Copy Love Box (387×250), Copy Love Box Swarfey (468×255), BlmapChill, ChillBlock5; baseline 7 200 (5 пресетов × 3 модели соперника), full 8 000 (+ роли ВБ, замороженный враг, враг держит крюком), guard-stress 3 600 (зал ВБ), «наш крюк в полёте» 900 (`--hook-flying`) | **19 700 решений, 110 файлов, 4 карты** | **0** (сравниваются решение, `lastInfo`, каждый кандидат `(план, очки)` побитно и скрытое состояние) |
+| free-run (`fr/`): 4 карты × 5 пресетов × 2 модели + 4 игры на `synthetic:arena`, до 600 решений | **23 833 решения, 44 игры** | **0** |
+| компоненты (`components/`, по 4 картам): `ceilingField` (сетка), `ropeIntercept` ×1 500, `wallSwingLines` ×98, `airChainLines` ×193, `sealedIn(passive)` ×800 (137 запечатано, 69 ответов отличаются от обычного) | 4 × 2 592 случая | **0** |
+
+Найденное и исправленное при сверке: `wbGuardPlan` в TS **не сбрасывает** `airChain` (только ставит), у `wb_guard_plan` сначала стояло безусловное
+`air_chain: air_chain` — 3 файла `guardchain` в первом прогоне расходились на 4 кандидата; теперь `air_chain || base.air_chain`.
+
+**Чувствительность корпуса (мутации кода v2; подмножество из 8 файлов, 2 020 решений: full/guard/baseline на всех четырёх картах).**
+
+| Мутация | Файлов с расхождением из 8 |
+|---|---|
+| `SNAP_MAX_RAD` 0,35 → 0,36 | 3 |
+| `ROPE_CEIL_MARGIN_PX` 16 → 17 | 4 |
+| шлюз `PHYSICAL_SIZE + 2` → `+ 3` | 4 |
+| `ropeIntercept`: 2 прохода → 1 | 3 |
+| `polishRope` при летящем крюке: `k` = [1, 2, 3] → [1, 2, 4] | 0 в основном подмножестве и в 5 играх free-run (2 728 решений) — пробел покрытия, закрыт набором `--hook-flying`: 2 из 6 файлов (900 решений) |
+| `WALL_SWING_FLIP` 11 → 12 | 0 в корпусе планировщика — мутант эквивалентен на сетке по 3 тика (старты шагов 0, 3, 6, …); поэлементный дамп `wallSwingLines` с другими раскладками (`buildStepTicks(16, 3, 3, 1)` и т. д.) его ловит |
+
+Пробел покрытия (ветка `hookKeepFlying` в `polishRope`: состояния «крюк летит» в обычных дампах слишком редки) закрыт сценарием генератора `--hook-flying P`
+(принудительно `hookState = HOOK_FLYING` у `self`, конец крюка в `42 + 80·k` пикселях от тия, `k` = 0…4 — как летит настоящий крюк; ревью 3.8 попросило реалистичную дальность, наборы пересняты, 900 решений, 0 расхождений); мутация выше на прежнем наборе ловилась.
+
+Перегенерировать:
+
+```bash
+mkdir -p ~/aiddnet/data/scratch/ts-af49dfb && git -C ~/aiddnet/ref/DDNet-AI-upstream archive af49dfb src package.json package-lock.json \
+  | tar -x -C ~/aiddnet/data/scratch/ts-af49dfb && mkdir -p ~/aiddnet/data/scratch/ts-af49dfb/node_modules \
+  && cp -r ~/aiddnet/DDNet-AI/node_modules/teeworlds ~/aiddnet/data/scratch/ts-af49dfb/node_modules/
+bash tools/ts-trace/run-planner-corpus-v2.sh          # ~45 мин на 2 потока; OUT_DIR=~/aiddnet/data/traces/planner-af49dfb
+DDAI_PLANNER_DUMP_DIR=~/aiddnet/data/traces/planner-af49dfb/tf cargo test -p ddai-planner --features ts-parity --release --test parity_planner -- --ignored --nocapture
+DDAI_PLANNER_FREERUN_DIR=~/aiddnet/data/traces/planner-af49dfb/fr cargo test -p ddai-planner --features ts-parity --release --test parity_planner_freerun -- --ignored --nocapture
+for m in clb clbswarfey blmapchill chillblock5; do DDAI_V2_COMPONENT_DUMP=~/aiddnet/data/traces/planner-af49dfb/components/$m.jsonl \
+  cargo test -p ddai-planner --features ts-parity --release --test parity_components_v2 -- --ignored --nocapture; done
+```
+
+Общие для тестов паритета пресеты (`классика`/`af49dfb`) — `tests/common/mod.rs` (`build_cfg(версия, пресет, соперник)`); версия берётся из
+поля `plannerVersion` заголовка дампа (нет поля — `classic`, старые корпуса читаются как раньше).
+
+### Сила против гибрида (E-019)
+
+Гибрид (умолчания `main`: 4 мс работы, потолок 5 мс, модель соперника вкл.), сиды 3001…3400 × 3 зала = 1 200 игр на плечо, парные игры (подробно и воспроизведение — `docs/EXPERIMENTS.md` E-019).
+«Засчитанные» делят на все игры, включая ничьи и таймауты, — 50% засчитанных **не** равенство сил; равенство проверяет знаковый тест на решённых играх (W против L).
+
+| Соперник | W:L:D:T | доля в решённых W/(W+L), знаковый p | засчитанные [Уилсон] |
+|---|---|---|---|
+| `old` (c3c619d, `preset normal`) | 676:456:33:35 | **59,7%**, p = 7·10⁻¹¹ | 56,3% [53,5; 59,1] |
+| `v2` (af49dfb, `normal-v2`, фиксированные итерации) | 627:513:21:39 | **55,0%**, p = 0,0008 | 52,2% [49,4; 55,1] |
+| `v2live` (af49dfb + `LIVE_PLANNER_CFG`, `live-v2`) | 614:480:27:79 | **56,1%**, p = 6·10⁻⁵ | 51,2% [48,3; 54,0] |
+
+Гибрид **значимо** побеждает текущий планировщик конкурента в решённых играх, но не выполняет планку D-059/E-017 «нижняя граница Уилсона засчитанных > 50%». Низкая засчитанная доля у
+`v2live` — эффект таймаутов (79 против 39 у `v2`), а не более сильный соперник: проигрышей у гибрида против него меньше (480 против 513). По засчитанным плечи парно различаются:
+`old` против `v2` p = 0,047, `old` против `v2live` p = 0,011, `v2` против `v2live` p = 0,62.
+
+Планировщик против планировщика (200 игр на зал): `v2` в слоте 0 против `old` — W:L 308:256 (**54,6%**, p = 0,032); `old` против `old` — 272:287 (48,7%, p = 0,55: слот 0 не в невыгодном
+положении). v2 сильнее старого и как дуэлянт, и как соперник гибриду. Гибрид по-прежнему построен на старом планировщике (D-095).
+
 ## D-041: боевой режим с дедлайном — измерения
 
 Ревью раунд 1, F1 (BLOCKER): у `Planner::decide`/`decide_once` нет и не будет настоящего

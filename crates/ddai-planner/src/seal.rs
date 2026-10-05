@@ -121,6 +121,24 @@ fn seal_escapes(held: PlayerInput) -> Vec<PlayerInput> {
 /// tries"). Removes every other tee from `world` (matching TS exactly — this mutates the world it
 /// is given, by design).
 pub fn sealed_in<W: PlanWorld>(world: &mut W, id: i32, state: &TeeState, held: PlayerInput) -> bool {
+    sealed_in_mode(world, id, state, held, false)
+}
+
+/// `sealedIn(world, id, state, held, passive = true)` (af49dfb `seal.ts`, the wayblock guard's `wbSealedNow`): the tee does
+/// **nothing but keep `held`** (no escape attempts), and a frozen tee only counts as sealed when it touches freeze while
+/// it is still frozen -- if it thawed (`freeze_ticks_left` ran out) before it ever touched freeze, it is not sealed.
+pub fn sealed_in_passive<W: PlanWorld>(world: &mut W, id: i32, state: &TeeState, held: PlayerInput) -> bool {
+    sealed_in_mode(world, id, state, held, true)
+}
+
+/// [`sealed_in`] with the v2 `passive` flag (`seal.ts` `sealedIn(..., passive = false)`).
+pub fn sealed_in_mode<W: PlanWorld>(
+    world: &mut W,
+    id: i32,
+    state: &TeeState,
+    held: PlayerInput,
+    passive: bool,
+) -> bool {
     for other in world.all_tees() {
         if other.id != id {
             world.remove_tee(other.id);
@@ -132,13 +150,15 @@ pub fn sealed_in<W: PlanWorld>(world: &mut W, id: i32, state: &TeeState, held: P
     world.apply_tee_state(id, state);
     let start = world.save_state();
 
-    let tries: Vec<PlayerInput> = if state.frozen && state.freeze_ticks_left >= i64::from(SEAL_TICKS) {
+    let tries: Vec<PlayerInput> = if passive || (state.frozen && state.freeze_ticks_left >= i64::from(SEAL_TICKS)) {
         vec![held]
     } else {
         seal_escapes(held)
     };
     for input in tries {
         world.restore_state(&start);
+        // Passive: a frozen tee must touch freeze before its freeze runs out, or it thaws on its own.
+        let mut reached = !passive || !state.frozen;
         for t in 0..SEAL_TICKS {
             let now = if input.jump != 0 && t % 2 == 1 {
                 PlayerInput { jump: 0, ..input }
@@ -147,10 +167,22 @@ pub fn sealed_in<W: PlanWorld>(world: &mut W, id: i32, state: &TeeState, held: P
             };
             world.set_input(id, now);
             world.step();
+            if !reached
+                && i64::from(t) < state.freeze_ticks_left
+                && let Some(at) = world.get_tee(id)
+                && at.alive
+                && touches_freeze(world.collision(), at.pos.x, at.pos.y)
+            {
+                reached = true;
+            }
         }
         let Some(end) = world.get_tee(id) else { continue };
         if !end.alive {
             continue;
+        }
+        if !reached {
+            world.restore_state(&start);
+            return false;
         }
         if !end.frozen || !touches_freeze(world.collision(), end.pos.x, end.pos.y) {
             world.restore_state(&start);

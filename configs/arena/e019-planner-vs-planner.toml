@@ -1,0 +1,38 @@
+# work-clock: default-rate
+# Task 3.8 (D-095, E-019): the competitor's planners against each other, in fixed-iteration mode (no clock): how much stronger is af49dfb
+# than c3c619d as a duelist? Slot 0 is the focal player; "old vs old" is the calibration of the arena's seat asymmetry (E-017: 43.8%).
+# The same three D-059 halls and seeds 3001..3200 (200 games per condition; a 400-game version with a third arm was too slow on the shared machine).
+#   ddnet-ai arena run --config configs/arena/e019-planner-vs-planner.toml --out ~/aiddnet/data/runs/E-019/planners --threads 2
+name = "E-019: planner v2 vs planner old"
+base_seed = 3001
+games = 200
+
+[[condition]]
+name = "clb-left: v2 vs old"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed", preset = "normal-v2" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left: old vs old"
+arena = "clb-left"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: v2 vs old"
+arena = "clb-right"
+players = [{ brain = "planner", mode = "fixed", preset = "normal-v2" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: old vs old"
+arena = "clb-right"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: v2 vs old"
+arena = "chillblock5-ruler"
+players = [{ brain = "planner", mode = "fixed", preset = "normal-v2" }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: old vs old"
+arena = "chillblock5-ruler"
+players = [{ brain = "planner", mode = "fixed" }, { brain = "planner", mode = "fixed" }]

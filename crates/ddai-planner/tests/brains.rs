@@ -336,6 +336,54 @@ fn presets_are_distinct_planner_configs() {
     assert!(s.population > n.population);
 }
 
+/// Task 3.8 (D-095): the v2 presets are the competitor's af49dfb planner, selectable by name; the classic ones are untouched.
+#[test]
+fn v2_presets_select_the_af49dfb_planner() {
+    use ddai_planner::config::PlannerVersion;
+    for (name, version) in [
+        ("normal", PlannerVersion::Classic),
+        ("low", PlannerVersion::Classic),
+        ("strong", PlannerVersion::Classic),
+        ("normal-v2", PlannerVersion::Upstream20261002),
+        ("live-v2", PlannerVersion::Upstream20261002),
+    ] {
+        let p = PlannerPreset::parse(name).unwrap_or_else(|| panic!("{name} parses"));
+        assert_eq!(p.label(), name);
+        assert_eq!(p.version(), version);
+        assert_eq!(p.config().version(), version);
+    }
+    assert!(PlannerPreset::parse("v3").is_none());
+    let v2 = PlannerPreset::NormalV2.config();
+    let live = PlannerPreset::LiveV2.config();
+    assert_eq!((v2.launch_exposure, v2.jumpless_hazard_cost), (1.0, 0.15));
+    assert_eq!((live.launch_exposure, live.jumpless_hazard_cost), (1.5, 0.4));
+    // The classic presets are exactly what they were.
+    assert_eq!(PlannerPreset::Normal.config(), ddai_planner::config::preset_normal());
+    assert_eq!(
+        PlannerPreset::Strong.config(),
+        ddai_planner::config::preset_strong_wb(ddai_planner::config::preset_normal())
+    );
+}
+
+/// Both versions play a fixed-iteration duel (same scene, same seed) and decide; with a duel in reach of a hook they may differ.
+#[test]
+fn a_v2_planner_brain_decides_like_any_other() {
+    let map = room();
+    let world = world_with(&map, &[(0, 10.5, 9.5), (1, 14.5, 9.5)]);
+    let obs = observation(&world, &map, 0, 1);
+    for preset in [PlannerPreset::Normal, PlannerPreset::NormalV2, PlannerPreset::LiveV2] {
+        let mut b = PlannerBrain::new(PlannerBrainConfig {
+            preset,
+            ..PlannerBrainConfig::default()
+        });
+        reset(&mut b, &map, 0, 3);
+        let a = b.decide_in(&obs, Some(&view(&world, 0)));
+        assert!((-1..=1).contains(&a.direction), "{preset:?}");
+        assert_eq!(b.stats().decisions, 1);
+        assert_eq!(b.name(), format!("planner-{}-fixed", preset.label()));
+    }
+}
+
 #[test]
 fn enemy_input_from_tee_reads_the_wire_angle() {
     let mut tee = ddai_planner::types::blank_tee_state();

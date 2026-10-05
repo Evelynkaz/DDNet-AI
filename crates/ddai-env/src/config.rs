@@ -144,7 +144,8 @@ pub struct PlayerSpec {
     /// Input lag of this client in ticks (decisions reach the world this many ticks late).
     #[serde(default)]
     pub lag: u32,
-    /// Planner: `normal` (default), `low` or `strong`.
+    /// Planner: `normal` (default), `low` or `strong`; `normal-v2` and `live-v2` are the competitor's current planner
+    /// (upstream af49dfb, task 3.8; the second with its `LIVE_PLANNER_CFG`). The hybrid takes the first three only.
     #[serde(default)]
     pub preset: Option<String>,
     /// Planner: `fixed` (default, deterministic) or `deadline`.
@@ -693,12 +694,12 @@ pub fn builtin_brain(spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
         "idle" => Ok(Box::new(IdleBrain)),
         "scripted" => Ok(Box::new(ScriptedBrain::new())),
         "planner" => {
-            let preset = match spec.preset.as_deref().unwrap_or("normal") {
-                "normal" => PlannerPreset::Normal,
-                "low" => PlannerPreset::Low,
-                "strong" => PlannerPreset::Strong,
-                other => return Err(EnvError::new(format!("planner: unknown preset {other:?}"))),
-            };
+            let preset = PlannerPreset::parse(spec.preset.as_deref().unwrap_or("normal")).ok_or_else(|| {
+                EnvError::new(format!(
+                    "planner: unknown preset {:?} (normal, low, strong, normal-v2, live-v2)",
+                    spec.preset.as_deref().unwrap_or("normal")
+                ))
+            })?;
             let mode = match spec.mode.as_deref().unwrap_or("fixed") {
                 "fixed" => PlannerMode::Fixed,
                 "deadline" => PlannerMode::Deadline {

@@ -18,7 +18,9 @@ import { writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { SimWorld, loadMapCollision, teeStateJson, inputJson, sha256File, tsCoreCommit, TS_REF } from "./lib.mjs";
 
-const { Planner } = await import(`${TS_REF}/src/plan/planner.ts`);
+const { Planner, PLANNER_DEFAULTS } = await import(`${TS_REF}/src/plan/planner.ts`);
+// Task 3.8: which planner this run dumps (`DDAI_TS_REF` = upstream af49dfb has the v2 knobs), see gen-planner-dump.mjs.
+const PLANNER_V2 = PLANNER_DEFAULTS.hookExactGate !== undefined;
 const { scriptedAction } = await import(`${TS_REF}/src/env/scripted.ts`);
 const { Rng } = await import(`${TS_REF}/src/nn/rng.ts`);
 const { emptyInput } = await import(`${TS_REF}/src/core/types.ts`);
@@ -47,7 +49,24 @@ if (!mapArg || !outPath) {
 
 const PRESET_BASE = { thirdTeeExposure: 0, memoryTrust: 0.9, frozenThrow: 3, explain: true };
 const WB_OVER = { noThawRope: true, frozenThrow: 3, airJumpCost: 0.3, launchExactReach: 100 };
+const WB_OVER_V2 = { ...WB_OVER, launchExposure: 1.0, jumplessHazardCost: 0.15 };
+const LIVE_V2 = { launchExposure: 1.5, jumplessHazardCost: 0.4 };
+const guardPlan = (base, wallDir, airChain) => ({ wallDir, frozenTargetSteps: 16, ...(airChain ? { airChain: true } : {}), ...base });
 function presetConfig(name) {
+  if (PLANNER_V2) {
+    switch (name) {
+      case "live":
+        return { ...PRESET_BASE, ...LIVE_V2 };
+      case "wblive":
+        return { ...PRESET_BASE, ...LIVE_V2, ...WB_OVER_V2 };
+      case "guardl":
+        return guardPlan({ ...PRESET_BASE, ...LIVE_V2, ...WB_OVER_V2 }, -1, false);
+      case "guardr":
+        return guardPlan({ ...PRESET_BASE, ...WB_OVER_V2 }, 1, false);
+      case "guardchain":
+        return guardPlan({ ...PRESET_BASE, ...LIVE_V2, ...WB_OVER_V2 }, -1, true);
+    }
+  }
   switch (name) {
     case "normal":
       return { ...PRESET_BASE };
@@ -164,6 +183,8 @@ writeFileSync(
     preset: presetName,
     opponent: opponentName,
     config: cfg,
+    plannerVersion: PLANNER_V2 ? "upstream-2026-10-02" : "classic",
+    tsRef: TS_REF,
     selfSpawn,
     enemySpawn,
     tsCoreCommit: tsCoreCommit(),

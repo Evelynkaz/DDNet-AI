@@ -182,6 +182,158 @@ pub fn travel_field(col: &impl PlanCollision, from_x: f64, from_y: f64) -> Hazar
     HazardField { width, height, dist }
 }
 
+/// `CEILING_NONE` (af49dfb `planner.ts`): "no freeze/death ceiling above".
+pub const CEILING_NONE: u8 = 255;
+const CEILING_MAX_TILES: u8 = 20;
+
+/// `ceilingField(collision)` (af49dfb `planner.ts`, `ropeCeilingCost`): per tile, how many tiles up the nearest
+/// freeze/death ceiling is, looking straight up through open air and also one column to either side (`CEILING_NONE` =
+/// none within 20 tiles). Game layer only, like [`hazard_field`]. Cached per map by the planner.
+#[derive(Debug, Clone)]
+pub struct CeilingField {
+    pub width: i32,
+    pub height: i32,
+    pub dist: Vec<u8>,
+}
+
+pub fn ceiling_field(col: &impl PlanCollision) -> CeilingField {
+    let width = col.width();
+    let height = col.height();
+    let n = (width * height) as usize;
+    let at = |x: i32, y: i32| (y * width + x) as usize;
+    // `own[i]`: tiles up to the ceiling straight above tile `i`; `open[i]`: tiles of open air above it (capped).
+    let mut own = vec![CEILING_NONE; n];
+    let mut open = vec![0u8; n];
+    for x in 0..width {
+        for y in 1..height {
+            let above = col.game_tile(x, y - 1);
+            let i = at(x, y);
+            if above == TILE_SOLID || above == TILE_NOHOOK {
+                continue;
+            }
+            open[i] = CEILING_MAX_TILES.min(open[at(x, y - 1)] + 1);
+            if above == TILE_FREEZE || above == TILE_DEATH {
+                own[i] = 1;
+            } else if own[at(x, y - 1)] < CEILING_MAX_TILES {
+                own[i] = own[at(x, y - 1)] + 1;
+            }
+        }
+    }
+    let beside = |x: i32, y: i32| {
+        let t = col.game_tile(x, y);
+        t == TILE_FREEZE || t == TILE_DEATH
+    };
+    let mut dist = vec![CEILING_NONE; n];
+    for y in 0..height {
+        for x in 0..width {
+            let i = at(x, y);
+            let mut d = own[i];
+            if x > 0 && !beside(x - 1, y) {
+                let nb = own[at(x - 1, y)];
+                if nb < d && nb <= open[i] {
+                    d = nb;
+                }
+            }
+            if x + 1 < width && !beside(x + 1, y) {
+                let nb = own[at(x + 1, y)];
+                if nb < d && nb <= open[i] {
+                    d = nb;
+                }
+            }
+            dist[i] = d;
+        }
+    }
+    CeilingField { width, height, dist }
+}
+
+/// `collision.moveBox(pos, vel, size, {x: 0, y: 0})` (`collision.ts` `moveBox`) written over [`PlanCollision::test_box`]
+/// (`testBoxAt(x, y, size.x * 0.5, size.y * 0.5)` is exactly `testBox({x, y}, size)`): the slide of a box along the
+/// walls, with zero elasticity (a blocked velocity component becomes `-0`/`0`).
+fn move_box_no_bounce(col: &impl PlanCollision, pos: &mut Vec2, vel: &mut Vec2, size: Vec2) {
+    let mut pos_x = pos.x;
+    let mut pos_y = pos.y;
+    let mut vel_x = vel.x;
+    let mut vel_y = vel.y;
+    let elasticity = 0.0_f64;
+    let distance = js::sqrt(vel_x * vel_x + vel_y * vel_y);
+    let max = js::trunc(distance) as i64;
+    if distance > 0.00001 {
+        let fraction = 1.0 / ((max + 1) as f64);
+        for _ in 0..=max {
+            if vel_x == 0.0 && vel_y == 0.0 {
+                break;
+            }
+            let mut new_x = pos_x + vel_x * fraction;
+            let mut new_y = pos_y + vel_y * fraction;
+            if new_x == pos_x && new_y == pos_y {
+                break;
+            }
+            if col.test_box(vec2(new_x, new_y), size) {
+                let mut hits = 0;
+                if col.test_box(vec2(pos_x, new_y), size) {
+                    new_y = pos_y;
+                    vel_y *= -elasticity;
+                    hits += 1;
+                }
+                if col.test_box(vec2(new_x, pos_y), size) {
+                    new_x = pos_x;
+                    vel_x *= -elasticity;
+                    hits += 1;
+                }
+                if hits == 0 {
+                    new_y = pos_y;
+                    vel_y *= -elasticity;
+                    new_x = pos_x;
+                    vel_x *= -elasticity;
+                }
+            }
+            pos_x = new_x;
+            pos_y = new_y;
+        }
+    }
+    pos.x = pos_x;
+    pos.y = pos_y;
+    vel.x = vel_x;
+    vel.y = vel_y;
+}
+
+/// `ropeIntercept(from, en, collision)` (af49dfb `planner.ts`): where a hook thrown from `from` would meet a victim at
+/// `pos` moving with `vel`: the victim's position after the rope's flight time, slid along the walls (two passes,
+/// the flight time re-estimated from the first). A still victim stays where it is.
+pub fn rope_intercept(col: &impl PlanCollision, from: Vec2, pos: Vec2, vel: Vec2) -> Vec2 {
+    let mut x = pos.x;
+    let mut y = pos.y;
+    let moving = js::abs(vel.x) + js::abs(vel.y) > 0.01;
+    let fire = *crate::tuning::HOOK_FIRE_SPEED;
+    let tee_box = vec2(PHYSICAL_SIZE, PHYSICAL_SIZE);
+    let mut i = 0;
+    while i < 2 && moving {
+        i += 1;
+        let t = js::min(
+            *crate::tuning::HOOK_LENGTH / fire,
+            js::max(
+                0.0,
+                (js::hypot2(x - from.x, y - from.y) - PHYSICAL_SIZE * 1.5 - fire / 2.0) / fire,
+            ),
+        );
+        let mut p = pos;
+        let mut v = vel;
+        let mut left = t;
+        while left > 0.0 {
+            let f = js::min(1.0, left);
+            let mut step = vec2(v.x * f, v.y * f);
+            move_box_no_bounce(col, &mut p, &mut step, tee_box);
+            if f == 1.0 {
+                v = step;
+            }
+            left -= 1.0;
+        }
+        x = p.x;
+        y = p.y;
+    }
+    vec2(x, y)
+}
+
 /// `hazardNearness(field, x, y)` (`planner.ts:500-507`): `floor(x/32)` tile addressing (not the
 /// collision's own `indexAt`/`getMapIndex`), out of bounds -> `0`.
 pub fn hazard_nearness(field: &HazardField, x: f64, y: f64) -> f64 {

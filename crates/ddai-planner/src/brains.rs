@@ -24,7 +24,10 @@ use ddai_jsmath::Rng;
 use ddai_physics::map::MapData;
 
 use crate::clock::{Clock, StepClock, WallClock};
-use crate::config::{PlannerConfig, preset_low_cpu, preset_normal, preset_strong_wb, wb_overrides};
+use crate::config::{
+    PlannerConfig, PlannerVersion, preset_live_v2, preset_low_cpu, preset_normal, preset_normal_v2, preset_strong_wb,
+    preset_strong_wb_v2, wb_overrides, wb_overrides_v2,
+};
 use crate::memory::FreezeMemory;
 use crate::physics_adapter::{PhysicsWorld, from_ddnet_input};
 use crate::plan_world::PlanWorld;
@@ -141,6 +144,9 @@ fn tee_from_observation(c: &CharacterObservation) -> TeeState {
     t.deep_frozen = Some(c.is_deep_frozen);
     t
 }
+
+/// A planner-config transformation (`wb_overrides`, `preset_strong_wb`, ...).
+type OverrideFn = fn(PlannerConfig) -> PlannerConfig;
 
 /// A private planning world, rebuilt lazily for the map of the current episode.
 pub(crate) struct Scratch {
@@ -267,11 +273,16 @@ impl Brain for ScriptedBrain {
 
 /// Planner configuration presets (`docs/research/orig-plan.md` §1.2): `Normal` is the live
 /// default (E-000's baseline), `Low` is `--low-cpu`, `Strong` is `STRONG_WB` over `Normal`.
+/// `NormalV2` and `LiveV2` are the competitor's current planner (upstream af49dfb, task 3.8, D-095): `NormalV2` is
+/// `Normal` on the v2 defaults (what the phase-0 harness would run), `LiveV2` is its `LIVE_PLANNER_CFG`
+/// (`launchExposure 1.5`, `jumplessHazardCost 0.4`: how its live bot plays).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlannerPreset {
     Normal,
     Low,
     Strong,
+    NormalV2,
+    LiveV2,
 }
 
 impl PlannerPreset {
@@ -280,6 +291,8 @@ impl PlannerPreset {
             PlannerPreset::Normal => preset_normal(),
             PlannerPreset::Low => preset_low_cpu(),
             PlannerPreset::Strong => preset_strong_wb(preset_normal()),
+            PlannerPreset::NormalV2 => preset_normal_v2(),
+            PlannerPreset::LiveV2 => preset_live_v2(),
         }
     }
 
@@ -288,7 +301,29 @@ impl PlannerPreset {
             PlannerPreset::Normal => "normal",
             PlannerPreset::Low => "low",
             PlannerPreset::Strong => "strong",
+            PlannerPreset::NormalV2 => "normal-v2",
+            PlannerPreset::LiveV2 => "live-v2",
         }
+    }
+
+    /// The planner version this preset reproduces.
+    pub fn version(self) -> PlannerVersion {
+        match self {
+            PlannerPreset::NormalV2 | PlannerPreset::LiveV2 => PlannerVersion::Upstream20261002,
+            _ => PlannerVersion::Classic,
+        }
+    }
+
+    /// Parses a preset name (`normal`, `low`, `strong`, `normal-v2`, `live-v2`).
+    pub fn parse(name: &str) -> Option<PlannerPreset> {
+        Some(match name {
+            "normal" => PlannerPreset::Normal,
+            "low" => PlannerPreset::Low,
+            "strong" => PlannerPreset::Strong,
+            "normal-v2" => PlannerPreset::NormalV2,
+            "live-v2" => PlannerPreset::LiveV2,
+            _ => return None,
+        })
     }
 }
 
@@ -577,16 +612,20 @@ impl Brain for PlannerBrain {
         let want = (ctx.wb.in_hall, ctx.wb.in_hall && ctx.wb.strong);
         if want != self.wb_applied {
             self.wb_applied = want;
+            // af49dfb's `WB_PLAN_OVERRIDES` also names `launchExposure 1.0` and `jumplessHazardCost 0.15` (it matters on top of
+            // its live config, which raises both); the guard's wall plans (`wallDir`) are not wired here.
+            let (wb, strong): (OverrideFn, OverrideFn) = match self.cfg.preset.version() {
+                PlannerVersion::Classic => (wb_overrides, preset_strong_wb),
+                PlannerVersion::Upstream20261002 => (wb_overrides_v2, preset_strong_wb_v2),
+            };
             self.planner.set_overrides(match want {
                 (false, _) => None,
-                (true, false) => Some(Box::new(wb_overrides)),
-                (true, true) => Some(Box::new(|base: PlannerConfig| {
-                    if base.population < 40 {
-                        preset_strong_wb(base)
-                    } else {
-                        wb_overrides(base)
-                    }
-                })),
+                (true, false) => Some(Box::new(wb)),
+                (true, true) => Some(Box::new(
+                    move |base: PlannerConfig| {
+                        if base.population < 40 { strong(base) } else { wb(base) }
+                    },
+                )),
             });
         }
         self.planner.set_band(
