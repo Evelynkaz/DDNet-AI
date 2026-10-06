@@ -37,11 +37,16 @@ toml = "1.1.6"
 fd-lock = "4.0.4"
 # `server_list` (task 4.3): the read-only master-list JSON parser.
 serde_json = "1"
+# Task 5.12: `safe_file` opens files the web may have written with `O_NOFOLLOW | O_NONBLOCK` (already in the tree via ddai-web).
+libc = "0.2"
 
 [features]
 # Exposes `socks5_testserver` (an in-process SOCKS5 server with a UDP relay and fault injection, loopback only)
 # to other crates' tests, same pattern as `ddai-map`'s `test-util`.
 test-util = []
+# Task 5.12 (D-099): accept a favourite on a loopback address (a private test server). Never enabled by a production build: the
+# favourites rules refuse loopback without it (`favourites::Rules::current`).
+loopback-favourites = []
 
 [dev-dependencies]
 tempfile = "3.14"

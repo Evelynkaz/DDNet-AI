@@ -166,11 +166,18 @@ if [[ "$DO_BUILD" -eq 1 ]]; then
   command -v cargo >/dev/null 2>&1 || die "cargo not found on PATH even after sourcing ~/.cargo/env"
   ( cd "$REPO_ROOT" && CARGO_BUILD_JOBS=4 cargo build --release --locked -p ddnet-ai )
   mkdir -p "$BIN_DIR"
+  # A test build accepts loopback favourites (task 5.12): never install one.
+  if "$REPO_ROOT/target/release/ddnet-ai" --version 2>/dev/null | grep -q 'loopback-favourites'; then
+    die "target/release/ddnet-ai is a test build (+loopback-favourites); rebuild without that feature"
+  fi
   install -m 0755 "$REPO_ROOT/target/release/ddnet-ai" "$BIN_PATH"
   log "installed $("$BIN_PATH" --version 2>/dev/null || echo ddnet-ai) -> $BIN_PATH"
 else
   log "--skip-build given, reusing existing $BIN_PATH"
   [[ -x "$BIN_PATH" ]] || die "--skip-build given but $BIN_PATH does not exist/is not executable"
+  if "$BIN_PATH" --version 2>/dev/null | grep -q 'loopback-favourites'; then
+    die "$BIN_PATH is a test build (+loopback-favourites): rebuild without that feature"
+  fi
 fi
 
 # ---------------------------------------------------------------------------------------------

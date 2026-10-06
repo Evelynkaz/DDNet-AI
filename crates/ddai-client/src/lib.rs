@@ -35,11 +35,13 @@
 
 pub mod allowlist;
 pub mod driver;
+pub mod favourites;
 pub mod live_servers;
 pub mod map_cache;
 pub mod proxy;
 pub mod relay_probe;
 pub mod relay_rule;
+pub mod safe_file;
 pub mod server_list;
 pub mod session;
 pub mod single_instance;

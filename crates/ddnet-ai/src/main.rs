@@ -17,12 +17,13 @@ mod play_cmd;
 mod proxy_cmd;
 mod rec_cmd;
 mod record_cmd;
+mod servers_cache_cmd;
 mod servers_cmd;
 mod trace_cmd;
 mod train_cmd;
 mod web_cmd;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::process::ExitCode;
 
 /// DDNet-AI: a block-mode bot for DDNet, rewritten in Rust.
@@ -69,6 +70,9 @@ enum Command {
     /// Read-only look at the DDNet master list (task 4.3): the block servers, their players, and which of
     /// them the bot may connect to. Opens no game connection.
     Servers(servers_cmd::ServersArgs),
+    /// Fetches the DDNet master list over HTTPS and writes the bounded, strictly parsed cache the site's «Серверы» tab reads (task
+    /// 5.12, D-099). The only code that talks to the master servers; it runs in a unit of its own, never in the web process.
+    ServersCache(servers_cache_cmd::ServersCacheArgs),
     /// Checks a SOCKS5 proxy (task 2.6): TCP connect, authentication, `UDP ASSOCIATE` and the relay address, and
     /// nothing else: no datagram goes to any game server. Prints ok / UDP not supported / auth failed.
     ProxyCheck(proxy_cmd::ProxyCheckArgs),
@@ -90,8 +94,21 @@ fn allowed_in_train_only_build(command: &Option<Command>) -> bool {
     matches!(command, None | Some(Command::Train(_)) | Some(Command::Fly(_)))
 }
 
+/// `--version` text. A test build that accepts loopback favourites (`cargo test`, the e2e) says so, so `deploy/install-launcher.sh` and
+/// `deploy/install.sh` can refuse to install it, and the root helper refuses to run as one (task 5.12 review F5).
+fn parse_cli() -> Cli {
+    let mut version = env!("CARGO_PKG_VERSION").to_string();
+    if ddai_client::favourites::Rules::current().allow_loopback {
+        version.push_str(" +loopback-favourites");
+    }
+    let matches = Cli::command()
+        .version(&*Box::leak(version.into_boxed_str()))
+        .get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     if TRAIN_ONLY_BUILD && !allowed_in_train_only_build(&cli.command) {
         eprintln!(
             "error: this ddnet-ai was built with target-cpu=x86-64-v3 (the opt-in training-only build, D-064) \
@@ -114,6 +131,7 @@ fn main() -> ExitCode {
         Some(Command::Record(args)) => record_cmd::run(args),
         Some(Command::Rec(args)) => rec_cmd::run(args),
         Some(Command::Servers(args)) => servers_cmd::run(args),
+        Some(Command::ServersCache(args)) => servers_cache_cmd::run(args),
         Some(Command::Clip(args)) => clip_cmd::run(args),
         Some(Command::ProxyCheck(args)) => proxy_cmd::run(args),
         Some(Command::Launch(args)) => launch_cmd::run(args),

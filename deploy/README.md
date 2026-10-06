@@ -414,6 +414,59 @@ systemctl show ddnet-ai-bot -p DropInPaths --value       # должен быть
 - Веб-юнит: `git checkout <старый коммит> -- deploy/systemd/ddnet-ai-web.service` и `deploy/install.sh --skip-build` (сайт без карточки «Запуск» просто не пишет запросов).
 - Руками (без сайта) бот запускается как раньше: `sudo systemctl start ddnet-ai-bot` (локальный гибрид по умолчанию); прежний ручной путь на публичный сервер (drop-in с `ExecStart=`, раздел «Прокси для Swarfey» выше) при установленном запускателе **не работает по замыслу**: помощник откажется стартовать, пока на юните есть чужой drop-in, а владелец выбирает сервер на сайте.
 
+## Браузер серверов (задача 5.12, D-099): что меняется при развёртывании
+
+Вкладка «Серверы»: список серверов DDNet, избранное (сервер и подключение — «напрямую» или через свой прокси — выбирает владелец на сайте) и профили прокси с сайта. Правила честной игры не менялись:
+кик или бан закрывает сервер, пока владелец сам не нажмёт «Открыть снова»; бот никогда не меняет прокси или IP сам; один бот на сервер; ≤ 5 подключений за 20 с; в чат бот сам не пишет. Формат файлов — `docs/formats.md` §36, решение — D-099.
+
+**Веб-юнит не меняется и не получает сети** (`IPAddressAllow=127.0.0.0/8 ::1`, `IPAddressDeny=any`; проверяет `cargo test -p ddnet-ai --test deploy_units`). `ReadWritePaths` те же (`secrets` — профили прокси, `launch` — избранное и запросы). Бот-юнит тоже не меняется (избранное он читает из `data/launch/favourites.json`, как и `live-servers.toml`, только на чтение).
+
+### Что ставится (`deploy/install-launcher.sh`, он же ставит всё из раздела про запуск с сайта)
+
+| Что | Куда / зачем |
+|---|---|
+| `ddnet-ai-servers.service` + `ddnet-ai-servers.path` | `/etc/systemd/system/`, путь-юнит включён. `ddnet-ai servers-cache`: единственный, кто ходит на мастер-серверы DDNet (HTTPS, только чтение). Владелец `ubuntu`, без capability, домашний каталог — пустой tmpfs, в нём только `data/servers` (запись); частные сети закрыты. Запускается, когда сайт переписывает `data/launch/servers-refresh` («Обновить список»), не чаще раза в 60 с. |
+| `ddnet-ai-proxycheck.service` + `ddnet-ai-proxycheck.path` | то же для кнопки «Проверить»: `ddnet-ai launch check-proxy`, **не root**; видит `data/secrets` (чтение) и `data/launch`; в игровой сервер не уходит ничего |
+| `~/aiddnet/data/servers` (`0755`, `ubuntu`; кэш `master.json`, `refresh.json`) и пустой `~/aiddnet/data/launch/servers-refresh` | создаёт скрипт |
+| корневая копия бинарника | `/usr/local/libexec/ddnet-ai/ddnet-ai` (все новые юниты запускают её) |
+
+`~/aiddnet/data/launch/favourites.json` (пишет только веб; не в git) и `~/aiddnet/data/secrets/<имя>-proxy.toml` (0600) создаёт сам сайт. `/run/ddnet-ai/blocked.json` (закрытые серверы для страницы) пишет помощник.
+
+### Развёртывание (по порядку)
+
+1. Влить ветку, `deploy/install.sh` (новый бинарник и перезапуск `ddnet-ai-web`; пароль не трогается). Ставится только релизная сборка: тестовая (`cargo test`, e2e) принимает избранное на loopback, пишет `+loopback-favourites` в `--version`, и оба установщика её отвергают (`launch apply` от root в ней тоже откажет).
+2. Остановить бота, если он работает, и `deploy/install-launcher.sh` (идемпотентен; новые юниты включает сам, бота не трогает).
+3. Проверка: `systemctl status ddnet-ai-servers.path ddnet-ai-proxycheck.path` (оба `active (waiting)`), на сайте «Серверы» → «Обновить список» → через несколько секунд список (`sudo journalctl -u ddnet-ai-servers -n 20`: `wrote N servers`).
+4. `systemd-analyze security ddnet-ai-servers.service ddnet-ai-proxycheck.service` (ожидаемо «OK»: 1.5–2.5).
+
+### Миграция существующего (Swarfey)
+
+- `~/aiddnet/data/live-servers.toml` **не трогается и не правится** ни сайтом, ни помощником: он читается как раньше, как дополнительные записи (запись Swarfey с `proxy = "swarfey"` продолжает работать, `ready` по-прежнему решает владелец). Открывается такая запись после бана по-старому: правкой файла после бана.
+- `~/aiddnet/data/secrets/swarfey-proxy.toml` остаётся как есть. Он **не привязан** к Swarfey: ключ `for_server` больше не ограничивает сервер (он лишь добавляет адреса, которые запрещает фильтр cgroup при `relay = "public"`). Сайт покажет его как «из файла» (адрес скрыт) и **не** перепишет и не удалит. Назначить его избранному можно (в поле «Подключение» он есть в списке), но менять его параметры можно только вручную.
+- Чтобы вести Swarfey как избранное: добавить сервер на сайте (подтвердив разрешение администратора), выбрать подключение через `swarfey` (или создать на сайте новый профиль), затем убрать запись Swarfey из `live-servers.toml` (пока она там есть, избранное с тем же адресом отвергается как дубль: два утверждения об одном сервере). Запись можно и оставить: тогда запускать нужно через неё.
+- Память банов (`/var/lib/ddnet-ai/launch-state.json`) общая: бан Swarfey, записанный раньше, закрывает и избранное с тем же адресом или IP, пока владелец не нажмёт «Открыть снова».
+
+### Диагностика
+
+```bash
+sudo journalctl -u ddnet-ai-servers -n 30          # загрузка списка: «wrote N servers» или «failed (no_master|bad_list|write_failed)»
+sudo journalctl -u ddnet-ai-proxycheck -n 30       # проверка прокси: «done (код)», без адресов и учётных данных
+sudo journalctl -u ddnet-ai-launch -n 30           # решения помощника (коды отказов, в том числе favourites_invalid, blocked_after_ban)
+cat /run/ddnet-ai/blocked.json                     # закрытые серверы (адрес, время, код выхода)
+cat ~/aiddnet/data/servers/refresh.json            # чем кончился последний запрос списка
+```
+
+«Список ещё не загружался» — нажать «Обновить список» (или `sudo systemctl start ddnet-ai-servers`); «Каталог data/launch не создан» — `deploy/install-launcher.sh`. «Файл избранного повреждён» — открыть `~/aiddnet/data/launch/favourites.json`: сайт его не трогает, пока он не исправлен (или не удалён). Путь-юнит после слишком частых срабатываний останавливается (`TriggerLimit`): `sudo systemctl restart ddnet-ai-servers.path ddnet-ai-proxycheck.path`.
+
+### Проверка на этой машине (без боевых юнитов)
+
+`tools/e2e/servers-e2e.sh` (описание — `tools/e2e/README.md`): частный сервер DDNet на `127.0.0.1:8463` (econ 8464, свой каталог и пароль, `sv_register 0`), свой тестовый веб на 7791 (бинарник с признаком `loopback-favourites`), помощник через **тестовый** путь (`launcher-sim.mjs` вместо путь-юнитов, поддельный `systemctl`, хук остановки), SOCKS5-двойник для «Проверить», настоящий список мастеров. Боевые юниты, `/etc`, Caddy и `~/aiddnet/data/bot` не трогаются. Песочницу юнита загрузки можно прогнать и на пользовательском systemd без sudo:
+`systemd-run --user --wait --pipe -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=<scratch>/servers -p BindReadOnlyPaths=<бинарник> -p MemoryDenyWriteExecute=true -p 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX' -p SystemCallFilter=@system-service -p 'IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10' <бинарник> servers-cache --data-dir <scratch>` (так проверено: 1377 серверов, 300 КБ).
+
+### Откат
+
+`deploy/install-launcher.sh --uninstall` (бот остановлен) выключает и убирает и новые юниты (кэш `data/servers`, `favourites.json` и профили остаются). Только вкладка: `git checkout <старый коммит> -- crates/ddai-web` и `deploy/install.sh` (запись избранного перестаёт работать; помощник старой версии избранное не знает и откажет `server_not_allowed`).
+
 ## Чат владельца с сайта (задача 4.9, D-094): что меняется при развёртывании
 
 **Ничего нового ставить не нужно.** Владелец набирает строку на сайте (карточка «Чат» на вкладке «Бот»), бот говорит её в игровой чат. Это тот же канал `control.sock` (задача 5.6) и те же два юнита; прав, каталогов, портов, `ReadWritePaths`, фильтров cgroup и правил Caddy не прибавилось, `deploy/install.sh` и юниты не менялись.

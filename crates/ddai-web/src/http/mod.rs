@@ -8,4 +8,5 @@ pub mod launch;
 pub mod login;
 pub mod map;
 pub mod say;
+pub mod servers;
 pub mod train;

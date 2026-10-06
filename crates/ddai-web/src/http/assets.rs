@@ -17,6 +17,8 @@ const DDTEE_JS: &str = include_str!("../../assets/ddtee.js");
 const GAME_JS: &str = include_str!("../../assets/game.js");
 const LAUNCH_JS: &str = include_str!("../../assets/launch.js");
 const LAUNCH_CSS: &str = include_str!("../../assets/launch.css");
+const SERVERS_JS: &str = include_str!("../../assets/servers.js");
+const SERVERS_CSS: &str = include_str!("../../assets/servers.css");
 const SAY_JS: &str = include_str!("../../assets/say.js");
 const SAY_CSS: &str = include_str!("../../assets/say.css");
 
@@ -79,4 +81,14 @@ pub async fn say_js() -> impl IntoResponse {
 /// Task 4.9: the chat input's styles (scoped under `.say-card`).
 pub async fn say_css() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], SAY_CSS)
+}
+
+/// Task 5.12: the «Серверы» tab's script (server list, favourites, proxies), loaded before `app.js`.
+pub async fn servers_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], SERVERS_JS)
+}
+
+/// Task 5.12: the «Серверы» tab's styles (scoped under `.servers-view`).
+pub async fn servers_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], SERVERS_CSS)
 }

@@ -1,0 +1,17 @@
+# The trigger of ddnet-ai-proxycheck.service (task 5.12, D-099): the site writes data/launch/proxycheck-request.json (atomically, a small JSON
+# file); this path unit notices it and starts the checker, which consumes (deletes) the file, so the unit fires again only for a NEW request.
+# A request nobody consumed for a minute is removed by the site. The site accepts at most 6 checks a minute, well below the burst. Installed
+# and enabled by deploy/install-launcher.sh.
+
+[Unit]
+Description=Server browser: a proxy check is waiting
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+
+[Path]
+PathExists=/home/ubuntu/aiddnet/data/launch/proxycheck-request.json
+Unit=ddnet-ai-proxycheck.service
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target

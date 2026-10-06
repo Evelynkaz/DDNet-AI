@@ -1,0 +1,17 @@
+# Starts ddnet-ai-servers.service when the site asks for a fresh server list (task 5.12, D-099). The web unit has no network: «Обновить
+# список» rewrites data/launch/servers-refresh (its content means nothing), and this unit notices the close after the write. The fetch itself
+# does nothing when the cache is younger than 60 s, so a flood of requests costs one list a minute at most. Installed and enabled by
+# deploy/install-launcher.sh.
+
+[Unit]
+Description=Server browser: the site asked for a fresh master list
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+
+[Path]
+PathChanged=/home/ubuntu/aiddnet/data/launch/servers-refresh
+Unit=ddnet-ai-servers.service
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

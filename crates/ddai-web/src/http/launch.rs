@@ -2,13 +2,15 @@
 //!
 //! | route | |
 //! |---|---|
-//! | `GET /api/bot/launch` | what the owner may choose (servers, brains, durations), the active fly bundle's run name, the helper's last status, whether a request is waiting |
+//! | `GET /api/bot/launch` | what the owner may choose (servers: local, the allow-list and the favourites; brains, durations), the active fly bundle's run name, the helper's last status, whether a request is waiting |
 //! | `POST /api/bot/launch` | one start or stop request: validated here against the same choices, then written **atomically** to `<launch-dir>/request.json` |
 //!
 //! **The web gains no privilege here.** It writes one small file into its own directory and reads another; a root systemd path
 //! unit runs `ddnet-ai launch apply`, which re-validates everything against fixed allow-lists and does the `systemctl`. Nothing
-//! the browser sends is a path, an address or a command line: the server is `"local"` or the exact `address` of a `ready = true`
-//! entry of the owner's `live-servers.toml` (which the web only reads), and the helper resolves it again by that file.
+//! the browser sends is a path, an address or a command line: the server is `"local"`, the exact `address` of a `ready = true`
+//! entry of the owner's `live-servers.toml` (which the web only reads), or (task 5.12, D-099) the exact address of one of the owner's
+//! favourites; the helper resolves it again by those files, and a favourite the bot was kicked or banned from stays closed
+//! (`409 blocked_after_ban`) until the owner re-opens it on the «Серверы» tab.
 //!
 //! Protections are those of every mutating route (D-070): the session, the strict same-origin check, the CSRF token and a JSON
 //! body ([`crate::http::bot::authorize_post`]); plus a rate limit of its own (one request per `launch_min_gap`) and a refusal while
@@ -29,6 +31,7 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
 use crate::http::bot::{authorize_get, authorize_post, json_error};
+use crate::http::servers::{closing_block, favourite_choices};
 use crate::launch::{
     Action, Brain, DurationChoice, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_SPARRING,
     MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, bundle_run_name,
@@ -100,12 +103,25 @@ pub async fn launch_get(State(state): State<SharedState>, jar: CookieJar) -> Res
         let state = state.clone();
         move || {
             let bundle = bundle_path(&state);
-            let mut servers = vec![serde_json::json!({"id": LOCAL_SERVER, "label": LOCAL_SERVER})];
+            let mut servers = vec![serde_json::json!({"id": LOCAL_SERVER, "label": LOCAL_SERVER, "kind": "local"})];
             servers.extend(
                 ready_servers(&state.config.live_servers)
                     .into_iter()
-                    .map(|a| serde_json::json!({"id": a, "label": a})),
+                    .map(|a| serde_json::json!({"id": a, "label": a, "kind": "allowlist"})),
             );
+            // Task 5.12: the owner's favourites, with whether the bot's ban memory has them closed (the helper decides again).
+            let fav = favourite_choices(&state);
+            servers.extend(fav.favourites.iter().map(|f| {
+                serde_json::json!({
+                    "id": f.address,
+                    "label": f.address,
+                    "kind": "favourite",
+                    "name": f.name,
+                    "nick": f.nick,
+                    "proxy": f.proxy_name(),
+                    "blocked": closing_block(f, &fav.blocks).is_some(),
+                })
+            }));
             let mut pending = pending_age(&dir);
             // A request nobody consumed for too long: the launcher is down. Remove what we left behind, and remember when.
             if pending.is_some_and(|a| a.as_secs() > REQUEST_STALE_SECS) {
@@ -130,6 +146,7 @@ pub async fn launch_get(State(state): State<SharedState>, jar: CookieJar) -> Res
             serde_json::json!({
                 "enabled": enabled,
                 "servers": servers,
+                "favourites_error": fav.error,
                 "brains": ["hybrid", "hybrid-fly", "fly"],
                 "durations": ["15m", "60m", "unlimited"],
                 "max_sparring": MAX_SPARRING,
@@ -262,9 +279,21 @@ pub async fn launch_post(
     let result = tokio::task::spawn_blocking({
         let state = state.clone();
         move || -> Result<LaunchRequest, (StatusCode, &'static str)> {
-            let ready = ready_servers(&state.config.live_servers);
+            let mut ready = ready_servers(&state.config.live_servers);
+            // Task 5.12: a favourite is a server the owner may choose like a ready allow-list entry; one the bot was kicked or banned
+            // from stays closed until «Открыть снова» (the helper holds the memory and judges again).
+            let fav = favourite_choices(&state);
+            ready.extend(fav.favourites.iter().map(|f| f.address.clone()));
             let bundle_ok = bundle_path(&state).is_file();
             let req = build_request(form, &ready, bundle_ok).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            if let Some(server) = req.server.as_deref()
+                && fav
+                    .favourites
+                    .iter()
+                    .any(|f| f.address == server && closing_block(f, &fav.blocks).is_some())
+            {
+                return Err((StatusCode::CONFLICT, "blocked_after_ban"));
+            }
             if pending_age(&dir).is_some_and(|a| a.as_secs() <= REQUEST_STALE_SECS) {
                 return Err((StatusCode::CONFLICT, "pending"));
             }

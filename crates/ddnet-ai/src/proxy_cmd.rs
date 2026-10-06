@@ -154,24 +154,12 @@ pub fn attach_proxy(config: &mut ClientConfig, server: SocketAddr, data_dir: &Pa
             config.proxy = p;
             Ok(())
         }
-        Err(e) => {
-            // A proxy that is issued for another server is a final refusal like any other `ProxyRefused`: exit 4,
-            // which the unit's `RestartPreventExitStatus` lists, so systemd does not keep restarting it.
-            let exit = if matches!(e, proxy::ProxyResolveError::NotForServer { .. }) {
-                EXIT_PROXY_REFUSED
-            } else {
-                1
-            };
-            Err(AttachError {
-                message: e.to_string(),
-                exit,
-            })
-        }
+        Err(e) => Err(AttachError {
+            message: e.to_string(),
+            exit: 1,
+        }),
     }
 }
-
-/// Exit code for a final proxy refusal (`GaveUpCategory::ProxyRefused` maps to the same code in the bot).
-pub const EXIT_PROXY_REFUSED: u8 = 4;
 
 /// Why [`attach_proxy`] / [`prepare_client`] refused, and the process exit code that goes with it.
 #[derive(Debug)]
@@ -188,7 +176,7 @@ impl std::fmt::Display for AttachError {
 
 /// What `play` does with `--live-servers` and the proxy: an explicit allow-list path replaces the default one
 /// that `ClientConfig::default()` loaded (a file that cannot be read is an error, never "allow everything"), and
-/// then the proxy is attached from the entry that admits `server` ([`attach_proxy`]).
+/// then the favourites of `<data-dir>/launch/favourites.json` are added as `ready` entries (task 5.12), and the proxy is attached from the entry that admits `server` ([`attach_proxy`]).
 pub fn prepare_client(
     config: &mut ClientConfig,
     live_servers: Option<&Path>,
@@ -201,6 +189,17 @@ pub fn prepare_client(
             exit: 1,
         })?;
     }
+    // Task 5.12 (D-099): the owner's favourites (written by the site, validated strictly here again) count as `ready` entries, with
+    // the proxy the owner assigned. A favourites file that cannot be trusted adds none (the gate then refuses that server).
+    let (merged, why) = ddai_client::live_servers::LiveServers::load_with_favourites(
+        std::mem::take(&mut config.live_servers),
+        &ddai_client::favourites::default_path(data_dir),
+        ddai_client::favourites::Rules::current(),
+    );
+    if let Some(why) = why {
+        tracing::warn!(reason = why, "the favourites file is not used");
+    }
+    config.live_servers = merged;
     attach_proxy(config, server, data_dir)
 }
 
@@ -323,5 +322,88 @@ mod tests {
             assert_eq!(code, 1);
             assert!(text.contains("failed"), "{text}");
         }
+    }
+
+    // --- task 5.12: the favourites are `ready` entries for the bot's own gate --------------------------------------------
+
+    fn favourites_dir(favs: &serde_json::Value, profile: bool) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("launch")).unwrap();
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        std::fs::write(dir.path().join("launch/favourites.json"), favs.to_string()).unwrap();
+        if profile {
+            let path = dir.path().join("secrets/hp-proxy.toml");
+            std::fs::write(
+                &path,
+                "host = \"198.51.100.7\"\nport = 1080\nuser = \"u\"\npass = \"p\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        dir
+    }
+
+    fn fav_json(address: &str, connection: &str) -> serde_json::Value {
+        serde_json::json!({"v":1,"favourites":[{"address":address,"name":"S","nick":"Muha","connection":connection,"consent_at":5,"added_at":5}]})
+    }
+
+    fn fresh_config(nick: &str) -> ClientConfig {
+        ClientConfig {
+            name: nick.to_string(),
+            ..ClientConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_favourite_passes_the_bots_gate_with_the_proxy_the_owner_assigned() {
+        let dir = favourites_dir(&fav_json("45.141.57.35:8308", "proxy:hp"), true);
+        let none = dir.path().join("no-live-servers.toml");
+        let addr: SocketAddr = "45.141.57.35:8308".parse().unwrap();
+        let mut c = fresh_config("Muha");
+        prepare_client(&mut c, Some(&none), addr, dir.path()).expect("prepared");
+        assert!(ddai_client::live_servers::check(addr, "Muha", &c.live_servers).is_ok());
+        assert_eq!(c.proxy.as_ref().map(|p| p.name()), Some("hp"));
+        // Another nick and another address are not admitted.
+        assert!(ddai_client::live_servers::check(addr, "Other", &c.live_servers).is_err());
+        assert!(
+            ddai_client::live_servers::check("45.141.57.35:8309".parse().unwrap(), "Muha", &c.live_servers).is_err()
+        );
+        // The assigned proxy's file is gone: an error, never a direct connection or another proxy.
+        std::fs::remove_file(dir.path().join("secrets/hp-proxy.toml")).unwrap();
+        let mut c = fresh_config("Muha");
+        let e = prepare_client(&mut c, Some(&none), addr, dir.path()).unwrap_err();
+        assert!(c.proxy.is_none() && e.exit == 1, "{e}");
+        // A direct favourite has no proxy.
+        let dir = favourites_dir(&fav_json("45.141.57.35:8308", "direct"), false);
+        let mut c = fresh_config("Muha");
+        prepare_client(&mut c, Some(&none), addr, dir.path()).unwrap();
+        assert!(c.proxy.is_none());
+        assert!(ddai_client::live_servers::check(addr, "Muha", &c.live_servers).is_ok());
+    }
+
+    #[test]
+    fn a_favourites_file_that_cannot_be_trusted_adds_nothing_to_the_bots_gate() {
+        let addr: SocketAddr = "45.141.57.35:8308".parse().unwrap();
+        let none = tempfile::tempdir().unwrap().path().join("no-live-servers.toml");
+        for bad in [
+            serde_json::json!({"v":1,"favourites":[{"address":"45.141.57.35:8308","name":"S","nick":"Muha","connection":"direct","consent_at":0,"added_at":5}]}),
+            serde_json::json!({"v":1,"favourites":[{"address":"45.141.57.35:8308","name":"S","nick":"Muha","connection":"direct","consent_at":5,"added_at":5,"ready":true}]}),
+            serde_json::json!({"v":2,"favourites":[]}),
+            serde_json::json!("junk"),
+        ] {
+            let dir = favourites_dir(&bad, false);
+            let mut c = fresh_config("Muha");
+            prepare_client(&mut c, Some(&none), addr, dir.path()).unwrap();
+            assert!(
+                ddai_client::live_servers::check(addr, "Muha", &c.live_servers).is_err(),
+                "{bad}"
+            );
+        }
+        // No file at all: nothing added either.
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = fresh_config("Muha");
+        prepare_client(&mut c, Some(&none), addr, dir.path()).unwrap();
+        assert!(ddai_client::live_servers::check(addr, "Muha", &c.live_servers).is_err());
     }
 }

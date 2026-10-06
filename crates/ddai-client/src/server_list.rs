@@ -48,6 +48,9 @@ pub struct ServerRow {
     pub players: u32,
     pub clients: u32,
     pub max_clients: u32,
+    /// The server announces a `tw-0.6+udp` address: the protocol this bot speaks (0.6 + DDNet). A server that is only on 0.7 is
+    /// listed but cannot be joined.
+    pub v06: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -122,6 +125,11 @@ pub fn parse_master(json: &str) -> Result<Vec<ServerRow>, MasterError> {
             other => text(other, 64),
         };
         let name = text(get("name"), 128);
+        let v06 = obj.get("addresses").and_then(|a| a.as_array()).is_some_and(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .any(|t| t.trim().starts_with("tw-0.6+udp://"))
+        });
         rows.push(ServerRow {
             address,
             name: if name.is_empty() { address.to_string() } else { name },
@@ -135,6 +143,7 @@ pub fn parse_master(json: &str) -> Result<Vec<ServerRow>, MasterError> {
                 .and_then(|m| m.as_u64())
                 .and_then(|m| u32::try_from(m).ok())
                 .unwrap_or(0),
+            v06,
         });
     }
     Ok(rows)
@@ -224,6 +233,185 @@ pub fn pick_auto_fetching(
         Ok(rows) => (pick_auto(local, nick, list, &rows), None),
         Err(e) => (pick_auto(local, nick, list, &[]), Some(e)),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The cache the site reads (task 5.12, D-099)
+// ---------------------------------------------------------------------------------------------
+//
+// The web unit has no network (`IPAddressDeny=any`), so the master list is fetched by a separate, minimal unit
+// (`ddnet-ai-servers.service`, `ddnet-ai servers-cache`), which writes this **bounded, strictly parsed** JSON into a directory the
+// web only reads. Everything on the list comes from the internet and is untrusted: the cache keeps public IPv4 addresses and
+// plain, length-capped text only (no control or direction-changing characters), never a client's name, and the reader checks all of
+// it again.
+
+use serde::{Deserialize, Serialize};
+
+use crate::favourites::{Rules, is_layout_trick, parse_address};
+
+/// The cache file's schema version.
+pub const CACHE_VERSION: u32 = 1;
+/// The cache's file name in `<data-dir>/servers/`.
+pub const CACHE_FILE: &str = "master.json";
+/// The fetch's outcome file in the same directory: when it last ran and why it failed, if it did.
+pub const REFRESH_FILE: &str = "refresh.json";
+/// The most bytes read from a master (the real list is under 1 MiB).
+pub const MAX_MASTER_BYTES: usize = 8 * 1024 * 1024;
+/// The cache file's size cap (reading and writing).
+pub const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
+/// The most servers in the cache.
+pub const MAX_CACHE_SERVERS: usize = 4000;
+/// The fetch does nothing when the cache is younger than this (seconds).
+pub const MIN_REFRESH_SECS: u64 = 60;
+const MAX_ROW_NAME: usize = 64;
+const MAX_ROW_MAP: usize = 64;
+const MAX_ROW_GAME_TYPE: usize = 32;
+const MAX_ROW_LOCATION: usize = 16;
+const MAX_COUNT: u32 = 10_000;
+
+/// One server as the site shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheRow {
+    /// `ip:port`, canonical, a public IPv4 address.
+    pub address: String,
+    pub name: String,
+    pub map: String,
+    pub game_type: String,
+    /// The master's region, for example `eu:de`.
+    pub location: String,
+    pub passworded: bool,
+    /// Clients that play (not spectators).
+    pub players: u32,
+    pub clients: u32,
+    pub max_clients: u32,
+    /// The server speaks protocol 0.6 (the bot's); `false` means 0.7 only and the site refuses to play there.
+    pub v06: bool,
+    /// [`is_block`]: «block» in the name, the map or the game type.
+    pub block: bool,
+}
+
+/// The cache file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterCache {
+    pub v: u32,
+    /// When it was fetched (unix seconds).
+    pub fetched_at: u64,
+    /// Which master (1..=4) answered.
+    pub master: u8,
+    pub servers: Vec<CacheRow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CacheError {
+    #[error("the cache is larger than {MAX_CACHE_BYTES} bytes")]
+    TooLarge,
+    #[error("the cache is not valid (JSON, schema, version or a value out of bounds)")]
+    Invalid,
+}
+
+fn clean(text: &str, max: usize) -> String {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !c.is_control() && !is_layout_trick(*c))
+        .collect();
+    cleaned.trim().chars().take(max).collect::<String>().trim().to_string()
+}
+
+fn text_ok(text: &str, max: usize) -> bool {
+    text.chars().count() <= max && text.trim() == text && !text.chars().any(|c| c.is_control() || is_layout_trick(c))
+}
+
+impl CacheRow {
+    fn from_server(r: &ServerRow) -> Option<CacheRow> {
+        let address = r.address.to_string();
+        parse_address(&address, Rules::default()).ok()?;
+        if !r.address.is_ipv4() {
+            return None;
+        }
+        let name = clean(&r.name, MAX_ROW_NAME);
+        Some(CacheRow {
+            name: if name.is_empty() { address.clone() } else { name },
+            address,
+            map: clean(&r.map, MAX_ROW_MAP),
+            game_type: clean(&r.game_type, MAX_ROW_GAME_TYPE),
+            location: clean(&r.location, MAX_ROW_LOCATION),
+            passworded: r.passworded,
+            players: r.players.min(MAX_COUNT),
+            clients: r.clients.min(MAX_COUNT),
+            max_clients: r.max_clients.min(MAX_COUNT),
+            v06: r.v06,
+            block: is_block(r),
+        })
+    }
+
+    fn valid(&self) -> bool {
+        parse_address(&self.address, Rules::default()).is_ok_and(|a| a.is_ipv4())
+            && !self.name.is_empty()
+            && text_ok(&self.name, MAX_ROW_NAME)
+            && text_ok(&self.map, MAX_ROW_MAP)
+            && text_ok(&self.game_type, MAX_ROW_GAME_TYPE)
+            && text_ok(&self.location, MAX_ROW_LOCATION)
+            && self.players <= MAX_COUNT
+            && self.clients <= MAX_COUNT
+            && self.max_clients <= MAX_COUNT
+    }
+}
+
+impl MasterCache {
+    /// The cache of a parsed master list: only public IPv4 servers, text cleaned and capped, the busiest first.
+    pub fn from_rows(rows: &[ServerRow], fetched_at: u64, master: u8) -> MasterCache {
+        let mut servers: Vec<CacheRow> = rows.iter().filter_map(CacheRow::from_server).collect();
+        servers.sort_by(|a, b| b.players.cmp(&a.players).then_with(|| a.address.cmp(&b.address)));
+        servers.dedup_by(|a, b| a.address == b.address);
+        servers.truncate(MAX_CACHE_SERVERS);
+        MasterCache {
+            v: CACHE_VERSION,
+            fetched_at,
+            master,
+            servers,
+        }
+    }
+
+    /// Parses and checks the cache file's bytes. Anything off refuses the whole file.
+    pub fn parse(bytes: &[u8]) -> Result<MasterCache, CacheError> {
+        if bytes.len() > MAX_CACHE_BYTES {
+            return Err(CacheError::TooLarge);
+        }
+        let cache: MasterCache = serde_json::from_slice(bytes).map_err(|_| CacheError::Invalid)?;
+        if cache.v != CACHE_VERSION
+            || !(1..=4).contains(&cache.master)
+            || cache.servers.len() > MAX_CACHE_SERVERS
+            || !cache.servers.iter().all(CacheRow::valid)
+        {
+            return Err(CacheError::Invalid);
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !cache.servers.iter().all(|s| seen.insert(s.address.as_str())) {
+            return Err(CacheError::Invalid);
+        }
+        Ok(cache)
+    }
+
+    /// The bytes to write: checked first, so a writer never produces a file the readers refuse.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CacheError> {
+        let bytes = serde_json::to_vec(self).map_err(|_| CacheError::Invalid)?;
+        Self::parse(&bytes)?;
+        Ok(bytes)
+    }
+}
+
+/// What the fetch last did (`refresh.json`): written after every run, so the page can say why the list is old.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefreshStatus {
+    pub v: u32,
+    pub at: u64,
+    pub ok: bool,
+    /// A fixed code when it failed (`no_master`, `bad_list`, `write_failed`), never the error's own text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[cfg(test)]
@@ -429,5 +617,116 @@ mod tests {
         let rows = parse_master(FIXTURE).unwrap();
         let (p, _) = pick_auto_fetching(local(), "Muha", &list(true), || Ok(rows));
         assert_eq!(p.addr, owner());
+    }
+
+    // --- task 5.12: the cache the site reads ---------------------------------------------------------------
+
+    #[test]
+    fn the_cache_keeps_public_ipv4_rows_with_clean_text_and_round_trips() {
+        let rows = parse_master(FIXTURE).unwrap();
+        let cache = MasterCache::from_rows(&rows, 1_700_000_000, 2);
+        assert!(!cache.servers.is_empty());
+        // The documentation-range rows of the fixture (203.0.113.x) are not public unicast: dropped. The public ones stay.
+        assert!(cache.servers.iter().all(|r| !r.address.starts_with("203.0.113.")));
+        let owner = cache.servers.iter().find(|r| r.address == "45.141.57.35:8308").unwrap();
+        assert_eq!((owner.players, owner.max_clients, owner.block), (2, 64, true));
+        assert_eq!(owner.map, "Copy Love Box");
+        assert!(owner.v06);
+        // Busiest first.
+        assert!(cache.servers.windows(2).all(|w| w[0].players >= w[1].players));
+        let bytes = cache.to_bytes().unwrap();
+        assert_eq!(MasterCache::parse(&bytes).unwrap(), cache);
+        assert!(!String::from_utf8(bytes).unwrap().contains("SECRET"));
+    }
+
+    #[test]
+    fn the_cache_text_is_cleaned_and_capped() {
+        let rows = vec![ServerRow {
+            address: "8.8.8.8:8303".parse().unwrap(),
+            name: format!("  Evil\u{202E}name\u{0}\n{}  ", "x".repeat(200)),
+            map: "Map\u{200B}X".into(),
+            game_type: "g".repeat(100),
+            location: "eu:de".into(),
+            passworded: false,
+            players: 1_000_000,
+            clients: 3,
+            max_clients: 16,
+            v06: true,
+        }];
+        let c = MasterCache::from_rows(&rows, 5, 1);
+        let r = &c.servers[0];
+        assert!(
+            r.name.starts_with("Evilname") && r.name.chars().count() <= 64,
+            "{:?}",
+            r.name
+        );
+        assert!(!r.name.chars().any(|c| c.is_control() || c == '\u{202E}'));
+        assert_eq!(r.map, "MapX");
+        assert_eq!(r.game_type.chars().count(), 32);
+        assert_eq!(r.players, 10_000);
+        assert!(MasterCache::parse(&c.to_bytes().unwrap()).is_ok());
+        // An empty name is the address.
+        let mut empty = rows.clone();
+        empty[0].name = "\u{202E}".into();
+        assert_eq!(MasterCache::from_rows(&empty, 5, 1).servers[0].name, "8.8.8.8:8303");
+    }
+
+    #[test]
+    fn the_cache_parser_is_strict() {
+        let rows = parse_master(FIXTURE).unwrap();
+        let good = serde_json::to_value(MasterCache::from_rows(&rows, 5, 1)).unwrap();
+        assert!(MasterCache::parse(good.to_string().as_bytes()).is_ok());
+        let bad = |f: &dyn Fn(&mut serde_json::Value)| {
+            let mut v = good.clone();
+            f(&mut v);
+            MasterCache::parse(v.to_string().as_bytes())
+        };
+        assert!(bad(&|v| v["extra"] = serde_json::json!(1)).is_err());
+        assert!(bad(&|v| v["servers"][0]["extra"] = serde_json::json!(1)).is_err());
+        assert!(bad(&|v| v["v"] = serde_json::json!(2)).is_err());
+        assert!(bad(&|v| v["master"] = serde_json::json!(0)).is_err());
+        assert!(bad(&|v| v["master"] = serde_json::json!(5)).is_err());
+        assert!(bad(&|v| v["servers"][0]["address"] = serde_json::json!("10.0.0.1:8303")).is_err());
+        assert!(bad(&|v| v["servers"][0]["address"] = serde_json::json!("example.com:8303")).is_err());
+        assert!(bad(&|v| v["servers"][0]["address"] = serde_json::json!("[2a01:4f8::1]:8303")).is_err());
+        assert!(bad(&|v| v["servers"][0]["name"] = serde_json::json!("a\nb")).is_err());
+        assert!(bad(&|v| v["servers"][0]["name"] = serde_json::json!("")).is_err());
+        assert!(bad(&|v| v["servers"][0]["name"] = serde_json::json!("x".repeat(65))).is_err());
+        assert!(bad(&|v| v["servers"][0]["players"] = serde_json::json!(10_001)).is_err());
+        assert!(bad(&|v| v["servers"][0]["players"] = serde_json::json!(-1)).is_err());
+        assert!(
+            bad(&|v| v["servers"][1]["address"] = v["servers"][0]["address"].clone()).is_err(),
+            "duplicate"
+        );
+        for bytes in [&b""[..], b"null", b"[]", b"{", b"\xff"] {
+            assert!(MasterCache::parse(bytes).is_err());
+        }
+        assert_eq!(
+            MasterCache::parse(&vec![b' '; MAX_CACHE_BYTES + 1]),
+            Err(CacheError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn a_huge_list_is_cut_to_the_cap() {
+        let rows: Vec<ServerRow> = (0..MAX_CACHE_SERVERS + 50)
+            .map(|i| ServerRow {
+                address: format!("45.{}.{}.{}:8303", 10 + i / 60000, (i / 250) % 250, 1 + i % 250)
+                    .parse()
+                    .unwrap(),
+                name: format!("S{i}"),
+                map: String::new(),
+                game_type: String::new(),
+                location: String::new(),
+                passworded: false,
+                players: u32::try_from(i % 7).unwrap(),
+                clients: 0,
+                max_clients: 0,
+                v06: true,
+            })
+            .collect();
+        let c = MasterCache::from_rows(&rows, 1, 1);
+        assert_eq!(c.servers.len(), MAX_CACHE_SERVERS);
+        assert!(c.to_bytes().unwrap().len() < MAX_CACHE_BYTES);
     }
 }

@@ -4,8 +4,11 @@
 #   ddnet-ai-launch.path / ddnet-ai-launch.service   root: consume the web's request file, validate it, start/stop the bot
 #   ddnet-ai-sparring@.service                      1-3 scripted local opponents (instances 1..3)
 #   ddnet-ai-bot.service                            the bot unit, now reading its server/brain/duration from an environment file
+#   ddnet-ai-servers.path / .service                task 5.12 (D-099): fetch the DDNet master list into the cache the site's «Серверы» tab reads
+#   ddnet-ai-proxycheck.path / .service             task 5.12: the site's «Проверить» for a proxy profile (unprivileged, sandboxed)
 #
-# and the places they use: ~/aiddnet/data/launch (the web's request directory; the status is in /run/ddnet-ai), ~/aiddnet/data/sparring (the sparring
+# and the places they use: ~/aiddnet/data/launch (the web's request directory, the favourites and the proxy-check files; the status and the
+# list of closed servers are in /run/ddnet-ai), ~/aiddnet/data/servers (the master-list cache, task 5.12), ~/aiddnet/data/sparring (the sparring
 # opponents' own data), /etc/ddnet-ai, /var/lib/ddnet-ai and the ROOT-OWNED copy of the binary the root units run
 # (/usr/local/libexec/ddnet-ai/ddnet-ai: a file the owner's user could rewrite must never be run as root).
 #
@@ -15,7 +18,8 @@
 # directories are kept).
 #
 # It never starts or stops the bot and refuses to run while the bot unit is active. It does NOT install or restart the web unit
-# (deploy/install.sh does, with the new ReadWritePaths for data/launch) and never touches Caddy, ufw, the allow-list or the secrets.
+# (deploy/install.sh does, with the new ReadWritePaths for data/launch; task 5.12 changes nothing in the web unit: it gets no network
+# right, only the new routes of the new binary) and never touches Caddy, ufw, the allow-list, live-servers.toml or the secrets.
 #
 # A hand-made drop-in on the bot unit (for example the old swarfey.conf with its own ExecStart= and IPAddressAllow=) would make the
 # unit ignore the validated environment, so the helper refuses to start while one exists. This script therefore moves such drop-ins
@@ -40,7 +44,8 @@ OWN_DROPIN="$DROPIN_DIR/50-launch.conf"
 BACKUP_ROOT="/var/backups/ddnet-ai-launcher"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="$BACKUP_ROOT/$STAMP"
-UNITS=(ddnet-ai-bot.service ddnet-ai-sparring@.service ddnet-ai-launch.service ddnet-ai-launch.path)
+UNITS=(ddnet-ai-bot.service ddnet-ai-sparring@.service ddnet-ai-launch.service ddnet-ai-launch.path
+       ddnet-ai-servers.service ddnet-ai-servers.path ddnet-ai-proxycheck.service ddnet-ai-proxycheck.path)
 
 TAKE_OVER=0
 UNINSTALL=0
@@ -80,8 +85,9 @@ bot_is_active() { systemctl is-active --quiet "$BOT_UNIT" || systemctl is-active
 if [[ "$UNINSTALL" -eq 1 ]]; then
   bot_is_active && die "the bot or a sparring unit is active: stop it first (the launcher never stops a run by itself here)"
   log "uninstalling the launcher"
-  sudo systemctl disable --now ddnet-ai-launch.path 2>/dev/null || true
-  for f in ddnet-ai-launch.path ddnet-ai-launch.service ddnet-ai-sparring@.service; do
+  sudo systemctl disable --now ddnet-ai-launch.path ddnet-ai-servers.path ddnet-ai-proxycheck.path 2>/dev/null || true
+  for f in ddnet-ai-launch.path ddnet-ai-launch.service ddnet-ai-sparring@.service ddnet-ai-servers.path ddnet-ai-servers.service \
+           ddnet-ai-proxycheck.path ddnet-ai-proxycheck.service; do
     if sudo test -e "$UNIT_DIR/$f"; then backup_file "$UNIT_DIR/$f"; sudo rm -f "$UNIT_DIR/$f"; fi
   done
   for f in "$OWN_DROPIN" /etc/ddnet-ai/bot-launch.env; do
@@ -97,7 +103,7 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
     log "no earlier copy of $BOT_UNIT in $BACKUP_ROOT: it was left as it is (it still works by hand, with its defaults)"
   fi
   sudo systemctl daemon-reload
-  log "done. Left in place: $LIBEXEC_BIN, /var/lib/ddnet-ai, $DATA_DIR/launch, $DATA_DIR/sparring (remove by hand if wanted)."
+  log "done. Left in place: $LIBEXEC_BIN, /var/lib/ddnet-ai, $DATA_DIR/launch (favourites.json included), $DATA_DIR/servers, $DATA_DIR/sparring (remove by hand if wanted)."
   exit 0
 fi
 
@@ -106,6 +112,10 @@ fi
 # ---------------------------------------------------------------------------------------------
 [[ -x "$BIN_SRC" ]] || die "$BIN_SRC is not an executable (build and install the binary first: deploy/install.sh)"
 for u in "${UNITS[@]}"; do [[ -f "$UNIT_SRC/$u" ]] || die "missing $UNIT_SRC/$u"; done
+# A test build (cargo test, the e2e) accepts loopback favourites: it must never become the root helper (task 5.12).
+if "$BIN_SRC" --version 2>/dev/null | grep -q 'loopback-favourites'; then
+  die "$BIN_SRC is a test build (+loopback-favourites): build and install a release binary with deploy/install.sh"
+fi
 "$BIN_SRC" launch --help >/dev/null 2>&1 || die "$BIN_SRC has no 'launch' subcommand: it is an older build"
 if bot_is_active; then
   die "ddnet-ai-bot.service or a sparring unit is active: not touching a running bot. Let it finish (or stop it) and run this again."
@@ -130,6 +140,13 @@ fi
 # The web writes request.json here (the status is in /run/ddnet-ai, root-owned): owned by the owner's user (the web unit's user), readable by root.
 mkdir -p "$DATA_DIR/launch"
 chmod 0755 "$DATA_DIR/launch"
+# Task 5.12: the master-list cache. Written by ddnet-ai-servers.service (the owner's user, sandboxed), only read by the web. The refresh
+# trigger the web rewrites exists from the start so the path unit has something to watch.
+mkdir -p "$DATA_DIR/servers"
+chmod 0755 "$DATA_DIR/servers"
+[[ -e "$DATA_DIR/launch/servers-refresh" ]] || : >"$DATA_DIR/launch/servers-refresh"
+# The proxy profiles the site writes live in $DATA_DIR/secrets (0700, 0600 files), which exists since `web-passwd`.
+[[ -d "$DATA_DIR/secrets" ]] || die "$DATA_DIR/secrets is missing: run \`ddnet-ai web-passwd\` first (deploy/install.sh)"
 # The sparring opponents' private data (logs, map cache): nothing of the real bot's.
 mkdir -p "$DATA_DIR/sparring"
 chmod 0700 "$DATA_DIR/sparring"
@@ -190,10 +207,12 @@ if sudo test -d "$BACKUP_ROOT"; then
 fi
 
 sudo systemctl daemon-reload
-sudo systemctl enable ddnet-ai-launch.path >/dev/null
-sudo systemctl restart ddnet-ai-launch.path
+sudo systemctl enable ddnet-ai-launch.path ddnet-ai-servers.path ddnet-ai-proxycheck.path >/dev/null
+sudo systemctl restart ddnet-ai-launch.path ddnet-ai-servers.path ddnet-ai-proxycheck.path
 sleep 1
-log "--- ddnet-ai-launch.path ---"
-systemctl status --no-pager ddnet-ai-launch.path || true
-log "done. Backups (if anything was replaced): $BACKUP_ROOT. The site's «Запуск» card needs the new web unit (deploy/install.sh) and the new binary."
+for p in ddnet-ai-launch.path ddnet-ai-servers.path ddnet-ai-proxycheck.path; do
+  log "--- $p ---"
+  systemctl status --no-pager "$p" || true
+done
+log "done. Backups (if anything was replaced): $BACKUP_ROOT. The site's «Запуск» card and «Серверы» tab need the new binary (installed above) and the web restarted: sudo systemctl restart ddnet-ai-web."
 log "rollback: deploy/install-launcher.sh --uninstall (stop the bot first)."

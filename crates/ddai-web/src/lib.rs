@@ -23,6 +23,7 @@ pub mod origin;
 pub mod rand_util;
 pub mod secrets;
 pub mod server;
+pub mod serverbrowser;
 pub mod session_guard;
 pub mod state;
 pub mod toml_kv;

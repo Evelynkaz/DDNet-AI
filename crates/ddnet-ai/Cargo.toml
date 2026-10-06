@@ -70,7 +70,11 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Task 5.12: a test binary that accepts a favourite on loopback (the local e2e with a private server). Never part of a production build.
+[features]
+loopback-favourites = ["ddai-client/loopback-favourites"]
+
 [dev-dependencies]
 tempfile = "3.14"
 # Task 2.6: `tests/proxy_check.rs` and the SOCKS5 e2e run against the in-process loopback SOCKS5 server.
-ddai-client = { path = "../ddai-client", features = ["test-util"] }
+ddai-client = { path = "../ddai-client", features = ["test-util", "loopback-favourites"] }

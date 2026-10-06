@@ -1242,7 +1242,7 @@ details.tr-tbl > summary {
   }
 }
 
-/* The tab bar has five tabs now: a little tighter on a phone so «Обучение» fits at 360 px. */
+/* The tab bar has six tabs now (task 5.12 added «Серверы»): a little tighter on a phone so «Обучение» and «Серверы» fit at 360 px. */
 .tabbar button {
   padding-left: 2px;
   padding-right: 2px;
@@ -1313,7 +1313,8 @@ body::after {
 
 .bot-view,
 .fly-view,
-.train-view {
+.train-view,
+.servers-view {
   box-sizing: border-box;
   margin-top: calc(var(--head-h) + 12px);
   margin-bottom: calc(var(--foot-h) + 12px);
@@ -1327,7 +1328,8 @@ body::after {
 @media (max-width: 760px) {
   .bot-view,
   .fly-view,
-  .train-view {
+  .train-view,
+  .servers-view {
     margin-left: 8px;
     margin-right: 8px;
     padding: 12px 10px;

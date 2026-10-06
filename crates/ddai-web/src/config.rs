@@ -92,6 +92,21 @@ pub struct WebConfig {
     pub live_servers: PathBuf,
     /// Task 5.9: the root-owned launcher config (the fly bundle path), read to show which bundle is active.
     pub launch_config: PathBuf,
+    /// Task 5.12 (D-099): where the master-list cache (`master.json`, `refresh.json`) is read from, read-only. Default
+    /// `<data-dir>/servers`. Written by `ddnet-ai servers-cache` in its own unit; the web has no network.
+    pub servers_dir: PathBuf,
+    /// Task 5.12: the rules the favourites and proxy hosts are held to. Production: [`ddai_client::favourites::Rules::current`]
+    /// (no loopback). Tests that run a private server on 127.0.0.1 are built with the `loopback-favourites` feature.
+    pub favourite_rules: ddai_client::favourites::Rules,
+    /// Task 5.12: the least time between two «обновить список» requests (the fetch itself also does nothing within
+    /// [`ddai_client::server_list::MIN_REFRESH_SECS`] of the last one).
+    pub refresh_min_gap: Duration,
+    /// Task 5.12: the least time between two «Проверить» requests, and the most in any 60 seconds.
+    pub proxycheck_min_gap: Duration,
+    pub proxycheck_max_per_minute: usize,
+    /// Task 5.12: the most favourite / proxy changes (every mutating route of the «Серверы» tab but launch, refresh and check) in any
+    /// 60 seconds. Every attempt counts, valid or not.
+    pub servers_edits_per_minute: usize,
     /// Task 4.9 (D-090): the web's own rate limit for the owner's chat lines (`POST /api/bot/say`), on top of the bot's (3 s apart,
     /// 10 a minute, a queue of 3): at most `say_burst` requests in any `say_burst_window`, and at most `say_max_per_minute` in any 60
     /// seconds. A burst of two covers a quick correction; a third in the same moment is refused here, before it reaches the bot.
@@ -137,6 +152,12 @@ impl WebConfig {
             launch_max_per_minute: 6,
             live_servers: data_dir.join("live-servers.toml"),
             launch_config: PathBuf::from(crate::launch::DEFAULT_CONFIG_PATH),
+            servers_dir: data_dir.join("servers"),
+            favourite_rules: ddai_client::favourites::Rules::current(),
+            refresh_min_gap: Duration::from_secs(60),
+            proxycheck_min_gap: Duration::from_secs(8),
+            proxycheck_max_per_minute: 6,
+            servers_edits_per_minute: 30,
             say_burst: 2,
             say_burst_window: Duration::from_secs(3),
             say_max_per_minute: 10,

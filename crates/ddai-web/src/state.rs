@@ -14,6 +14,9 @@ use crate::control::client::ControlClient;
 use crate::control::relations::RelationsStore;
 use crate::live::hub::LiveHub;
 use crate::secrets::SecretsPaths;
+use crate::serverbrowser::RateGate;
+use crate::serverbrowser::favourites::FavouritesStore;
+use crate::serverbrowser::proxies::ProxyStore;
 use crate::training::{Limits, TrainingStore};
 
 /// Everything handlers need, wrapped once in an `Arc` and cloned cheaply per request.
@@ -70,6 +73,15 @@ pub struct AppState {
     pub launch_stalled_at: Mutex<Option<u64>>,
     /// Task 4.9: when the owner's chat requests of the last minute were let through to the bot (the web's own rate limit).
     pub say_gate: Mutex<std::collections::VecDeque<Instant>>,
+    /// Task 5.12: the owner's favourite servers (`launch/favourites.json`) and the proxy profiles (`secrets/<name>-proxy.toml`).
+    pub favourites: FavouritesStore,
+    pub proxies: ProxyStore,
+    /// Task 5.12: the rate limits of the «Серверы» tab's mutating routes.
+    pub servers_edit_gate: RateGate,
+    pub refresh_gate: RateGate,
+    pub proxycheck_gate: RateGate,
+    /// Task 5.12: the last «Проверить» request (id, proxy name), so a result is shown only for the request that was asked.
+    pub proxycheck_last: Mutex<Option<(String, String)>>,
 }
 
 impl AppState {
@@ -92,6 +104,11 @@ impl AppState {
         let control = ControlClient::new(config.control_socket.clone());
         let relations = RelationsStore::new(config.relations_path.clone());
         let training = Arc::new(TrainingStore::new(config.runs_dir.clone(), Limits::default()));
+        let favourites = FavouritesStore::new(&config.launch_dir, config.favourite_rules);
+        let proxies = ProxyStore::new(secrets_paths.dir(), config.favourite_rules);
+        let servers_edit_gate = RateGate::new(std::time::Duration::ZERO, config.servers_edits_per_minute);
+        let refresh_gate = RateGate::new(config.refresh_min_gap, 60);
+        let proxycheck_gate = RateGate::new(config.proxycheck_min_gap, config.proxycheck_max_per_minute);
         Self {
             config,
             secrets_paths,
@@ -110,6 +127,12 @@ impl AppState {
             launch_gate: Mutex::new(std::collections::VecDeque::new()),
             launch_stalled_at: Mutex::new(None),
             say_gate: Mutex::new(std::collections::VecDeque::new()),
+            favourites,
+            proxies,
+            servers_edit_gate,
+            refresh_gate,
+            proxycheck_gate,
+            proxycheck_last: Mutex::new(None),
         }
     }
 

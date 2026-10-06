@@ -351,7 +351,7 @@ tools/ci/no-weights.sh        # в git нет весов, демок, карт �
 
 | Путь | Что там |
 |---|---|
-| `crates/ddnet-ai/` | единственный бинарник: `play`, `web`, `arena`, `train`, `fly`, `clip`, `demo`, `dataset`, `record`, `rec`, `servers`, `proxy-check`, `launch`, `web-passwd`, `trace`, `map` |
+| `crates/ddnet-ai/` | единственный бинарник: `play`, `web`, `arena`, `train`, `fly`, `clip`, `demo`, `dataset`, `record`, `rec`, `servers`, `servers-cache`, `proxy-check`, `launch`, `web-passwd`, `trace`, `map` |
 | `crates/ddai-physics`, `ddai-map`, `ddai-world` | физика DDNet 20.1, чтение карт, предсказанный мир по снапшотам |
 | `crates/ddai-net`, `ddai-client` | протокол 0.6 + DDNet, клиентская сессия и список разрешённых |
 | `crates/ddai-brain`, `ddai-planner`, `ddai-nav` | интерфейс мозга, планировщик и гибрид, навигация и вейблок |

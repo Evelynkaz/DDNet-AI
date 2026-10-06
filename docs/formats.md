@@ -5679,7 +5679,7 @@ proxy = "swarfey"     # новое, необязательное: имя про�
 - Имя — `[A-Za-z0-9_-]`, 1–64 символа (оно становится частью имени файла: ни `/`, ни точек).
 - `LiveServers::proxy_binding(addr, nick)` смотрит записи, которые пропустила бы `live_servers::check` (адрес, ник и для не-loopback `ready = true`). Если такие записи спорят (одна с `proxy`, другая без, или разные имена) — ошибка, а не выбор наугад.
 - Для loopback записи не нужно, но если она есть и называет прокси, прокси используется (так работает e2e на локальном сервере); без записи loopback идёт напрямую.
-- **Драйвер сверяет пару перед каждой попыткой** (первой, переподключением, редиректом) и отказывает (`GaveUp(LocalError)`, ни одного пакета не отправлено) в обоих направлениях: запись называет прокси, а `ClientConfig::proxy` пуст (прямое соединение к такому серверу повторило бы бан D-052); `ClientConfig::proxy` задан, а запись его не называет; имена разные; записи спорят; **у самого файла прокси есть `for_server`, и это не тот сервер** (33.2, ревью F4: тестовый `--live-servers` не может направить прокси Swarfey на другой сервер).
+- **Драйвер сверяет пару перед каждой попыткой** (первой, переподключением, редиректом) и отказывает (`GaveUp(LocalError)`, ни одного пакета не отправлено) в обоих направлениях: запись называет прокси, а `ClientConfig::proxy` пуст (прямое соединение к такому серверу повторило бы бан D-052); `ClientConfig::proxy` задан, а запись его не называет; имена разные; записи спорят; (последняя проверка прежней версии — «у файла прокси есть `for_server` другого сервера» — снята задачей 5.12, см. 33.2).
 
 ### 33.2 Файл `<data-dir>/secrets/<имя>-proxy.toml`
 
@@ -5699,6 +5699,7 @@ note = "…"        # справочно, не читается
 - Права: обычный файл, **без битов группы и остальных** (`mode & 0o077 == 0`, то есть 0600 или строже). Иначе отказ `has mode 0644 … (chmod 600)`, содержимое не читается. Права берутся с открытого дескриптора, не с пути (между проверкой и чтением файл подменить нельзя). На не-Unix проверка прав пропускается.
 - Без `user`/`pass` прокси без входа; если заданы, при согласовании предлагаются оба метода (без входа и по логину), а данные уходят только если прокси выбрал метод логина.
 - Ключ `for_server` (`host:port`, как в настоящем `swarfey-proxy.toml`; необязателен) — **собственная привязка файла** (D-053: прокси выдан для одного сервера). Если он есть, прокси годится только для этого сервера: `ProxyConfig::allows(цель)` разрешает `for_server` (IP или `host:port`) и требует точного совпадения адреса и порта; неразрешимое значение не разрешает ничего. Проверяется дважды: в `proxy::resolve_for_server` (отказ `proxy "<имя>" is issued for another server …`, `play`/`record` не стартуют) и драйвером перед каждой попыткой (`check_proxy_binding`). Поле `proxy` записи сервера по-прежнему обязательно: `for_server` одно прокси не включает. Пустое или не строка — ошибка файла. Значение нигде не печатается (в `Debug` только `<set>`). Файл без `for_server` (собранный вручную в тестах) привязан только записью. `note` не читается.
+  **Поправка задачи 5.12 (D-099): привязка снята.** Какой прокси идёт к какому серверу, решает владелец на сайте (поле `connection` избранного; запись `live-servers.toml` называет прокси, как и раньше), и помощник проверяет это назначение; `ProxyConfig::allows`, отказ `issued for another server` и сверка в `check_proxy_binding` удалены. Ключ `for_server` по-прежнему читается и валидируется, но служит только **дополнительными адресами**, которых ретранслятор не вправе занимать (`for_server_ips`), и которые фильтр cgroup запрещает при `relay = "public"` (33.9). Новое в файле: необязательный ключ `managed_by = "ddnet-ai-web"` (профиль сделан сайтом, §36.5), `load_proxy` не следует за симлинком (`O_NOFOLLOW`).
 
 ### 33.3 Редактирование: чего нет нигде
 
@@ -5855,7 +5856,7 @@ IPv6-ретранслятор для IPv4-сервера клиент отвер
 - `action`: `start` | `stop`. У `stop` других полей нет. У `start` обязательны `brain`, `server`, `duration`; `sparring` по умолчанию 0.
 - `brain`: `hybrid` | `hybrid-fly` (гибрид с мухой как предлагающим, `--fly-bundle`) | `fly` (муха сама, `--fly-bundle`).
 - `duration`: `15m` (900 с) | `60m` (3600 с) | `unlimited` (`--duration 0`).
-- `server`: `"local"` (`127.0.0.1:8303`, ник `Muha`) **или точный `address`** записи `live-servers.toml` с `ready = true`. Свободный адрес не принимается.
+- `server`: `"local"` (`127.0.0.1:8303`, ник `Muha`), **точный `address`** записи `live-servers.toml` с `ready = true` **или точный адрес избранного** (задача 5.12, §36.1: ник, прокси и адрес берутся из записи, не из запроса; запрос ≤ 1024 байт по-прежнему). Свободный адрес не принимается.
 - `sparring`: 0–3, только при `server = "local"`.
 - `mirror` (необязательное, D-090): `on` | `off`, модель соперника гибрида (`ddnet-ai play --hybrid-mirror`); без поля — `on`; другие значения и поле у `stop` — `bad_request`. У мозга `fly` игнорируется.
 - Помощник читает файл и **удаляет его до обработки**; следующий запрос нужен для нового действия.
@@ -5890,11 +5891,11 @@ BOT_HYBRID_MIRROR="on"
 
 ### 34.4 Память помощника `/var/lib/ddnet-ai/launch-state.json` (root, `0600`, под `flock`)
 
-`last_start_at`, `last_launch` (запуск), `stop_requested_at`, `last_exit` (`at`, `code`), `blocked` (адрес публичного сервера → `at`, `code`; снимается, когда `live-servers.toml` изменён позже `at`). Нечитаемый файл не перезаписывается, запуски закрыты (`state_unreadable`).
+`last_start_at`, `last_launch` (запуск), `stop_requested_at`, `last_exit` (`at`, `code`), `blocked` (адрес публичного сервера → `at`, `code`, `favourite`: бан записан для избранного; нет поля — бан записи списка). **Задача 5.12:** блок закрывает **все адреса с тем же IP** и снимается способом открытия цели: для записи `live-servers.toml` — файл изменён позже `at`, для избранного — его `reopened_at` позже `at` (правка подключения, ника, удаление и повторное добавление не открывают); записи о банах не стираются (снятый бан просто старше открытия); правка `live-servers.toml` не снимает бан, записанный для избранного. Пока в `live-servers.toml` есть запись с именем хоста, избранное не принимается (`allowlist_not_literal`). Нечитаемый файл не перезаписывается, запуски закрыты (`state_unreadable`).
 
 ### 34.5 Маршруты сайта (все за сессией; POST — строгий Origin, CSRF, JSON)
 
-- `GET /api/bot/launch` → `{enabled, servers:[{id,label}], brains, durations, max_sparring, bundle, bundle_present, status, launcher_down, pending, pending_age_s}`; `servers` — `local` и готовые записи списка; `launcher_down` — запрос не взяли за 60 с (его убрали), и помощник с тех пор ничего не писал.
+- `GET /api/bot/launch` → `{enabled, servers:[{id,label,kind,…}], favourites_error, brains, durations, max_sparring, bundle, bundle_present, status, launcher_down, pending, pending_age_s}`; `servers` — `local` (`kind: "local"`), готовые записи списка (`"allowlist"`) и избранное (`"favourite"` с `name`, `nick`, `proxy`, `blocked`); `favourites_error` — код, если файл избранного нельзя прочесть (избранного тогда нет); `launcher_down` — запрос не взяли за 60 с (его убрали), и помощник с тех пор ничего не писал.
 - `POST /api/bot/launch` с `{action, brain?, server?, duration?, sparring?, mirror?}` → `202 {ok, id, action}`; `400` (`bad_request`, `server_not_allowed`, `sparring_local_only`, `bundle_missing`), `409 pending`, `429 rate_limited` (не чаще одного в 2 с и не больше 6 в минуту: путь-юнит останавливается после 10 срабатываний в минуту), `503 launcher_unavailable`, `500 launch_write_failed`; `401/403/415` как у остальных.
 
 ## 35. Игра на сайте: слои карты, сцена `DWSC`, облик игроков, чат (задача 5.10, D-093, `ddai-map::scene`, `ddai-web::{live::visual_scene, live::chat, http::map, http::ddnet_assets}`, `assets/{ddmap,ddtee,game}.js`)
@@ -6000,3 +6001,97 @@ JSON: `{"v":1, "skipped":n, "game":{"w","h"}|null, "images":[…], "env":[…], 
 `mapres/<имя>.png`, `skins/<имя>.png`. `<имя>` — простое имя: 1–64 знака `A-Za-z0-9_-+. ` и пробел, первый не точка, без `..`, без `/`, не заканчивается точкой или пробелом. Путь склеивается,
 канонизируется и обязан остаться внутри канонизированного каталога (симлинк наружу не пускает), это обычный файл не больше 16 МиБ; иначе 404. `Cache-Control: private, max-age=86400`.
 Файлы DDNet в репозиторий **не копируются** (CC BY-SA 3.0, D-093); на странице есть ссылка на авторов.
+
+## 36. Браузер серверов: кэш мастер-списка, избранное, профили прокси, проверка (задача 5.12, D-099, `ddai-client::{favourites, safe_file, server_list}`, `ddai-web::{serverbrowser, http::servers}`, `ddnet-ai::{servers_cache_cmd, launch_cmd}`)
+
+Номер раздела временный (лид перенумерует при слиянии). Все файлы — обычные (симлинк и FIFO отвергаются: `O_NOFOLLOW | O_NONBLOCK`, тип проверяется по открытому дескриптору), размеры ограничены. Что в них попадает из интернета или от браузера, ни одним читателем не принимается на веру.
+
+### 36.1 Избранное `~/aiddnet/data/launch/favourites.json` (пишет **только веб**, `0644`, не в git, ≤ 64 КиБ, ≤ 64 записей)
+
+```json
+{"v":1,"favourites":[{"address":"45.141.57.35:8308","name":"Swarfey's | 24/7 Linear","nick":"Muha","connection":"proxy:hproxy","consent_at":1791200000,"notes":"админ разрешил в Discord","added_at":1791200000,"reopened_at":0}]}
+```
+
+- Строгая схема (`deny_unknown_fields`): ни одного лишнего ключа на любом уровне, `v` = 1. **Один плохой элемент отвергает файл целиком** (`favourites_invalid`; симлинк, не обычный файл, слишком большой — `favourites_unreadable`); никакой «частичной» веры.
+- `address` — ровно `ip:порт` в канонической записи (`SocketAddr::to_string()` совпадает с текстом: без пробелов, ведущих нулей, заглавных hex в IPv6, `::ffff:` v4-mapped), порт 1..=65535, IP — **публичный одноадресный** (`relay_rule::is_public_unicast`: не loopback, не частный `10/8 172.16/12 192.168/16 fc00::/7`, не link-local, не CGNAT, не multicast/broadcast, не документационный `192.0.2/24 198.51.100/24 203.0.113/24 2001:db8::/32`, не зарезервированный, не 6to4/Teredo/NAT64). Имена хостов не разрешаются и не принимаются никогда. Дубликатов по адресу нет.
+- `name` — отображаемое имя, 1–64 знаков (символов Unicode), без пробела по краям, без управляющих, невидимых и направляющих символов (`U+200B–200F`, `U+2028–202E`, `U+2060–2064`, `U+2066–206F`, `U+FEFF`, `U+FFF9–FFFB`); `notes` — 0–200 знаков, те же правила.
+- `nick` — 1–15 знаков из `[A-Za-z0-9_-]` (станет `--name` бота; по умолчанию `Muha`).
+- `connection` — `"direct"` или `"proxy:<имя>"`, имя — `[A-Za-z0-9_-]{1,64}`. **Единственный способ, которым выбирается прокси**: ни бот, ни помощник, ни сайт не меняют его сами.
+- `consent_at` — секунды Unix, когда владелец подтвердил, что администратор сервера разрешает бота. **Не 0** (иначе отказ `consent_required`); сайт ставит его сам при добавлении (`consent: true` в запросе обязательно), правкой избранного он не меняется.
+- `added_at` — секунды Unix. `reopened_at` — секунды Unix последнего «Открыть снова» (0 — не было); пишет **только** действие `reopen`, правка избранного его не трогает. Значение позже «сейчас + 120 с» — ошибка файла (`reopened_invalid`). Лифт блока — только `reopened_at` строго новее бана.
+- Loopback принимает лишь сборка с cargo-признаком `loopback-favourites` (e2e с частным сервером; `Rules::current()`); в обычной сборке такого пути нет.
+- Избранное читают помощник (root), бот и веб одним разбором `Favourites::parse`. Для ворот бота (`LiveServers::with_favourites`) каждое избранное — запись `{address, nick, ready = true, proxy}`; адрес, который `live-servers.toml` уже называет (литерал, без DNS), — отказ (`favourites_clash` у бота, `server_ambiguous` у помощника). Запись в файле списка разрешённых не меняется.
+
+### 36.2 Кэш мастер-списка `~/aiddnet/data/servers/master.json` и `refresh.json` (пишет `ddnet-ai servers-cache`, `0644`; веб только читает)
+
+```json
+{"v":1,"fetched_at":1791241428,"master":1,"servers":[{"address":"45.141.57.35:8308","name":"…","map":"Copy Love Box","game_type":"DDFightNet fng","location":"eu:it","passworded":false,"players":2,"clients":3,"max_clients":64,"v06":true,"block":true}]}
+{"v":1,"at":1791241428,"ok":false,"reason":"no_master"}
+```
+
+- Список запрашивается у `https://master1..4.ddnet.org/ddnet/15/servers.json` по очереди (только эти четыре адреса, только HTTPS, без редиректов, 8 с на запрос, **не больше 8 МиБ** из ответа независимо от `Content-Length`); разбор — `server_list::parse_master` (имена игроков не сохраняются). Меньше чем через 60 с после прошлого успеха команда ничего не запрашивает.
+- В кэш попадают только строки с **публичным IPv4** (`address` канонический), текст очищен (управляющие, направляющие и невидимые символы убраны) и обрезан (`name` 64, `map` 64, `game_type` 32, `location` 16), счётчики ≤ 10 000, ≤ 4000 строк, самые людные первыми. `v06` — у сервера есть адрес `tw-0.6+udp` (протокол бота; «только 0.7» сайт показывает, но играть не даёт). `block` — `server_list::is_block` (block / blmap / copy love box в имени, карте или режиме). `master` — какой мастер (1–4) ответил.
+- Читатель (`MasterCache::parse`) — тот же, что проверяет перед записью: `deny_unknown_fields`, `v` = 1, `master` 1–4, каждая строка заново, дубликаты адресов — отказ всего файла, ≤ 4 МиБ. Файл не годится — страница говорит `invalid`, файла нет — `missing`.
+- `refresh.json`: после каждого запуска; `reason` — фиксированный код (`no_master`, `bad_list`, `write_failed`), никогда текст ошибки и адрес.
+- Запись — временный файл и `rename` (симлинк на месте файла заменяется, не разыменовывается).
+- Просьба сайта: `POST /api/servers/refresh` переписывает `data/launch/servers-refresh` на месте (усечение, запись, закрытие; `O_NOFOLLOW`); путь-юнит `ddnet-ai-servers.path` (`PathChanged=`) запускает `ddnet-ai-servers.service`. Если кэш моложе 60 с, файл не трогается (`asked: false`).
+
+### 36.3 Список закрытых серверов `/run/ddnet-ai/blocked.json` (пишет root-помощник рядом со `status.json`, `0644`, ≤ 64 КиБ)
+
+```json
+{"v":1,"at":1791241500,"blocked":[{"address":"45.141.57.35:8308","at":1791241400,"code":3}]}
+```
+
+Адрес, секунды Unix кика/бана и код выхода бота (3 — кик/бан, 4 — не вошёл). Без текста причины. **Информационный**: закрывает сервер только память помощника (`launch-state.json`, §34.4); сайт по этому файлу рисует «закрыт после кика/бана» (избранное закрыто, если есть запись с тем же адресом или тем же IP и `reopened_at` ≤ `at`). Пишется при каждом запуске, остановке и выходе бота.
+
+### 36.4 Профили прокси `~/aiddnet/data/secrets/<имя>-proxy.toml` (`0600`)
+
+Формат — §33.2 (`host`, `port`, `user`, `pass`, `relay`, `session_pick`, `for_server`, `note`). Файл, сделанный сайтом, начинается ключом `managed_by = "ddnet-ai-web"`; его сайт может менять и удалять. Файл без этого ключа (боевой `swarfey-proxy.toml`) показывается «из файла», его адрес скрыт, а менять, перезаписывать и удалять его сайт отказывается (`proxy_not_managed`, `proxy_exists`).
+
+Что принимает сайт при создании и правке (`ProxyStore`, до записи профиль проходит `ddai_client::proxy::parse_proxy_text`, тот же разбор, что у бота и помощника):
+
+- `name` — `[A-Za-z0-9_-]{1,64}`; `host` — **публичный IP-литерал** (ни имён, ни `[...]`, ни частных, loopback и зарезервированных адресов); `port` 1–65535; `user` и `pass` — оба или ни одного, 1–255 печатных ASCII (`0x20–0x7E`); `relay` — `proxy-host-only` (по умолчанию) или `public`; `session_pick` — 0 или 2–4 (при ≥ 2 в `user` нужен `{session}`, и наоборот).
+- Не больше 32 профилей. Файл пишется атомарно (`write_atomic`, `0600`). Значения кладутся через `toml::to_string`: кавычки и синтаксис TOML в значении не создают новых ключей (тест).
+- **Пароль только записывается.** `GET /api/proxies` отдаёт `{name, managed, host, port, has_credentials, relay, session_pick, usable, problem}` (`host`, `port` — только у профилей сайта); ни пароля, ни логина нет ни в одном ответе, ошибке и строке журнала. Пустые `user` / `pass` при правке оставляют прежние.
+- Удалить профиль, назначенный избранному, нельзя (`proxy_in_use`); если файл избранного нечитаем, удаление отказывает (`favourites_invalid`: неизвестно, не используется ли он).
+
+### 36.5 «Проверить»: `launch/proxycheck-request.json` → `launch/proxycheck-result.json`
+
+Запрос (сайт, атомарно, ≤ 2 КиБ): `{"v":1,"id":"<8–32 hex>","ts":<сек>,"proxy":"<имя>"}`; `deny_unknown_fields`, имя — как в 36.4, свежесть — как у запроса запуска (60 с по `ts` и mtime). `ddnet-ai launch check-proxy` (юнит `ddnet-ai-proxycheck.service`, **не root**) читает его с `O_NOFOLLOW`, **удаляет до обработки**, загружает профиль (`load_proxy`: права 0600, формат), делает `socks5::check` (в игровой сервер ничего не уходит) и пишет результат (`0644`, атомарно):
+
+```json
+{"v":1,"id":"0123456789abcdef","at":1791241450,"proxy":"hproxy","ok":true,"code":"ok","relay":"remote","relay_mode":"public","udp_rtt_ms":22,"probe_sent":5,"probe_replies":4}
+```
+
+- `code`: `ok`, `udp_not_supported`, `auth_failed`, `no_auth_method`, `timeout`, `connect_failed`, `refused`, `relay_refused`, `probe_failed`, `protocol_error`, `proxy_missing`, `proxy_file_bad`, `proxy_host_refused` (профиль сайта с не публичным IP-литералом в `host`: проверка туда не ходит), `request_stale`, `bad_request` (запрос не разобран: `id` и `proxy` пусты).
+- `relay`: `same_host` | `substituted` | `remote`; `relay_mode`: правило файла; `udp_rtt_ms` — медиана зонда (или выбранной сессии при `session_pick`). Адреса, логина, пароля и текста ошибки нет.
+- Сайт показывает результат только для **последнего** своего запроса (по `id`).
+
+### 36.6 Маршруты сайта (все за сессией; POST — строгий Origin, CSRF, JSON, свой лимит на каждую попытку)
+
+| маршрут | |
+|---|---|
+| `GET /api/servers` | `{enabled, problem, fetched_at, age_s, master, min_refresh_s, refresh, servers:[…36.2]}` |
+| `POST /api/servers/refresh` `{}` | `202 {ok, asked}`; `429` (не чаще раза в 60 с), `503 launcher_unavailable` |
+| `GET /api/favourites` | `{enabled, error, favourites:[{…36.1, proxy, blocked:{at,code}\|null}], max}` |
+| `POST /api/favourites/add` `{address, name, nick?, connection?, consent, notes?}` | `201`; `400` (`consent_required`, `bad_address`, `bad_name`, `bad_nick`, `bad_connection`, `bad_notes`, `proxy_unknown`), `409` (`duplicate` — в избранном или в списке разрешённых, `allowlist_not_literal`, `too_many`, `favourites_invalid`) |
+| `POST /api/favourites/update` `{address, name?, nick?, connection?, notes?}` | `200`; не меняет `consent_at`, `added_at`, `reopened_at`; закрытый сервер правка не открывает |
+| `POST /api/favourites/remove` `{address}` | `200`; `404 not_found` |
+| `POST /api/favourites/reopen` `{address, confirm:true}` | `200`, пишет `reopened_at` = max(сейчас, бан + 1); `400 confirm_required`, `409 not_blocked` (заранее открыть нельзя), `409 clock_skew` (бан датирован будущим) |
+| `GET /api/proxies` | `{enabled, proxies:[36.4], check, last_check_id, pending}` |
+| `POST /api/proxies/save` `{create, name, host, port, user?, pass?, relay?, session_pick?}` | `200`; `400` (`bad_name`, `bad_host`, `bad_port`, `bad_user`, `bad_pass`, `bad_relay`, `bad_session_pick`, `proxy_invalid`), `409` (`proxy_exists`, `proxy_not_managed`, `too_many_proxies`), `404 proxy_not_found` |
+| `POST /api/proxies/remove` `{name}` | `200`; `409` (`proxy_in_use`, `proxy_not_managed`, `favourites_invalid`) |
+| `POST /api/proxies/check` `{name}` | `202 {ok, id}`; `404`, `409 pending` (запрос ждёт, устаревший за 60 с убирается), `429` (не чаще раза в 8 с, 6 в минуту), `503` |
+
+Лимит правок (избранное, профили): 30 попыток в минуту, считаются **все** попытки, в том числе отказанные. `GET /api/bot/launch` дополнен избранным (§34.5), `POST /api/bot/launch` принимает адрес избранного и отказывает `409 blocked_after_ban` для закрытого.
+
+### 36.7 Команды `ddnet-ai`
+
+- `servers-cache [--data-dir] [--out]` — §36.2 (скрытый `--fixture-url http://127.0.0.1:<порт>/…` — только для тестов, принимает лишь `http` и хост `127.0.0.1`, разбирается как URL, а не по префиксу). Выход 0 — записан или свежий кэш, 1 — ничего годного.
+- `launch check-proxy [--data-dir]` — §36.5. Всегда выход 0 (ответ — в файле).
+- `launch apply` — §34 с избранным; новые коды отказа: `favourites_invalid`, `favourites_unreadable`, `bad_address`, `bad_nick`, `bad_name`, `bad_connection`, `consent_required` (избранное, не прошедшее повторную проверку).
+- `proxy-check`, `servers` — без изменений.
+
+### 36.8 Юниты (`deploy/systemd/`, ставит `deploy/install-launcher.sh`)
+
+`ddnet-ai-servers.{path,service}` (§36.2; `User=ubuntu`, `ProtectHome=tmpfs` + `BindPaths=data/servers`, без capability, `IPAddressDeny` на частные сети), `ddnet-ai-proxycheck.{path,service}` (§36.5; `User=ubuntu`, `BindReadOnlyPaths=data/secrets`, `BindPaths=data/launch`, те же ограничения). `ddnet-ai-web.service` и `ddnet-ai-bot.service` не меняются: у веба по-прежнему только loopback и `IPAddressDeny=any`.

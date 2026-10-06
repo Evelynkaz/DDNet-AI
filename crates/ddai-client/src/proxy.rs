@@ -21,6 +21,7 @@ use crate::live_servers::{LiveServers, ProxyBindingError};
 use std::fmt;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// A string that never prints: `Debug` and `Display` both show `<redacted>`. The only way to see the
@@ -116,8 +117,9 @@ pub struct ProxyConfig {
     host: Secret,
     port: u16,
     auth: Option<ProxyAuth>,
-    /// The file's own `for_server` (`host:port`): the one server this proxy was issued for (D-053). `None` when
-    /// the file has none (hand-built configs).
+    /// The file's own `for_server` (`host:port`): the server this proxy was first issued for (D-053). Since task 5.12 it binds
+    /// nothing (the owner assigns proxies to servers on the site); its addresses are only kept away from the relay and, for
+    /// `relay = "public"`, denied by the unit's cgroup filter. `None` when the file has none.
     for_server: Option<String>,
     relay: RelayMode,
     /// 0 or 1: off. 2..=4: how many sessions to try (needs [`SESSION_PLACEHOLDER`] in the user name).
@@ -277,24 +279,10 @@ impl ProxyConfig {
         self.for_server.as_deref()?.parse::<SocketAddr>().ok().map(|a| a.port())
     }
 
-    /// Pins the proxy to one server (`host:port`), as the `for_server` key of the file does.
+    /// Names a server (`host:port`) whose addresses a relay must never be, as the `for_server` key of the file does.
     pub fn with_for_server(mut self, for_server: impl Into<String>) -> Self {
         self.for_server = Some(for_server.into());
         self
-    }
-
-    /// Whether this proxy may be used for `target`: always, if the file named no `for_server`; otherwise only if
-    /// `for_server` (an `ip:port`, or `host:port` resolved now) is `target`. A `for_server` that cannot be resolved
-    /// allows nothing. This is the proxy file's own binding (D-053: the proxy is for one server only), checked in
-    /// addition to the allow-list entry's `proxy = "<name>"`, so a scratch allow-list cannot route the proxy to
-    /// another server.
-    pub fn allows(&self, target: SocketAddr) -> bool {
-        let Some(for_server) = &self.for_server else {
-            return true;
-        };
-        for_server.to_socket_addrs().is_ok_and(|mut it| {
-            it.any(|a| a.ip().to_canonical() == target.ip().to_canonical() && a.port() == target.port())
-        })
     }
 
     pub fn name(&self) -> &str {
@@ -414,13 +402,21 @@ pub fn secrets_dir_for(data_dir: &Path) -> PathBuf {
 /// accepted as an alias of `pass`), `for_server` (string, `host:port`, optional), `relay` (`"proxy-host-only"`, the
 /// default, or `"public"`, task 2.6b), `session_pick` (integer 0..=4, task 2.6b; 2..=4 needs `{session}` in `user`) and
 /// `note` (ignored). Which server
-/// gets the proxy is decided by the `proxy = "<name>"` field of the server's entry in `live-servers.toml`; when
-/// the file has `for_server` the proxy is **also** only usable for that server ([`ProxyConfig::allows`]).
+/// gets the proxy is decided by the `proxy = "<name>"` field of the server's entry (`live-servers.toml`, or the owner's favourite,
+/// task 5.12); `for_server` is no longer a binding, only extra addresses the relay rule and the cgroup filter keep away
+/// ([`ProxyConfig::for_server_ips`]).
 pub fn load_proxy(secrets_dir: &Path, name: &str) -> Result<ProxyConfig, ProxyLoadError> {
     let path = proxy_file_path(secrets_dir, name)?;
-    let mut file = match std::fs::File::open(&path) {
+    // Task 5.12: the web unit can now create files in the secrets directory, and the root launcher helper reads them: a symlink
+    // there is refused (`O_NOFOLLOW`) and a FIFO cannot block the reader (`O_NONBLOCK`).
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ProxyLoadError::Missing { path }),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(ProxyLoadError::NotAFile { path }),
         Err(e) => return Err(ProxyLoadError::Io { path, kind: e.kind() }),
     };
     // The mode is read from the opened handle, so the file checked is the file read.
@@ -449,6 +445,15 @@ pub fn load_proxy(secrets_dir: &Path, name: &str) -> Result<ProxyConfig, ProxyLo
         Err(_) => return Err(ProxyLoadError::Syntax { path, line: None }),
     };
     parse_proxy(name, &text, &path)
+}
+
+/// Parses the text of a proxy file exactly as [`load_proxy`] does (every rule: the keys, the relay mode, `session_pick` against
+/// `{session}`), without touching the disk. The site validates a profile with this before it writes the file (task 5.12).
+pub fn parse_proxy_text(name: &str, text: &str) -> Result<ProxyConfig, ProxyLoadError> {
+    if !valid_proxy_name(name) {
+        return Err(ProxyLoadError::InvalidName);
+    }
+    parse_proxy(name, text, Path::new("<proxy profile>"))
 }
 
 fn parse_proxy(name: &str, text: &str, path: &Path) -> Result<ProxyConfig, ProxyLoadError> {
@@ -543,10 +548,6 @@ fn parse_proxy(name: &str, text: &str, path: &Path) -> Result<ProxyConfig, Proxy
 pub enum ProxyResolveError {
     #[error(transparent)]
     Binding(#[from] ProxyBindingError),
-    #[error(
-        "proxy {name:?} is issued for another server (its file's `for_server`), not for {addr}: refusing to use it there (D-053)"
-    )]
-    NotForServer { addr: SocketAddr, name: String },
     #[error("the entry for {addr} names proxy {name:?}: {source}")]
     Load {
         addr: SocketAddr,
@@ -558,6 +559,10 @@ pub enum ProxyResolveError {
 /// The proxy a connection to `addr` as `nick` must use, from the allow-list entry: `Ok(None)` for a
 /// direct connection (no entry, or an entry without `proxy`), `Ok(Some(..))` when the entry names one.
 /// `live_servers::check` (`ready = true`, the nick) is a separate gate that still applies.
+///
+/// Task 5.12 (D-099): the proxy file's `for_server` no longer has to match the server. Which proxy a server uses is the owner's
+/// choice, made on the site and kept in that server's entry (a favourite's `connection`); the root helper validates it. A
+/// `for_server` that a file still has only adds addresses to the ones a relay must never be and the cgroup filter denies.
 pub fn resolve_for_server(
     addr: SocketAddr,
     nick: &str,
@@ -572,12 +577,6 @@ pub fn resolve_for_server(
         name: name.to_string(),
         source,
     })?;
-    if !cfg.allows(addr) {
-        return Err(ProxyResolveError::NotForServer {
-            addr,
-            name: name.to_string(),
-        });
-    }
     Ok(Some(cfg))
 }
 
@@ -850,52 +849,28 @@ mod tests {
         );
     }
 
-    /// F4: the proxy file's own `for_server` pins it to one server (D-053), whatever the allow-list says.
+    /// Task 5.12 (D-099): the file's `for_server` is read, but it is no binding any more: the owner assigns the proxy to a server
+    /// on the site, and that assignment (the entry's `proxy`) is the one rule. Its addresses are only kept away from the relay.
     #[test]
-    fn for_server_pins_the_proxy_to_one_server() {
-        let addr = |s: &str| -> SocketAddr { s.parse().unwrap() };
-        let free = ProxyConfig::new("p", "h", 1, None).unwrap();
-        assert!(
-            free.allows(addr("203.0.113.9:1")),
-            "a hand-built config without for_server allows any"
-        );
-        let pinned = ProxyConfig::new("p", "h", 1, None)
-            .unwrap()
-            .with_for_server("45.141.57.35:8308");
-        assert!(pinned.allows(addr("45.141.57.35:8308")));
-        for other in ["45.141.57.35:8309", "45.141.57.36:8308", "127.0.0.1:8303", "[::1]:8308"] {
-            assert!(!pinned.allows(addr(other)), "{other}");
-        }
-        // IPv4-mapped IPv6 is the same endpoint.
-        assert!(pinned.allows(addr("[::ffff:45.141.57.35]:8308")));
-        // Unresolvable or malformed: allows nothing.
-        for bad in ["not an address", "45.141.57.35", "never-resolved.invalid:8308"] {
-            let p = ProxyConfig::new("p", "h", 1, None).unwrap().with_for_server(bad);
-            assert!(!p.allows(addr("45.141.57.35:8308")), "{bad}");
-        }
-        // Not printed.
-        assert!(!format!("{pinned:?}").contains("45.141"));
-    }
-
-    #[test]
-    fn for_server_is_read_from_the_file_and_enforced_by_resolve() {
+    fn for_server_is_read_but_no_longer_pins_the_proxy() {
         let dir = tempfile::tempdir().unwrap();
         write_proxy(dir.path(), "swarfey", &good_body(), 0o600);
         let cfg = load_proxy(dir.path(), "swarfey").unwrap();
-        assert!(cfg.allows("45.141.57.35:8308".parse().unwrap()));
-        assert!(!cfg.allows("127.0.0.1:8303".parse().unwrap()));
-        // A scratch allow-list that names the Swarfey proxy for another server is refused.
+        assert_eq!(
+            cfg.for_server_ips(),
+            vec!["45.141.57.35".parse::<IpAddr>().unwrap()],
+            "still read, for the deny list"
+        );
+        // An entry for ANOTHER server that names the proxy gets it (the old refusal is gone).
         let list: LiveServers = toml::from_str(
             "[[server]]\naddress = \"203.0.113.9:8303\"\nnick = \"Muha\"\nready = true\nproxy = \"swarfey\"\n",
         )
         .unwrap();
-        let err = resolve_for_server("203.0.113.9:8303".parse().unwrap(), "Muha", &list, dir.path()).unwrap_err();
-        assert!(matches!(err, ProxyResolveError::NotForServer { .. }), "{err:?}");
-        assert!(err.to_string().contains("another server"));
-        let text = format!("{err} {err:?}");
-        for s in [SECRET_USER, SECRET_PASS, SECRET_HOST, "45.141.57.35"] {
-            assert!(!text.contains(s), "{s}");
-        }
+        let got = resolve_for_server("203.0.113.9:8303".parse().unwrap(), "Muha", &list, dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.name(), "swarfey");
+        assert!(!format!("{got:?}").contains("45.141"));
         // Bad values are rejected without echoing them.
         for body in ["for_server = 5\n", "for_server = \"\"\n"] {
             write_proxy(dir.path(), "bad", &format!("host = \"h\"\nport = 1\n{body}"), 0o600);
@@ -904,13 +879,43 @@ mod tests {
                 Err(ProxyLoadError::Invalid { .. })
             ));
         }
-        // No for_server in the file: only the allow-list binds it.
-        write_proxy(dir.path(), "free", "host = \"h\"\nport = 1\n", 0o600);
+        // The proxy named by an entry must exist and load: no silent direct connection, no other proxy.
+        let err = resolve_for_server(
+            "203.0.113.9:8303".parse().unwrap(),
+            "Muha",
+            &list,
+            tempfile::tempdir().unwrap().path(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProxyResolveError::Load { .. }), "{err:?}");
+        for s in [SECRET_USER, SECRET_PASS, SECRET_HOST, "45.141.57.35"] {
+            assert!(!format!("{err} {err:?}").contains(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_proxy_file_that_is_a_symlink_or_a_fifo_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = write_proxy(dir.path(), "real", &good_body(), 0o600);
+        std::os::unix::fs::symlink(&real, dir.path().join("link-proxy.toml")).unwrap();
+        assert!(matches!(
+            load_proxy(dir.path(), "link"),
+            Err(ProxyLoadError::NotAFile { .. })
+        ));
+        assert!(load_proxy(dir.path(), "real").is_ok());
+        // A FIFO: opened without blocking, then refused as not a regular file (never read).
+        let fifo = dir.path().join("pipe-proxy.toml");
         assert!(
-            load_proxy(dir.path(), "free")
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
                 .unwrap()
-                .allows("1.2.3.4:5".parse().unwrap())
+                .success()
         );
+        assert!(matches!(
+            load_proxy(dir.path(), "pipe"),
+            Err(ProxyLoadError::NotAFile { .. })
+        ));
     }
 
     // --- task 2.6b: `relay` and `session_pick` ---------------------------------------------------------------

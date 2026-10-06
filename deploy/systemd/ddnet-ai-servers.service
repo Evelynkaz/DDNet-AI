@@ -1,0 +1,59 @@
+# The server browser's master-list fetch (task 5.12, D-099): `ddnet-ai servers-cache` downloads the DDNet master list over HTTPS and
+# writes the bounded, strictly parsed cache /home/ubuntu/aiddnet/data/servers/master.json that the site's «Серверы» tab reads. It is the ONLY
+# thing that talks to the master servers. The web unit keeps IPAddressDeny=any and never fetches anything: it asks by rewriting
+# data/launch/servers-refresh, which ddnet-ai-servers.path watches. Nothing else of the owner's data is visible here: the home directory is an
+# empty tmpfs with only data/servers mounted into it (writable), no capability, no private network range reachable.
+#
+# What it fetches is untrusted: at most 8 MiB per answer, parsed and reduced to public IPv4 rows with plain, length-capped text, parsed
+# AGAIN by the same strict reader the web uses before it is written, and nothing is fetched when the cache is younger than 60 s.
+# Never connects to any game server. Installed by deploy/install-launcher.sh (it also creates data/servers).
+
+[Unit]
+Description=Server browser: fetch the DDNet master list into the cache the site reads
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+# The root-owned copy of the binary (installed by deploy/install-launcher.sh), like the launcher's units.
+ExecStart=/usr/local/libexec/ddnet-ai/ddnet-ai servers-cache --data-dir /home/ubuntu/aiddnet/data
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Environment=NO_COLOR=1
+TimeoutStartSec=60
+UMask=0022
+
+# --- Hardening. Network is the point of this unit, so it is the one place that gets it; everything else is closed. ---
+NoNewPrivileges=true
+ProtectSystem=strict
+# The home directory is an empty tmpfs; only the cache directory is mounted into it, writable. Secrets, the bot's data, the launch
+# directory and the favourites are not there at all.
+ProtectHome=tmpfs
+BindPaths=/home/ubuntu/aiddnet/data/servers
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=256M
+TasksMax=32
+# The machine's own networks stay out of reach (this unit parses what the internet sends); loopback is left alone for the DNS stub.
+# Deny only, no allow list: an allow match would win over a deny match.
+IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10

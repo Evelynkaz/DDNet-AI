@@ -31,6 +31,8 @@ exit 0
 "#;
 
 const PROXY_IP: &str = "198.51.100.7";
+/// A favourite is a public unicast address (a documentation address such as `SERVER_IP` is refused by the strict favourites rules).
+const FAV_IP: &str = "93.184.216.34";
 const SERVER_IP: &str = "203.0.113.5";
 const PROXY_USER: &str = "u-s3cr3t-user";
 const PROXY_PASS: &str = "p-s3cr3t-pass";
@@ -138,6 +140,49 @@ impl Rig {
 
     fn proxy_file(&self) {
         self.proxy_file_with("");
+    }
+
+    /// The favourites file the site writes (`data/launch/favourites.json`): `(address, connection, reopened_at)` each.
+    fn favourites(&self, list: &[(&str, &str, u64)]) {
+        let favs: Vec<Value> = list
+            .iter()
+            .map(|(address, connection, reopened_at)| {
+                json!({"address": address, "name": "Some Block Server", "nick": "Muha2", "connection": connection,
+                       "consent_at": now(), "notes": "", "added_at": now(), "reopened_at": reopened_at})
+            })
+            .collect();
+        fs::write(
+            self.data().join("launch/favourites.json"),
+            serde_json::to_vec(&json!({"v": 1, "favourites": favs})).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A profile `<name>-proxy.toml` as the site writes it (0600).
+    fn profile(&self, name: &str, extra: &str) {
+        let path = self.data().join(format!("secrets/{name}-proxy.toml"));
+        fs::write(
+            &path,
+            format!("host = \"{PROXY_IP}\"\nport = 1080\nuser = \"{PROXY_USER}\"\npass = \"{PROXY_PASS}\"\n{extra}"),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// Moves the helper's memory of the last start and exit back by `secs`: the real-time cool-down and start interval are over.
+    fn age_state(&self, secs: u64) {
+        let path = self.p("var/state.json");
+        let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let start = state["last_start_at"].as_u64().unwrap_or(0);
+        state["last_start_at"] = json!(start.saturating_sub(secs));
+        if let Some(at) = state["last_exit"]["at"].as_u64() {
+            state["last_exit"]["at"] = json!(at.saturating_sub(secs));
+        }
+        fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
+    }
+
+    fn blocked_file(&self) -> Value {
+        serde_json::from_slice(&fs::read(self.p("status/blocked.json")).expect("blocked.json was written")).unwrap()
     }
 
     /// The proxy file plus extra lines (for example `relay = "public"`, task 2.6b).
@@ -878,4 +923,393 @@ fn an_ipv6_server_entry_is_allowed() {
     assert_eq!(rig.status()["state"], "started", "{}", rig.status());
     assert!(rig.env_file().contains("BOT_SERVER=\"[2001:db8::7]:8308\"\n"));
     assert!(rig.dropin().contains("IPAddressAllow=2001:db8::7\n"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Task 5.12 (D-099): favourites
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn a_favourite_start_takes_nick_address_and_filter_from_the_favourite_never_from_the_request() {
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    rig.favourites(&[(&addr, "direct", 0)]);
+    let mut body = start(&addr);
+    body["brain"] = json!("hybrid");
+    let out = rig.send(&body);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    assert_eq!(rig.status()["server"], addr.as_str());
+    let env = rig.env_file();
+    assert!(env.contains(&format!("BOT_SERVER=\"{addr}\"\n")), "{env}");
+    assert!(env.contains("BOT_NAME=\"Muha2\"\n"), "the favourite's nick: {env}");
+    assert!(
+        rig.dropin().contains(&format!("IPAddressAllow={FAV_IP}\n")),
+        "{}",
+        rig.dropin()
+    );
+    assert_eq!(rig.actions().last().unwrap(), "start ddnet-ai-bot.service");
+    // Public: no sparring, as for every public server.
+    let rig = Rig::new();
+    rig.favourites(&[(&addr, "direct", 0)]);
+    let mut body = start(&addr);
+    body["sparring"] = json!(1);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(reason(&rig.status()), "sparring_local_only");
+    assert!(rig.actions().is_empty());
+}
+
+#[test]
+fn a_favourite_through_a_proxy_gets_that_proxys_filter_and_leaks_no_secret() {
+    let addr = format!("{FAV_IP}:8303");
+    // Public relay: deny the server, allow nothing.
+    let rig = Rig::new();
+    rig.profile("hp-pub", "relay = \"public\"\n");
+    rig.favourites(&[(&addr, "proxy:hp-pub", 0)]);
+    let out = rig.send(&start(&addr));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    let dropin = rig.dropin();
+    assert!(
+        dropin.contains(&format!("IPAddressDeny={FAV_IP}\n")) && dropin.contains("IPAddressAllow=\n"),
+        "{dropin}"
+    );
+    assert!(
+        !dropin.contains("127.0.0.0/8") && !dropin.contains(PROXY_IP),
+        "{dropin}"
+    );
+    // The proxy's own host: allowed, the server is not mentioned.
+    let rig = Rig::new();
+    rig.profile("hp-host", "");
+    rig.favourites(&[(&addr, "proxy:hp-host", 0)]);
+    let out = rig.send(&start(&addr));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    let dropin = rig.dropin();
+    assert!(
+        dropin.contains(&format!("IPAddressAllow={PROXY_IP}\n")) && !dropin.contains(FAV_IP),
+        "{dropin}"
+    );
+    let everything = format!(
+        "{}{dropin}{}{}{}{}",
+        rig.env_file(),
+        rig.status(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+        rig.calls().join("\n")
+    );
+    // The proxy's IP is in the filter (the unit may talk to it); its login and password are nowhere.
+    for secret in [PROXY_USER, PROXY_PASS] {
+        assert!(!everything.contains(secret), "{secret} leaked");
+    }
+}
+
+#[test]
+fn a_missing_or_unsafe_proxy_is_a_refusal_never_a_direct_start_or_another_proxy() {
+    let addr = format!("{FAV_IP}:8303");
+    let rig = Rig::new();
+    rig.profile("other", "relay = \"public\"\n");
+    rig.favourites(&[(&addr, "proxy:gone", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "proxy_error");
+    assert!(rig.actions().is_empty(), "nothing started: {:?}", rig.actions());
+    assert!(!rig.p("etc/bot-launch.env").exists());
+    // A loose mode on the named profile.
+    let rig = Rig::new();
+    rig.profile("hp", "");
+    fs::set_permissions(
+        rig.data().join("secrets/hp-proxy.toml"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    rig.profile("other", "");
+    rig.favourites(&[(&addr, "proxy:hp", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "proxy_error");
+    assert!(rig.actions().is_empty());
+    // A bad connection value in the file is refused as such.
+    let rig = Rig::new();
+    rig.favourites(&[(&addr, "proxy:../secrets/x", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "favourites_invalid");
+    assert!(rig.actions().is_empty());
+}
+
+#[test]
+fn what_is_not_a_valid_favourite_is_refused_and_changes_nothing() {
+    let addr = format!("{FAV_IP}:8303");
+    // (A loopback favourite is refused by the production build; the test binary of `cargo test` is built with the `loopback-favourites`
+    // feature for the e2e, so that refusal is tested on the rules themselves: `launch_cmd` unit tests and `ddai_client::favourites`.)
+    let bad_files: Vec<(&str, Vec<u8>)> = vec![
+        ("not json", b"{ nope".to_vec()),
+        ("unknown field", serde_json::to_vec(&json!({"v":1,"favourites":[],"x":1})).unwrap()),
+        ("private address", serde_json::to_vec(&json!({"v":1,"favourites":[{"address":"10.0.0.5:8303","name":"n","nick":"Muha","connection":"direct","consent_at":5,"added_at":5}]})).unwrap()),
+        ("no consent", serde_json::to_vec(&json!({"v":1,"favourites":[{"address":addr,"name":"n","nick":"Muha","connection":"direct","consent_at":0,"added_at":5}]})).unwrap()),
+        ("bad nick", serde_json::to_vec(&json!({"v":1,"favourites":[{"address":addr,"name":"n","nick":"a b;c","connection":"direct","consent_at":5,"added_at":5}]})).unwrap()),
+        ("extra key", serde_json::to_vec(&json!({"v":1,"favourites":[{"address":addr,"name":"n","nick":"Muha","connection":"direct","consent_at":5,"added_at":5,"ready":true}]})).unwrap()),
+        ("duplicate", serde_json::to_vec(&json!({"v":1,"favourites":[
+            {"address":addr,"name":"n","nick":"Muha","connection":"direct","consent_at":5,"added_at":5},
+            {"address":addr,"name":"n","nick":"Muha","connection":"direct","consent_at":5,"added_at":5}]})).unwrap()),
+        ("too big", vec![b' '; 70_000]),
+    ];
+    for (what, bytes) in bad_files {
+        let rig = Rig::new();
+        fs::write(rig.data().join("launch/favourites.json"), &bytes).unwrap();
+        for target in [addr.as_str(), "10.0.0.5:8303", "127.0.0.1:8463"] {
+            assert!(rig.send(&start(target)).status.success());
+            let r = rig.status();
+            assert!(
+                matches!(reason(&r), "favourites_invalid" | "favourites_unreadable"),
+                "{what} / {target}: {r}"
+            );
+            assert!(rig.actions().is_empty(), "{what}: {:?}", rig.actions());
+        }
+        // The local server never depends on the favourites file.
+        let rig2 = Rig::new();
+        fs::write(rig2.data().join("launch/favourites.json"), &bytes).unwrap();
+        assert!(rig2.send(&start("local")).status.success());
+        assert_eq!(rig2.status()["state"], "started", "{what}");
+    }
+    // A symlink where the file should be is not followed; a directory is refused.
+    let rig = Rig::new();
+    let real = rig.data().join("real.json");
+    fs::write(&real, serde_json::to_vec(&json!({"v":1,"favourites":[]})).unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, rig.data().join("launch/favourites.json")).unwrap();
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "favourites_unreadable");
+    // An address that is simply not a favourite.
+    let rig = Rig::new();
+    rig.favourites(&[(&addr, "direct", 0)]);
+    for other in [
+        "93.184.216.35:8303",
+        "93.184.216.34:8304",
+        "1.2.3.4:5",
+        "example.com:8303",
+        "127.0.0.1:8463",
+    ] {
+        assert!(rig.send(&start(other)).status.success());
+        assert_eq!(reason(&rig.status()), "server_not_allowed", "{other}");
+    }
+    assert!(rig.actions().is_empty());
+}
+
+/// The fair-play core: a kick or ban closes a favourite (and every port on its IP) until the owner's explicit re-open, whatever the
+/// favourite's proxy, nick or entry says afterwards, and the bot's own side never changes a proxy.
+#[test]
+fn a_ban_on_a_favourite_blocks_it_until_the_explicit_reopen_and_no_proxy_switch_gets_round_it() {
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    let sibling = format!("{FAV_IP}:8304");
+    let other = "45.141.57.35:8308";
+    rig.profile("hp-1", "relay = \"public\"\n");
+    rig.profile("hp-2", "");
+    rig.favourites(&[(&addr, "proxy:hp-1", 0), (&sibling, "direct", 0), (other, "direct", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+
+    // The bot is kicked / banned («VPN detected»): exit 3.
+    assert!(rig.exited("exited", "3").status.success());
+    assert_eq!(reason(&rig.status()), "kicked_or_banned");
+    let blocked = rig.blocked_file();
+    assert_eq!(blocked["blocked"][0]["address"], addr.as_str());
+    assert_eq!(blocked["blocked"][0]["code"], 3);
+    let ban_at = blocked["blocked"][0]["at"].as_u64().unwrap();
+    assert!(!blocked.to_string().contains(PROXY_PASS), "{blocked}");
+    // The unit is back to the plain local default: no proxy IP, no deny line is left allowed for a hand start.
+    assert!(!rig.p("etc/bot-launch.env").exists());
+    let actions = rig.actions().len();
+
+    // The cool-down and the start interval are over; the ban is not.
+    rig.age_state(500);
+    // 1. as it is; 2. with ANOTHER proxy; 3. direct; 4. a new nick; 5. removed and added again (reopened_at 0) - all closed.
+    for (connection, why) in [
+        ("proxy:hp-1", "unchanged"),
+        ("proxy:hp-2", "another proxy"),
+        ("direct", "direct"),
+    ] {
+        rig.favourites(&[(&addr, connection, 0), (&sibling, "direct", 0), (other, "direct", 0)]);
+        assert!(rig.send(&start(&addr)).status.success());
+        assert_eq!(reason(&rig.status()), "blocked_after_ban", "{why}: {}", rig.status());
+        rig.age_state(500);
+    }
+    // The same IP, another port: closed too.
+    assert!(rig.send(&start(&sibling)).status.success());
+    assert_eq!(reason(&rig.status()), "blocked_after_ban", "the ban is the machine's");
+    rig.age_state(500);
+    // Editing live-servers.toml (even to a time after the ban) re-opens allow-list entries, not favourites.
+    rig.allow_list("");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(rig.live_servers())
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(600))
+        .unwrap();
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "blocked_after_ban");
+    rig.age_state(500);
+    // A re-open that is not newer than the ban does not lift it.
+    rig.favourites(&[
+        (&addr, "proxy:hp-2", ban_at),
+        (&sibling, "direct", 0),
+        (other, "direct", 0),
+    ]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "blocked_after_ban");
+    rig.age_state(500);
+    // Another IP was never affected.
+    assert!(rig.send(&start(other)).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    assert!(rig.exited("exited", "0").status.success());
+    rig.age_state(500);
+    assert_eq!(
+        rig.actions()
+            .iter()
+            .filter(|a| a.starts_with("start ddnet-ai-bot"))
+            .count(),
+        2,
+        "only the first start and the other server: {:?}",
+        rig.actions()
+    );
+    assert!(rig.actions().len() > actions);
+
+    // The owner presses «Открыть снова»: `reopened_at` after the ban. Only then it starts, with the proxy the owner has set now.
+    rig.favourites(&[
+        (&addr, "proxy:hp-2", ban_at + 1),
+        (&sibling, "direct", 0),
+        (other, "direct", 0),
+    ]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    let dropin = rig.dropin();
+    assert!(
+        dropin.contains(&format!("IPAddressAllow={PROXY_IP}\n")),
+        "the proxy of the owner's choice: {dropin}"
+    );
+    // The ban stays in the memory (inert for the re-opened favourite): the sibling on the same IP needs its own re-opening.
+    assert_eq!(rig.blocked_file()["blocked"][0]["address"], addr.as_str());
+    assert!(rig.exited("exited", "0").status.success());
+    rig.age_state(500);
+    assert!(rig.send(&start(&sibling)).status.success());
+    assert_eq!(reason(&rig.status()), "blocked_after_ban", "{}", rig.status());
+    rig.favourites(&[
+        (&addr, "proxy:hp-2", ban_at + 1),
+        (&sibling, "direct", ban_at + 1),
+        (other, "direct", 0),
+    ]);
+    assert!(rig.send(&start(&sibling)).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+}
+
+#[test]
+fn a_cool_down_and_the_start_interval_apply_to_favourites_like_to_every_server() {
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    rig.favourites(&[(&addr, "direct", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(rig.status()["state"], "started");
+    assert!(rig.exited("exited", "4").status.success());
+    // Right after the exit: the cool-down (and the start interval), whichever server.
+    assert!(rig.send(&start(&addr)).status.success());
+    assert!(
+        matches!(reason(&rig.status()), "cooldown" | "rate_limited" | "blocked_after_ban"),
+        "{}",
+        rig.status()
+    );
+    let n = rig.actions().len();
+    assert!(rig.send(&start("local")).status.success());
+    assert_eq!(reason(&rig.status()), "cooldown");
+    assert_eq!(rig.actions().len(), n);
+}
+
+#[test]
+fn the_helper_never_writes_into_the_launch_directory_but_its_own_request_and_the_blocked_list_is_for_the_web() {
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    rig.favourites(&[(&addr, "direct", 0)]);
+    let before = fs::read(rig.data().join("launch/favourites.json")).unwrap();
+    assert!(rig.send(&start(&addr)).status.success());
+    assert!(rig.exited("exited", "3").status.success());
+    assert_eq!(
+        fs::read(rig.data().join("launch/favourites.json")).unwrap(),
+        before,
+        "the helper never edits the favourites"
+    );
+    assert_eq!(mode_of(&rig.p("status/blocked.json")), 0o644);
+    assert!(!rig.data().join("launch/blocked.json").exists());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Review 5.12 round 1
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// F1: a `reopened_at` far in the future would lift every past and future ban on that IP. The helper refuses the file.
+#[test]
+fn a_future_dated_reopening_lifts_nothing() {
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    rig.favourites(&[(&addr, "direct", 99_999_999_999)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "favourites_invalid");
+    assert!(rig.actions().is_empty());
+    // With a ban in the memory too.
+    let rig = Rig::new();
+    rig.favourites(&[(&addr, "direct", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert!(rig.exited("exited", "3").status.success());
+    rig.age_state(500);
+    rig.favourites(&[(&addr, "direct", 99_999_999_999)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "favourites_invalid");
+    rig.favourites(&[(&addr, "direct", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "blocked_after_ban");
+}
+
+/// F2: a host name in the allow-list can hide the address of a favourite: no favourite starts while one exists.
+#[test]
+fn a_host_name_in_the_allow_list_refuses_favourites() {
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    rig.allow_list(
+        "[[server]]\naddress = \"one.one.one.one:8303\"\nnick = \"Muha\"\nready = true\nproxy = \"swarfey\"\n",
+    );
+    rig.favourites(&[(&addr, "direct", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert_eq!(reason(&rig.status()), "allowlist_not_literal");
+    assert!(rig.actions().is_empty());
+}
+
+/// F3: editing live-servers.toml re-opens allow-list entries, never a ban recorded for a favourite (not even for a sibling port).
+#[test]
+fn a_live_servers_edit_does_not_lift_a_favourites_ban_for_an_allow_list_sibling() {
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    let sibling = format!("{FAV_IP}:8304");
+    rig.favourites(&[(&addr, "direct", 0)]);
+    assert!(rig.send(&start(&addr)).status.success());
+    assert!(rig.exited("exited", "3").status.success());
+    rig.age_state(500);
+    rig.allow_list(&format!(
+        "[[server]]\naddress = \"{sibling}\"\nnick = \"Muha\"\nready = true\n"
+    ));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(rig.live_servers())
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(600))
+        .unwrap();
+    assert!(rig.send(&start(&sibling)).status.success());
+    assert_eq!(reason(&rig.status()), "blocked_after_ban");
+}
+
+/// F5: the test-only feature shows in `--version`, and as root such a build refuses to be the helper (uid 0 cannot be had here: the
+/// version text is what the installers check).
+#[test]
+fn a_build_that_accepts_loopback_says_so_in_its_version() {
+    let out = Command::new(env!("CARGO_BIN_EXE_ddnet-ai"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("+loopback-favourites"), "{text}");
 }

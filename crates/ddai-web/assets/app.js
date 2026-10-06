@@ -31,6 +31,8 @@
   var gameViewEl = document.getElementById("game-view");
   var tabBotButton = document.getElementById("tab-bot");
   var botViewEl = document.getElementById("bot-view");
+  var tabServersButton = document.getElementById("tab-servers");
+  var serversViewEl = document.getElementById("servers-view");
   var tabFlyButton = document.getElementById("tab-fly");
   var flyViewEl = document.getElementById("fly-view");
   var tabTrainButton = document.getElementById("tab-train");
@@ -52,6 +54,8 @@
     botViewEl.hidden = true;
     flyViewEl.hidden = true;
     trainViewEl.hidden = true;
+    serversViewEl.hidden = true;
+    ServersPanel.onHidden();
     BotPanel.onHidden();
     FlyPanel.onHidden();
     TrainPanel.onHidden();
@@ -68,6 +72,8 @@
     botViewEl.hidden = name !== "bot";
     flyViewEl.hidden = name !== "fly";
     trainViewEl.hidden = name !== "train";
+    serversViewEl.hidden = name !== "servers";
+    tabServersButton.classList.toggle("active", name === "servers");
     tabTrainButton.classList.toggle("active", name === "train");
     tabFlyButton.classList.toggle("active", name === "fly");
     tabStatusButton.classList.toggle("active", name === "status");
@@ -81,6 +87,11 @@
       BotPanel.onShown();
     } else {
       BotPanel.onHidden();
+    }
+    if (name === "servers") {
+      ServersPanel.onShown();
+    } else {
+      ServersPanel.onHidden();
     }
     if (name === "fly") {
       FlyPanel.onShown();
@@ -97,7 +108,9 @@
   function showAuthenticated() {
     tabbar.hidden = false;
     showTab(
-      currentTab === "game" || currentTab === "bot" || currentTab === "fly" || currentTab === "train" ? currentTab : "status",
+      currentTab === "game" || currentTab === "bot" || currentTab === "servers" || currentTab === "fly" || currentTab === "train"
+        ? currentTab
+        : "status",
     );
   }
 
@@ -346,6 +359,9 @@
   });
   tabBotButton.addEventListener("click", function () {
     showTab("bot");
+  });
+  tabServersButton.addEventListener("click", function () {
+    showTab("servers");
   });
   tabFlyButton.addEventListener("click", function () {
     showTab("fly");
@@ -930,6 +946,14 @@
     }
 
     LaunchCard.mount(el("launch-mount"), api);
+    // Task 5.12: the «Серверы» tab (list, favourites, proxies). «Играть здесь» opens the «Бот» tab with that server chosen in the
+    // «Запуск» card; the card still asks for the owner's confirmation and the root helper still judges the start.
+    ServersPanel.mount(el("servers-mount"), api, {
+      play: function (address) {
+        LaunchCard.preselect(address);
+        showTab("bot");
+      },
+    });
     // Task 5.11: the chat input sits under the chat panel of the «Игра» tab (it needs this `api`: session and CSRF token).
     SayCard.mount(el("game-say-mount"), api, { embedded: true });
     el("bot-to-chat").addEventListener("click", function () {

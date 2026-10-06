@@ -1632,7 +1632,7 @@ fn give_up_on_attempt_cap(events_tx: &event_channel::Sender, target: SocketAddr,
 /// Task 2.6: the proxy binding gate, checked before every connection attempt. The allow-list entry that admits
 /// a connection decides whether it goes through a proxy (`proxy = "<name>"`); the caller's
 /// [`ClientConfig::proxy`] must say exactly the same. Both mismatches are refused: a proxy that the entry does
-/// not name is never used (D-053: sanctioned for one server only), and a server whose entry names a proxy is
+/// not name is never used (the owner assigns proxies to servers, D-099), and a server whose entry names a proxy is
 /// never connected to directly (that is the VPN-ban of D-052).
 fn check_proxy_binding(target: SocketAddr, config: &ClientConfig) -> Result<(), String> {
     let bound = config
@@ -1641,16 +1641,7 @@ fn check_proxy_binding(target: SocketAddr, config: &ClientConfig) -> Result<(), 
         .map_err(|e| format!("live-servers safety switch refused {target}: {e}"))?;
     match (bound, config.proxy.as_ref()) {
         (None, None) => Ok(()),
-        (Some(entry), Some(cfg)) if cfg.name() == entry => {
-            if cfg.allows(target) {
-                Ok(())
-            } else {
-                Err(format!(
-                    "live-servers safety switch refused {target}: proxy {:?} is issued for another server (its file's `for_server`), D-053",
-                    cfg.name()
-                ))
-            }
-        }
+        (Some(entry), Some(cfg)) if cfg.name() == entry => Ok(()),
         (Some(entry), Some(cfg)) => Err(format!(
             "live-servers safety switch refused {target}: its entry names proxy {entry:?}, but proxy {:?} was configured",
             cfg.name()

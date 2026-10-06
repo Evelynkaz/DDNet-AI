@@ -63,6 +63,19 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/bot/launch",
             get(http::launch::launch_get).post(http::launch::launch_post),
         )
+        // Task 5.12 (D-099): the server browser. The list is a cache another unit wrote; favourites and proxy profiles are files the web
+        // writes (session, strict Origin, CSRF, JSON and a rate limit on every POST); «Проверить» and «Обновить» drop a request file.
+        .route("/api/servers", get(http::servers::servers_get))
+        .route("/api/servers/refresh", post(http::servers::refresh_post))
+        .route("/api/favourites", get(http::servers::favourites_get))
+        .route("/api/favourites/add", post(http::servers::favourite_add))
+        .route("/api/favourites/update", post(http::servers::favourite_update))
+        .route("/api/favourites/remove", post(http::servers::favourite_remove))
+        .route("/api/favourites/reopen", post(http::servers::favourite_reopen))
+        .route("/api/proxies", get(http::servers::proxies_get))
+        .route("/api/proxies/save", post(http::servers::proxy_save))
+        .route("/api/proxies/remove", post(http::servers::proxy_remove))
+        .route("/api/proxies/check", post(http::servers::proxy_check))
         // Task 5.8: the read-only training panel (session only; plain GETs, nothing is written anywhere).
         .route("/api/train/runs", get(http::train::runs))
         .route("/api/train/run", get(http::train::run))
@@ -93,6 +106,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/game.js", get(http::assets::game_js))
         .route("/launch.js", get(http::assets::launch_js))
         .route("/launch.css", get(http::assets::launch_css))
+        .route("/servers.js", get(http::assets::servers_js))
+        .route("/servers.css", get(http::assets::servers_css))
         .route("/say.js", get(http::assets::say_js))
         .route("/say.css", get(http::assets::say_css));
 

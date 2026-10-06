@@ -214,10 +214,10 @@ fn a_relay_announced_on_another_host_is_reported_as_substituted() {
     assert!(!stdout.contains("10.1.2.3"), "{stdout}");
 }
 
-/// F4: the proxy file's `for_server` is enforced by `play` too: an allow-list that names the proxy for another
-/// server is refused before anything is sent.
+/// Task 5.12 (D-099): the proxy file's `for_server` binds nothing any more: `play` uses the proxy the allow-list entry (the owner's
+/// choice on the site) names, whatever server the file was first issued for.
 #[test]
-fn play_refuses_a_proxy_issued_for_another_server() {
+fn play_uses_the_proxy_the_entry_names_even_if_the_file_was_issued_for_another_server() {
     let game = UdpSocket::bind("127.0.0.1:0").unwrap();
     game.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
     let game_addr = game.local_addr().unwrap();
@@ -254,13 +254,18 @@ fn play_refuses_a_proxy_issued_for_another_server() {
         .arg(&list)
         .output()
         .expect("run ddnet-ai play");
-    // Exit 4: the unit's `RestartPreventExitStatus` lists it, so systemd does not keep restarting a refusal.
-    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
-    assert!(text(&out).contains("issued for another server"), "{}", text(&out));
+    assert!(!text(&out).contains("issued for another server"), "{}", text(&out));
     assert!(!text(&out).contains("45.141.57.35"), "{}", text(&out));
-    let mut buf = [0u8; 64];
-    assert!(game.recv_from(&mut buf).is_err(), "a datagram reached the game server");
-    assert_eq!(server.tcp_accepts(), 0);
+    assert!(server.tcp_accepts() >= 1, "the entry's proxy was contacted");
+    // The "game server" here is a bare socket: whatever reached it came from the relay, never from the bot's own port.
+    let mut buf = [0u8; 2048];
+    if let Ok((_, from)) = game.recv_from(&mut buf) {
+        assert_eq!(
+            from,
+            server.relay_addr(),
+            "a datagram reached the game server not through the relay"
+        );
+    }
 }
 
 // --- task 2.6b: `relay = "public"`, the UDP probe, session picking --------------------------------------------------

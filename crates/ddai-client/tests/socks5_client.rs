@@ -482,15 +482,25 @@ fn a_direct_entry_without_a_proxy_still_connects_directly() {
     client.join();
 }
 
-/// F4: the proxy file's own `for_server` is checked by the driver too, so even a hand-built allow-list that names
-/// the proxy for another server cannot route it there.
+/// Task 5.12 (D-099): the proxy file's `for_server` is no binding any more. The entry (the owner's choice on the site) names the
+/// proxy and that is the one rule: a proxy file that was once issued for another server still carries this session, and the
+/// game server still only ever sees the relay.
 #[test]
-fn a_proxy_issued_for_another_server_is_refused_before_anything_is_sent() {
-    expect_refused(
-        |g| entry(g, Some(PROXY)),
-        |s| Some(proxy_cfg(s, None).with_for_server("45.141.57.35:8308")),
-        "issued for another server",
+fn a_proxy_file_issued_for_another_server_is_used_where_the_entry_assigns_it() {
+    let proxy = TestSocks5Server::start(Config::default());
+    let game = GameDouble::start(false);
+    let cfg = config(
+        entry(game.addr, Some(PROXY)),
+        Some(proxy_cfg(&proxy, None).with_for_server("45.141.57.35:8308")),
     );
+    let mut client = Client::connect(game.addr, cfg);
+    let events = collect(&mut client, Duration::from_secs(5), |e| connected_count(e) >= 1);
+    assert_eq!(connected_count(&events), 1, "{events:?}");
+    client.disconnect();
+    client.join();
+    thread::sleep(Duration::from_millis(100));
+    let seen = game.seen.lock().unwrap();
+    assert!(seen.senders.iter().all(|s| *s == proxy.relay_addr()));
 }
 
 // --- task 2.6b: `relay = "public"`: a relay on another host ---------------------------------------------------------

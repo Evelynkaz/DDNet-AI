@@ -31,8 +31,14 @@
     request_too_large: "Запрос слишком большой.",
     request_not_regular: "Запрос отклонён: это не обычный файл.",
     request_unreadable: "Запрос не удалось прочитать.",
-    server_not_allowed: "Этот сервер не в списке разрешённых.",
+    server_not_allowed: "Этого сервера нет ни в избранном, ни в списке разрешённых.",
     server_not_ready: "Сервер в списке, но владелец ещё не открыл его (ready).",
+    favourites_invalid: "Файл избранного повреждён: избранные серверы недоступны, пока он не исправлен.",
+    favourites_unreadable: "Файл избранного не читается: избранные серверы недоступны.",
+    bad_address: "Адрес избранного сервера не прошёл проверку (нужен публичный IP:порт).",
+    bad_nick: "Ник избранного сервера не прошёл проверку.",
+    bad_connection: "Подключение избранного сервера не прошло проверку.",
+    consent_required: "У избранного сервера нет подтверждения администратора.",
     server_ambiguous: "В списке серверов противоречивые записи для этого адреса.",
     server_bad_entry: "Запись сервера в списке разрешённых некорректна.",
     sparring_local_only: "Спарринг-боты бывают только на локальном сервере.",
@@ -41,7 +47,7 @@
     config_bad: "Конфиг запуска не читается.",
     config_untrusted: "Конфиг запуска доступен на запись не только root: отказ.",
     blocked_after_ban:
-      "Этот сервер закрыт после кика или бана: запуск возможен, только когда владелец заново откроет запись в списке серверов.",
+      "Этот сервер закрыт после кика или бана (все порты на этом IP): запуск возможен, только когда вы сами откроете его снова (вкладка «Серверы», «Избранное», «Открыть снова»; запись списка разрешённых — правкой файла). Прокси и IP бот сам не меняет.",
     state_unreadable: "Память запускателя повреждена: запуск закрыт, пока владелец её не проверит.",
     cooldown: "После кика, бана или ошибки входа запуск закрыт на 2 минуты.",
     rate_limited: "Слишком часто: не больше одного запуска в 30 секунд.",
@@ -65,7 +71,9 @@
     bad_csrf: "Токен защиты не подошёл: обновите страницу.",
     json_required: "Нужен JSON.",
     bad_request: "Запрос не принят: неверный формат.",
-    server_not_allowed: "Этот сервер не в списке разрешённых.",
+    server_not_allowed: "Этого сервера нет ни в избранном, ни в списке разрешённых.",
+    blocked_after_ban:
+      "Сервер закрыт после кика или бана: откройте его снова на вкладке «Серверы» (кнопка «Открыть снова»).",
     sparring_local_only: "Спарринг-боты бывают только на локальном сервере.",
     bundle_missing: "Файл мухи (bundle) не найден.",
     rate_limited: "Слишком часто: подождите несколько секунд (не больше 6 запросов в минуту).",
@@ -109,8 +117,19 @@
     return s;
   }
 
+  // What the last answer said about each choice (`kind`: local, allowlist or favourite; a favourite's name and whether the bot's ban
+  // memory has it closed).
+  var serverMeta = {};
+
   function serverLabel(id) {
-    return id === "local" ? "Локальный сервер" : "Сервер " + id;
+    if (id === "local") {
+      return "Локальный сервер";
+    }
+    var m = serverMeta[id];
+    if (m && m.kind === "favourite") {
+      return "★ " + m.name + " (" + id + ")" + (m.blocked ? " — закрыт после кика/бана" : "");
+    }
+    return "Сервер " + id;
   }
 
   var LaunchCard = (function () {
@@ -121,6 +140,7 @@
     var timer = null;
     var busy = false;
     var fastUntil = 0;
+    var wanted = null; // a server the «Серверы» tab asked for («Играть здесь»), chosen when the choices have it
     var info = null; // the last GET /api/bot/launch
     var bridge = null; // the last GET /api/bot/status
 
@@ -201,7 +221,10 @@
       );
       root.appendChild(card);
 
-      ui.server.addEventListener("change", syncSparring);
+      ui.server.addEventListener("change", function () {
+        syncSparring();
+        render();
+      });
       ui.brain.addEventListener("change", syncMirror);
       syncMirror();
       ui.start.addEventListener("click", onStart);
@@ -242,6 +265,10 @@
 
     function applyChoices(i) {
       var current = ui.server.value;
+      serverMeta = {};
+      (i.servers || []).forEach(function (s) {
+        serverMeta[s.id] = s;
+      });
       clear(ui.server);
       (i.servers || []).forEach(function (s) {
         var opt = document.createElement("option");
@@ -249,6 +276,10 @@
         opt.textContent = serverLabel(s.id);
         ui.server.appendChild(opt);
       });
+      if (wanted !== null && serverMeta[wanted]) {
+        current = wanted;
+        wanted = null;
+      }
       ui.server.value = current;
       if (ui.server.value !== current) {
         ui.server.value = "local";
@@ -340,10 +371,19 @@
         text = "Ошибка запуска";
         detail = REASON_TEXT[status.reason] || "Причина: " + status.reason;
       }
+      var chosen = serverMeta[ui.server.value];
+      var closed = !!(chosen && chosen.kind === "favourite" && chosen.blocked);
+      if (closed && !live && !info.pending && !detail) {
+        detail =
+          "Выбранный сервер закрыт после кика или бана. Бот не пытается обойти бан: откройте сервер снова на вкладке «Серверы» (Избранное, «Открыть снова»).";
+      }
+      if (info.favourites_error && !detail) {
+        detail = REASON_TEXT[info.favourites_error] || "";
+      }
       ui.dot.className = "dot " + dot;
       ui.stateText.textContent = text;
       ui.detail.textContent = detail;
-      ui.start.disabled = busy || !enabled || info.pending || live;
+      ui.start.disabled = busy || !enabled || info.pending || live || closed;
       ui.stop.disabled = busy || !enabled || info.pending;
       ui.watch.hidden = !live;
       [ui.server, ui.brain, ui.duration, ui.mirror].forEach(function (c) {
@@ -421,7 +461,9 @@
         body.mirror = ui.mirror.value === "off" ? "off" : "on";
       }
       if (body.server !== "local") {
-        var ok = window.confirm("Запустить бота на публичном сервере? Бот не пишет в чат и не обходит баны.");
+        var ok = window.confirm(
+          "Запустить бота на сервере " + serverLabel(body.server) + "? Администратор должен разрешать бота. Бот не пишет в чат и не обходит кики и баны (ни прокси, ни IP сам не меняет).",
+        );
         if (!ok) {
           return;
         }
@@ -446,6 +488,15 @@
       }
     }
 
+    // Task 5.12: «Играть здесь» on the «Серверы» tab: choose this server in the card (the card still asks to be started).
+    function preselect(address) {
+      wanted = typeof address === "string" ? address : null;
+      if (info) {
+        applyChoices(info);
+        render();
+      }
+    }
+
     function onHidden() {
       shown = false;
       if (timer) {
@@ -454,7 +505,7 @@
       }
     }
 
-    return { mount: mount, onShown: onShown, onHidden: onHidden };
+    return { mount: mount, onShown: onShown, onHidden: onHidden, preselect: preselect };
   })();
 
   window.LaunchCard = LaunchCard;

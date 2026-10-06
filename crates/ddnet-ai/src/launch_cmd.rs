@@ -4,17 +4,26 @@
 //!
 //! - the request is read as a regular file (no symlink), size-limited, parsed with a strict schema, and **deleted before it is
 //!   processed** (a request is never replayed, e.g. after a reboot);
-//! - `server` is `"local"` or the exact `address` of a `ready = true` entry of `live-servers.toml`; the nick, the proxy and
-//!   the address that reach the unit come from that entry, never from the request;
+//! - `server` is `"local"`, the exact `address` of a `ready = true` entry of `live-servers.toml`, or (task 5.12, D-099) the exact
+//!   address of one of the owner's **favourites** (`<launch-dir>/favourites.json`, written by the site and validated strictly
+//!   here again: a public unicast `ip:port`, a valid nick, `direct` or `proxy:<name>`, the owner's consent). A favourite is judged
+//!   exactly like a `ready` entry, with the same ban memory, cool-downs and limits; the nick, the proxy and the address that
+//!   reach the unit come from that entry, never from the request;
 //! - the root-owned environment file for the bot unit holds only validated values from a closed character set;
 //! - the unit's cgroup filter (a generated drop-in) allows loopback, plus the proxy's IPs (read from the secrets file, never
 //!   printed) or the entry's server IP for a public server; for a proxy with `relay = "public"` (its UDP relay lives on
 //!   another host, task 2.6b, D-090) it is the opposite: both lists are reset and **every IP of the game server is denied**,
 //!   with no allow list, so the relay is reachable anywhere and the server never directly;
 //! - at most one start per [`START_INTERVAL_SECS`]; a cool-down after exit 3/4; after a kick/ban on a **public** server that
-//!   server is refused until the owner has edited `live-servers.toml` again (re-opened it).
+//!   server (every address on the same IP) is refused until the owner has re-opened it: edited `live-servers.toml` again, or, for a
+//!   favourite, pressed «Открыть снова» on the site (`reopened_at` newer than the ban). **Nothing ever switches the proxy or the IP by
+//!   itself**: a favourite's proxy is the one the owner assigned, a missing or unsafe proxy file is a refusal (never a direct start
+//!   or another proxy), and a ban closes the server whatever proxy the favourite names afterwards.
 //!
 //! `launch exited` is the bot unit's `ExecStopPost=` hook: it records how the bot ended (the ban memory above) and tells the web.
+//! `launch check-proxy` (task 5.12) answers the site's «Проверить» button: it runs **unprivileged** (its own unit), reads one small
+//! request naming a proxy profile, runs `proxy-check` on it and writes a result of fixed codes and numbers (never an address or a
+//! credential).
 //! Schemas: `docs/formats.md` §34. Never connects to any game server and never writes chat.
 
 use std::collections::BTreeMap;
@@ -25,12 +34,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use clap::{Args, Subcommand};
+use ddai_client::favourites::{self, Favourite, Favourites, Rules};
 use ddai_client::live_servers::{LiveServers, is_loopback};
+use ddai_client::socks5::{ProxyCheck, RelayHost, Socks5Error, Timeouts};
 use ddai_web::launch::{
     Action, Brain, DurationChoice, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_REQUEST_BYTES,
     MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, State as RunState,
     bundle_run_name, parse_request, read_regular_nofollow, read_regular_nofollow_with_mtime, request_is_fresh,
     unix_now, write_atomic,
+};
+use ddai_web::serverbrowser::{
+    BLOCKED_FILE, BlockedEntry, BlockedFile, MAX_PROXY_CHECK_BYTES, PROXY_CHECK_REQUEST_FILE, PROXY_CHECK_RESULT_FILE,
+    ProxyCheckResult, parse_proxy_check_request,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +62,6 @@ const STOP_GRACE_SECS: u64 = 120;
 /// The state file's size cap when reading it back.
 const MAX_STATE_BYTES: usize = 64 * 1024;
 /// A live-servers entry's value that becomes part of a command line must be this short and plain.
-const MAX_NICK_LEN: usize = 15;
 
 #[derive(Debug, Args)]
 pub struct LaunchArgs {
@@ -62,6 +76,16 @@ pub enum LaunchCommand {
     Apply(ApplyArgs),
     /// The bot unit's `ExecStopPost=` hook: records how the bot ended (exit code from `$EXIT_STATUS`) and updates the status.
     Exited(PathArgs),
+    /// The site's «Проверить» button (task 5.12): consumes `<launch-dir>/proxycheck-request.json`, runs `proxy-check` on the named
+    /// profile and writes `<launch-dir>/proxycheck-result.json` (fixed codes and numbers). Unprivileged: run by its own unit.
+    CheckProxy(CheckProxyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CheckProxyArgs {
+    /// Base data directory (`launch/`, `secrets/`). Default `~/aiddnet/data`.
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -147,6 +171,9 @@ struct LaunchInfo {
     duration: DurationChoice,
     sparring: u8,
     public: bool,
+    /// The target was one of the owner's favourites (not an allow-list entry): the origin a ban is recorded with.
+    #[serde(default)]
+    favourite: bool,
     bundle: Option<String>,
 }
 
@@ -160,6 +187,10 @@ struct ExitInfo {
 struct Block {
     at: u64,
     code: i32,
+    /// Recorded for a favourite. Editing `live-servers.toml` never lifts such a block, not even for a sibling allow-list entry on the
+    /// same IP (review 5.12 F3); only that favourite's own re-opening does. Older state files have none: an allow-list block.
+    #[serde(default)]
+    favourite: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -169,8 +200,36 @@ struct State {
     last_launch: Option<LaunchInfo>,
     stop_requested_at: u64,
     last_exit: Option<ExitInfo>,
-    /// Public servers (by allow-list address) the bot was kicked or banned from, until the owner re-opens the entry.
+    /// Public servers (by address: an allow-list entry or a favourite) the bot was kicked or banned from, until the owner re-opens
+    /// them (the allow-list edited, or the favourite's «Открыть снова»). A block closes every address on the same IP.
     blocked: BTreeMap<String, Block>,
+}
+
+impl State {
+    /// The kicks and bans that still close `target`: those recorded for any address on the **same IP** (a ban for «VPN detected» or
+    /// «bad ip» is the machine's, not one port's) that its way of re-opening has not lifted yet. Empty for `local`.
+    fn closing_blocks(&self, target: &Target, live_servers_mtime: u64) -> Vec<&str> {
+        let lifted = |block: &Block| match target.reopen {
+            Reopen::Never => true,
+            // The file's edit lifts only blocks recorded on allow-list entries.
+            Reopen::AllowListEdit => !block.favourite && live_servers_mtime > block.at,
+            Reopen::Favourite { reopened_at } => reopened_at > block.at,
+        };
+        if target.reopen == Reopen::Never {
+            return Vec::new();
+        }
+        self.blocked
+            .iter()
+            .filter(|(key, _)| {
+                key.as_str() == target.key
+                    || key
+                        .parse::<SocketAddr>()
+                        .is_ok_and(|a| a.ip().to_canonical() == target.addr.ip().to_canonical())
+            })
+            .filter(|(_, block)| !lifted(block))
+            .map(|(key, _)| key.as_str())
+            .collect()
+    }
 }
 
 /// Loads the state: `Ok(default)` when the file does not exist, `Err(())` when it exists and cannot be trusted (then every
@@ -216,6 +275,17 @@ fn with_state<T>(path: &Path, f: impl FnOnce(&mut State) -> T) -> std::io::Resul
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Refuse(&'static str);
 
+/// How a closed (kicked or banned) server is opened again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reopen {
+    /// `local` is never closed.
+    Never,
+    /// An allow-list entry: the owner edits `live-servers.toml` (its mtime must be newer than the ban).
+    AllowListEdit,
+    /// A favourite: the owner pressed «Открыть снова» on the site (its `reopened_at` must be newer than the ban).
+    Favourite { reopened_at: u64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Target {
     /// `local`, or the entry's `address` (the state's and the status's name for it).
@@ -223,6 +293,7 @@ struct Target {
     addr: SocketAddr,
     nick: String,
     public: bool,
+    reopen: Reopen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,43 +308,74 @@ struct Plan {
 }
 
 fn valid_nick(nick: &str) -> bool {
-    !nick.is_empty()
-        && nick.len() <= MAX_NICK_LEN
-        && nick
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    favourites::valid_nick(nick)
 }
 
-/// `"local"`, or the one `ready = true` entry whose `address` is exactly `selector`.
-fn resolve_server(selector: &str, live: &LiveServers) -> Result<Target, Refuse> {
+/// The favourites as the helper sees them: the file's list, or the reason it cannot be trusted (then no favourite can be started).
+type FavouritesView = Result<Favourites, &'static str>;
+
+/// `"local"`, the one `ready = true` entry of the allow-list whose `address` is exactly `selector`, or the favourite with exactly
+/// that address.
+fn resolve_server(selector: &str, live: &LiveServers, favs: &FavouritesView, rules: Rules) -> Result<Target, Refuse> {
     if selector == LOCAL_SERVER {
         return Ok(Target {
             key: LOCAL_SERVER.to_string(),
             addr: LOCAL_ADDR.parse().map_err(|_| Refuse("internal"))?,
             nick: LOCAL_NAME.to_string(),
             public: false,
+            reopen: Reopen::Never,
         });
     }
     let listed: Vec<_> = live.servers.iter().filter(|e| e.address == selector).collect();
-    if listed.is_empty() {
-        return Err(Refuse("server_not_allowed"));
+    if !listed.is_empty() {
+        let ready: Vec<_> = listed.iter().filter(|e| e.ready).collect();
+        let Some(entry) = ready.first() else {
+            return Err(Refuse("server_not_ready"));
+        };
+        if ready.iter().any(|e| e.nick != entry.nick || e.proxy != entry.proxy) {
+            return Err(Refuse("server_ambiguous"));
+        }
+        let addr: SocketAddr = entry.address.parse().map_err(|_| Refuse("server_bad_entry"))?;
+        if is_loopback(addr) || !valid_nick(&entry.nick) {
+            return Err(Refuse("server_bad_entry"));
+        }
+        return Ok(Target {
+            key: entry.address.clone(),
+            addr,
+            nick: entry.nick.clone(),
+            public: true,
+            reopen: Reopen::AllowListEdit,
+        });
     }
-    let ready: Vec<_> = listed.iter().filter(|e| e.ready).collect();
-    let Some(entry) = ready.first() else {
-        return Err(Refuse("server_not_ready"));
+    // Not an allow-list entry: only a favourite can be meant. A favourites file that cannot be trusted means none can.
+    let favs = favs.as_ref().map_err(|code| Refuse(code))?;
+    // A host name in the allow-list can hide the address a favourite names, and nothing here resolves names: no favourite while one
+    // exists (review 5.12 F2; the owner's file has IP literals only).
+    if live.has_non_literal_entry() {
+        return Err(Refuse("allowlist_not_literal"));
+    }
+    let Some(fav) = favs.find(selector) else {
+        return Err(Refuse("server_not_allowed"));
     };
-    if ready.iter().any(|e| e.nick != entry.nick || e.proxy != entry.proxy) {
+    target_of_favourite(fav, live, rules)
+}
+
+/// A favourite as a start target: validated again (the file's own parse already did, this is for callers that built one), and
+/// refused when the allow-list also names the same server (two statements about one server would be a guess).
+fn target_of_favourite(fav: &Favourite, live: &LiveServers, rules: Rules) -> Result<Target, Refuse> {
+    fav.validate(rules).map_err(|e| Refuse(e.code()))?;
+    let addr = fav.socket_addr().ok_or(Refuse("server_bad_entry"))?;
+    if live.listed(addr) {
         return Err(Refuse("server_ambiguous"));
     }
-    let addr: SocketAddr = entry.address.parse().map_err(|_| Refuse("server_bad_entry"))?;
-    if is_loopback(addr) || !valid_nick(&entry.nick) {
-        return Err(Refuse("server_bad_entry"));
-    }
     Ok(Target {
-        key: entry.address.clone(),
+        key: fav.address.clone(),
         addr,
-        nick: entry.nick.clone(),
+        nick: fav.nick.clone(),
         public: true,
+        reopen: Reopen::Favourite {
+            reopened_at: fav.reopened_at,
+        },
     })
 }
 
@@ -312,13 +414,21 @@ fn configured_bundle(config: &Path, data_dir: &Path) -> Result<PathBuf, Refuse> 
     Ok(path)
 }
 
+/// Everything a start is judged against besides the state: the owner's two lists.
+struct Catalog<'a> {
+    live: &'a LiveServers,
+    favs: &'a FavouritesView,
+    rules: Rules,
+    /// Unix seconds when the owner last edited the allow-list: a ban of an allow-list entry stays until the file is newer. A
+    /// favourite is re-opened by its own `reopened_at` instead.
+    live_servers_mtime: u64,
+}
+
 /// Judges a start request against the allow-lists and the rate rules. `state` is `None` when the state file cannot be trusted
 /// (everything is then refused, the local server too: the file may hold a ban).
-/// `live_servers_mtime` (unix seconds) is when the owner last edited the allow-list: a ban stays until the file is newer.
 fn decide(
     req: &LaunchRequest,
-    live: &LiveServers,
-    live_servers_mtime: u64,
+    cat: &Catalog,
     state: Option<&State>,
     bundle: &dyn Fn() -> Result<PathBuf, Refuse>,
     now: u64,
@@ -333,7 +443,7 @@ fn decide(
     if sparring > MAX_SPARRING {
         return Err(Refuse("bad_request"));
     }
-    let target = resolve_server(selector, live)?;
+    let target = resolve_server(selector, cat.live, cat.favs, cat.rules)?;
     if sparring > 0 && target.public {
         return Err(Refuse("sparring_local_only"));
     }
@@ -343,9 +453,7 @@ fn decide(
     match state {
         None => return Err(Refuse("state_unreadable")),
         Some(st) => {
-            if let Some(block) = st.blocked.get(&target.key)
-                && live_servers_mtime <= block.at
-            {
+            if !st.closing_blocks(&target, cat.live_servers_mtime).is_empty() {
                 return Err(Refuse("blocked_after_ban"));
             }
             if let Some(exit) = st.last_exit
@@ -597,6 +705,31 @@ fn write_status(paths: &Paths, status: &LaunchStatus) {
     }
 }
 
+/// Tells the web which servers the bot was kicked or banned from and has not been re-opened (`blocked.json` next to the status, root
+/// owned, world readable: addresses, times and exit codes only, never a reason text). The web shows «закрыт» and «Открыть снова»
+/// from it; what actually closes a server is the memory in `state`, never this file.
+fn publish_blocked(paths: &Paths, state: &State, now: u64) {
+    let file = BlockedFile {
+        v: 1,
+        at: now,
+        blocked: state
+            .blocked
+            .iter()
+            .map(|(address, b)| BlockedEntry {
+                address: address.clone(),
+                at: b.at,
+                code: b.code,
+            })
+            .collect(),
+    };
+    let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
+        return;
+    };
+    if let Err(e) = write_root_file(&paths.status_dir.join(BLOCKED_FILE), &bytes, 0o644) {
+        eprintln!("launch: could not write the blocked list: {e}");
+    }
+}
+
 fn refused(paths: &Paths, now: u64, id: Option<&str>, code: &str) {
     let mut status = LaunchStatus::new(RunState::Refused, now);
     status.request_id = id.map(str::to_string);
@@ -620,10 +753,27 @@ fn status_of(info: &LaunchInfo, state: RunState, now: u64) -> LaunchStatus {
 // apply
 // ---------------------------------------------------------------------------------------------
 
+/// A binary that accepts loopback favourites (a test build) must never run as the root helper: it would start a bot against a local
+/// service named by a web-written file (task 5.12 review F5). `deploy/install-launcher.sh` refuses to install one as well.
+fn refuse_test_build_as_root() -> Option<ExitCode> {
+    let uid = std::fs::metadata("/proc/self").map_or(u32::MAX, |m| m.uid());
+    if Rules::current().allow_loopback && uid == 0 {
+        eprintln!("launch: refusing to run: this is a test build (+loopback-favourites) and this is the root helper");
+        return Some(ExitCode::FAILURE);
+    }
+    None
+}
+
 pub fn run(args: LaunchArgs) -> ExitCode {
+    if matches!(args.command, LaunchCommand::Apply(_) | LaunchCommand::Exited(_))
+        && let Some(code) = refuse_test_build_as_root()
+    {
+        return code;
+    }
     match args.command {
         LaunchCommand::Apply(a) => apply(&a),
         LaunchCommand::Exited(p) => exited(&p.resolve()),
+        LaunchCommand::CheckProxy(a) => check_proxy(&a),
     }
 }
 
@@ -696,6 +846,9 @@ fn apply(args: &ApplyArgs) -> ExitCode {
 
 fn apply_stop(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
     let _ = with_state(&paths.state, |st| st.stop_requested_at = now);
+    if let Ok(st) = load_state(&paths.state) {
+        publish_blocked(paths, &st, now);
+    }
     let ok = stop_all();
     reset_to_local(paths);
     let _ = systemctl(&["daemon-reload"]);
@@ -725,16 +878,26 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
             return ExitCode::SUCCESS;
         }
     };
+    // Task 5.12: the owner's favourites, validated again here (the file is the web's, so nothing in it is trusted).
+    let rules = Rules::current();
+    let favs: FavouritesView = match favourites::load(&paths.launch_dir.join(favourites::FILE_NAME), rules) {
+        Ok(f) => Ok(f),
+        Err(favourites::LoadError::Unreadable) => Err("favourites_unreadable"),
+        Err(favourites::LoadError::Invalid(_)) => Err("favourites_invalid"),
+    };
+    let live_mtime = mtime_secs(&paths.live_servers);
+    let cat = Catalog {
+        live: &live,
+        favs: &favs,
+        rules,
+        live_servers_mtime: live_mtime,
+    };
     let state = load_state(&paths.state).ok();
+    if let Some(st) = &state {
+        publish_blocked(paths, st, now);
+    }
     let bundle = || configured_bundle(&paths.config, &paths.data_dir);
-    let plan = match decide(
-        req,
-        &live,
-        mtime_secs(&paths.live_servers),
-        state.as_ref(),
-        &bundle,
-        now,
-    ) {
+    let plan = match decide(req, &cat, state.as_ref(), &bundle, now) {
         Ok(p) => p,
         Err(Refuse(code)) => {
             refused(paths, now, id, code);
@@ -759,7 +922,17 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let secrets_dir = ddai_client::proxy::secrets_dir_for(&paths.data_dir);
-    let filter = match filter_for(&plan, &live, &secrets_dir) {
+    // The proxy is resolved on the allow-list plus the favourites, the one list the bot's own gate reads (`prepare_client`), so the
+    // cgroup filter written here and the proxy the bot loads cannot disagree. The target was found in exactly one of them.
+    let merged = match (&favs, plan.target.reopen) {
+        (Ok(f), Reopen::Favourite { .. }) => live.clone().with_favourites(f).ok(),
+        _ => Some(live.clone()),
+    };
+    let Some(merged) = merged else {
+        refused(paths, now, id, "server_ambiguous");
+        return ExitCode::SUCCESS;
+    };
+    let filter = match filter_for(&plan, &merged, &secrets_dir) {
         Ok(filter) => filter,
         Err(Refuse(code)) => {
             refused(paths, now, id, code);
@@ -781,6 +954,7 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         duration: plan.duration,
         sparring: plan.sparring,
         public: plan.target.public,
+        favourite: matches!(plan.target.reopen, Reopen::Favourite { .. }),
         bundle: plan.bundle.as_deref().map(bundle_run_name),
     };
     let fail = |code: &str| {
@@ -794,12 +968,12 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
     // The memory is committed BEFORE anything is written or started, and the policy is judged again on the fresh state inside the
     // lock: the exit hook may have recorded a kick or ban since the first look (review F4), and that must not be overwritten.
     let committed = with_state(&paths.state, |st| {
-        decide(req, &live, mtime_secs(&paths.live_servers), Some(st), &bundle, now)?;
+        decide(req, &cat, Some(st), &bundle, now)?;
         st.last_start_at = now;
         st.last_launch = Some(info.clone());
         st.stop_requested_at = 0;
-        // Only a ban that `decide` has just found re-opened (the allow-list was edited after it) is still here to remove.
-        st.blocked.remove(&plan.target.key);
+        // Bans are never forgotten: one that the target's re-opening has lifted is inert (its time is older than the re-opening) and
+        // keeps closing every OTHER address on the same IP until that favourite has its own re-opening.
         Ok::<(), Refuse>(())
     });
     match committed {
@@ -813,6 +987,9 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(_) => return fail("state_write_failed"),
+    }
+    if let Ok(st) = load_state(&paths.state) {
+        publish_blocked(paths, &st, now);
     }
     write_status(paths, &status_of(&info, RunState::Started, now));
 
@@ -846,6 +1023,161 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         "launch: started (brain {:?}, local {}, sparring {})",
         plan.brain, !plan.target.public, plan.sparring
     );
+    ExitCode::SUCCESS
+}
+
+// ---------------------------------------------------------------------------------------------
+// check-proxy (the site's «Проверить», task 5.12)
+// ---------------------------------------------------------------------------------------------
+
+fn check_result_base(id: &str, proxy: &str, now: u64, code: &str) -> ProxyCheckResult {
+    ProxyCheckResult {
+        v: 1,
+        id: id.to_string(),
+        at: now,
+        proxy: proxy.to_string(),
+        ok: code == "ok",
+        code: code.to_string(),
+        relay: None,
+        relay_mode: None,
+        udp_rtt_ms: None,
+        probe_sent: None,
+        probe_replies: None,
+    }
+}
+
+/// What the page is told about a finished check: fixed codes and numbers, never an address, a user name or a password (the
+/// error's own text is not forwarded: it can name a step, and `Display` is for terminals).
+fn check_result(id: &str, proxy: &str, now: u64, result: &Result<ProxyCheck, Socks5Error>) -> ProxyCheckResult {
+    match result {
+        Ok(c) => {
+            let mut r = check_result_base(id, proxy, now, "ok");
+            r.relay = Some(
+                match c.relay_host {
+                    RelayHost::SameAsProxy => "same_host",
+                    RelayHost::Substituted => "substituted",
+                    RelayHost::Remote => "remote",
+                }
+                .to_string(),
+            );
+            r.relay_mode = Some(c.mode.as_str().to_string());
+            if let Some(p) = &c.probe {
+                r.udp_rtt_ms = Some(u64::try_from(p.median.as_millis()).unwrap_or(u64::MAX));
+                r.probe_sent = Some(p.sent);
+                r.probe_replies = Some(p.replies);
+            } else if let Some(s) = &c.sessions
+                && let Some(Some(rtt)) = s.rtts.get(s.picked)
+            {
+                r.udp_rtt_ms = Some(u64::try_from(rtt.as_millis()).unwrap_or(u64::MAX));
+            }
+            r
+        }
+        Err(e) => {
+            let code = match e {
+                Socks5Error::UdpNotSupported => "udp_not_supported",
+                Socks5Error::AuthFailed => "auth_failed",
+                Socks5Error::NoAcceptableMethod | Socks5Error::UnsupportedMethod(_) => "no_auth_method",
+                Socks5Error::Timeout { .. } => "timeout",
+                Socks5Error::Io { .. } | Socks5Error::Closed { .. } | Socks5Error::ControlClosed => "connect_failed",
+                Socks5Error::Refused { .. } => "refused",
+                Socks5Error::Protocol(_) => "protocol_error",
+                Socks5Error::RelayAddress(_) => "relay_refused",
+                Socks5Error::ProbeFailed => "probe_failed",
+            };
+            check_result_base(id, proxy, now, code)
+        }
+    }
+}
+
+/// A profile the site made has a public IP-literal host (the site refuses anything else); one that does not is not the site's doing, and
+/// the check must not connect there (review 5.12 F4). Hand-made profiles (no `managed_by`) are the owner's own and unchanged.
+fn managed_host_refused(secrets_dir: &Path, name: &str, rules: Rules) -> bool {
+    let Ok(path) = ddai_client::proxy::proxy_file_path(secrets_dir, name) else {
+        return false;
+    };
+    let Ok(bytes) = read_regular_nofollow(&path, 64 * 1024) else {
+        return false;
+    };
+    let Some(table) = String::from_utf8(bytes)
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+    else {
+        return false;
+    };
+    if table.get("managed_by").and_then(toml::Value::as_str) != Some(ddai_web::serverbrowser::proxies::MANAGED_VALUE) {
+        return false;
+    }
+    let host_ok = table
+        .get("host")
+        .and_then(toml::Value::as_str)
+        .and_then(|h| h.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|ip| ddai_client::relay_rule::is_public_unicast(ip) || (rules.allow_loopback && ip.is_loopback()));
+    !host_ok
+}
+
+fn check_proxy(args: &CheckProxyArgs) -> ExitCode {
+    let data_dir = args.data_dir.clone().unwrap_or_else(|| match std::env::var_os("HOME") {
+        Some(h) if !h.is_empty() => PathBuf::from(h).join("aiddnet").join("data"),
+        _ => PathBuf::from("data"),
+    });
+    let launch_dir = data_dir.join("launch");
+    let request_path = launch_dir.join(PROXY_CHECK_REQUEST_FILE);
+    let read = read_regular_nofollow_with_mtime(&request_path, MAX_PROXY_CHECK_BYTES);
+    if matches!(read, Err(ReadError::Missing)) {
+        eprintln!("check-proxy: no request, nothing to do");
+        return ExitCode::SUCCESS;
+    }
+    // Consumed before it is looked at: a request is never replayed.
+    discard(&request_path);
+    let now = unix_now();
+    let write = |result: &ProxyCheckResult| {
+        let Ok(bytes) = serde_json::to_vec_pretty(result) else {
+            return;
+        };
+        if let Err(e) = write_atomic(&launch_dir, PROXY_CHECK_RESULT_FILE, &bytes, 0o644) {
+            eprintln!("check-proxy: could not write the result: {e}");
+        }
+    };
+    let (bytes, mtime) = match read {
+        Ok(b) => b,
+        Err(_) => {
+            write(&check_result_base("", "", now, "bad_request"));
+            return ExitCode::SUCCESS;
+        }
+    };
+    let req = match parse_proxy_check_request(&bytes) {
+        Ok(r) => r,
+        Err(_) => {
+            write(&check_result_base("", "", now, "bad_request"));
+            return ExitCode::SUCCESS;
+        }
+    };
+    if !request_is_fresh(req.ts, mtime, now) {
+        write(&check_result_base(&req.id, &req.proxy, now, "request_stale"));
+        return ExitCode::SUCCESS;
+    }
+    let secrets_dir = ddai_client::proxy::secrets_dir_for(&data_dir);
+    if managed_host_refused(&secrets_dir, &req.proxy, Rules::current()) {
+        write(&check_result_base(&req.id, &req.proxy, now, "proxy_host_refused"));
+        return ExitCode::SUCCESS;
+    }
+    let cfg = match ddai_client::proxy::load_proxy(&secrets_dir, &req.proxy) {
+        Ok(c) => c,
+        Err(ddai_client::proxy::ProxyLoadError::Missing { .. }) => {
+            write(&check_result_base(&req.id, &req.proxy, now, "proxy_missing"));
+            return ExitCode::SUCCESS;
+        }
+        Err(_) => {
+            write(&check_result_base(&req.id, &req.proxy, now, "proxy_file_bad"));
+            return ExitCode::SUCCESS;
+        }
+    };
+    // The check sends nothing to any game server (`ddai_client::socks5::check`): the handshake, `UDP ASSOCIATE`, and for a public
+    // relay a DNS probe to a public resolver through it.
+    let outcome = ddai_client::socks5::check(&cfg, &Timeouts::default());
+    let result = check_result(&req.id, &req.proxy, unix_now(), &outcome);
+    write(&result);
+    eprintln!("check-proxy: done ({})", result.code);
     ExitCode::SUCCESS
 }
 
@@ -903,11 +1235,18 @@ fn exited(paths: &Paths) -> ExitCode {
         let (state, reason) = classify_exit(code, stop_requested, time_up);
         if let Some(c @ (3 | 4)) = code {
             st.last_exit = Some(ExitInfo { at: now, code: c });
-            // A kick/ban on a public server stays in force until the owner edits the allow-list again.
+            // A kick/ban on a public server (an allow-list entry or a favourite) stays in force until the owner re-opens it.
             if let Some(info) = &launch
                 && info.public
             {
-                st.blocked.insert(info.server.clone(), Block { at: now, code: c });
+                st.blocked.insert(
+                    info.server.clone(),
+                    Block {
+                        at: now,
+                        code: c,
+                        favourite: info.favourite,
+                    },
+                );
             }
         }
         st.stop_requested_at = 0;
@@ -920,6 +1259,9 @@ fn exited(paths: &Paths) -> ExitCode {
         eprintln!("launch: could not update the state");
         return ExitCode::SUCCESS;
     };
+    if let Ok(st) = load_state(&paths.state) {
+        publish_blocked(paths, &st, now);
+    }
     if no_restart {
         reset_to_local(paths);
     }
@@ -972,7 +1314,25 @@ mod tests {
         mtime: u64,
         now: u64,
     ) -> Result<Plan, Refuse> {
-        decide(r, l, mtime, st, &bundle_ok, now)
+        decide_fav(r, l, &Favourites::default(), st, mtime, now)
+    }
+
+    fn decide_fav(
+        r: &LaunchRequest,
+        l: &LiveServers,
+        f: &Favourites,
+        st: Option<&State>,
+        mtime: u64,
+        now: u64,
+    ) -> Result<Plan, Refuse> {
+        let favs: FavouritesView = Ok(f.clone());
+        let cat = Catalog {
+            live: l,
+            favs: &favs,
+            rules: Rules::default(),
+            live_servers_mtime: mtime,
+        };
+        decide(r, &cat, st, &bundle_ok, now)
     }
 
     #[test]
@@ -1080,12 +1440,20 @@ mod tests {
     fn a_missing_bundle_refuses_the_fly_brains_only() {
         let missing = || Err(Refuse("bundle_missing"));
         let mut r = req("local");
+        let favs: FavouritesView = Ok(Favourites::default());
+        let live = LiveServers::default();
+        let cat = Catalog {
+            live: &live,
+            favs: &favs,
+            rules: Rules::default(),
+            live_servers_mtime: 0,
+        };
         assert_eq!(
-            decide(&r, &LiveServers::default(), 0, Some(&State::default()), &missing, 1000),
+            decide(&r, &cat, Some(&State::default()), &missing, 1000),
             Err(Refuse("bundle_missing"))
         );
         r.brain = Some(Brain::Hybrid);
-        assert!(decide(&r, &LiveServers::default(), 0, Some(&State::default()), &missing, 1000).is_ok());
+        assert!(decide(&r, &cat, Some(&State::default()), &missing, 1000).is_ok());
     }
 
     #[test]
@@ -1132,8 +1500,14 @@ mod tests {
     fn a_banned_public_server_stays_refused_until_the_allow_list_is_edited_after_the_ban() {
         let l = live(PUBLIC);
         let mut st = State::default();
-        st.blocked
-            .insert("203.0.113.5:8308".to_string(), Block { at: 5000, code: 3 });
+        st.blocked.insert(
+            "203.0.113.5:8308".to_string(),
+            Block {
+                at: 5000,
+                code: 3,
+                favourite: false,
+            },
+        );
         // Long after the cool-down, still refused: the file is older than the ban (or the same second).
         assert_eq!(
             decide_with(&req("203.0.113.5:8308"), &l, Some(&st), 4000, 9000),
@@ -1430,13 +1804,623 @@ mod tests {
         let path = dir.path().join("sub/state.json");
         with_state(&path, |st| {
             st.last_start_at = 7;
-            st.blocked.insert("a:1".into(), Block { at: 9, code: 3 });
+            st.blocked.insert(
+                "a:1".into(),
+                Block {
+                    at: 9,
+                    code: 3,
+                    favourite: false,
+                },
+            );
         })
         .unwrap();
-        assert_eq!(load_state(&path).unwrap().blocked["a:1"], Block { at: 9, code: 3 });
+        assert_eq!(
+            load_state(&path).unwrap().blocked["a:1"],
+            Block {
+                at: 9,
+                code: 3,
+                favourite: false
+            }
+        );
         std::fs::write(&path, b"{ not json").unwrap();
         assert!(load_state(&path).is_err());
         assert!(with_state(&path, |_| ()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+    }
+
+    // --- task 5.12 (D-099): favourites -------------------------------------------------------------------------
+
+    const FAV_ADDR: &str = "45.141.57.35:8308";
+    const FAV_SIBLING: &str = "45.141.57.35:8309";
+    const FAV_OTHER: &str = "93.184.216.34:8303";
+
+    fn fav(address: &str, connection: &str) -> Favourite {
+        Favourite {
+            address: address.to_string(),
+            name: "Some Block Server".to_string(),
+            nick: "Muha".to_string(),
+            connection: connection.to_string(),
+            consent_at: 1_700_000_000,
+            notes: String::new(),
+            added_at: 1_700_000_000,
+            reopened_at: 0,
+        }
+    }
+
+    fn favs(list: Vec<Favourite>) -> Favourites {
+        Favourites {
+            v: favourites::FILE_VERSION,
+            favourites: list,
+        }
+    }
+
+    fn blocked_state(address: &str, at: u64) -> State {
+        let mut st = State::default();
+        st.blocked.insert(
+            address.to_string(),
+            Block {
+                at,
+                code: 3,
+                favourite: false,
+            },
+        );
+        st
+    }
+
+    #[test]
+    fn a_favourite_is_planned_like_a_ready_entry_with_its_own_nick_and_nothing_from_the_request() {
+        let mut f = fav(FAV_ADDR, "direct");
+        f.nick = "Muha2".to_string();
+        let plan = decide_fav(
+            &req(FAV_ADDR),
+            &LiveServers::default(),
+            &favs(vec![f]),
+            Some(&State::default()),
+            0,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(plan.target.addr.to_string(), FAV_ADDR);
+        assert_eq!(plan.target.nick, "Muha2");
+        assert!(plan.target.public);
+        assert_eq!(plan.target.reopen, Reopen::Favourite { reopened_at: 0 });
+        // Not a favourite: refused, whatever it looks like.
+        for s in [
+            FAV_OTHER,
+            FAV_SIBLING,
+            "45.141.57.36:8308",
+            "127.0.0.1:8463",
+            "Local",
+            "",
+            "45.141.57.35:8308 ",
+        ] {
+            assert_eq!(
+                decide_fav(
+                    &req(s),
+                    &LiveServers::default(),
+                    &favs(vec![fav(FAV_ADDR, "direct")]),
+                    Some(&State::default()),
+                    0,
+                    1000
+                ),
+                Err(Refuse("server_not_allowed")),
+                "{s:?}"
+            );
+        }
+        // Sparring is for the local server only, favourites included.
+        let mut r = req(FAV_ADDR);
+        r.sparring = Some(1);
+        assert_eq!(
+            decide_fav(
+                &r,
+                &LiveServers::default(),
+                &favs(vec![fav(FAV_ADDR, "direct")]),
+                Some(&State::default()),
+                0,
+                1000
+            ),
+            Err(Refuse("sparring_local_only"))
+        );
+    }
+
+    #[test]
+    fn a_favourite_the_helper_cannot_trust_is_refused_whatever_the_file_said() {
+        let live = LiveServers::default();
+        let st = State::default();
+        let go = |f: Favourite| decide_fav(&req(&f.address), &live, &favs(vec![f]), Some(&st), 0, 1000);
+        // Built by hand (a writer bug, a hand edit): the helper validates again.
+        for (bad, code) in [
+            (fav("10.0.0.5:8308", "direct"), "bad_address"),
+            (fav("127.0.0.1:8308", "direct"), "bad_address"),
+            (fav("203.0.113.5:8308", "direct"), "bad_address"),
+            (fav("example.com:8308", "direct"), "bad_address"),
+            (fav(FAV_ADDR, "proxy:../x"), "bad_connection"),
+            (fav(FAV_ADDR, "proxy:"), "bad_connection"),
+            (fav(FAV_ADDR, "Direct"), "bad_connection"),
+            (
+                Favourite {
+                    consent_at: 0,
+                    ..fav(FAV_ADDR, "direct")
+                },
+                "consent_required",
+            ),
+            (
+                Favourite {
+                    nick: "Mu ha; rm".to_string(),
+                    ..fav(FAV_ADDR, "direct")
+                },
+                "bad_nick",
+            ),
+            (
+                Favourite {
+                    nick: String::new(),
+                    ..fav(FAV_ADDR, "direct")
+                },
+                "bad_nick",
+            ),
+            (
+                Favourite {
+                    name: "a\nb".to_string(),
+                    ..fav(FAV_ADDR, "direct")
+                },
+                "bad_name",
+            ),
+        ] {
+            assert_eq!(go(bad.clone()), Err(Refuse(code)), "{bad:?}");
+        }
+        // A favourites file that cannot be trusted: no favourite can start; local still can.
+        for why in ["favourites_invalid", "favourites_unreadable"] {
+            let view: FavouritesView = Err(why);
+            let cat = Catalog {
+                live: &live,
+                favs: &view,
+                rules: Rules::default(),
+                live_servers_mtime: 0,
+            };
+            assert_eq!(
+                decide(&req(FAV_ADDR), &cat, Some(&st), &bundle_ok, 1000),
+                Err(Refuse(why))
+            );
+            assert!(decide(&req("local"), &cat, Some(&st), &bundle_ok, 1000).is_ok());
+        }
+        // The allow-list also names it: two statements about one server are refused.
+        let both = live_from(&format!(
+            "[[server]]\naddress = \"{FAV_ADDR}\"\nnick = \"Muha\"\nready = false\n"
+        ));
+        let list = favs(vec![fav(FAV_ADDR, "direct")]);
+        let clash = decide_fav(&req(FAV_ADDR), &both, &list, Some(&st), 0, 1000);
+        assert_eq!(
+            clash,
+            Err(Refuse("server_not_ready")),
+            "the allow-list entry is judged first, as it always was"
+        );
+        let ready_both = live_from(&format!(
+            "[[server]]\naddress = \"{FAV_ADDR}\"\nnick = \"Muha\"\nready = true\n"
+        ));
+        assert!(
+            decide_fav(&req(FAV_ADDR), &ready_both, &list, Some(&st), 0, 1000).is_ok(),
+            "an exact allow-list entry wins, nothing else changes"
+        );
+        // ... and a favourite that only resembles an allow-list entry on the same address under another spelling is a clash.
+        let list2 = favs(vec![fav(FAV_SIBLING, "direct")]);
+        let clash = live_from(&format!(
+            "[[server]]\naddress = \"{FAV_SIBLING}\"\nnick = \"X\"\nready = true\n"
+        ));
+        // (exact string equal -> the allow-list branch.) A different spelling never reaches here: the favourite parse refuses it.
+        assert!(decide_fav(&req(FAV_SIBLING), &clash, &list2, Some(&st), 0, 1000).is_ok());
+        // The allow-list names the same server in another spelling of the same address (an IPv6 literal in capitals): the favourite
+        // is a second statement about one server, and refused.
+        let v6_live = live_from("[[server]]\naddress = \"[2A01:4F8::1]:8303\"\nnick = \"X\"\nready = true\n");
+        let v6_fav = favs(vec![fav("[2a01:4f8::1]:8303", "direct")]);
+        assert_eq!(
+            decide_fav(&req("[2a01:4f8::1]:8303"), &v6_live, &v6_fav, Some(&st), 0, 1000),
+            Err(Refuse("server_ambiguous"))
+        );
+        // Loopback is refused under the production rules (the e2e build accepts it, see `Rules::current`).
+        let lo = fav("127.0.0.1:8463", "direct");
+        let view: FavouritesView = Ok(favs(vec![lo]));
+        let cat = Catalog {
+            live: &live,
+            favs: &view,
+            rules: Rules::default(),
+            live_servers_mtime: 0,
+        };
+        assert_eq!(
+            decide(&req("127.0.0.1:8463"), &cat, Some(&st), &bundle_ok, 1000),
+            Err(Refuse("bad_address"))
+        );
+        let cat = Catalog {
+            rules: Rules { allow_loopback: true },
+            ..cat
+        };
+        assert!(decide(&req("127.0.0.1:8463"), &cat, Some(&st), &bundle_ok, 1000).is_ok());
+    }
+
+    fn live_from(toml: &str) -> LiveServers {
+        live(toml)
+    }
+
+    #[test]
+    fn a_ban_closes_a_favourite_until_the_owner_reopens_it_and_no_edit_of_its_proxy_or_anything_else_does() {
+        let live = LiveServers::default();
+        let ban_at = 5000;
+        let st = blocked_state(FAV_ADDR, ban_at);
+        let mut f = fav(FAV_ADDR, "proxy:hp-1");
+        let go = |f: &Favourite, mtime: u64, now: u64| {
+            decide_fav(&req(FAV_ADDR), &live, &favs(vec![f.clone()]), Some(&st), mtime, now)
+        };
+        assert_eq!(go(&f, 0, 9000), Err(Refuse("blocked_after_ban")));
+        // Whatever the owner edits afterwards (another proxy, direct, the nick) it stays closed ...
+        for connection in ["proxy:hp-2", "direct", "proxy:hp-1"] {
+            f.connection = connection.to_string();
+            assert_eq!(go(&f, 0, 9000), Err(Refuse("blocked_after_ban")), "{connection}");
+        }
+        f.nick = "Other".to_string();
+        assert_eq!(go(&f, 0, 9000), Err(Refuse("blocked_after_ban")));
+        // ... and so does editing live-servers.toml (that re-opens allow-list entries, not favourites), even to a time after the ban.
+        assert_eq!(go(&f, ban_at + 1_000_000, 9000), Err(Refuse("blocked_after_ban")));
+        // Removing it and adding it again (a new entry, `reopened_at` 0) is not a re-opening.
+        let fresh = fav(FAV_ADDR, "direct");
+        assert_eq!(go(&fresh, 0, 9000), Err(Refuse("blocked_after_ban")));
+        // A re-open at or before the ban time does not lift it; one after it does.
+        f.reopened_at = ban_at;
+        assert_eq!(go(&f, 0, 9000), Err(Refuse("blocked_after_ban")));
+        f.reopened_at = ban_at - 1;
+        assert_eq!(go(&f, 0, 9000), Err(Refuse("blocked_after_ban")));
+        f.reopened_at = ban_at + 1;
+        assert!(go(&f, 0, 9000).is_ok());
+        // A newer ban closes it again (the earlier re-open is older than the new ban).
+        let st2 = blocked_state(FAV_ADDR, ban_at + 500);
+        assert_eq!(
+            decide_fav(&req(FAV_ADDR), &live, &favs(vec![f.clone()]), Some(&st2), 0, 9000),
+            Err(Refuse("blocked_after_ban"))
+        );
+    }
+
+    #[test]
+    fn a_ban_is_the_machines_not_one_ports_and_other_servers_are_unaffected() {
+        let live = LiveServers::default();
+        let st = blocked_state(FAV_ADDR, 5000);
+        let both = favs(vec![
+            fav(FAV_ADDR, "direct"),
+            fav(FAV_SIBLING, "direct"),
+            fav(FAV_OTHER, "direct"),
+        ]);
+        let go = |a: &str| decide_fav(&req(a), &live, &both, Some(&st), 0, 9000);
+        assert_eq!(go(FAV_ADDR), Err(Refuse("blocked_after_ban")));
+        assert_eq!(go(FAV_SIBLING), Err(Refuse("blocked_after_ban")), "the same IP");
+        assert!(go(FAV_OTHER).is_ok(), "another IP");
+        // The local server is never closed by anything.
+        assert!(decide_fav(&req("local"), &live, &both, Some(&st), 0, 9000).is_ok());
+        // The sibling's own re-open lifts the block for it (and only for the favourite that was re-opened).
+        let mut reopened = fav(FAV_SIBLING, "direct");
+        reopened.reopened_at = 6000;
+        let list = favs(vec![fav(FAV_ADDR, "direct"), reopened]);
+        assert!(decide_fav(&req(FAV_SIBLING), &live, &list, Some(&st), 0, 9000).is_ok());
+        assert_eq!(
+            decide_fav(&req(FAV_ADDR), &live, &list, Some(&st), 0, 9000),
+            Err(Refuse("blocked_after_ban"))
+        );
+    }
+
+    #[test]
+    fn the_cool_down_and_the_start_interval_apply_to_favourites_too() {
+        let live = LiveServers::default();
+        let list = favs(vec![fav(FAV_ADDR, "direct")]);
+        let st = State {
+            last_exit: Some(ExitInfo { at: 1000, code: 4 }),
+            ..State::default()
+        };
+        assert_eq!(
+            decide_fav(&req(FAV_ADDR), &live, &list, Some(&st), 0, 1119),
+            Err(Refuse("cooldown"))
+        );
+        assert!(decide_fav(&req(FAV_ADDR), &live, &list, Some(&st), 0, 1120).is_ok());
+        let st = State {
+            last_start_at: 1000,
+            ..State::default()
+        };
+        assert_eq!(
+            decide_fav(&req(FAV_ADDR), &live, &list, Some(&st), 0, 1029),
+            Err(Refuse("rate_limited"))
+        );
+        assert_eq!(
+            decide_fav(&req(FAV_ADDR), &live, &list, None, 0, 1029),
+            Err(Refuse("state_unreadable"))
+        );
+    }
+
+    #[test]
+    fn a_lifted_ban_is_inert_but_still_closes_the_other_addresses_on_that_ip() {
+        let live = LiveServers::default();
+        let st = blocked_state(FAV_ADDR, 5000);
+        let mut reopened = fav(FAV_ADDR, "direct");
+        reopened.reopened_at = 6000;
+        let list = favs(vec![reopened, fav(FAV_SIBLING, "direct")]);
+        assert!(decide_fav(&req(FAV_ADDR), &live, &list, Some(&st), 0, 9000).is_ok());
+        assert_eq!(
+            decide_fav(&req(FAV_SIBLING), &live, &list, Some(&st), 0, 9000),
+            Err(Refuse("blocked_after_ban")),
+            "the sibling needs its own re-opening"
+        );
+    }
+
+    #[test]
+    fn a_favourites_proxy_is_the_one_the_owner_named_and_a_missing_one_is_a_refusal_never_a_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, extra: &str| {
+            let path = dir.path().join(format!("{name}-proxy.toml"));
+            std::fs::write(&path, format!("host = \"198.51.100.7\"\nport = 1080\n{extra}")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write("hp-pub", "relay = \"public\"\n");
+        write("hp-host", "");
+        let plan_of = |f: Favourite| {
+            let list = favs(vec![f.clone()]);
+            let live = LiveServers::default();
+            let plan = decide_fav(&req(&f.address), &live, &list, Some(&State::default()), 0, 1000).expect("plan");
+            let merged = live.with_favourites(&list).unwrap();
+            (plan, merged)
+        };
+        let server: IpAddr = "45.141.57.35".parse().unwrap();
+        // A public relay: the server's IP is denied, nothing is allowed.
+        let (plan, merged) = plan_of(fav(FAV_ADDR, "proxy:hp-pub"));
+        assert_eq!(
+            filter_for(&plan, &merged, dir.path()),
+            Ok(Filter::DenyServer(vec![server]))
+        );
+        // A relay on the proxy's host: the proxy's IP is allowed.
+        let (plan, merged) = plan_of(fav(FAV_ADDR, "proxy:hp-host"));
+        assert_eq!(
+            filter_for(&plan, &merged, dir.path()),
+            Ok(Filter::Allow(vec!["198.51.100.7".parse().unwrap()]))
+        );
+        // Direct: the server's own IP.
+        let (plan, merged) = plan_of(fav(FAV_ADDR, "direct"));
+        assert_eq!(filter_for(&plan, &merged, dir.path()), Ok(Filter::Allow(vec![server])));
+        // The named proxy is gone (or unsafe), while another one exists: a refusal. Not direct, not the other proxy.
+        let (plan, merged) = plan_of(fav(FAV_ADDR, "proxy:gone"));
+        assert_eq!(filter_for(&plan, &merged, dir.path()), Err(Refuse("proxy_error")));
+        let path = dir.path().join("hp-host-proxy.toml");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (plan, merged) = plan_of(fav(FAV_ADDR, "proxy:hp-host"));
+        assert_eq!(filter_for(&plan, &merged, dir.path()), Err(Refuse("proxy_error")));
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("hp-pub-proxy.toml"), &path).unwrap();
+        assert_eq!(
+            filter_for(&plan, &merged, dir.path()),
+            Err(Refuse("proxy_error")),
+            "a symlink is not followed"
+        );
+    }
+
+    #[test]
+    fn the_blocked_list_for_the_web_holds_addresses_times_and_codes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            data_dir: dir.path().to_path_buf(),
+            live_servers: dir.path().join("l.toml"),
+            config: dir.path().join("c.toml"),
+            env_file: dir.path().join("e"),
+            dropin: dir.path().join("d"),
+            state: dir.path().join("s.json"),
+            launch_dir: dir.path().join("launch"),
+            status_dir: dir.path().join("status"),
+        };
+        let st = blocked_state(FAV_ADDR, 5000);
+        publish_blocked(&paths, &st, 7000);
+        let text = std::fs::read_to_string(paths.status_dir.join(BLOCKED_FILE)).unwrap();
+        let file: BlockedFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (
+                file.v,
+                file.at,
+                file.blocked.len(),
+                file.blocked[0].address.as_str(),
+                file.blocked[0].at,
+                file.blocked[0].code
+            ),
+            (1, 7000, 1, FAV_ADDR, 5000, 3)
+        );
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(paths.status_dir.join(BLOCKED_FILE))
+                    .unwrap()
+                    .permissions()
+            ) & 0o777,
+            0o644
+        );
+    }
+
+    // --- check-proxy: the page is told codes and numbers, never a value ---------------------------------------------
+
+    #[test]
+    fn the_check_result_has_fixed_codes_and_no_address_or_credential() {
+        use ddai_client::proxy::RelayMode;
+        use ddai_client::socks5::{ProbeReport, SessionReport, Step};
+        use std::time::Duration;
+        let ok = check_result(
+            "0123456789abcdef",
+            "hp",
+            9,
+            &Ok(ProxyCheck {
+                relay_host: RelayHost::Remote,
+                relay_port: 4242,
+                authenticated: true,
+                mode: RelayMode::Public,
+                probe: Some(ProbeReport {
+                    sent: 5,
+                    replies: 4,
+                    median: Duration::from_millis(22),
+                }),
+                sessions: None,
+            }),
+        );
+        assert!(ok.ok);
+        assert_eq!(
+            (
+                ok.code.as_str(),
+                ok.relay.as_deref(),
+                ok.relay_mode.as_deref(),
+                ok.udp_rtt_ms,
+                ok.probe_sent,
+                ok.probe_replies
+            ),
+            ("ok", Some("remote"), Some("public"), Some(22), Some(5), Some(4))
+        );
+        let picked = check_result(
+            "0123456789abcdef",
+            "hp",
+            9,
+            &Ok(ProxyCheck {
+                relay_host: RelayHost::SameAsProxy,
+                relay_port: 1,
+                authenticated: false,
+                mode: RelayMode::ProxyHostOnly,
+                probe: None,
+                sessions: Some(SessionReport {
+                    rtts: vec![None, Some(Duration::from_millis(40))],
+                    picked: 1,
+                }),
+            }),
+        );
+        assert_eq!(
+            (picked.relay.as_deref(), picked.udp_rtt_ms),
+            (Some("same_host"), Some(40))
+        );
+        for (e, code) in [
+            (Socks5Error::UdpNotSupported, "udp_not_supported"),
+            (Socks5Error::AuthFailed, "auth_failed"),
+            (Socks5Error::NoAcceptableMethod, "no_auth_method"),
+            (Socks5Error::UnsupportedMethod(9), "no_auth_method"),
+            (Socks5Error::Timeout { step: Step::Connect }, "timeout"),
+            (Socks5Error::Closed { step: Step::Connect }, "connect_failed"),
+            (Socks5Error::ControlClosed, "connect_failed"),
+            (
+                Socks5Error::Refused {
+                    code: 5,
+                    meaning: "refused",
+                },
+                "refused",
+            ),
+            (Socks5Error::Protocol("x"), "protocol_error"),
+            (Socks5Error::RelayAddress("private 10.1.2.3"), "relay_refused"),
+            (Socks5Error::ProbeFailed, "probe_failed"),
+        ] {
+            let r = check_result("0123456789abcdef", "hp", 9, &Err(e));
+            assert_eq!((r.ok, r.code.as_str()), (false, code));
+            let text = serde_json::to_string(&r).unwrap();
+            assert!(!text.contains("10.1.2.3"), "{text}");
+        }
+    }
+
+    // --- review 5.12 round 1 ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_reopening_dated_in_the_future_is_refused_by_the_helper() {
+        let live = LiveServers::default();
+        let st = blocked_state(FAV_ADDR, 5000);
+        for future in [99_999_999_999u64, u64::MAX] {
+            let mut f = fav(FAV_ADDR, "direct");
+            f.reopened_at = future;
+            assert_eq!(
+                decide_fav(&req(FAV_ADDR), &live, &favs(vec![f]), Some(&st), 0, 9000),
+                Err(Refuse("reopened_invalid")),
+                "{future}"
+            );
+        }
+        // A file that holds one is refused as a whole when it is read.
+        let mut f = fav(FAV_ADDR, "direct");
+        f.reopened_at = 99_999_999_999;
+        let bytes = serde_json::to_vec(&favs(vec![f])).unwrap();
+        assert!(Favourites::parse(&bytes, Rules::default()).is_err());
+    }
+
+    #[test]
+    fn a_host_name_in_the_allow_list_closes_the_favourites_door() {
+        let named = live(
+            "[[server]]\naddress = \"one.one.one.one:8303\"\nnick = \"Muha\"\nready = true\nproxy = \"swarfey\"\n",
+        );
+        let list = favs(vec![fav("1.1.1.1:8303", "direct")]);
+        assert_eq!(
+            decide_fav(&req("1.1.1.1:8303"), &named, &list, Some(&State::default()), 0, 9000),
+            Err(Refuse("allowlist_not_literal"))
+        );
+        // Literal entries only: favourites work.
+        let literal = live("[[server]]\naddress = \"203.0.113.5:8308\"\nnick = \"Muha\"\nready = true\n");
+        assert!(decide_fav(&req("1.1.1.1:8303"), &literal, &list, Some(&State::default()), 0, 9000).is_ok());
+    }
+
+    #[test]
+    fn an_allow_list_edit_never_lifts_a_ban_recorded_for_a_favourite() {
+        // The favourite 45.141.57.35:8308 was banned; the allow-list names a sibling port on the same IP.
+        let sibling = live(&format!(
+            "[[server]]\naddress = \"{FAV_SIBLING}\"\nnick = \"Muha\"\nready = true\n"
+        ));
+        let mut st = State::default();
+        st.blocked.insert(
+            FAV_ADDR.to_string(),
+            Block {
+                at: 5000,
+                code: 3,
+                favourite: true,
+            },
+        );
+        // Any later edit of live-servers.toml: still closed.
+        assert_eq!(
+            decide_with(&req(FAV_SIBLING), &sibling, Some(&st), 1_000_000, 9000),
+            Err(Refuse("blocked_after_ban"))
+        );
+        // The favourite's own re-opening lifts it for the favourite, and an allow-list-origin block is still lifted by the edit.
+        let mut reopened = fav(FAV_ADDR, "direct");
+        reopened.reopened_at = 6000;
+        assert!(
+            decide_fav(
+                &req(FAV_ADDR),
+                &LiveServers::default(),
+                &favs(vec![reopened]),
+                Some(&st),
+                0,
+                9000
+            )
+            .is_ok()
+        );
+        let st2 = blocked_state(FAV_ADDR, 5000); // origin: allow-list
+        assert!(decide_with(&req(FAV_SIBLING), &sibling, Some(&st2), 1_000_000, 9000).is_ok());
+        assert_eq!(
+            decide_with(&req(FAV_SIBLING), &sibling, Some(&st2), 100, 9000),
+            Err(Refuse("blocked_after_ban"))
+        );
+    }
+
+    #[test]
+    fn a_site_made_profile_host_must_be_public_and_loopback_only_in_a_test_build() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let path = dir.path().join(format!("{name}-proxy.toml"));
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let prod = Rules::default();
+        let test = Rules { allow_loopback: true };
+        write(
+            "site",
+            "managed_by = \"ddnet-ai-web\"\nhost = \"127.0.0.1\"\nport = 1\n",
+        );
+        assert!(managed_host_refused(dir.path(), "site", prod));
+        assert!(!managed_host_refused(dir.path(), "site", test));
+        write(
+            "pub",
+            "managed_by = \"ddnet-ai-web\"\nhost = \"93.184.216.34\"\nport = 1\n",
+        );
+        assert!(!managed_host_refused(dir.path(), "pub", prod));
+        write("v6", "managed_by = \"ddnet-ai-web\"\nhost = \"::1\"\nport = 1\n");
+        assert!(managed_host_refused(dir.path(), "v6", prod));
+        // A hand-made profile is the owner's own, whatever its host.
+        write("hand", "host = \"10.0.0.1\"\nport = 1\n");
+        assert!(!managed_host_refused(dir.path(), "hand", prod));
+        assert!(!managed_host_refused(dir.path(), "missing", prod));
     }
 }

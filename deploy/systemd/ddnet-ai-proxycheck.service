@@ -1,0 +1,57 @@
+# The site's «Проверить» button for a proxy profile (task 5.12, D-099): `ddnet-ai launch check-proxy` consumes
+# data/launch/proxycheck-request.json (a few dozen bytes naming a profile), runs the same check as `ddnet-ai proxy-check` (TCP connect, login,
+# UDP ASSOCIATE; for a public relay a DNS probe to a public resolver through it; nothing is ever sent to a game server) and writes
+# data/launch/proxycheck-result.json: fixed codes and numbers, never an address, a user name or a password.
+#
+# The web unit has no network, so the check runs here. It needs nothing root has: it is the owner's user, the home directory is an empty
+# tmpfs with only the secrets (read-only) and the launch directory (read-write: the request is removed, the result written) mounted into
+# it, no capability, no private network range reachable. Installed by deploy/install-launcher.sh.
+
+[Unit]
+Description=Server browser: check a proxy profile (the site's «Проверить»)
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/libexec/ddnet-ai/ddnet-ai launch check-proxy --data-dir /home/ubuntu/aiddnet/data
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Environment=NO_COLOR=1
+TimeoutStartSec=45
+UMask=0022
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/ubuntu/aiddnet/data/secrets
+BindPaths=/home/ubuntu/aiddnet/data/launch
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=128M
+TasksMax=32
+# Only the proxy host is the point: the private ranges and the whole of loopback (the local game server, the web, the bot's sockets) are
+# denied, except 127.0.0.53/32, the DNS stub (a hand-made profile may name a host). An allow match wins over a deny match, so this one
+# allowed address punches exactly that hole and nothing else; any other address matches neither list and stays reachable.
+IPAddressAllow=127.0.0.53/32
+IPAddressDeny=127.0.0.0/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10
