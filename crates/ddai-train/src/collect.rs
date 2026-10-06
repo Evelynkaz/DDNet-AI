@@ -214,6 +214,20 @@ pub fn collect_game(
     g: u32,
     factory: &BrainFactory,
 ) -> Result<Episode, EnvError> {
+    collect_game_held(arena, arena_index, rules, job, g, factory).map(|(e, _)| e)
+}
+
+/// [`collect_game`] plus what the game says about whether its block held (task 3.10): the episode holds the steps of the whole game,
+/// the `rules.after_ticks` window after the deciding freeze included (use `Rules::held_block_window` for a 5 s window), and the
+/// [`HeldOutcome`] gives the reward facts (`held_return()`). The stored [`Episode`] format is unchanged.
+pub fn collect_game_held(
+    arena: &Arena,
+    arena_index: u16,
+    rules: &Rules,
+    job: &CollectJob,
+    g: u32,
+    factory: &BrainFactory,
+) -> Result<(Episode, ddai_env::game::HeldOutcome), EnvError> {
     let actor = job.actor.as_ref().map(factory).transpose()?;
     let (labeller, log) = LabellingBrain::new(actor, job.mixing);
     let mut players = vec![PlayerSetup {
@@ -241,14 +255,18 @@ pub fn collect_game(
         players,
     )?;
     let steps = std::mem::take(&mut *log.lock().expect("step log"));
-    Ok(Episode {
-        arena: arena_index,
-        seed,
-        players: n,
-        outcome: outcome(report.result),
-        end_tick: report.end_tick,
-        steps,
-    })
+    let held = report.held_outcome(rules.after_ticks);
+    Ok((
+        Episode {
+            arena: arena_index,
+            seed,
+            players: n,
+            outcome: outcome(report.result),
+            end_tick: report.end_tick,
+            steps,
+        },
+        held,
+    ))
 }
 
 /// Plays all games of `job` on `threads` workers; the episodes come back in game order, so the

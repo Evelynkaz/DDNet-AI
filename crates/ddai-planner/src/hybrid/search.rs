@@ -1654,6 +1654,7 @@ impl HybridSearch {
                 &anchors,
                 &TechCaps {
                     generic_escape: danger.flagged(),
+                    frozen_offence: cfg.finish_families,
                     ..TechCaps::default()
                 },
             );

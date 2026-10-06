@@ -13,6 +13,7 @@ pub mod config;
 pub mod diag;
 pub mod elite;
 pub mod fields;
+pub mod forecast;
 pub mod hybrid;
 pub mod memory;
 pub mod opponent_profile;

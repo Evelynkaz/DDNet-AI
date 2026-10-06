@@ -254,6 +254,18 @@ pub struct PlannerConfig {
     /// `ropeCeilingCost` (v2 default `1`): cost per tick of being hooked by the victim and flying up into a
     /// freeze/death ceiling (`ceilingField`). `0` = off.
     pub rope_ceiling_cost: f64,
+    /// Task 3.10 (hybrid only, `0` = off everywhere else, the TS-parity path never reads it): per-tick shaping of a **frozen** victim's
+    /// progress toward a freeze/death tile (the change of `hazardNearness`, signed: dragging it nearer pays, losing ground costs). A freeze
+    /// that is not kept up thaws after 150 ticks; this is the gradient that makes the rollouts prefer plans that haul the victim back into
+    /// the freeze (the TS `hookDragWeight` is off for a frozen victim by design).
+    pub frozen_drag_weight: f64,
+    /// Task 3.10 (hybrid only, `0` = off): at the end of a rollout with the victim frozen, the exact passive forecast of
+    /// [`crate::forecast::passive_forecast`] (ticks it stays out, up to the held-block horizon) is worth this much at full horizon, and
+    /// an escape inside the horizon costs what it lacks of it.
+    pub held_forecast_weight: f64,
+    /// Task 3.10 (hybrid only, `0` = off): per-tile reward for our progress toward the *staging point* behind a frozen victim that lies off
+    /// the freeze (110 px from it on the side of its nearest freeze): from there the rope hauls it back into the freeze.
+    pub frozen_stage_weight: f64,
 }
 
 /// Which upstream planner a [`PlannerConfig`] reproduces (task 3.8, D-095).
@@ -405,6 +417,9 @@ impl Default for PlannerConfig {
             hook_snap_aim: false,
             hook_keep_flying: false,
             rope_ceiling_cost: 0.0,
+            frozen_drag_weight: 0.0,
+            held_forecast_weight: 0.0,
+            frozen_stage_weight: 0.0,
         }
     }
 }
@@ -576,6 +591,13 @@ mod tests {
         assert_eq!(preset_low_cpu().version(), PlannerVersion::Classic);
         assert_eq!((d.wall_dir, d.air_chain), (0, false));
         assert_eq!(d.rope_ceiling_cost, 0.0);
+        // Task 3.10: the finishing terms are hybrid-only; every preset the TS-parity path uses has them off.
+        for c in [&d, &preset_normal(), &preset_normal_v2(), &preset_live_v2()] {
+            assert_eq!(
+                (c.frozen_drag_weight, c.held_forecast_weight, c.frozen_stage_weight),
+                (0.0, 0.0, 0.0)
+            );
+        }
     }
 
     #[test]

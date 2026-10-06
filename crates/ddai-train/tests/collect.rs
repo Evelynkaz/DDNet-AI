@@ -8,7 +8,7 @@ use ddai_env::brains::RecordingBrain;
 use ddai_env::config::{PlayerSpec, Rules, builtin_brain};
 use ddai_env::game::{Layout, play_game};
 use ddai_env::sim::PlayerSetup;
-use ddai_train::collect::{CollectJob, Mixing, collect};
+use ddai_train::collect::{CollectJob, Mixing, collect, collect_game_held};
 use ddai_train::types::{Episode, action_of, step_flags};
 
 fn pit() -> Arena {
@@ -209,4 +209,51 @@ fn scenario_trials_are_labelled_deterministically() {
     );
     // Jitter differs between trials, so the visited states differ.
     assert_ne!(one[0].steps[0].me.pos, one[1].steps[0].me.pos);
+}
+
+/// Task 3.10, the API the fly's training builds on: an episode past the first freeze. With `Rules::held_block_window` the game is played on
+/// for 250 ticks after the deciding freeze, the episode holds those decisions too, and the `HeldOutcome` carries the reward facts.
+#[test]
+fn an_episode_can_play_on_past_the_first_freeze_and_report_whether_the_block_held() {
+    let arena = pit();
+    let j = job(None, Mixing::default(), 1);
+    let short = Rules {
+        max_ticks: 240,
+        after_ticks: 0,
+        ..Rules::default()
+    };
+    let long = short.clone().held_block_window();
+    assert_eq!(long.after_ticks, ddai_env::config::HELD_BLOCK_TICKS);
+    let (mut decided, mut longer) = (0, 0);
+    for g in 0..6 {
+        let (e0, h0) = collect_game_held(&arena, 0, &short, &j, g, &builtin_brain).unwrap();
+        let (e1, h1) = collect_game_held(&arena, 0, &long, &j, g, &builtin_brain).unwrap();
+        // The game is the same up to the deciding tick; the long episode only adds decisions.
+        assert_eq!((e0.outcome, e0.end_tick), (e1.outcome, e1.end_tick), "game {g}");
+        assert_eq!(h1.window_ticks, 250);
+        assert!(e1.steps.len() >= e0.steps.len());
+        if h1.victim_out_ticks > 0 || h1.held_block {
+            decided += 1;
+        }
+        if e1.steps.len() > e0.steps.len() {
+            longer += 1;
+            assert!(
+                e1.steps.last().unwrap().tick >= e1.end_tick,
+                "game {g}: steps after the deciding tick"
+            );
+        }
+        // The facts agree with themselves: held means out on every tick of the window.
+        assert_eq!(
+            h1.held_block,
+            h1.victim_out_ticks == 250 && h1.escape_tick.is_none() && h1.victim_out_ticks > 0,
+            "game {g}: {h1:?}"
+        );
+        assert!((-1.0..=1.0).contains(&h1.held_return()));
+        assert_eq!(h1.held_return() == 1.0, h1.strict_held_win(), "game {g}");
+        assert_eq!(h0.result, h1.result);
+    }
+    assert!(
+        decided > 0 && longer > 0,
+        "the pit decides games: {decided} decided, {longer} played on"
+    );
 }

@@ -53,6 +53,84 @@ pub fn default_target(world: &ddai_physics::world::World<f32>, slot: usize, ids:
     best.map(|(_, _, id)| id)
 }
 
+/// The target rule of the finishing switch (task 3.10, `Rules::hold_target`): [`default_target`], except that the focal player's frozen
+/// current target stays the target (for up to [`HOLD_TARGET_TICKS`] after it was first seen frozen) until the exact passive forecast
+/// ([`ddai_planner::forecast::passive_forecast`]) says it stays out for the held-block window. The arena's counterpart of the live bot's
+/// `--finish target` target logic (`ddai_bot::target`): in a crowd the default rule leaves the victim of a first freeze at once for a free
+/// opponent, and a victim that lies frozen on open ground thaws in 3 s.
+pub struct HoldTarget {
+    /// The forecast's scratch world, synced from the game's world at each look.
+    pw: std::cell::RefCell<PhysicsWorld>,
+    state: std::cell::RefCell<HoldState>,
+}
+
+struct HoldState {
+    current: i32,
+    frozen_since: i32,
+    checked_at: i32,
+    held: bool,
+}
+
+/// How long after it first froze a victim is kept at most (the bot's `FINISH_MAX_HOLD_TICKS`).
+pub const HOLD_TARGET_TICKS: i32 = 600;
+/// "No forecast yet" (far enough back that the first look always runs, without overflowing the subtraction).
+const NEVER_CHECKED: i32 = -1_000_000;
+/// A forecast answer is reused for this many ticks (the bot's `SEAL_ANSWER_TICKS`).
+const HOLD_ANSWER_TICKS: i32 = 6;
+
+impl HoldTarget {
+    pub fn new(map: Arc<MapData>) -> HoldTarget {
+        HoldTarget {
+            pw: std::cell::RefCell::new(PhysicsWorld::new(map, 1)),
+            state: std::cell::RefCell::new(HoldState {
+                current: -1,
+                frozen_since: -1,
+                checked_at: NEVER_CHECKED,
+                held: false,
+            }),
+        }
+    }
+
+    /// A [`TargetFn`] body.
+    pub fn pick(&self, world: &ddai_physics::world::World<f32>, slot: usize, ids: &[i32]) -> Option<i32> {
+        if slot != 0 {
+            return default_target(world, slot, ids);
+        }
+        let mut st = self.state.borrow_mut();
+        let cur = st.current;
+        if cur >= 0 && ids.contains(&cur) && observe::is_alive(world, cur) && observe::is_out(world, cur) {
+            if st.frozen_since < 0 {
+                st.frozen_since = world.tick;
+                st.checked_at = NEVER_CHECKED;
+            }
+            if world.tick - st.frozen_since <= HOLD_TARGET_TICKS {
+                if world.tick - st.checked_at >= HOLD_ANSWER_TICKS {
+                    let mut pw = self.pw.borrow_mut();
+                    pw.sync_from(world);
+                    st.held = ddai_planner::forecast::passive_forecast(
+                        &mut *pw,
+                        cur,
+                        ddai_planner::forecast::HELD_HORIZON_TICKS,
+                    )
+                    .held();
+                    st.checked_at = world.tick;
+                }
+                if !st.held {
+                    return Some(cur);
+                }
+            }
+        } else {
+            st.frozen_since = -1;
+        }
+        let t = default_target(world, slot, ids);
+        if t != Some(cur) {
+            st.frozen_since = -1;
+        }
+        st.current = t.unwrap_or(-1);
+        t
+    }
+}
+
 /// Action -> wire input; the fire counter continues from `prev_fire` (`true` = a fresh press each
 /// decision, `false` = released: the `decodeAction`/`scriptedAction` convention).
 pub fn wire_from_action(a: &Action, prev_fire: i32) -> Wire {

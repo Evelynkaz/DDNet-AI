@@ -153,6 +153,9 @@ pub struct BotConfig {
     pub strong: bool,
     /// Console replies name other players by their real nickname (`--console-names`); by default by tag.
     pub console_names: bool,
+    /// Task 3.10 (`--finish target`, opt-in): finish blocks -- the target selection keeps a frozen current target until it is held
+    /// ([`crate::target::TargetPicker::set_finish`]).
+    pub finish: bool,
 }
 
 impl Default for BotConfig {
@@ -176,6 +179,7 @@ impl Default for BotConfig {
             low: false,
             strong: false,
             console_names: false,
+            finish: false,
         }
     }
 }
@@ -211,6 +215,18 @@ pub enum BotEvent {
     BlockedBy {
         tick: i32,
         by: String,
+    },
+    /// Task 3.10: a block of ours was still on 5 s later, or its victim died inside the window (`died`).
+    BlockHeld {
+        tick: i32,
+        victim: String,
+        died: bool,
+    },
+    /// Task 3.10: the victim of a block of ours was free again `after` ticks after it.
+    BlockEscaped {
+        tick: i32,
+        victim: String,
+        after: i32,
     },
     TargetChanged {
         tick: i32,
@@ -437,11 +453,13 @@ const EVENT_CAP: usize = 64;
 impl Bot {
     pub fn new(cfg: BotConfig, brain: Box<dyn Brain>, hooks: Hooks, relations: Relations) -> Bot {
         let mode = cfg.mode;
+        let mut picker = TargetPicker::new(cfg.fixed_target.as_deref());
+        picker.set_finish(cfg.finish);
         Bot {
             players: PlayerTable::new(cfg.salt),
             tees: TeeSet::new(),
             clock: ActivityClock::new(),
-            picker: TargetPicker::new(cfg.fixed_target.as_deref()),
+            picker,
             unstick: Unstick::new(),
             wander: Wander::new(cfg.seed),
             encoder: InputEncoder::new(),
@@ -1123,6 +1141,16 @@ impl Bot {
                         by: players.tag(by).to_string(),
                     }
                 }
+                BlockEvent::Held { victim, died } => BotEvent::BlockHeld {
+                    tick,
+                    victim: players.tag(victim).to_string(),
+                    died,
+                },
+                BlockEvent::Escaped { victim, after } => BotEvent::BlockEscaped {
+                    tick,
+                    victim: players.tag(victim).to_string(),
+                    after,
+                },
             };
             push_event(events, e);
         }

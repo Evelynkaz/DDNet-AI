@@ -75,13 +75,28 @@ pub enum BlockEvent {
     Block { victim: i32 },
     /// `by` froze us.
     BlockedBy { by: i32 },
+    /// Task 3.10: a block of ours was still on `HELD_BLOCK_TICKS` later (`died`: the victim died inside the window, which is out of
+    /// the fight as well).
+    Held { victim: i32, died: bool },
+    /// Task 3.10: the victim of a block of ours was free again `after` ticks after the block.
+    Escaped { victim: i32, after: i32 },
 }
+
+/// The window a block must stay on to count as held (the arena's held-block metric: 250 ticks, 5 s).
+pub const HELD_BLOCK_TICKS: i32 = 250;
+/// Blocks watched at once (more are not watched; the oldest watch is dropped first).
+const HELD_WATCH: usize = 8;
 
 /// Running block counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlockStats {
     pub blocks: u32,
     pub blocked_by: u32,
+    /// Task 3.10: of our blocks, those that were still on 5 s later (or whose victim died), and those whose victim got free before.
+    pub held: u32,
+    pub escaped: u32,
+    /// Of `held`: the victim died inside the window (a kill tile or its own `/kill`), not frozen the whole time.
+    pub died: u32,
 }
 
 pub struct ActivityClock {
@@ -97,6 +112,8 @@ pub struct ActivityClock {
     out_of_game: Box<[bool; MAX_CLIENTS]>,
     stats: BlockStats,
     events: Vec<BlockEvent>,
+    /// `(victim, block tick)` of the blocks being followed (`victim < 0`: free slot).
+    held_watch: [(i32, i32); HELD_WATCH],
 }
 
 impl Default for ActivityClock {
@@ -128,6 +145,7 @@ impl ActivityClock {
             out_of_game: Box::new([false; MAX_CLIENTS]),
             stats: BlockStats::default(),
             events: Vec::with_capacity(EVENT_CAP),
+            held_watch: [(-1, 0); HELD_WATCH],
         }
     }
 
@@ -152,6 +170,16 @@ impl ActivityClock {
     /// its input-settle window.
     pub fn on_kill(&mut self, victim: i32, tick: i32) {
         let Some(i) = Self::idx(victim) else { return };
+        // Task 3.10: a victim that dies inside the window of a block of ours is out of the fight (the block is held, `died`), even when it is back
+        // on its feet by the next snapshot (a kill tile or its own `/kill` respawns it at once).
+        for w in self.held_watch.iter_mut().filter(|w| w.0 == victim) {
+            *w = (-1, 0);
+            self.stats.held += 1;
+            self.stats.died += 1;
+            if self.events.len() < EVENT_CAP {
+                self.events.push(BlockEvent::Held { victim, died: true });
+            }
+        }
         self.last_touch[i] = None;
         self.thaw_tick[i] = NEVER;
         if self.seen[i].valid {
@@ -380,6 +408,8 @@ impl ActivityClock {
             seen.at = tick;
         }
 
+        self.follow_blocks(tick, tees, players);
+
         for i in 0..MAX_CLIENTS {
             self.was_alive[i] = tees.get(i as i32).is_some();
         }
@@ -411,6 +441,56 @@ impl ActivityClock {
         self.stats.blocks += 1;
         if self.events.len() < EVENT_CAP {
             self.events.push(BlockEvent::Block { victim: tee.id });
+        }
+        // Follow it: the slot of this victim's older watch, else a free one, else the oldest.
+        let slot = self
+            .held_watch
+            .iter()
+            .position(|w| w.0 == tee.id)
+            .or_else(|| self.held_watch.iter().position(|w| w.0 < 0))
+            .unwrap_or_else(|| {
+                (0..HELD_WATCH)
+                    .min_by_key(|&k| self.held_watch[k].1)
+                    .expect("HELD_WATCH > 0")
+            });
+        self.held_watch[slot] = (tee.id, tick);
+    }
+
+    /// Task 3.10: the verdicts of the blocks being followed. Free (not frozen) before the window ends: escaped; still frozen when it ends: held; died: only
+    /// by a kill message (`on_kill`); gone from the snapshot without one: no verdict.
+    fn follow_blocks(&mut self, tick: i32, tees: &TeeSet, players: &PlayerTable) {
+        for k in 0..HELD_WATCH {
+            let (victim, since) = self.held_watch[k];
+            if victim < 0 {
+                continue;
+            }
+            let verdict = match tees.get(victim) {
+                // Gone from the snapshot: dead, out of view or in the spectators -- the snapshot cannot tell which. A death is announced by its kill message
+                // (`on_kill`, which ends the watch as held); without one there is no verdict, and the watch just runs out (the clip tool's `OutOfView`).
+                None if players.get(victim).is_some_and(|s| s.present) && tick - since < HELD_BLOCK_TICKS => continue,
+                None => {
+                    self.held_watch[k] = (-1, 0);
+                    continue;
+                }
+                Some(t) if !t.frozen && tick > since => Some(BlockEvent::Escaped {
+                    victim,
+                    after: tick - since,
+                }),
+                Some(_) if tick - since >= HELD_BLOCK_TICKS => Some(BlockEvent::Held { victim, died: false }),
+                Some(_) => None,
+            };
+            let Some(v) = verdict else { continue };
+            self.held_watch[k] = (-1, 0);
+            match v {
+                BlockEvent::Held { died, .. } => {
+                    self.stats.held += 1;
+                    self.stats.died += u32::from(died);
+                }
+                _ => self.stats.escaped += 1,
+            }
+            if self.events.len() < EVENT_CAP {
+                self.events.push(v);
+            }
         }
     }
 }
@@ -583,6 +663,86 @@ mod tests {
         );
     }
 
+    /// Task 3.10: a block is followed for 250 ticks: free again before that is "escaped", still frozen at the end is "held", gone from the
+    /// tees without a kill message gets no verdict (a kill message ends the watch as held at once); a victim that leaves the server is dropped.
+    #[test]
+    fn a_block_is_followed_until_the_victim_is_free_or_the_window_ends() {
+        // Escaped: thaws 120 ticks after the block.
+        let mut f = Fixture::new(2);
+        f.step(0);
+        hook_then_freeze(&mut f, 0, 1, 10, 30);
+        f.clock.drain_events().for_each(drop);
+        let mut v = f.tee(1);
+        v.frozen = true;
+        f.set(v);
+        f.step(100);
+        assert!(
+            f.clock.drain_events().next().is_none(),
+            "still frozen at 70 ticks: no verdict yet"
+        );
+        v.frozen = false;
+        f.set(v);
+        f.step(150);
+        assert_eq!(
+            f.clock.drain_events().collect::<Vec<_>>(),
+            vec![BlockEvent::Escaped { victim: 1, after: 120 }]
+        );
+        assert_eq!((f.clock.stats().held, f.clock.stats().escaped), (0, 1));
+        f.step(400);
+        assert!(f.clock.drain_events().next().is_none(), "one verdict per block");
+
+        // Held: frozen on the 250th tick.
+        let mut g = Fixture::new(2);
+        g.step(0);
+        hook_then_freeze(&mut g, 0, 1, 10, 30);
+        g.clock.drain_events().for_each(drop);
+        let mut v = g.tee(1);
+        v.frozen = true;
+        g.set(v);
+        g.step(200);
+        assert!(g.clock.drain_events().next().is_none());
+        g.step(280);
+        assert_eq!(
+            g.clock.drain_events().collect::<Vec<_>>(),
+            vec![BlockEvent::Held { victim: 1, died: false }]
+        );
+        assert_eq!((g.clock.stats().held, g.clock.stats().escaped), (1, 0));
+
+        // A kill message (a kill tile, its own /kill) ends the watch at once as held, even if the victim is back on its feet next snapshot.
+        let mut k = Fixture::new(2);
+        k.step(0);
+        hook_then_freeze(&mut k, 0, 1, 10, 30);
+        k.clock.drain_events().for_each(drop);
+        k.clock.on_kill(1, 60);
+        let mut v = k.tee(1);
+        v.frozen = false;
+        k.set(v);
+        k.step(70);
+        assert_eq!(
+            k.clock.drain_events().collect::<Vec<_>>(),
+            vec![BlockEvent::Held { victim: 1, died: true }]
+        );
+        assert_eq!(
+            (k.clock.stats().held, k.clock.stats().died, k.clock.stats().escaped),
+            (1, 1, 0)
+        );
+
+        // Gone from the snapshot with no kill message (out of view, in the spectators): no verdict, not even at the end of the window.
+        let mut d = Fixture::new(2);
+        d.step(0);
+        hook_then_freeze(&mut d, 0, 1, 10, 30);
+        d.clock.drain_events().for_each(drop);
+        d.kill(1);
+        d.step(60);
+        d.step(200);
+        d.step(400);
+        assert!(
+            d.clock.drain_events().next().is_none(),
+            "no verdict without a kill message"
+        );
+        assert_eq!((d.clock.stats().held, d.clock.stats().escaped), (0, 0));
+    }
+
     #[test]
     fn swinging_at_a_friend_marks_at_friend() {
         let mut f = Fixture::new(3);
@@ -629,7 +789,10 @@ mod tests {
             f.clock.stats(),
             BlockStats {
                 blocks: 1,
-                blocked_by: 0
+                blocked_by: 0,
+                held: 0,
+                escaped: 0,
+                died: 0
             }
         );
         assert_eq!(
@@ -670,7 +833,10 @@ mod tests {
             f.clock.stats(),
             BlockStats {
                 blocks: 0,
-                blocked_by: 1
+                blocked_by: 1,
+                held: 0,
+                escaped: 0,
+                died: 0
             }
         );
         assert_eq!(

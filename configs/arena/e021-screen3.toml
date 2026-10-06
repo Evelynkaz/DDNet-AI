@@ -1,0 +1,30 @@
+# work-clock: default-rate
+# Task 3.10 (E-021): development screen 3 (staging point behind a frozen victim), clb-left, DEVELOPMENT seeds 6001.., 100 games per arm. The arm "drag20" is
+# the screen-2 arm again (same games, same result), the baseline of this screen.
+#   ddnet-ai arena run --config configs/arena/e021-screen3.toml --out ~/aiddnet/data/runs/E-021/screen3 --threads 3
+name = "E-021: finishing screen 3 (dev seeds 6001..)"
+base_seed = 6001
+games = 100
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-left drag20"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left stage1"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0, frozen_stage_weight = 1.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left stage3"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0, frozen_stage_weight = 3.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left stage8"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0, frozen_stage_weight = 8.0 } }, { brain = "planner", mode = "fixed" }]

@@ -1,0 +1,91 @@
+# work-clock: default-rate
+# Task 3.10 (E-021, review round 1, F1): the crowd ablation. In the crowd runs of E-021 the "finish" arm was the drag shaping AND the hold-target rule together; here the
+# four arms are played on the same games: base, `hold_target` only (the arena counterpart of the bot's `--finish target` target logic), the drag shaping only, and both.
+# FRESH seeds 7001.. (neither the screens, 6001.., nor the E-021 runs, 4001.., nor the reviewer's, 9101.., used them).
+#   ddnet-ai arena run --config configs/arena/e021-ablate-crowd.toml --out ~/aiddnet/data/runs/E-021/ablate-crowd --threads 3
+name = "E-021: crowd ablation (hold_target / drag shaping / both), seeds 7001.."
+base_seed = 7001
+games = 150
+
+[rules]
+after_ticks = 250
+crowd_from = 2
+crowd_spacing = 1.0
+
+[[condition]]
+name = "clb-left 1v3 scripted: base"
+arena = "clb-left"
+games = 150
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 1v3 scripted: hold"
+arena = "clb-left"
+games = 150
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 1v3 scripted: drag"
+arena = "clb-left"
+games = 150
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 1v3 scripted: both"
+arena = "clb-left"
+games = 150
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 1v5 scripted: base"
+arena = "clb-left"
+games = 150
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "clb-left 1v5 scripted: hold"
+arena = "clb-left"
+games = 150
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "clb-left 1v5 scripted: drag"
+arena = "clb-left"
+games = 150
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "clb-left 1v5 scripted: both"
+arena = "clb-left"
+games = 150
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders: base"
+arena = "clb-left"
+games = 300
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders: hold"
+arena = "clb-left"
+games = 300
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders: drag"
+arena = "clb-left"
+games = 300
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders: both"
+arena = "clb-left"
+games = 300
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]

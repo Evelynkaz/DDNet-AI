@@ -1033,6 +1033,23 @@ load average, не больше 4, D-080). Постоянный пул (`engine`
 `enemy_landing_bonus` (новое поле `PlannerConfig`, 0 во всех TS-пресетах): награда за жертву, чья баллистика заканчивается во
 фризе, даже если приземление за горизонтом 27 тиков — иначе бросок молотом оценивается как стояние на месте (T18: 0 → 40%).
 
+### Добивание: удержанный блок (задача 3.10, E-021, D-097) — все переключатели выключены по умолчанию
+
+Живой разбор (`docs/research/held-block.md`): заморозка у потолка зала Copy Love Box роняет жертву на пол, где она оттаивает через 150 тиков, если её
+не втащить обратно во фриз; горизонт роллаута (27 тиков) этого не видит. Что добавлено (все слагаемые `PlannerConfig` равны 0 во всех TS-пресетах —
+паритет не затронут, тест `classic_defaults_keep_every_v2_switch_off`):
+
+| Что | Где | Умолчание | Итог в E-021 |
+|---|---|---|---|
+| `frozen_drag_weight` — подтягивание замороженной жертвы к фризу: знаковое изменение `hazardNearness` за тик (TS-вес `hookDragWeight` для замороженной выключен намеренно) | `planner.rs::score_tick` | 0; `HybridConfig::with_finish()` ставит 20 (`FINISH_DRAG_WEIGHT`) | **главный эффект** (clb-left: held W с 30 до 42 из 100 при тех же 59 засчитанных) |
+| `held_forecast_weight` — точный пассивный прогноз жертвы на 250 тиков в конце каждого роллаута с замороженной жертвой (`forecast::passive_forecast`: жертва одна в мире, без ввода, реальная физика, выход при покое: на фризе — держится, вне — таймер) | `planner.rs::evaluate`, `forecast.rs` | 0 | не лучше шейпинга (screen 1), и дорогой; тики прогноза заряжаются в часы работы |
+| `frozen_stage_weight` — награда за приближение к точке «за жертвой» (110 px, со стороны её ближайшего фриза): оттуда верёвка тянет жертву к фризу | `planner.rs::score_tick` | 0 | вес 1: +4 из 100 (не значимо), 3 и 8 — ухудшают засчитанные заморозки |
+| `finish_families` (`TechCaps::frozen_offence`) — наступательные техники T1/T2/T3/T5/… против замороженной жертвы, а не только T7/T8 | `techniques.rs`, `search.rs` | выкл. | игры совпали с `drag20` до единицы: не выбираются |
+
+`passive_forecast` аллокаций не делает (id перебираются, а не перечисляются; `tests/hybrid_alloc.rs::finishing_terms_keep_worker_scoring_allocation_free`),
+счётчик работы — тики одного ти, делённые на число ти мира. Правило цели арены (`rules.hold_target`) и цели живого бота (`--finish target`) используют этот
+же прогноз. Скорость: `cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture finish_work_report`.
+
 ### Телеметрия (`Brain::telemetry`, JSON)
 
 `{"brain","proposer","workers","totals":{решения, extended, danger_flagged, shielded, shield_incomplete, out_of_time,

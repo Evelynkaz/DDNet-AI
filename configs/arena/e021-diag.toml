@@ -1,0 +1,25 @@
+# work-clock: default-rate
+# Task 3.10 (E-021): the diagnosis of held blocks in the arena. Development seeds (6001..), never used for a claim: the hybrid with the
+# main defaults against the OLD fixed planner, 250 ticks (5 s) played on after the deciding freeze (the held-block window).
+#   ddnet-ai arena run --config configs/arena/e021-diag.toml --out ~/aiddnet/data/runs/E-021/diag --threads 3
+name = "E-021: held-block diagnosis (hybrid main defaults vs old), development seeds 6001.."
+base_seed = 6001
+games = 100
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-left: hybrid 4 ms WORK vs old"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right: hybrid 4 ms WORK vs old"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5: hybrid 4 ms WORK vs old"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]

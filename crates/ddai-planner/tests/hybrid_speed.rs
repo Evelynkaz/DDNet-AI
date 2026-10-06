@@ -129,6 +129,19 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
 /// Plays scenes of `tees` tees (slot 0 = the hybrid, the others scripted attackers) on the left
 /// wayblock hall and records `decisions` decisions of slot 0.
 fn run(map: &Arc<MapData>, cfg: &HybridConfig, proposer: Box<dyn Proposer>, tees: usize, decisions: usize) -> Row {
+    run_scenes(map, cfg, proposer, tees, decisions, false)
+}
+
+/// [`run`]; with `frozen_victim` the tee next to slot 0 starts frozen (150 ticks left) and the scenes go on while slot 0 is free (task 3.10: the
+/// decisions of the finishing phase, where the finishing terms and families are active).
+fn run_scenes(
+    map: &Arc<MapData>,
+    cfg: &HybridConfig,
+    proposer: Box<dyn Proposer>,
+    tees: usize,
+    decisions: usize,
+    frozen_victim: bool,
+) -> Row {
     let mut row = Row {
         wall: vec![],
         ticks: vec![],
@@ -164,6 +177,12 @@ fn run(map: &Arc<MapData>, cfg: &HybridConfig, proposer: Box<dyn Proposer>, tees
                 },
             );
         }
+        if frozen_victim && tees > 1 {
+            let mut st = pw.get_tee(1).expect("victim");
+            st.frozen = true;
+            st.freeze_ticks_left = 150;
+            pw.apply_tee_state(1, &st);
+        }
         hybrid.reset(&ResetContext {
             map: map.clone(),
             self_id: 0,
@@ -184,7 +203,7 @@ fn run(map: &Arc<MapData>, cfg: &HybridConfig, proposer: Box<dyn Proposer>, tees
             }
             let world = pw.inner().clone();
             let out = |id: i32| pw.get_tee(id).is_none_or(|t| t.frozen || !t.alive);
-            if out(0) || (1..tees as i32).all(out) {
+            if out(0) || (!frozen_victim && (1..tees as i32).all(out)) {
                 break;
             }
             for (slot, &id) in ids.iter().enumerate() {
@@ -649,5 +668,62 @@ fn mirror_work_report() {
     assert!(
         worst_two_tee_p99 <= 5.0,
         "work p99 at 2 tees with the opponent model is {worst_two_tee_p99:.2} ms, above the 5 ms of D-042"
+    );
+}
+
+/// Task 3.10, D-042: the finishing switches keep the live decision inside its budget. Decisions of the finishing phase (the victim frozen next to
+/// us, 150 ticks of freeze left) on the work clock with the opponent model on: the baseline, the default switch (`HybridConfig::with_finish`, the drag
+/// shaping), and -- as a diagnostic, not a promise -- every finishing knob at once (families, staging point, exact forecast). The work p99 at 2 tees
+/// of the first two must stay at most 5 ms.
+///
+/// ```text
+/// cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture finish_work_report
+/// ```
+#[test]
+#[ignore = "heavy; needs the Copy Love Box map"]
+fn finish_work_report() {
+    let Some(map) = clb() else {
+        eprintln!("no Copy Love Box map; skipping");
+        return;
+    };
+    let n: usize = std::env::var("DDAI_SPEED_DECISIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(800);
+    println!("\n| tees | finish | work ms p50 / p90 / p99 / max | candidates p50 |\n|---|---|---|---|");
+    let mut worst = 0.0f64;
+    for tees in [2usize, 4] {
+        for mode in ["off", "default", "all knobs"] {
+            let mut cfg = deadline(4.0, 1, true, 0);
+            cfg.work_clock_us_per_tick = Some(WORK_US_PER_TEE_TICK);
+            cfg.mirror = true;
+            if mode != "off" {
+                cfg = cfg.with_finish();
+            }
+            if mode == "all knobs" {
+                cfg.finish_families = true;
+                cfg.planner.frozen_stage_weight = 1.0;
+                cfg.planner.held_forecast_weight = 20.0;
+            }
+            let mut r = run_scenes(&map, &cfg, Box::new(NoProposer), tees, n, true);
+            let mut w = r.tee_ticks.clone();
+            let ms = |v: &mut Vec<f64>, p: f64| pct(v, p) * WORK_US_PER_TEE_TICK / 1000.0;
+            let p99 = ms(&mut w, 99.0);
+            if tees == 2 && mode != "all knobs" {
+                worst = worst.max(p99);
+            }
+            println!(
+                "| {tees} | {mode} | {:.2} / {:.2} / {:.2} / {:.2} | {:.0} |",
+                ms(&mut w, 50.0),
+                ms(&mut w, 90.0),
+                p99,
+                ms(&mut w, 100.0),
+                pct(&mut r.cands, 50.0)
+            );
+        }
+    }
+    assert!(
+        worst <= 5.0,
+        "work p99 at 2 tees in the finishing phase is {worst:.2} ms, above the 5 ms of D-042"
     );
 }

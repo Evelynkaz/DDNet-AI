@@ -204,6 +204,9 @@ pub struct WbFilter {
     /// The tee in the corridor behind the wall that the guard catches first: never "sealed" or "out of reach"
     /// and worth `WB_CORRIDOR_SCORE` (`guard.corridor`).
     pub corridor: bool,
+    /// Task 3.10: `skip` is only the hall's leash (we are inside the hall and the candidate is outside it) -- not the walk in, not a guard rule (a lower-shelf
+    /// tee, a frozen one still falling). The one skip `--finish target` may override for a frozen victim we are finishing.
+    pub leash_only: bool,
 }
 
 /// Trek / path goals (task 4.2).

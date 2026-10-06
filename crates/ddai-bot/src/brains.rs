@@ -100,6 +100,8 @@ pub struct BrainOptions {
     /// plan). On by default; `--hybrid-mirror off` is the way back to "the victim holds its input" (it was built and measured against
     /// planners, scripted bots and idle/wandering/hook-spamming tees, not yet against people).
     pub hybrid_mirror: bool,
+    /// Task 3.10 (opt-in, `--finish full`): the hybrid's finishing switches ([`HybridConfig::with_finish`]).
+    pub hybrid_finish: bool,
     pub seed: u64,
 }
 
@@ -140,6 +142,7 @@ impl Default for BrainOptions {
             search_threads: Some(1),
             proposal_in_cap: true,
             hybrid_mirror: true,
+            hybrid_finish: false,
             seed: 1,
         }
     }
@@ -155,12 +158,13 @@ pub enum BrainError {
 
 /// The live hybrid's configuration: the library defaults plus what the options set.
 pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
-    HybridConfig {
+    let cfg = HybridConfig {
         workers: opts.search_threads.unwrap_or_else(auto_search_threads_here).max(1),
         proposal_in_cap: opts.proposal_in_cap,
         mirror: opts.hybrid_mirror,
         ..HybridConfig::default()
-    }
+    };
+    if opts.hybrid_finish { cfg.with_finish() } else { cfg }
 }
 
 /// The hybrid the bot plays: wall clock, with the fly of `opts.fly_bundle` as its proposer when there is one.

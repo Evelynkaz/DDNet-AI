@@ -90,6 +90,8 @@ pub struct TargetPicker {
     reach: ReachCache,
     fixed_name: Option<String>,
     last_pick: Pick,
+    /// Task 3.10 (`--finish target`): keep a frozen current target until it is held (see [`TargetPicker::set_finish`]).
+    finish: bool,
 }
 
 impl TargetPicker {
@@ -114,6 +116,19 @@ impl TargetPicker {
             reach: ReachCache::new(REACH_CHECKS_PER_SNAPSHOT),
             fixed_name: fixed_target.map(fold_name).filter(|n| !n.is_empty()),
             last_pick: Pick { id: -1, score: 0.0 },
+            finish: false,
+        }
+    }
+
+    /// Task 3.10 (opt-in, off by default): finish blocks. A frozen **current** target is no longer dropped as "settled" after 150 ticks or
+    /// when it lies more than two tiles from a freeze tile (the port's rule): it stays the target, with the hold score
+    /// [`FINISH_HOLD_SCORE`], for up to [`FINISH_MAX_HOLD_TICKS`] after it froze, **until the exact passive forecast says it stays out for
+    /// [`FINISH_HORIZON_TICKS`]** (`PlanScratch::sealed_or_held`: frozen on a freeze tile at rest, dead, or frozen for longer than the
+    /// horizon). The seal answers of frozen tees mean "held" from then on.
+    pub fn set_finish(&mut self, on: bool) {
+        self.finish = on;
+        for s in self.seal.iter_mut() {
+            s.valid = false;
         }
     }
 
@@ -197,6 +212,14 @@ impl TargetPicker {
         let mut best = -1;
         let mut best_score = f32::NEG_INFINITY;
         let mut keep_settled = false;
+        // Task 3.10: a free tee that hooks us or attacked us lately outranks the frozen victim we are finishing: no hold bonus while there is one.
+        let hunted = self.finish
+            && ctx.tees.iter().any(|t| {
+                t.id != me.id
+                    && !t.frozen
+                    && !is_spared(t, tick, ctx.players, ctx.clock)
+                    && (t.hooked_player == me.id || ctx.clock.at_us_within(t.id, tick, AGGRESSOR_MEMORY_TICKS))
+            });
         let default_flags = RelationFlags::default();
         for tee in ctx.tees.iter() {
             if tee.id == me.id {
@@ -230,12 +253,21 @@ impl TargetPicker {
             } else {
                 Default::default()
             };
-            if wb.skip {
-                continue;
-            }
-
             let frozen_for = ctx.clock.frozen_for(tee, tick);
             let is_current = tee.id == self.target;
+            // Task 3.10 (`--finish target`): the wayblock's leash skips whoever lies outside the hall, and a victim we froze at the hall's ceiling falls
+            // out of it onto the floor of the room: the very tee to finish. Only the leash (we are inside the hall, the victim is not -- not the walk in,
+            // not a guard rule such as a frozen tee still falling) and only while the victim is still being finished: frozen, within the hold, and (below)
+            // not held. Past that the leash rules again, and a victim the leash would have skipped is never "kept" as a settled target.
+            let leash_kept = wb.skip
+                && wb.leash_only
+                && self.finish
+                && is_current
+                && tee.frozen
+                && frozen_for <= FINISH_MAX_HOLD_TICKS;
+            if wb.skip && !leash_kept {
+                continue;
+            }
             let near_freeze = ctx.grid.near_freeze(tee.pos.x, tee.pos.y, SEAL_NEAR_TILES);
             // `settled = sealed || (!finishing && frozenFor > S)` with `finishing = cand && !sealed`
             // (`bot.ts:3072-3088`). When the tee has been frozen a while and is not a "finishing"
@@ -245,8 +277,14 @@ impl TargetPicker {
             // `wbFinish` (`bot.ts:3080`): a frozen tee in the WB zone, seen from inside the hall, is a
             // finishing target (unless sealed) however long it has been frozen.
             let wb_finish_candidate = wb.finish_zone && tee.frozen;
-            let finishing_candidate =
-                wb_finish_candidate || (is_current && tee.frozen && frozen_for <= FINISH_BLOCK_TICKS && near_freeze);
+            let finishing_candidate = wb_finish_candidate
+                || (is_current
+                    && tee.frozen
+                    && if self.finish {
+                        frozen_for <= FINISH_MAX_HOLD_TICKS
+                    } else {
+                        frozen_for <= FINISH_BLOCK_TICKS && near_freeze
+                    });
             let settled_anyway = frozen_for > SETTLED_FREEZE_TICKS && !finishing_candidate;
             let sealed = !wb.corridor
                 && (tee.frozen || (is_current && near_freeze))
@@ -255,7 +293,7 @@ impl TargetPicker {
             let finishing = finishing_candidate && !sealed;
             let settled = sealed || (!finishing && frozen_for > SETTLED_FREEZE_TICKS);
             if settled {
-                if is_current {
+                if is_current && !leash_kept {
                     keep_settled = true;
                 }
                 continue;
@@ -294,7 +332,10 @@ impl TargetPicker {
             if is_current && tee.frozen && d < BLOCKING_RANGE_PX {
                 score += BLOCK_HOLD_SCORE;
             }
-            if finishing && d < BLOCKING_RANGE_PX {
+            if self.finish && is_current && tee.frozen && d < ENGAGED_PX && !hunted {
+                score += FINISH_HOLD_SCORE;
+            }
+            if finishing && d < BLOCKING_RANGE_PX && !hunted {
                 score += FINISH_BLOCK_SCORE;
             }
             if tick - tee.attack_tick < AGGRESSOR_MEMORY_TICKS && d < AGGRESSOR_RANGE_PX {
@@ -407,7 +448,13 @@ impl TargetPicker {
             // Asynchronous: ask (once per tee) and use the old answer until the new one arrives.
             if self.in_flight[slot].is_none()
                 && let Some(w) = self.worker.as_ref()
-                && w.request(tee.id, tick, self.generation, base)
+                && w.request(
+                    tee.id,
+                    tick,
+                    self.generation,
+                    base,
+                    self.finish.then_some(FINISH_HORIZON_TICKS),
+                )
             {
                 self.in_flight[slot] = Some((tick, tile));
             }
@@ -418,7 +465,11 @@ impl TargetPicker {
         }
         self.seal_left -= 1;
         let t0 = std::time::Instant::now();
-        let sealed = plan.sealed(base, tee.id);
+        let sealed = if self.finish {
+            plan.sealed_or_held(base, tee.id, FINISH_HORIZON_TICKS)
+        } else {
+            plan.sealed(base, tee.id)
+        };
         self.seal_times.push(t0.elapsed());
         self.seal[slot] = SealAnswer {
             valid: true,
@@ -750,6 +801,252 @@ mod tests {
         assert_eq!(f.pick(), -1, "frozen for 2 ticks and not the current target: settled");
     }
 
+    /// A fixture for the finishing switch: us at 1000 px, the frozen current target `foe` at 1100 px (open room, no freeze tile within two tiles),
+    /// and a free player `other` at 1300 px; the clock saw the freeze at tick 1000.
+    fn finish_fx(finish: bool) -> Fx {
+        let mut f = Fx::open();
+        f.picker.set_finish(finish);
+        f.set_players(&[(0, "me"), (1, "foe"), (2, "other")]);
+        f.put(tee(0, 1000.0));
+        f.put(tee(1, 1100.0));
+        f.put(tee(2, 1300.0));
+        f.tick = 1000;
+        f.clock.update(f.tick, &f.tees, &f.players, 0);
+        f.picker.set_target(1);
+        let mut t = *f.tees.get(1).unwrap();
+        t.frozen = true;
+        t.freeze_ticks_left = 150;
+        f.put(t);
+        f
+    }
+
+    #[test]
+    fn finish_off_drops_a_frozen_target_on_open_ground_for_a_free_player() {
+        let mut f = finish_fx(false);
+        assert_eq!(
+            f.pick(),
+            1,
+            "the tick the freeze is first seen: frozen for 0 ticks, still eligible"
+        );
+        f.tick = 1002;
+        assert_eq!(
+            f.pick(),
+            2,
+            "frozen 2 ticks, not near a freeze tile: settled, the free player is taken"
+        );
+    }
+
+    #[test]
+    fn finish_on_keeps_a_frozen_current_target_until_it_is_held_or_the_hold_runs_out() {
+        let mut f = finish_fx(true);
+        // At war with both, so that standing still for 500 ticks does not make them AFK.
+        f.rel.add(ListKind::War, "foe");
+        f.rel.add(ListKind::War, "other");
+        f.set_players(&[(0, "me"), (1, "foe"), (2, "other")]);
+        f.tick = 1000;
+        assert_eq!(f.pick(), 1);
+        for (tick, why) in [
+            (1002, "just frozen"),
+            (1200, "frozen 200 ticks: the old rule had let go at 150"),
+            (1590, "frozen 590 ticks"),
+        ] {
+            f.tick = tick;
+            f.put(*f.tees.get(1).unwrap());
+            assert_eq!(f.pick(), 1, "{why}");
+            f.picker.set_target(1);
+        }
+        // At war +900, distance -25, current-target hold 400, finishing 600 and the finishing hold 600.
+        assert_eq!(f.score(), 900.0 - 25.0 + 400.0 + 600.0 + FINISH_HOLD_SCORE);
+        // After the hold (600 ticks) it is settled again: the free player is taken.
+        f.tick = 1601;
+        assert_eq!(f.pick(), 2);
+        // Only the CURRENT target is kept: a frozen player we are not fighting is settled at once.
+        let mut g = finish_fx(true);
+        g.pick();
+        g.picker.set_target(2);
+        g.tick = 1002;
+        assert_eq!(g.pick(), 2);
+    }
+
+    /// The wayblock's leash skips whoever lies outside the hall; a frozen victim that fell out of it is the tee to finish: with `--finish target` the frozen
+    /// CURRENT target stays while it is being finished (within the 600-tick hold, not held) -- and only then: past the hold the leash rules again, a
+    /// skip that is a guard rule or the walk in is never overridden, and a victim the leash would skip is not kept as a "settled" target.
+    #[test]
+    fn finish_on_keeps_a_frozen_current_target_the_leash_would_skip_only_while_it_is_finished() {
+        let ticks = [1000, 1002, 1300, 1590, 1601, 1700, 2500, 4000];
+        let run = |finish: bool, leash: bool| -> Vec<i32> {
+            let mut f = finish_fx(finish);
+            // At war with both, so that standing still for thousands of ticks does not make them AFK.
+            f.rel.add(ListKind::War, "foe");
+            f.rel.add(ListKind::War, "other");
+            f.set_players(&[(0, "me"), (1, "foe"), (2, "other")]);
+            f.hooks.wayblock = Box::new(Wb {
+                skip: vec![1, 2],
+                zone: vec![],
+                leash,
+            });
+            ticks
+                .iter()
+                .map(|&t| {
+                    f.tick = t;
+                    f.put(*f.tees.get(1).unwrap());
+                    let got = f.pick();
+                    f.picker.set_target(got);
+                    got
+                })
+                .collect()
+        };
+        // Finish on, the leash: kept for the 600 ticks of the hold (ticks 1000..=1590 are 0..=590 frozen), then the leash rules.
+        assert_eq!(run(true, true), vec![1, 1, 1, 1, -1, -1, -1, -1]);
+        // Finish off: the leash always rules.
+        assert_eq!(run(false, true), vec![-1; 8]);
+        // A skip that is not the leash (a guard rule, the walk in) is never overridden.
+        assert_eq!(run(true, false), vec![-1; 8]);
+        // Not the current target: skipped as before.
+        let mut g = finish_fx(true);
+        g.hooks.wayblock = Box::new(Wb {
+            skip: vec![1, 2],
+            zone: vec![],
+            leash: true,
+        });
+        g.picker.set_target(2);
+        g.tick = 1002;
+        assert_eq!(g.pick(), -1);
+    }
+
+    /// The leash override ends when the victim is held: a victim lying frozen in a pit needs nothing more, and the bot must not stay with it.
+    /// A free tee that hooks us (or hit us lately) outranks the frozen victim: the hold bonus is suspended while there is one.
+    #[test]
+    fn finish_on_does_not_hold_a_frozen_victim_over_an_attacker() {
+        for (finish, hooked, want) in [(true, false, 1), (true, true, 2), (false, true, 2), (false, false, 2)] {
+            let mut f = finish_fx(finish);
+            f.pick(); // the tick the freeze is first seen
+            if hooked {
+                let mut t = *f.tees.get(2).unwrap();
+                t.hooked_player = 0;
+                t.hook_state = crate::tees::HOOK_GRABBED;
+                f.put(t);
+            }
+            f.tick = 1002;
+            assert_eq!(f.pick(), want, "finish {finish}, hooked by the free tee {hooked}");
+        }
+        // Not only the hook: a swing at us a few ticks ago counts too.
+        let mut f = finish_fx(true);
+        f.pick();
+        f.tick = 1002;
+        f.clock.update(f.tick, &f.tees, &f.players, 0);
+        let mut other = *f.tees.get(2).unwrap();
+        other.pos = Vec2::new(1000.0 + 100.0, 500.0);
+        other.attack_tick = 1001;
+        f.put(other);
+        f.tick = 1004;
+        assert_eq!(f.pick(), 2, "a fresh swing near us");
+    }
+
+    #[test]
+    fn finish_on_does_not_keep_a_held_victim_the_leash_would_skip() {
+        let pit: Vec<(u32, u32, u8)> = (30..33).flat_map(|x| (36..39).map(move |y| (x, y, FREEZE))).collect();
+        for finish in [false, true] {
+            let mut f = Fx::new(room(120, 40, &pit), None);
+            f.picker.set_finish(finish);
+            f.rel.add(ListKind::War, "foe");
+            f.rel.add(ListKind::War, "other");
+            f.set_players(&[(0, "me"), (1, "foe"), (2, "other")]);
+            let pos = Vec2::new(31.0 * 32.0 + 16.0, 37.0 * 32.0 + 16.0);
+            f.put(Tee {
+                pos: Vec2::new(900.0, 500.0),
+                ..tee(0, 0.0)
+            });
+            f.put(Tee { pos, ..tee(1, 0.0) });
+            f.put(Tee {
+                pos: Vec2::new(1300.0, 500.0),
+                ..tee(2, 0.0)
+            });
+            ddai_physics::world::spawn_character(&mut f.world, 1, Vec2::new(pos.x, pos.y));
+            f.world.characters[1].as_mut().unwrap().freeze_time = 150;
+            f.hooks.wayblock = Box::new(Wb {
+                skip: vec![1, 2],
+                zone: vec![],
+                leash: true,
+            });
+            f.tick = 1000;
+            f.clock.update(f.tick, &f.tees, &f.players, 0);
+            f.picker.set_target(1);
+            let mut t = *f.tees.get(1).unwrap();
+            t.frozen = true;
+            t.freeze_ticks_left = 150;
+            f.put(t);
+            for tick in [1000, 1010, 1100, 1500] {
+                f.tick = tick;
+                assert_eq!(
+                    f.pick(),
+                    -1,
+                    "finish {finish}, tick {tick}: held in the pit, the leash skips the other tee, nobody is the target"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finish_on_lets_go_of_a_frozen_target_that_the_forecast_says_stays_out() {
+        // A freeze pit 3 tiles wide on the floor of a room; the frozen target rests in it: held, so it is settled and the free player goes first.
+        let pit: Vec<(u32, u32, u8)> = (30..33).flat_map(|x| (36..39).map(move |y| (x, y, FREEZE))).collect();
+        let mut f = Fx::new(room(120, 40, &pit), None);
+        f.picker.set_finish(true);
+        f.set_players(&[(0, "me"), (1, "foe"), (2, "other")]);
+        let pos = Vec2::new(31.0 * 32.0 + 16.0, 37.0 * 32.0 + 16.0);
+        f.put(Tee {
+            pos: Vec2::new(900.0, 500.0),
+            ..tee(0, 0.0)
+        });
+        f.put(Tee { pos, ..tee(1, 0.0) });
+        f.put(Tee {
+            pos: Vec2::new(1300.0, 500.0),
+            ..tee(2, 0.0)
+        });
+        ddai_physics::world::spawn_character(&mut f.world, 1, Vec2::new(pos.x, pos.y));
+        f.world.characters[1].as_mut().unwrap().freeze_time = 150;
+        f.tick = 1000;
+        f.clock.update(f.tick, &f.tees, &f.players, 0);
+        f.picker.set_target(1);
+        let mut t = *f.tees.get(1).unwrap();
+        t.frozen = true;
+        t.freeze_ticks_left = 150;
+        f.put(t);
+        assert_eq!(
+            f.pick(),
+            2,
+            "held in the pit: nothing left to finish, the free player is taken at once"
+        );
+        f.tick = 1010; // past the 6-tick answer cache of the first look
+        assert_eq!(f.pick(), 2);
+        // The same tee out of the pit (on the open floor, 150 ticks of freeze left) is not held: it stays the target.
+        let mut g = Fx::new(room(120, 40, &[]), None);
+        g.picker.set_finish(true);
+        g.set_players(&[(0, "me"), (1, "foe"), (2, "other")]);
+        g.put(Tee {
+            pos: Vec2::new(900.0, 500.0),
+            ..tee(0, 0.0)
+        });
+        g.put(Tee { pos, ..tee(1, 0.0) });
+        g.put(Tee {
+            pos: Vec2::new(1300.0, 500.0),
+            ..tee(2, 0.0)
+        });
+        ddai_physics::world::spawn_character(&mut g.world, 1, Vec2::new(pos.x, pos.y));
+        g.world.characters[1].as_mut().unwrap().freeze_time = 150;
+        g.tick = 1000;
+        g.clock.update(g.tick, &g.tees, &g.players, 0);
+        g.picker.set_target(1);
+        let mut t = *g.tees.get(1).unwrap();
+        t.frozen = true;
+        t.freeze_ticks_left = 150;
+        g.put(t);
+        assert_eq!(g.pick(), 1);
+        g.tick = 1010;
+        assert_eq!(g.pick(), 1, "it thaws in 150 ticks: not held, still the target");
+    }
+
     #[test]
     fn a_target_with_no_route_loses_700_but_one_in_reach_or_at_war_or_roped_does_not() {
         // A wall column splits the room; the foe is 500 px away on the far side.
@@ -798,6 +1095,8 @@ mod tests {
     struct Wb {
         skip: Vec<i32>,
         zone: Vec<i32>,
+        /// The skips are the hall's leash only (else a guard rule or the walk in).
+        leash: bool,
     }
     impl WayBlock for Wb {
         fn holding(&self) -> bool {
@@ -809,6 +1108,7 @@ mod tests {
                 in_zone: self.zone.contains(&t.id),
                 finish_zone: false,
                 corridor: false,
+                leash_only: self.leash,
             }
         }
     }
@@ -819,12 +1119,14 @@ mod tests {
         f.hooks.wayblock = Box::new(Wb {
             skip: vec![1],
             zone: vec![],
+            leash: false,
         });
         assert_eq!(f.pick(), -1);
         let mut g = single();
         g.hooks.wayblock = Box::new(Wb {
             skip: vec![],
             zone: vec![1],
+            leash: false,
         });
         g.pick();
         assert_eq!(g.score(), -50.0 + 300.0);

@@ -1,0 +1,71 @@
+# work-clock: default-rate
+# Task 3.10 (E-021): held block and first-freeze regression vs scripted and idle (3 halls x 200, both arms)
+# FRESH seeds 4001.. (never used while the finishing switches were developed: the screens used 6001..). Both arms of a pair play the same games
+# (same seeds and layouts), so they pair up for McNemar; the finishing arm is "finish" = `hybrid = { frozen_drag_weight = 20.0 }` (= `HybridConfig::with_finish`).
+#   ddnet-ai arena run --config configs/arena/e021-held-regress.toml --out ~/aiddnet/data/runs/E-021/held-regress --threads 3
+name = "E-021: held block and first-freeze regression vs scripted and idle (3 halls x 200, both arms)"
+base_seed = 4001
+games = 200
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-left base vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left finish vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right base vs scripted"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-right finish vs scripted"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5 base vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5 finish vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted" }]
+
+[[condition]]
+name = "clb-left base vs idle"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "idle" }]
+
+[[condition]]
+name = "clb-left finish vs idle"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "idle" }]
+
+[[condition]]
+name = "clb-right base vs idle"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "idle" }]
+
+[[condition]]
+name = "clb-right finish vs idle"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "idle" }]
+
+[[condition]]
+name = "chillblock5 base vs idle"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "idle" }]
+
+[[condition]]
+name = "chillblock5 finish vs idle"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "idle" }]

@@ -20,6 +20,8 @@ use ddai_physics::world::World;
 use crate::planning::PlanScratch;
 
 struct Request {
+    /// `Some(horizon)`: the finishing check (`PlanScratch::sealed_or_held`) instead of the plain seal search.
+    held_horizon: Option<i32>,
     id: i32,
     tick: i32,
     generation: u64,
@@ -54,7 +56,10 @@ impl SealWorker {
                 let mut plan = PlanScratch::new(map);
                 while let Ok(req) = req_rx.recv() {
                     let t0 = Instant::now();
-                    let sealed = plan.sealed(&req.world, req.id);
+                    let sealed = match req.held_horizon {
+                        Some(h) => plan.sealed_or_held(&req.world, req.id, h),
+                        None => plan.sealed(&req.world, req.id),
+                    };
                     let res = SealResult {
                         id: req.id,
                         tick: req.tick,
@@ -75,9 +80,10 @@ impl SealWorker {
     }
 
     /// Queues a search on a copy of `world` (the one allocation of this path).
-    pub fn request(&self, id: i32, tick: i32, generation: u64, world: &World<f32>) -> bool {
+    pub fn request(&self, id: i32, tick: i32, generation: u64, world: &World<f32>, held_horizon: Option<i32>) -> bool {
         self.tx.as_ref().is_some_and(|tx| {
             tx.send(Request {
+                held_horizon,
                 id,
                 tick,
                 generation,
@@ -114,7 +120,7 @@ mod tests {
         let _ = world.init(std::iter::empty::<&str>());
         let worker = SealWorker::spawn(Arc::clone(&map)).unwrap();
         // No such tee in the world: "not sealed", but the round trip and the tags are what is tested.
-        assert!(worker.request(7, 1234, 3, &world));
+        assert!(worker.request(7, 1234, 3, &world, None));
         let mut got = None;
         for _ in 0..200 {
             if let Some(r) = worker.try_recv() {

@@ -229,6 +229,9 @@ pub struct HybridConfig {
     /// injects). Reproducible and load-independent; with `workers > 1` the helpers only speculate, the result is
     /// bit-identical to `workers = 1` (task 3.7a). See [`crate::hybrid::work`].
     pub work_clock_us_per_tick: Option<f64>,
+    /// Task 3.10 (finishing, opt-in): generate the offensive technique families against a frozen victim too
+    /// ([`crate::hybrid::techniques::TechCaps::frozen_offence`]). `false` = T7/T8 only, as before.
+    pub finish_families: bool,
     /// Keep a count of the physics ticks each phase simulates (D-045). Cheap; on by default.
     pub count_work: bool,
     /// Diagnostics: put the best candidates of every decision, with their scores, into the
@@ -285,6 +288,7 @@ impl Default for HybridConfig {
             shield_timeout_danger: false,
             shield_reserve_ms_per_tee: 0.25,
             work_clock_us_per_tick: None,
+            finish_families: false,
             count_work: true,
             debug_dump: false,
             debug_pool: false,
@@ -294,7 +298,19 @@ impl Default for HybridConfig {
     }
 }
 
+/// Task 3.10: the weight of the frozen-victim drag shaping the finishing switch turns on (`PlannerConfig::frozen_drag_weight`).
+pub const FINISH_DRAG_WEIGHT: f64 = 20.0;
+
 impl HybridConfig {
+    /// Task 3.10 (opt-in, `--finish full`): this configuration with the finishing switches of the hybrid on -- the frozen-victim drag
+    /// shaping ([`FINISH_DRAG_WEIGHT`]) only. `finish_families` (the offensive techniques against a frozen victim), `frozen_stage_weight` (the staging
+    /// point) and `held_forecast_weight` (the exact forecast) stay separate knobs: no gain that holds up in E-021. The bot's target logic has its own switch
+    /// (`BotConfig::finish`); `--finish full` sets both. Measured in E-021.
+    pub fn with_finish(mut self) -> HybridConfig {
+        self.planner.frozen_drag_weight = FINISH_DRAG_WEIGHT;
+        self
+    }
+
     /// A fixed-work (deterministic) configuration.
     pub fn fixed() -> HybridConfig {
         HybridConfig {

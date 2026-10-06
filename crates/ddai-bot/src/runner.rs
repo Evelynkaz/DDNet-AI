@@ -255,6 +255,8 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     let mut ended = false;
     // Set by the bot (moved to the spectators) or the reconnect budget: stop and disconnect politely.
     let mut stop_now = false;
+    let diag_block_clips = std::env::var_os("DDAI_DIAG_BLOCK_CLIPS").is_some();
+    let mut diag_clips_left = DIAG_BLOCK_CLIPS;
     let mut budget = ReconnectBudget::default();
     let mut next_status = Instant::now();
     let mut next_log = Instant::now() + LOG_EVERY;
@@ -353,6 +355,21 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         let mut events: Vec<BotEvent> = bot.drain_events().collect();
         for e in events.drain(..) {
             log_event(&e);
+            // Task 3.10 live diagnosis (opt-in by the environment, at most `DIAG_BLOCK_CLIPS` per run): the ring as a clip when a block's fate is known,
+            // `manual-<tick>-held` / `-escaped`, to read with `ddnet-ai clip held --track`.
+            if diag_block_clips && diag_clips_left > 0 {
+                let note = match &e {
+                    BotEvent::BlockHeld { tick, .. } => Some(format!("held-{tick}")),
+                    BotEvent::BlockEscaped { tick, .. } => Some(format!("escaped-{tick}")),
+                    _ => None,
+                };
+                if let Some(note) = note {
+                    diag_clips_left -= 1;
+                    if let Err(err) = bot.save_clip(&note) {
+                        tracing::warn!(%err, "block clip not saved");
+                    }
+                }
+            }
             if let BotEvent::RosterChanged { .. } = &e {
                 if let Some(b) = bridge.as_mut() {
                     b.send_players(&players_message(&bot, cfg.web_names));
@@ -621,11 +638,16 @@ fn apply_output(client: &Client, out: &Output, snap: &LiveWorldSnapshot, report:
     }
 }
 
+/// Clips per run the `DDAI_DIAG_BLOCK_CLIPS` diagnosis saves at most.
+const DIAG_BLOCK_CLIPS: u32 = 12;
+
 fn log_event(e: &BotEvent) {
     match e {
         BotEvent::Killed { tick, reason } => tracing::info!(tick, ?reason, "unstick: Cl_Kill"),
         BotEvent::Block { tick, victim } => tracing::info!(tick, victim, "block"),
         BotEvent::BlockedBy { tick, by } => tracing::info!(tick, by, "blocked by"),
+        BotEvent::BlockHeld { tick, victim, died } => tracing::info!(tick, victim, died, "block held"),
+        BotEvent::BlockEscaped { tick, victim, after } => tracing::info!(tick, victim, after, "block escaped"),
         BotEvent::TargetChanged { tick, to } => tracing::info!(tick, target = ?to, "target"),
         BotEvent::Respawned { tick } => tracing::info!(tick, "life started"),
         BotEvent::KillFallback { tick, noticed } => {

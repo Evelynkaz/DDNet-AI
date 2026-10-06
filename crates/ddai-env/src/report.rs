@@ -137,6 +137,18 @@ pub struct ConditionSummary {
     pub held_w: u32,
     pub credited_l: u32,
     pub held_l: u32,
+    /// Task 3.10, the "held block" metric (D-059 amendment): `W` games won by the focal player's **credited** block whose victim stayed out on every
+    /// tick of the `after_ticks` window (`held_block`; an opponent that froze itself is not a block), and `L` games whose victim (the focal player) did.
+    pub held_block_w: u32,
+    pub held_block_l: u32,
+    /// The same without the credit condition: every `W` game whose victim stayed out (an opponent's self-freeze that held counts).
+    pub held_block_w_any: u32,
+    /// `held_block_w / (held_block_w + held_block_l)`: the share of the *held* decided games the focal player won.
+    pub held_block_win_rate: Option<Rate>,
+    /// `held_block_w / games`: games won by a block that was still on 5 s later (timeouts and draws count against it).
+    pub held_block_rate: Option<Rate>,
+    /// `held_block_w / W`: how much of what the focal player froze it kept.
+    pub held_block_share_of_w: Option<Rate>,
     /// Opponent onsets credited to the focal player.
     pub blocks_by_a: u32,
     /// Game time played, minutes (sum of end ticks / 3000).
@@ -168,11 +180,20 @@ pub struct ConditionSummary {
     pub games_per_s: f64,
 }
 
+/// `k / n` with its 95% Wilson interval; `None` for `n == 0`.
+fn wilson_rate(k: u32, n: u32) -> Option<(f64, f64, f64)> {
+    (n > 0).then(|| {
+        let (lo, hi) = crate::stats::wilson95(f64::from(k), f64::from(n));
+        (f64::from(k) / f64::from(n), lo, hi)
+    })
+}
+
 /// Aggregates one condition.
 pub fn summarize(run: &ConditionRun, arena_tag: &str, map_sha256: Option<String>) -> ConditionSummary {
     let games = &run.games;
     let mut tally = Tally::default();
     let (mut credited_w, mut held_w, mut credited_l, mut held_l) = (0, 0, 0, 0);
+    let (mut held_block_w, mut held_block_l, mut held_block_w_any) = (0u32, 0u32, 0u32);
     let mut blocks = 0u32;
     let mut freezes = 0u32;
     let mut bystanders = 0u32;
@@ -187,10 +208,13 @@ pub fn summarize(run: &ConditionRun, arena_tag: &str, map_sha256: Option<String>
             GameResult::W => {
                 credited_w += u32::from(g.credited);
                 held_w += u32::from(g.held);
+                held_block_w += u32::from(g.held_block && g.credited);
+                held_block_w_any += u32::from(g.held_block);
             }
             GameResult::L => {
                 credited_l += u32::from(g.credited);
                 held_l += u32::from(g.held);
+                held_block_l += u32::from(g.held_block);
             }
             _ => {}
         }
@@ -247,6 +271,12 @@ pub fn summarize(run: &ConditionRun, arena_tag: &str, map_sha256: Option<String>
         held_w,
         credited_l,
         held_l,
+        held_block_w,
+        held_block_l,
+        held_block_w_any,
+        held_block_win_rate: Rate::from(wilson_rate(held_block_w, held_block_w + held_block_l)),
+        held_block_rate: Rate::from(tally.credited_win_rate(held_block_w)),
+        held_block_share_of_w: Rate::from(wilson_rate(held_block_w, tally.w)),
         blocks_by_a: blocks,
         minutes_played: minutes,
         blocks_per_min: per_min(blocks),
@@ -465,6 +495,29 @@ pub fn markdown(s: &RunSummary) -> String {
             dec(a),
             dec(b),
             c.games_per_s
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nУдержанный блок (задача 3.10, поправка к D-059): после решающей заморозки игра идёт ещё `after_ticks` тиков (5 с = 250), \
+         и блок считается, только если жертва была вне игры (заморожена или мертва) на КАЖДОМ тике окна. «held W:L» — выигрыши **собственным засчитанным блоком** (credited) и \
+         поражения с удержанным блоком; «held среди решённых» = held W / (held W + held L); «held-побед/все» делит held W на все игры; \
+         «удержано из W» = held W / W.\n"
+    );
+    let _ = writeln!(
+        out,
+        "| Условие | held W:L | held среди решённых, % [ДИ] | held-побед/все, % [ДИ] | удержано из W, % [ДИ] |\n|---|---|---|---|---|"
+    );
+    for c in &s.conditions {
+        let _ = writeln!(
+            out,
+            "| {} | {}:{} | {} | {} | {} |",
+            c.name,
+            c.held_block_w,
+            c.held_block_l,
+            pct(&c.held_block_win_rate),
+            pct(&c.held_block_rate),
+            pct(&c.held_block_share_of_w),
         );
     }
     if s.conditions.iter().any(|c| c.band_fraction.is_some()) {

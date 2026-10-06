@@ -164,3 +164,15 @@ pub const SEALED_TRUE_TICKS: i32 = 30;
 /// aimed at the second slot (exact, but a tick slower). The spread between runs on this host is larger
 /// than the difference between p90 and p95; see `docs/formats.md` §21.6.
 pub const DEFAULT_ESTIMATE_QUANTILE: f64 = 0.9;
+
+// ---- Task 3.10: finishing a block (opt-in, `BotConfig::finish`, `--finish target`) ----------------------------------------------------
+
+/// A frozen **current** target stays the target (it is "finishing", not settled) for this long after it froze, however far it is from
+/// a freeze tile: the 150-tick, near-freeze rule of the port dropped a victim that lay on open ground and thawed 3 s later (E-021).
+pub const FINISH_MAX_HOLD_TICKS: i32 = 600;
+/// The score of the frozen current target within [`ENGAGED_PX`] (`blockHoldScore`: 0 in the port): keeps it ahead of free players
+/// while it is still out.
+pub const FINISH_HOLD_SCORE: f32 = 600.0;
+/// The horizon of the "held" check of a frozen target: it is settled (left alone) only when the passive forecast says it stays
+/// out this long (the held-block window of the arena metric, 5 s).
+pub const FINISH_HORIZON_TICKS: i32 = 250;

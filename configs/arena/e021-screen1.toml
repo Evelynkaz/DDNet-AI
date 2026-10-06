@@ -1,0 +1,60 @@
+# work-clock: default-rate
+# Task 3.10 (E-021): development screen of the finishing switches (hybrid, 4 ms WORK, vs the OLD fixed planner), 100 games per arm and hall on
+# the DEVELOPMENT seeds 6001.. (never used for a claim). Held-block window 250 ticks.
+#   ddnet-ai arena run --config configs/arena/e021-screen1.toml --out ~/aiddnet/data/runs/E-021/screen1 --threads 3
+name = "E-021: finishing screen 1 (dev seeds 6001..)"
+base_seed = 6001
+games = 100
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-left base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left drag6"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 6.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left drag20"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left fc20"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { held_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left drag6fc20"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 6.0, held_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right base"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right drag6"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 6.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right drag20"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right fc20"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { held_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right drag6fc20"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 6.0, held_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]

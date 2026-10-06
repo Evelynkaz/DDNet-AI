@@ -24,6 +24,14 @@ pub enum ClipCmd {
     Info { file: PathBuf },
     /// The incidents the clip holds, by kind.
     Incidents { file: PathBuf },
+    /// Task 3.10: what became of every block we made in the clips (held 5 s / escaped, and why escaped), per clip and in total.
+    Held {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Also print the victim's track after each block (every 10 ticks: position, velocity, frozen, ticks left, our distance and target).
+        #[arg(long)]
+        track: bool,
+    },
     /// Frames `from..=to` of a clip: our tee, the sent inputs, the events (to look at a divergence).
     Dump {
         file: PathBuf,
@@ -64,6 +72,7 @@ pub fn run(args: ClipArgs) -> ExitCode {
     let result = match args.cmd {
         ClipCmd::Info { file } => info(&file),
         ClipCmd::Incidents { file } => incidents(&file),
+        ClipCmd::Held { files, track } => held(&files, track),
         ClipCmd::Dump { file, from, to } => dump(&file, from, to),
         ClipCmd::Replay {
             files,
@@ -165,6 +174,77 @@ fn dump(file: &Path, from: usize, to: usize) -> Result<ExitCode, String> {
             f.events
         );
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn held(files: &[PathBuf], track: bool) -> Result<ExitCode, String> {
+    use ddai_clip::held::{Fate, FateCounts, block_fates};
+    let mut total = FateCounts::default();
+    // Clips overlap (two incidents a few seconds apart share frames): one block is counted once.
+    let mut seen = std::collections::HashSet::new();
+    for f in files {
+        let c = read(f)?;
+        let name = f
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().to_string());
+        for b in block_fates(&c.frames, c.header.own_id) {
+            let tag = c
+                .header
+                .players
+                .iter()
+                .find(|p| p.id == b.victim)
+                .map_or("?", |p| p.tag.as_str());
+            if !seen.insert((b.tick, tag.to_string())) {
+                continue;
+            }
+            let fate = match b.fate {
+                Fate::Held => "held".to_string(),
+                Fate::Killed { weapon } => format!("killed (weapon {weapon})"),
+                Fate::Escaped { after, why } => format!("escaped after {after} ticks ({why:?})"),
+                Fate::Unknown(u) => format!("unknown ({u:?})"),
+            };
+            println!(
+                "{name}: block at tick {} victim {tag}: {fate}; in view out {} ticks, target at block {}, frames off target {}, touches {}",
+                b.tick, b.out_ticks, b.target_at_block, b.frames_off_target, b.touches
+            );
+            total.add(&b);
+            if track {
+                let mut next = 0;
+                for fr in &c.frames[b.frame..] {
+                    let dt = fr.tick - b.tick;
+                    if dt > ddai_clip::held::HELD_TICKS + 20 {
+                        break;
+                    }
+                    if dt < next {
+                        continue;
+                    }
+                    next = dt + 10;
+                    let (me, v) = (fr.tee(c.header.own_id), fr.tee(b.victim));
+                    let dist = me.zip(v).map(|(m, v)| {
+                        let (a, b2) = (m.pos(), v.pos());
+                        ((a.0 - b2.0).hypot(a.1 - b2.1)).round()
+                    });
+                    println!(
+                        "    +{dt:>3}: victim {} our dist {:?} target {} our hook {}/{}",
+                        v.map_or("not in view".to_string(), |t| format!(
+                            "({:.0},{:.0}) v ({:.1},{:.1}) frozen {} left {}",
+                            t.ch.x,
+                            t.ch.y,
+                            t.vel().0,
+                            t.vel().1,
+                            t.frozen,
+                            t.freeze_left
+                        )),
+                        dist,
+                        fr.bot.target,
+                        me.map_or(-1, |t| t.ch.hook_state),
+                        me.map_or(-1, |t| t.ch.hooked_player)
+                    );
+                }
+            }
+        }
+    }
+    println!("{total:?} (escaped {})", total.escaped());
     Ok(ExitCode::SUCCESS)
 }
 

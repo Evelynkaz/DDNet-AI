@@ -627,7 +627,10 @@ impl Core {
             let roped = cand.hooked_player == own.id || own.hooked_player == cand.id;
             let counter = at_us && d <= HOOK_LENGTH_PX + COUNTER_REACH_PX && !in_leash;
             if !roped && !at_war && !counter && !corridor && !in_leash {
-                return skip;
+                return WbFilter {
+                    leash_only: true,
+                    ..skip
+                };
             }
         }
         let in_zone = def.in_zone(side, tx, ty);
@@ -659,6 +662,7 @@ impl Core {
             in_zone,
             finish_zone: me_in_leash && in_zone,
             corridor,
+            leash_only: false,
         }
     }
 }

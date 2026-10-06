@@ -55,6 +55,19 @@ impl PlanScratch {
         sealed_in(&mut self.world, id, &state, held)
     }
 
+    /// Task 3.10 (`--finish target`): [`PlanScratch::sealed`] for a tee that is not frozen; for a **frozen** one the exact passive forecast
+    /// ([`ddai_planner::forecast::passive_forecast`]): is it still out (frozen, or dead) after `horizon` ticks if nobody touches it
+    /// again? That is "settled" in the finishing sense: a victim lying frozen on open ground is not, it thaws in 3 s.
+    pub fn sealed_or_held(&mut self, base: &World<f32>, id: i32, horizon: i32) -> bool {
+        self.world.sync_from(base);
+        match self.world.get_tee(id) {
+            Some(state) if state.frozen => {
+                ddai_planner::forecast::passive_forecast(&mut self.world, id, horizon).held()
+            }
+            _ => self.sealed(base, id),
+        }
+    }
+
     /// `guard` (`bot.ts:2801-2820`). `predicted` is the world the wanted input takes effect in (our
     /// own in-flight inputs already applied — the TS rolled `lag` ticks with `prevInput` for that);
     /// `prev` is the input we last sent (the shield's "sent aim"). Returns the wanted action when

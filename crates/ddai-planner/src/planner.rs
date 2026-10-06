@@ -203,7 +203,13 @@ struct DragTracker {
     prev_enemy_near: f64,
     start_enemy_near: f64,
     started_in_dead: bool,
+    /// Task 3.10: our distance to the staging point behind a frozen victim at the previous tick (`NaN` = not seen yet).
+    prev_stage_dist: f64,
 }
+
+/// Task 3.10: how far behind a frozen victim (on the side its nearest freeze lies) the staging point is, in px: from there a hook pulls it
+/// toward the freeze.
+const STAGE_BEHIND_PX: f64 = 110.0;
 
 /// `scoreTick` (`planner.ts:518-605`). Free function (not a method): needs only `cfg`/`drag` plus
 /// read-only world state, exactly like TS's own module-level function. `travel` is not a
@@ -300,7 +306,26 @@ fn score_tick<W: PlanWorld>(
     if cfg.hook_drag_weight > 0.0 && me.hooked_player == enemy_id && !en.frozen && en_near > drag.prev_enemy_near {
         s += cfg.hook_drag_weight * (en_near - drag.prev_enemy_near);
     }
+    if cfg.frozen_drag_weight > 0.0 && en.frozen && en.alive {
+        s += cfg.frozen_drag_weight * (en_near - drag.prev_enemy_near);
+    }
     drag.prev_enemy_near = en_near;
+    // Task 3.10: a frozen victim lying off the freeze is hauled back only by someone standing on its freeze side (the rope pulls it to us), and
+    // that takes longer than the 27 ticks of a rollout: reward the progress toward that spot (per tile gained), the way the drag term rewards its progress.
+    if cfg.frozen_stage_weight > 0.0 && en.frozen && en.alive && me.alive && !me.frozen && en_near < 0.95 {
+        let g = crate::hybrid::techniques::toward_hazard(field, en.pos);
+        if g.x != 0.0 || g.y != 0.0 {
+            let stage = Vec2 {
+                x: en.pos.x + g.x * STAGE_BEHIND_PX,
+                y: en.pos.y + g.y * STAGE_BEHIND_PX,
+            };
+            let d = vdistance(me.pos, stage);
+            if !drag.prev_stage_dist.is_nan() {
+                s += cfg.frozen_stage_weight * (drag.prev_stage_dist - d) / 32.0;
+            }
+            drag.prev_stage_dist = d;
+        }
+    }
 
     let me_near = hazard_nearness(field, me.pos.x, me.pos.y);
     if me_near > cfg.self_hazard_threshold {
@@ -3266,6 +3291,7 @@ impl<W: PlanWorld> Planner<W> {
             prev_enemy_near: en_near_at_start,
             start_enemy_near: en_near_at_start,
             started_in_dead: me_at_start.is_some_and(|me| in_dead(self.dead.as_ref(), me.pos.x, me.pos.y)),
+            prev_stage_dist: f64::NAN,
         };
 
         // Task 3.5 (T14): jumpless, airborne, with a hazard below -- an anchor is the only control.
@@ -3551,6 +3577,20 @@ impl<W: PlanWorld> Planner<W> {
             let en_end = world.get_tee(enemy_id);
             self.rollout_enemy_sealed =
                 en_end.is_some_and(|e| !e.alive || (e.frozen && rests_in_freeze(world.collision(), e.pos, e.vel) > 0));
+        }
+        // Task 3.10: the exact passive forecast of a frozen victim (hybrid only; plays the victim alone on the real physics, so it is
+        // charged to the work meter as ticks of the rollout's own tee count). Never when the final state is kept for inspection.
+        if self.cfg.held_forecast_weight > 0.0
+            && !self.keep_final
+            && let Some(en_end) = world.get_tee(enemy_id)
+            && en_end.alive
+            && en_end.frozen
+        {
+            let tees = crate::forecast::tee_count(world).max(1) as u64;
+            let f = crate::forecast::passive_forecast(world, enemy_id, crate::forecast::HELD_HORIZON_TICKS);
+            self.eval_ticks += (f.steps.max(0) as u64).div_ceil(tees);
+            let h = crate::forecast::HELD_HORIZON_TICKS;
+            score += self.cfg.held_forecast_weight * f64::from(f.out_ticks(h)) / f64::from(h);
         }
         self.last_input = input;
         if !self.keep_final {
@@ -3924,6 +3964,7 @@ mod tests {
                 prev_enemy_near: 0.0,
                 start_enemy_near: 0.0,
                 started_in_dead: false,
+                prev_stage_dist: f64::NAN,
             };
             score_tick(
                 &w,

@@ -64,6 +64,12 @@ pub struct BotOpts {
     /// against people: the way back if the first live session shows it hurts.
     #[arg(long, default_value = "on", value_parser = parse_on_off, action = clap::ArgAction::Set)]
     pub hybrid_mirror: bool,
+    /// Finish blocks (task 3.10, E-021, D-097): `off` (the default), `target` keeps a frozen current target until it is held (the bot's target
+    /// logic only: the part with consistent evidence, the live A/B candidate), `full` adds the hybrid's drag-back shaping for a frozen victim
+    /// (a duel gain that did not hold up in review: not recommended). `on` = `full`, kept for compatibility. Off until a live session shows what
+    /// people do against it.
+    #[arg(long, default_value = "off", value_parser = parse_finish, action = clap::ArgAction::Set)]
+    pub finish: FinishMode,
     /// `--brain fly`: the compiled graph.
     #[arg(long)]
     pub fly_flyg: Option<PathBuf>,
@@ -178,6 +184,39 @@ impl Default for SearchThreads {
     /// One thread, like the `--search-threads` default.
     fn default() -> Self {
         SearchThreads(Some(1))
+    }
+}
+
+/// `--finish`: which finishing switches are on (task 3.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FinishMode {
+    /// None (the default).
+    #[default]
+    Off,
+    /// The bot's target logic only (`TargetPicker::set_finish`).
+    Target,
+    /// The target logic and the hybrid's frozen-victim drag shaping (`HybridConfig::with_finish`).
+    Full,
+}
+
+impl FinishMode {
+    /// The bot keeps a frozen current target until it is held.
+    pub fn target_logic(self) -> bool {
+        self != FinishMode::Off
+    }
+
+    /// The hybrid's drag shaping is on.
+    pub fn hybrid_drag(self) -> bool {
+        self == FinishMode::Full
+    }
+}
+
+fn parse_finish(s: &str) -> Result<FinishMode, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "off" => Ok(FinishMode::Off),
+        "target" => Ok(FinishMode::Target),
+        "full" | "on" => Ok(FinishMode::Full),
+        _ => Err(format!("expected `off`, `target` or `full` (`on` = `full`), got {s:?}")),
     }
 }
 
@@ -353,6 +392,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
     brain.search_threads = Some(search_threads);
     brain.proposal_in_cap = !o.no_proposal_in_cap;
     brain.hybrid_mirror = o.hybrid_mirror;
+    brain.hybrid_finish = o.finish.hybrid_drag();
     if kind == BrainKind::Hybrid {
         eprintln!(
             "hybrid search threads: {search_threads} ({})",
@@ -374,6 +414,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         brain: kind,
         mode,
         fixed_target: o.target.clone(),
+        finish: o.finish.target_logic(),
         seed: args.seed,
         clips: ddai_bot::clipper::ClipConfig {
             dir: Some(
@@ -585,12 +626,15 @@ fn summary_of(name: &str, s: ddai_bot::latency::Summary) -> String {
 fn summary(r: &RunReport) -> String {
     let l = &r.latency;
     let mut out = format!(
-        "bot ran {:.1}s, exit {}, {} decisions ({} collapsed), {} blocks, {} blocked-by, {} kills\n",
+        "bot ran {:.1}s, exit {}, {} decisions ({} collapsed), {} blocks ({} held 5 s, {} of them the victim died, {} escaped), {} blocked-by, {} kills\n",
         r.elapsed.as_secs_f64(),
         r.exit_code,
         r.stats.decisions,
         r.stats.collapsed,
         r.block_stats.blocks,
+        r.block_stats.held,
+        r.block_stats.died,
+        r.block_stats.escaped,
         r.block_stats.blocked_by,
         r.kill_ticks.len()
     );
@@ -648,7 +692,7 @@ pub fn report_json(r: &RunReport) -> serde_json::Value {
             "guarded_inputs": r.stats.guarded_inputs,
             "deaths": r.stats.deaths,
         },
-        "blocks": {"blocks": r.block_stats.blocks, "blocked_by": r.block_stats.blocked_by},
+        "blocks": {"blocks": r.block_stats.blocks, "blocked_by": r.block_stats.blocked_by, "held": r.block_stats.held, "died": r.block_stats.died, "escaped": r.block_stats.escaped},
         "kill_ticks": r.kill_ticks,
         "kill_command_ticks": r.kill_command_ticks,
         // The owner's website chat (D-094). `sent` counts the lines handed to the client, which can still drop one if the session left
@@ -779,6 +823,30 @@ mod search_threads_tests {
             get(&["--no-owner-chat", "--no-control"]).unwrap(),
             "it does not conflict with --no-control"
         );
+    }
+
+    #[test]
+    fn finish_is_off_by_default_and_takes_off_target_or_full() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.finish)
+        };
+        assert_eq!(get(&[]).unwrap(), FinishMode::Off, "finishing is opt-in");
+        assert_eq!(get(&["--finish", "off"]).unwrap(), FinishMode::Off);
+        assert_eq!(get(&["--finish", "target"]).unwrap(), FinishMode::Target);
+        assert_eq!(get(&["--finish", "FULL"]).unwrap(), FinishMode::Full);
+        assert_eq!(
+            get(&["--finish", "on"]).unwrap(),
+            FinishMode::Full,
+            "`on` is the old spelling of `full`"
+        );
+        assert!(get(&["--finish", "maybe"]).is_err());
+        // The switches each mode turns on: the target mode has no drag shaping.
+        let on = |m: FinishMode| (m.target_logic(), m.hybrid_drag());
+        assert_eq!(on(FinishMode::Off), (false, false));
+        assert_eq!(on(FinishMode::Target), (true, false));
+        assert_eq!(on(FinishMode::Full), (true, true));
     }
 
     #[test]

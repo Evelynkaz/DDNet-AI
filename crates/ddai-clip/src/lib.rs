@@ -2,6 +2,7 @@
 //!
 //! - [`format`]: the clip format v1 (postcard + zstd), the data types;
 //! - [`record`]: the 30 s ring recorder with fixed storage (no allocation per frame);
+//! - [`held`]: what became of every block we made (held or escaped, and why; the live diagnosis of task 3.10);
 //! - [`incidents`]: `findIncidents` with real events, `mergeOverlapping`, `summarise`;
 //! - [`store`]: names, the autoclip scheduling and pruning of `~/aiddnet/data/bot/clips/`;
 //! - [`replay`]: the offline bit-exact replay of a clip on `ddai-world`/`ddai-physics`.
@@ -9,6 +10,7 @@
 //! No chat, no network, no nicknames: a clip holds numbers and the 4.1 tags (`c<id>-<hash>`).
 
 pub mod format;
+pub mod held;
 pub mod incidents;
 pub mod record;
 pub mod replay;

@@ -9,6 +9,7 @@
 | `record` | кольцо в фиксированных слотах (запись кадра не выделяет память), `to_clip` |
 | `incidents` | `find_incidents` (10 видов, пороги TS), `merge_overlapping`, `summarise` |
 | `store` | имена, `pick_incident`, автоклип (кулдауны), чистка каталога (24 / 16, `manual-*` не трогается) |
+| `held` | **3.10:** что стало с каждым нашим блоком в клипе: `block_fates` — удержан 250 тиков / убит / сбежал (причина `Switched`, `NoReach`, `LateInput`, `Slipped`) / неизвестно; `ddnet-ai clip held [--track] <файлы>` |
 | `replay` | `replay(clip, map, Resync \| FreeRun)` → `Report` с первым расхождением и его причиной |
 
 Ников в клипе нет (теги 4.1), карты тоже нет (имя + sha256). Клипы в git не попадают. Формат — `docs/formats.md` §24, решение — D-067,

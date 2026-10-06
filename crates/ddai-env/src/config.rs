@@ -69,6 +69,11 @@ pub struct Rules {
     /// hub of 12-15 tees does not fit an E-002 box at that spacing).
     #[serde(default)]
     pub crowd_spacing: Option<f64>,
+    /// Task 3.10 (finishing, opt-in): the focal player's target rule keeps a frozen current target until the passive forecast says it stays
+    /// out for the held-block window ([`crate::sim::HoldTarget`], the arena's counterpart of the bot's `--finish target` target logic); the
+    /// default rule takes a free opponent first and a frozen one last, so in a crowd the victim of a first freeze is left at once.
+    #[serde(default)]
+    pub hold_target: bool,
 }
 
 impl Default for Rules {
@@ -81,11 +86,25 @@ impl Default for Rules {
             credit_required: None,
             crowd_from: None,
             crowd_spacing: None,
+            hold_target: false,
         }
     }
 }
 
+/// The window of the held-block metric (task 3.10, D-059 amendment): 250 ticks = 5 s, more than `sv_freeze_delay` (3 s).
+pub const HELD_BLOCK_TICKS: i32 = 250;
+
 impl Rules {
+    /// These rules with the held-block window: the game is played on for [`HELD_BLOCK_TICKS`] after the deciding freeze, so
+    /// `GameReport::held_block` and `victim_out_ticks` mean something. An episode of a training run that should see (and be rewarded for)
+    /// what happens after the first freeze uses this too (`collect_game` plays the whole window and labels it).
+    pub fn held_block_window(self) -> Rules {
+        Rules {
+            after_ticks: self.after_ticks.max(HELD_BLOCK_TICKS),
+            ..self
+        }
+    }
+
     pub fn validate(&self) -> Result<(), EnvError> {
         if self.max_ticks <= 0 || self.after_ticks < 0 || self.decide_every <= 0 || self.credit_ticks < 0 {
             return Err(EnvError::new(
@@ -114,6 +133,8 @@ pub struct RulesOverride {
     pub crowd_from: Option<usize>,
     #[serde(default)]
     pub crowd_spacing: Option<f64>,
+    #[serde(default)]
+    pub hold_target: Option<bool>,
 }
 
 impl RulesOverride {
@@ -127,6 +148,7 @@ impl RulesOverride {
             credit_required: self.credit_required.or(base.credit_required),
             crowd_from: self.crowd_from.or(base.crowd_from),
             crowd_spacing: self.crowd_spacing.or(base.crowd_spacing),
+            hold_target: self.hold_target.unwrap_or(base.hold_target),
         }
     }
 }
@@ -306,6 +328,19 @@ pub struct HybridSpec {
     pub mirror: Option<bool>,
     #[serde(default)]
     pub mirror_samples: Option<usize>,
+    /// Task 3.10 (finishing, opt-in, default 0 = off): the shaping weight of a frozen victim's progress toward a freeze/death tile
+    /// (`PlannerConfig::frozen_drag_weight`), and the weight of the exact passive forecast of how long the frozen victim stays out
+    /// (`PlannerConfig::held_forecast_weight`).
+    #[serde(default)]
+    pub frozen_drag_weight: Option<f64>,
+    #[serde(default)]
+    pub held_forecast_weight: Option<f64>,
+    /// Task 3.10 (opt-in, default false): the offensive technique families against a frozen victim too (`HybridConfig::finish_families`).
+    #[serde(default)]
+    pub finish_families: Option<bool>,
+    /// Task 3.10 (opt-in, default 0): per-tile reward for the progress toward the staging point behind a frozen victim (`PlannerConfig::frozen_stage_weight`).
+    #[serde(default)]
+    pub frozen_stage_weight: Option<f64>,
     /// Samples per CEM iteration and CEM iterations of the search (planner presets: 20 and 2): a diagnostic knob (task 3.7b).
     #[serde(default)]
     pub cem_population: Option<i32>,
@@ -424,6 +459,18 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
             .unwrap_or(if h.proposer_name() == "none" { 0 } else { cfg.proposals });
         if let Some(v) = h.workers {
             cfg.workers = v;
+        }
+        if let Some(v) = h.frozen_drag_weight {
+            cfg.planner.frozen_drag_weight = v;
+        }
+        if let Some(v) = h.held_forecast_weight {
+            cfg.planner.held_forecast_weight = v;
+        }
+        if let Some(v) = h.finish_families {
+            cfg.finish_families = v;
+        }
+        if let Some(v) = h.frozen_stage_weight {
+            cfg.planner.frozen_stage_weight = v;
         }
         if let Some(v) = h.techniques {
             cfg.techniques = v;

@@ -1,0 +1,46 @@
+# work-clock: default-rate
+# Task 3.10 (E-021): held block in crowds (1v3, 1v5 scripted, 8 tees with idle bystanders; finish arm = drag shaping + the hold-target rule)
+# FRESH seeds 4001.. (never used while the finishing switches were developed: the screens used 6001..). Both arms of a pair play the same games
+# (same seeds and layouts), so they pair up for McNemar; the finishing arm is "finish" = `hybrid = { frozen_drag_weight = 20.0 }` (= `HybridConfig::with_finish`).
+#   ddnet-ai arena run --config configs/arena/e021-held-crowd.toml --out ~/aiddnet/data/runs/E-021/held-crowd --threads 3
+name = "E-021: held block in crowds (1v3, 1v5 scripted, 8 tees with idle bystanders; finish arm = drag shaping + the hold-target rule)"
+base_seed = 4001
+games = 150
+
+[rules]
+after_ticks = 250
+crowd_from = 2
+crowd_spacing = 1.0
+
+[[condition]]
+name = "clb-left 1v3 scripted: base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 1v3 scripted: finish"
+arena = "clb-left"
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 1v5 scripted: base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "clb-left 1v5 scripted: finish"
+arena = "clb-left"
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted", count = 5 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders: base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders: finish"
+arena = "clb-left"
+rules = { hold_target = true }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]

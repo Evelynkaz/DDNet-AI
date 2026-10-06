@@ -1,0 +1,40 @@
+# work-clock: default-rate
+# Task 3.10 (E-021): development screen 2 of the finishing switches (hybrid, 4 ms WORK, vs the OLD fixed planner), clb-left, 100 games per arm on
+# the DEVELOPMENT seeds 6001.. (never used for a claim). Held-block window 250 ticks.
+#   ddnet-ai arena run --config configs/arena/e021-screen2.toml --out ~/aiddnet/data/runs/E-021/screen2 --threads 3
+name = "E-021: finishing screen 2 (dev seeds 6001..)"
+base_seed = 6001
+games = 100
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-left base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left drag20"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left drag50"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 50.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left drag100"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 100.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left drag20fam"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 20.0, finish_families = true } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left drag50fam"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_drag_weight = 50.0, finish_families = true } }, { brain = "planner", mode = "fixed" }]

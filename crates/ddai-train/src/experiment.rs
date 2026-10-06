@@ -148,6 +148,11 @@ pub struct JobConfig {
     #[serde(default = "default_noise_len")]
     pub noise_len: (u32, u32),
     pub base_seed: u64,
+    /// Task 3.10: ticks played on after the deciding freeze (`Rules::after_ticks`); `None` = the default (150). `250` is the held-block
+    /// window (`Rules::held_block_window`): the episode then holds the decisions *after* the first freeze too, so a student trained on it
+    /// sees what happens to a block; `HeldOutcome::held_return` pays only a strict held win and pays nothing for a freeze that thaws (`collect_game_held`).
+    #[serde(default)]
+    pub after_ticks: Option<i32>,
 }
 
 fn default_opponents() -> Vec<String> {
@@ -229,8 +234,10 @@ pub fn job_setup(job: &JobConfig) -> String {
 /// The identity of a job within a round: its setup, base seed, game count and noise-burst length. A job whose key is
 /// already in the dataset is not collected again (resuming an interrupted round).
 pub fn job_key(job: &JobConfig) -> String {
+    // The window is part of the key only when set: the keys of datasets collected before 3.10 stay valid.
+    let window = job.after_ticks.map_or(String::new(), |t| format!("|after={t}"));
     format!(
-        "{}|seed={}|games={}|noise_len={}-{}",
+        "{}|seed={}|games={}|noise_len={}-{}{window}",
         job_setup(job),
         job.base_seed,
         job.games,
@@ -253,9 +260,12 @@ pub fn run_collect_jobs(
     log: &mut dyn FnMut(&str),
 ) -> Result<Vec<JobSummary>, String> {
     let factory = env.models.factory();
-    let rules = Rules::default();
     let mut summaries = Vec::new();
     for job in jobs {
+        let rules = Rules {
+            after_ticks: job.after_ticks.unwrap_or_else(|| Rules::default().after_ticks),
+            ..Rules::default()
+        };
         let key = job_key(job);
         if store.manifest.job_done(round, &key) {
             log(&format!(

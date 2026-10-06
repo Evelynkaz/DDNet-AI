@@ -465,6 +465,11 @@ pub struct ArenaEval {
     /// Games won by the player's own credited block over all games (D-059), with its Wilson interval.
     pub credited_win_rate: Option<[f64; 3]>,
     pub credited_w: u32,
+    /// Task 3.10: games won by the focal player's credited block that was still on at the end of the window (`held W`), lost games whose block on us
+    /// held, and the rate of the former over all games (the held-block metric; meaningful with the 250-tick window of [`arena_eval_held`]).
+    pub held_block_w: u32,
+    pub held_block_l: u32,
+    pub held_block_rate: Option<[f64; 3]>,
     pub self_freezes_per_min: f64,
     pub blocks_per_min: f64,
     pub decide_us_p50: Option<u32>,
@@ -479,6 +484,52 @@ pub fn arena_eval(
     games: u32,
     base_seed: u64,
     threads: usize,
+) -> Result<ArenaEval, String> {
+    arena_eval_rules(
+        env,
+        actor,
+        arena,
+        opponents,
+        games,
+        base_seed,
+        threads,
+        Rules::default(),
+    )
+}
+
+/// [`arena_eval`] over the held-block window (`Rules::held_block_window`, 250 ticks after the deciding freeze): the same games up to the deciding tick,
+/// slower by the extra ticks, and the `held_block_*` fields of the result mean something. Opt-in (task 3.10): [`arena_eval`] keeps the 150-tick window.
+pub fn arena_eval_held(
+    env: &Env,
+    actor: &PlayerSpec,
+    arena: &str,
+    opponents: &[String],
+    games: u32,
+    base_seed: u64,
+    threads: usize,
+) -> Result<ArenaEval, String> {
+    arena_eval_rules(
+        env,
+        actor,
+        arena,
+        opponents,
+        games,
+        base_seed,
+        threads,
+        Rules::default().held_block_window(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn arena_eval_rules(
+    env: &Env,
+    actor: &PlayerSpec,
+    arena: &str,
+    opponents: &[String],
+    games: u32,
+    base_seed: u64,
+    threads: usize,
+    rules: Rules,
 ) -> Result<ArenaEval, String> {
     let a = env
         .arenas
@@ -497,7 +548,7 @@ pub fn arena_eval(
         name: "eval".into(),
         base_seed,
         games,
-        rules: Rules::default(),
+        rules,
         arenas_dir: None,
         map_dir: None,
         condition: vec![cond.clone()],
@@ -518,6 +569,9 @@ pub fn arena_eval(
         win_rate_all: s.win_rate_all.map(|r| [r.p, r.lo, r.hi]),
         credited_win_rate: s.credited_win_rate.map(|r| [r.p, r.lo, r.hi]),
         credited_w: s.credited_w,
+        held_block_w: s.held_block_w,
+        held_block_l: s.held_block_l,
+        held_block_rate: s.held_block_rate.map(|r| [r.p, r.lo, r.hi]),
         self_freezes_per_min: s.self_freezes_per_min,
         blocks_per_min: s.blocks_per_min,
         decide_us_p50: p0.and_then(|p| p.decide_us_p50),

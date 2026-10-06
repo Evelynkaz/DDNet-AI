@@ -157,6 +157,10 @@ pub struct TechCaps {
     pub swing_anchors: usize,
     /// Emit the generic wall/ceiling escape even when no T-trigger fits (danger without a cause).
     pub generic_escape: bool,
+    /// Task 3.10 (finishing, opt-in): against a **frozen** victim the offensive families (drag through the edge, hammer toss, swing,
+    /// leapfrog, the corner hook) are generated too, not only T7/T8 (which only hold it or push it where it already lies near a hazard):
+    /// a victim frozen on open ground thaws in 3 s unless it is hauled back into the freeze.
+    pub frozen_offence: bool,
 }
 
 impl Default for TechCaps {
@@ -165,6 +169,7 @@ impl Default for TechCaps {
             escape_anchors: 4,
             swing_anchors: 2,
             generic_escape: false,
+            frozen_offence: false,
         }
     }
 }
@@ -676,7 +681,9 @@ fn offence<C: PlanCollision>(ctx: &TechCtx<'_, C>, anchors: &[Anchor], caps: &Te
                 plan: plan(n, |s| st(if s < 3 { toward } else { 0 }, false, false, false, 0.0)),
             });
         }
-        return;
+        if !caps.frozen_offence {
+            return;
+        }
     }
 
     // T1: hook drag through the edge into the hazard -- only when a hazard lies on (or just under)
@@ -1117,6 +1124,42 @@ mod tests {
         let g = generate(&ctx(&col, &field, &me, &v), &[], &TechCaps::default());
         assert!(g.offence.iter().any(|p| p.tech == Tech::T8));
         assert!(g.offence.iter().all(|p| p.plan.iter().all(|s| s.fire == 0)));
+    }
+
+    /// Task 3.10: with `frozen_offence` the offensive families are generated against a frozen victim too (a victim frozen on open ground thaws
+    /// in 3 s unless it is hauled back into the freeze); T7/T8 stay, and the default (off) is the old behaviour.
+    #[test]
+    fn frozen_offence_adds_the_offensive_families_against_a_frozen_victim() {
+        let col = pit();
+        let field = crate::fields::hazard_field(&col);
+        let me = tee(150.0, 200.0);
+        let mut v = tee(190.0, 200.0);
+        v.frozen = true;
+        v.freeze_ticks_left = 200;
+        let ctx = ctx(&col, &field, &me, &v);
+        let off = generate(&ctx, &[], &TechCaps::default());
+        let on = generate(
+            &ctx,
+            &[],
+            &TechCaps {
+                frozen_offence: true,
+                ..TechCaps::default()
+            },
+        );
+        assert!(on.offence.iter().any(|p| p.tech == Tech::T8), "hands off stays");
+        assert!(
+            off.offence
+                .iter()
+                .all(|p| !matches!(p.tech, Tech::T1 | Tech::T2 | Tech::T3 | Tech::T5))
+        );
+        assert!(
+            on.offence
+                .iter()
+                .any(|p| matches!(p.tech, Tech::T1 | Tech::T2 | Tech::T3 | Tech::T5)),
+            "{:?}",
+            on.offence.iter().map(|p| p.tech.name()).collect::<Vec<_>>()
+        );
+        assert!(on.offence.len() > off.offence.len());
     }
 
     #[test]

@@ -14,6 +14,10 @@
 //! * `credited`: the victim was hooked or hammered by the winner at most `credit_ticks` before
 //!   the onset. `held`: `after_ticks` more ticks are played; the victim is still out at the end
 //!   and the winner was never out in that window.
+//! * `held_block` (task 3.10, the D-059 amendment "held block"): the strict form of `held`. Over the whole window of
+//!   `after_ticks` the victim was out on **every** tick (frozen or dead, never thawed in between), whatever the winner
+//!   did; `escape_tick` is the first tick of the window the victim was free again. The metric needs
+//!   `after_ticks` of at least 250 (5 s, more than `sv_freeze_delay` = 3 s: a freeze that nobody keeps up thaws inside it).
 //!
 //! Hammer credit comes from `ddai_planner::physics_adapter::PhysicsWorld::step`'s
 //! `HammerHit` derivation (task 3.2); hook credit from the hooker's `hooked_player` each tick.
@@ -28,7 +32,7 @@ use crate::EnvError;
 use crate::arena::{Arena, tile_center};
 use crate::config::Rules;
 use crate::observe;
-use crate::sim::{PlayerSetup, Sim, default_target};
+use crate::sim::{HoldTarget, PlayerSetup, Sim, default_target};
 use crate::stats::{GameResult, percentile_u32};
 
 /// How a game's seed is turned into a starting layout. Both flips exist because both matter:
@@ -80,6 +84,18 @@ pub struct GameReport {
     pub end_tick: i32,
     pub credited: bool,
     pub held: bool,
+    /// Task 3.10: the victim was out (frozen or dead) on every tick of the `after_ticks` window that follows the deciding
+    /// tick (the window was played to its end); `false` for `D`/`T` games, which have no victim.
+    pub held_block: bool,
+    /// Task 3.10: the first tick after the deciding tick on which the victim was free again; `None` = it never was.
+    pub escape_tick: Option<i32>,
+    /// Task 3.10: the winner was out (frozen or dead) at some tick of the window (the `held` rule's condition; for a 1vN loss nobody was credited
+    /// for: any opponent was out).
+    pub winner_out_in_window: bool,
+    /// Task 3.10: the focal player (slot 0) was out at some tick of the window (always true when it is the victim).
+    pub focal_out_in_window: bool,
+    /// Task 3.10: ticks of the `after_ticks` window the victim was out (a graded form of `held_block`, for rewards).
+    pub victim_out_ticks: i32,
     /// Slot of the victim (`W`: the opponent that went out, `L`: 0), `-1` for `D`/`T`.
     pub victim: i32,
     /// Spawn positions in pixels, by slot.
@@ -109,6 +125,63 @@ pub struct GameReport {
     /// Raw decision times per player, for pooling into batch-level percentiles.
     #[serde(skip)]
     pub decide_us: Vec<Vec<u32>>,
+}
+
+/// What a game says about whether its block held: the facts a training reward is made of (task 3.10; the fly's training plays
+/// episodes past the first freeze, `Rules::held_block_window`, and rewards what lasts).
+///
+/// **Which fields a reward takes.** `held_block` alone is *not* a win: it holds for any victim, an opponent that froze itself and a lost game included.
+/// A held block *of the focal player* is `result == W && credited && held_block && !focal_out_in_window`
+/// ([`HeldOutcome::strict_held_win`]); this is what task 8.5a's `EpisodeOutcome::held_block` computes too, so it can swap its `from_records` for
+/// these facts (`credited`, `focal_out_in_window`, `held_block`, `victim_out_ticks`, `escape_tick`) without losing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct HeldOutcome {
+    pub result: GameResult,
+    pub credited: bool,
+    /// The victim was out on every tick of the window (any game with a victim; see above).
+    pub held_block: bool,
+    pub escape_tick: Option<i32>,
+    pub victim_out_ticks: i32,
+    pub winner_out_in_window: bool,
+    pub focal_out_in_window: bool,
+    /// The window the facts were played over (`Rules::after_ticks`).
+    pub window_ticks: i32,
+}
+
+impl GameReport {
+    pub fn held_outcome(&self, window_ticks: i32) -> HeldOutcome {
+        HeldOutcome {
+            result: self.result,
+            credited: self.credited,
+            held_block: self.held_block,
+            escape_tick: self.escape_tick,
+            victim_out_ticks: self.victim_out_ticks,
+            winner_out_in_window: self.winner_out_in_window,
+            focal_out_in_window: self.focal_out_in_window,
+            window_ticks,
+        }
+    }
+}
+
+impl HeldOutcome {
+    /// The focal player's own held block: a win by its credited block whose victim stayed out for the whole window while the focal player was never out.
+    pub fn strict_held_win(&self) -> bool {
+        self.result == GameResult::W && self.credited && self.held_block && !self.focal_out_in_window
+    }
+
+    /// The held-block return for the focal player, the same as task 8.5a's `RewardConfig` base reward: `+1` for a strict held win
+    /// ([`HeldOutcome::strict_held_win`]); `-1` when the focal player was out at any time of the window (a lost game included: an own freeze is the worst
+    /// outcome); `0` for everything else, a block that thawed and a freeze nobody credited the focal player for included (no graded credit: a freeze that
+    /// lets go is not a block, and an opponent's self-freeze is not a skill).
+    pub fn held_return(&self) -> f32 {
+        if self.strict_held_win() {
+            1.0
+        } else if self.focal_out_in_window || self.result == GameResult::L {
+            -1.0
+        } else {
+            0.0
+        }
+    }
 }
 
 /// A last-touch record: who hooked/hammered a tee, and when.
@@ -188,6 +261,9 @@ pub fn play_game_watched(
         );
         spawns[i] = [x, y];
     }
+    let hold = rules
+        .hold_target
+        .then(|| std::rc::Rc::new(HoldTarget::new(arena.map.clone())));
     let mut sim = Sim::new(pw, arena.map.clone(), players, rules.decide_every, seed);
     let mut last_touch: Vec<Touch> = vec![None; n];
     let mut was_out = vec![false; n];
@@ -198,6 +274,9 @@ pub fn play_game_watched(
     let mut winner: Option<usize> = None;
     let mut credited = false;
     let mut winner_out_after = false;
+    let mut focal_out_window = false;
+    let mut escape_tick: Option<i32> = None;
+    let mut victim_out_ticks = 0i32;
     let mut a_out_tick: Option<i32> = None;
     let mut a_self_freezes = 0u32;
     let mut blocks_by_a = 0u32;
@@ -207,7 +286,13 @@ pub fn play_game_watched(
 
     let limit = rules.max_ticks + rules.after_ticks;
     for _ in 0..limit {
-        let events = sim.step(&default_target);
+        let events = match &hold {
+            Some(h) => {
+                let h = std::rc::Rc::clone(h);
+                sim.step(&move |w, slot, ids| h.pick(w, slot, ids))
+            }
+            None => sim.step(&default_target),
+        };
         let now = sim.tick();
         if !observe(&mut sim, now) {
             break;
@@ -300,6 +385,12 @@ pub fn play_game_watched(
             }
         } else {
             if victim >= 0 {
+                if out_now[victim as usize] {
+                    victim_out_ticks += 1;
+                } else {
+                    escape_tick.get_or_insert(now);
+                }
+                focal_out_window |= out_now[0];
                 match winner {
                     Some(w) => winner_out_after |= out_now[w],
                     // A 1vN loss nobody was credited for: "the winner never out" means no
@@ -318,6 +409,8 @@ pub fn play_game_watched(
         GameResult::T
     });
     let held = victim >= 0 && observe::is_out(sim.pw.inner(), sim.ids[victim as usize]) && !winner_out_after;
+    // The window must have been played to its end (an observer that stops the game early leaves it short).
+    let held_block = victim >= 0 && escape_tick.is_none() && sim.tick() >= end_tick + rules.after_ticks;
 
     let mut reports = Vec::with_capacity(n);
     let mut p50 = Vec::with_capacity(n);
@@ -345,6 +438,11 @@ pub fn play_game_watched(
         end_tick,
         credited,
         held,
+        held_block,
+        escape_tick,
+        winner_out_in_window: winner_out_after,
+        focal_out_in_window: focal_out_window,
+        victim_out_ticks,
         victim,
         spawns,
         a_out_tick,

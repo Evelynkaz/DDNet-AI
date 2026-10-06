@@ -58,6 +58,35 @@ E-005), поэтому `W/(W+L+D)` (`PLAN.md` §0) остаётся **втори
 Каждая таблица арены публикуется с базовыми линиями `idle` и scripted-против-scripted. Поле `credited_win_rate` добавлено в
 `summary.json` аддитивно: старые сводки читаются как раньше, а для них значение пересчитывается из `credited_w` и `games`.
 
+**Удержанный блок (задача 3.10, поправка к D-059, E-021).** Все прежние замеры силы — доля *первых заморозок*: партия кончается на
+первом onset. На Copy Love Box заморозка у потолка зала роняет жертву на пол, и через 150 тиков (`sv_freeze_delay` 3 с) она
+оттаивает: на тех же играх `held` (150 тиков) держится у ≈ 50% побед. Поэтому добавлено:
+- `rules.after_ticks = 250` (5 с, больше `sv_freeze_delay`) — окно «удержания»; помощник `Rules::held_block_window()` (константа
+  `HELD_BLOCK_TICKS`). Умолчание `after_ticks` осталось 150, чтобы не менять прежние прогоны.
+- **`held_block`** в строке игры: жертва была out (заморожена или мертва) на **каждом** тике окна (в отличие от `held`, где важно только
+  состояние в конце и что победитель не выбывал); `escape_tick` — первый тик окна, когда жертва снова свободна; `victim_out_ticks` —
+  сколько тиков окна она была out (градуированный вариант для наград).
+- В `summary.json`/`summary.md`: `held_block_w` — победы **собственным засчитанным блоком** с удержанной жертвой (`credited && held_block`; соперник, который
+  сам замёрз в яму, — не блок: ловушка D-059), `held_block_w_any` — то же без условия credited (сырое число), `held_block_l`, «held W:L», «held среди решённых» =
+  held W / (held W + held L) (жертва при проигрыше — сам A), «held-побед/все» = held W / все игры, «удержано из W», все с ДИ Уилсона.
+- `docs/research/held-block/heldcompare.py` — те же числа из JSONL и **парное** сравнение двух плеч (точный McNemar по «held W»,
+  знаковый тест по `held W − held L`).
+- **Для обучения мухи** (`ddai-train`): `Rules::held_block_window()` проигрывает эпизод дальше первой заморозки, `collect_game_held` отдаёт `(Episode, HeldOutcome)`
+  (формат `Episode` не менялся). Факты `HeldOutcome`: `result`, `credited`, `held_block` (жертва out на каждом тике окна; верно для **любой** жертвы), `escape_tick`,
+  `victim_out_ticks`, `winner_out_in_window`, `focal_out_in_window`. **Собственный удержанный блок A** — `strict_held_win()` = `W && credited && held_block &&
+  !focal_out_in_window`; ровно это считает `EpisodeOutcome::held_block` задачи 8.5a, поэтому 8.5a может взять из `HeldOutcome` `credited`, `focal_out_in_window`,
+  `held_block`, `victim_out_ticks`, `escape_tick` вместо своего `from_records`. `held_return()` совпадает с наградой **`RewardConfig::post_freeze`** 8.5a (не `full_game`, которая добавляет ещё +0,3 за засчитанную первую заморозку, −1 за проигрыш и −0,5 за ничью и таймаут): **+1** за строгий
+  удержанный блок, **−1**, если A был out в окне (проигрыш — тоже), **0** за остальное (в том числе блок, который оттаял, и заморозку, за которую A не credited).
+  **Только дуэль:** 8.5a считает удержанным блоком лишь победу с жертвой в слоте 1 (`victim_slot == Some(1)`); у `HeldOutcome` нет номера слота жертвы, и в толпе (1vN) `strict_held_win` засчитает и жертву другого слота, поэтому для обучения в толпе берите слот жертвы из `GameReport::victim`.
+  `arena_eval` по-прежнему играет 150 тиков после заморозки; окно 250 и поля `held_block_*` — в `arena_eval_held` (opt-in).
+- `rules.hold_target = true` — правило цели фокусного игрока «не бросать замороженную цель, пока точный прогноз
+  (`ddai_planner::forecast::passive_forecast`) не скажет, что она останется out на всё окно» (`sim::HoldTarget`; умолчание
+  `default_target` берёт свободного соперника первым и поэтому в толпе бросает жертву сразу). Аналог правила цели живого бота
+  `--finish target`.
+
+Диагностика: `cargo run --release -p ddai-env --example held_diag` проигрывает партии из JSONL и пишет траекторию жертвы после
+решающего тика (`docs/research/held-block.md`); `--example map_ascii` рисует окно тайлов настоящей карты.
+
 ## Арены — данные, не код (`configs/arenas/*.toml`)
 
 | Арена | Тег | Что |
@@ -128,7 +157,8 @@ players = [{ brain = "planner", mode = "deadline", budget_ms = 4.0, lag = 0 },
 
 ## Выход
 
-- `<условие>.jsonl` — по строке на партию: `seed`, `swap`, `result`, `end_tick`, `credited`, `held`, `victim`, `spawns`,
+- `<условие>.jsonl` — по строке на партию: `seed`, `swap`, `result`, `end_tick`, `credited`, `held`, `held_block`, `escape_tick`,
+  `victim_out_ticks`, `victim`, `spawns`,
   `a_out_tick`, `a_self_freezes`, `blocks_by_a`, `first_block_tick`, `bystander_outs`, `players[]` (`decisions`, `hash`,
   `telemetry`) и `timing` (`decide_us_p50/p99` по игрокам — **единственная** недетерминированная часть).
 - `hash` — первые 16 hex SHA-1 потока решений (`orig-run.md` §9): `"{тик}:{dir},{jump},{hook},{fire},{tx},{ty},{wanted};"`

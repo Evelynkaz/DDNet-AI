@@ -94,13 +94,36 @@ fn plans() -> Vec<Vec<PlanStep>> {
 
 #[test]
 fn worker_scoring_is_allocation_free_in_steady_state() {
-    let map = hall();
-    let pw = scene(&map, 4);
     let cfg = {
         let mut c = HybridConfig::fixed();
         c.workers = 1;
         c
     };
+    scoring_is_allocation_free(cfg, false);
+}
+
+/// Task 3.10: the same with the finishing terms on (the frozen-victim drag shaping and the exact passive forecast at the end of every
+/// rollout of a frozen victim) and the victim frozen on open ground, so the forecast runs in every rollout.
+#[test]
+fn finishing_terms_keep_worker_scoring_allocation_free() {
+    let cfg = {
+        let mut c = HybridConfig::fixed().with_finish();
+        c.workers = 1;
+        c.planner.held_forecast_weight = 20.0;
+        c
+    };
+    scoring_is_allocation_free(cfg, true);
+}
+
+fn scoring_is_allocation_free(cfg: HybridConfig, frozen_victim: bool) {
+    let map = hall();
+    let mut pw = scene(&map, 4);
+    if frozen_victim {
+        let mut st = pw.get_tee(1).expect("victim");
+        st.frozen = true;
+        st.freeze_ticks_left = 150;
+        pw.apply_tee_state(1, &st);
+    }
     let ctx = Box::new(Ctx {
         generation: 1,
         saved: Box::new(pw.save_state()),
@@ -147,7 +170,17 @@ fn worker_scoring_is_allocation_free_in_steady_state() {
         engine.evaluate(&mut batch, &clock, None, &mut out);
     }
     assert_eq!(out.len(), 20);
-    assert!(out.iter().all(|o| o.res.is_some() && o.ticks == 27));
+    // The forecast of a frozen victim is charged on top of the rollout's own 27 ticks.
+    assert!(
+        out.iter()
+            .all(|o| o.res.is_some() && if frozen_victim { o.ticks >= 27 } else { o.ticks == 27 })
+    );
+    if frozen_victim {
+        assert!(
+            out.iter().any(|o| o.ticks > 27),
+            "the forecast ran in at least one rollout"
+        );
+    }
     let info = measure(|| {
         for _ in 0..25 {
             fill(&mut batch);

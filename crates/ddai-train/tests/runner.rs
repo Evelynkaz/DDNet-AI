@@ -27,6 +27,7 @@ fn job(base_seed: u64, games: u32) -> JobConfig {
         noise_prob: 0.0,
         noise_len: (2, 6),
         base_seed,
+        after_ticks: None,
     }
 }
 
@@ -290,6 +291,7 @@ fn scenario_jobs_are_stored_under_their_own_arena_and_can_keep_only_the_solved_t
         noise_prob: 0.0,
         noise_len: (2, 6),
         base_seed: 40,
+        after_ticks: None,
     };
     let jobs = [scn("T12", true), scn("T15a", true)];
     let sums = run_collect_jobs(&env, &mut store, &jobs, "teacher", 0, 2, &mut |_| {}).unwrap();
