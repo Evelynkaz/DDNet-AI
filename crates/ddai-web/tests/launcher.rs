@@ -8,7 +8,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ddai_web::launch::{Action, Brain, DurationChoice, Mirror, parse_request};
+use ddai_web::launch::{Action, Brain, DurationChoice, Finish, Mirror, parse_request};
 use support::{Req, TestServer, send};
 
 struct Login {
@@ -186,6 +186,99 @@ async fn a_start_writes_one_request_file_atomically_with_the_chosen_values() {
         req.mirror, None,
         "no `mirror` in the form: none in the request (the helper then keeps the model on)"
     );
+    assert_eq!(
+        req.finish, None,
+        "no `finish` in the form: none in the request (an old request; the helper reads it as off)"
+    );
+    let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
+    assert!(
+        !text.contains("finish"),
+        "an unchanged form writes an unchanged request: {text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_finishing_switch_reaches_the_request_as_one_of_three_words_and_the_pure_fly_takes_only_off() {
+    // Task 5.13 (D-097).
+    let server = deployed().await;
+    let l = login(&server);
+    let with = |brain: &str, finish: serde_json::Value| {
+        let mut body = start_body();
+        body["brain"] = serde_json::json!(brain);
+        body["finish"] = finish;
+        body
+    };
+    for (brain, word, want) in [
+        ("hybrid", "off", Finish::Off),
+        ("hybrid", "target", Finish::Target),
+        ("hybrid-fly", "target", Finish::Target),
+        ("hybrid-fly", "full", Finish::Full),
+        ("fly", "off", Finish::Off),
+    ] {
+        let r = post(&server, &l, &with(brain, serde_json::json!(word)));
+        assert_eq!(r.status, 202, "{brain} {word}: {r:?}");
+        let req = parse_request(&fs::read(request_file(&server)).unwrap()).expect("the helper's own parser accepts it");
+        assert_eq!((req.brain.is_some(), req.finish), (true, Some(want)), "{brain} {word}");
+        fs::remove_file(request_file(&server)).unwrap();
+    }
+    // The pure fly with finishing on: refused up front, nothing written.
+    for word in ["target", "full"] {
+        let r = post(&server, &l, &with("fly", serde_json::json!(word)));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("finish_hybrid_only")),
+            "{word}"
+        );
+    }
+    // Anything outside the three words, and a finishing on a stop: refused, nothing written (the injection attempts included).
+    for bad in [
+        serde_json::json!("on"),
+        serde_json::json!("Target"),
+        serde_json::json!("TARGET"),
+        serde_json::json!(true),
+        serde_json::json!(1),
+        serde_json::json!("target --report /etc/passwd"),
+        serde_json::json!("target\nBOT_SERVER=\"203.0.113.5:8308\""),
+        serde_json::json!("$(id)"),
+    ] {
+        let r = post(&server, &l, &with("hybrid", bad.clone()));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{bad}"
+        );
+    }
+    let r = post(&server, &l, &serde_json::json!({"action":"stop","finish":"off"}));
+    assert_eq!((r.status, r.json()["error"].as_str()), (400, Some("bad_request")));
+    assert!(
+        files_in(&launch_dir(&server)).is_empty(),
+        "a refused call writes nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_page_gets_the_finishing_mode_of_the_helpers_status_and_an_old_status_has_none() {
+    let server = deployed().await;
+    let l = login(&server);
+    let status = server.config.status_dir.join("status.json");
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"request_id":"0123456789abcdef","brain":"hybrid","server":"local","duration":"15m","sparring":0,"finish":"target"}"#,
+    )
+    .unwrap();
+    assert_eq!(get(&server, &l).json()["status"]["finish"], "target");
+    // A status written before the field existed has none (the card then says nothing about finishing).
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"brain":"hybrid","server":"local","duration":"15m","sparring":0}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["state"], "started");
+    assert!(j["status"].get("finish").is_none(), "{j}");
+    // A word outside the list makes the whole status unreadable, never a mode of its own.
+    fs::write(&status, r#"{"v":1,"state":"started","at":5,"finish":"turbo"}"#).unwrap();
+    assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -470,5 +563,16 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         assert_eq!(r.status, 200, "{path}");
         assert!(r.header("content-type").is_some_and(|c| c.starts_with(ctype)), "{path}");
         assert!(!r.body.is_empty());
+    }
+    // Task 5.13: the «Бот» card has a row for the finishing mode, and the launch card's script offers the three words.
+    assert!(html.contains(r#"id="bs-finish""#));
+    let js = String::from_utf8_lossy(&send(server.addr, Req::new("GET", "/launch.js")).body).into_owned();
+    for needle in [
+        "Дожим",
+        "цель (рекомендуется)",
+        "полный (не рекомендуется)",
+        "finish_hybrid_only",
+    ] {
+        assert!(js.contains(needle), "launch.js lacks {needle}");
     }
 }

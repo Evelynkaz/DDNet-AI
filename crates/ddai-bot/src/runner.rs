@@ -734,6 +734,18 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         clips_saved: bot.stats().clips_saved,
         kill_cooldown_ticks: bot.kill_cooldown_ticks(),
         paused: bot.paused(),
+        finish: finish_label(cfg.bot.finish, cfg.brain.hybrid_finish).to_string(),
+    }
+}
+
+/// The finishing mode the process runs with, as `--finish` spells it: `off`, `target` (the bot's target rule) or `full` (the target
+/// rule plus the hybrid's drag shaping). Two independent switches carry it ([`BotConfig::finish`], [`BrainOptions::hybrid_finish`]); the
+/// drag alone (without the target rule) is not a mode the command line can ask for, and reads as `off`.
+fn finish_label(target_rule: bool, hybrid_drag: bool) -> &'static str {
+    match (target_rule, hybrid_drag) {
+        (false, _) => "off",
+        (true, false) => "target",
+        (true, true) => "full",
     }
 }
 
@@ -854,6 +866,15 @@ fn publish(b: &mut Bridge, bot: &Bot, snap: &LiveWorldSnapshot, chars: &mut Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_status_names_the_finishing_mode_as_the_command_line_spells_it() {
+        assert_eq!(finish_label(false, false), "off");
+        assert_eq!(finish_label(true, false), "target");
+        assert_eq!(finish_label(true, true), "full");
+        // The drag without the target rule cannot be asked for (`--finish full` sets both): read as off, never as a mode of its own.
+        assert_eq!(finish_label(false, true), "off");
+    }
 
     fn table() -> crate::players::PlayerTable {
         use crate::players::test_support::player;

@@ -97,6 +97,38 @@ impl Mirror {
     }
 }
 
+/// The finishing switch (task 5.13, D-097; `ddnet-ai play --finish`): a closed list, so the helper writes only one of three words to the
+/// unit's environment. `Off` is the default and what a request without the field means.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Finish {
+    /// No finishing (the bot as before 3.10).
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    /// The bot keeps a frozen target until it is held, sealed or dead (the recommended live A/B).
+    #[serde(rename = "target")]
+    Target,
+    /// `target` plus the hybrid's drag shaping for a frozen victim (did not hold up in review: not recommended).
+    #[serde(rename = "full")]
+    Full,
+}
+
+impl Finish {
+    /// The value of `ddnet-ai play --finish`.
+    pub fn flag_value(self) -> &'static str {
+        match self {
+            Finish::Off => "off",
+            Finish::Target => "target",
+            Finish::Full => "full",
+        }
+    }
+
+    /// Whether this is not `off` (the pure fly brain refuses such a request).
+    pub fn is_on(self) -> bool {
+        self != Finish::Off
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurationChoice {
     #[serde(rename = "15m")]
@@ -139,6 +171,10 @@ pub struct LaunchRequest {
     /// The hybrid brains' opponent model (`on` when absent, D-090); other brains ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<Mirror>,
+    /// The finishing mode (task 5.13, D-097); `off` when absent. Not allowed with the pure fly brain unless it is `off`
+    /// (the helper refuses `finish_hybrid_only`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<Finish>,
 }
 
 /// Whether a request made at `ts` (and written to a file last modified at `mtime`), seen at `now`, is fresh: neither older than
@@ -187,7 +223,8 @@ pub fn parse_request(bytes: &[u8]) -> Result<LaunchRequest, ParseError> {
         && req.server.is_none()
         && req.duration.is_none()
         && req.sparring.is_none()
-        && req.mirror.is_none();
+        && req.mirror.is_none()
+        && req.finish.is_none();
     match req.action {
         Action::Start if !complete => Err(ParseError::Invalid),
         Action::Stop if !empty => Err(ParseError::Invalid),
@@ -235,6 +272,9 @@ pub struct LaunchStatus {
     pub bundle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// The finishing mode of the launch (task 5.13); none in the status of a launch made before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<Finish>,
 }
 
 impl LaunchStatus {
@@ -251,6 +291,7 @@ impl LaunchStatus {
             sparring: None,
             bundle: None,
             exit_code: None,
+            finish: None,
         }
     }
 }
@@ -391,6 +432,57 @@ mod tests {
         assert_eq!(parse(&v).unwrap().mirror, Some(Mirror::Off));
         let stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
         assert_eq!(parse(&stop).unwrap().action, Action::Stop);
+    }
+
+    #[test]
+    fn the_finishing_field_is_additive_a_closed_list_and_absent_means_off() {
+        // An old request (no field) parses and means off.
+        let old = parse(&start_json()).unwrap();
+        assert_eq!(old.finish, None);
+        assert_eq!(old.finish.unwrap_or_default(), Finish::Off);
+        for (word, want, flag) in [
+            ("off", Finish::Off, "off"),
+            ("target", Finish::Target, "target"),
+            ("full", Finish::Full, "full"),
+        ] {
+            let mut v = start_json();
+            v["finish"] = serde_json::json!(word);
+            let r = parse(&v).unwrap();
+            assert_eq!(r.finish, Some(want), "{word}");
+            assert_eq!(want.flag_value(), flag);
+            // It survives the way the web writes it (a request round trip).
+            let back = parse_request(&serde_json::to_vec(&r).unwrap()).unwrap();
+            assert_eq!(back, r);
+        }
+        assert!(!Finish::Off.is_on() && Finish::Target.is_on() && Finish::Full.is_on());
+        // An absent field is not written (old helpers' strict schema never sees an unknown key from an unchanged request).
+        let text = String::from_utf8(serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(!text.contains("finish"), "{text}");
+        // Nothing but the three words, in lower case: no aliases, no `on`, no injection.
+        for bad in [
+            serde_json::json!("on"),
+            serde_json::json!("Target"),
+            serde_json::json!("TARGET"),
+            serde_json::json!("target "),
+            serde_json::json!(" target"),
+            serde_json::json!("target\n"),
+            serde_json::json!("target --report /etc/passwd"),
+            serde_json::json!("target\"\nBOT_SERVER=\"1.2.3.4:5\""),
+            serde_json::json!("$(id)"),
+            serde_json::json!(""),
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!(["target"]),
+            serde_json::json!({"mode": "target"}),
+        ] {
+            let mut v = start_json();
+            v["finish"] = bad.clone();
+            assert_eq!(parse(&v), Err(ParseError::Invalid), "finish={bad}");
+        }
+        // A stop carries nothing, finishing included.
+        let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
+        stop["finish"] = serde_json::json!("off");
+        assert_eq!(parse(&stop), Err(ParseError::Invalid));
     }
 
     #[test]

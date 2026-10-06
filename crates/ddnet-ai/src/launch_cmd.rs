@@ -38,7 +38,7 @@ use ddai_client::favourites::{self, Favourite, Favourites, Rules};
 use ddai_client::live_servers::{LiveServers, is_loopback};
 use ddai_client::socks5::{ProxyCheck, RelayHost, Socks5Error, Timeouts};
 use ddai_web::launch::{
-    Action, Brain, DurationChoice, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_REQUEST_BYTES,
+    Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_REQUEST_BYTES,
     MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, State as RunState,
     bundle_run_name, parse_request, read_regular_nofollow, read_regular_nofollow_with_mtime, request_is_fresh,
     unix_now, write_atomic,
@@ -175,6 +175,9 @@ struct LaunchInfo {
     #[serde(default)]
     favourite: bool,
     bundle: Option<String>,
+    /// The finishing mode of the launch (task 5.13); older state files have none, which is `off`.
+    #[serde(default)]
+    finish: Finish,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +308,8 @@ struct Plan {
     bundle: Option<PathBuf>,
     /// The hybrid's opponent model (`on` unless the request says `off`, D-090).
     mirror: Mirror,
+    /// The finishing mode (`off` unless the request says otherwise, task 5.13, D-097).
+    finish: Finish,
 }
 
 fn valid_nick(nick: &str) -> bool {
@@ -443,6 +448,12 @@ fn decide(
     if sparring > MAX_SPARRING {
         return Err(Refuse("bad_request"));
     }
+    // Task 5.13: finishing was measured with the hybrid (D-097); the pure fly was not trained or measured on a held victim, so it takes
+    // `off` only. The web refuses the same request first (`finish_hybrid_only`); this is the helper's own, authoritative check.
+    let finish = req.finish.unwrap_or_default();
+    if brain == Brain::Fly && finish.is_on() {
+        return Err(Refuse("finish_hybrid_only"));
+    }
     let target = resolve_server(selector, cat.live, cat.favs, cat.rules)?;
     if sparring > 0 && target.public {
         return Err(Refuse("sparring_local_only"));
@@ -474,6 +485,7 @@ fn decide(
         sparring,
         bundle,
         mirror: req.mirror.unwrap_or(Mirror::On),
+        finish,
     })
 }
 
@@ -509,6 +521,7 @@ fn render_env(id: &str, plan: &Plan) -> Result<String, Refuse> {
     out += &env_line("BOT_DURATION", &plan.duration.seconds().to_string())?;
     out += &env_line("BOT_FLY_ARGS", &fly_args)?;
     out += &env_line("BOT_HYBRID_MIRROR", plan.mirror.flag_value())?;
+    out += &env_line("BOT_FINISH", plan.finish.flag_value())?;
     Ok(out)
 }
 
@@ -746,6 +759,7 @@ fn status_of(info: &LaunchInfo, state: RunState, now: u64) -> LaunchStatus {
     status.duration = Some(info.duration);
     status.sparring = Some(info.sparring);
     status.bundle = info.bundle.clone();
+    status.finish = Some(info.finish);
     status
 }
 
@@ -956,6 +970,7 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         public: plan.target.public,
         favourite: matches!(plan.target.reopen, Reopen::Favourite { .. }),
         bundle: plan.bundle.as_deref().map(bundle_run_name),
+        finish: plan.finish,
     };
     let fail = |code: &str| {
         let mut status = status_of(&info, RunState::Error, now);
@@ -1020,8 +1035,11 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         }
     }
     eprintln!(
-        "launch: started (brain {:?}, local {}, sparring {})",
-        plan.brain, !plan.target.public, plan.sparring
+        "launch: started (brain {:?}, local {}, sparring {}, finish {})",
+        plan.brain,
+        !plan.target.public,
+        plan.sparring,
+        plan.finish.flag_value()
     );
     ExitCode::SUCCESS
 }
@@ -1300,6 +1318,7 @@ mod tests {
             duration: Some(DurationChoice::M15),
             sparring: Some(0),
             mirror: None,
+            finish: None,
         }
     }
 
@@ -1578,6 +1597,68 @@ mod tests {
             assert_eq!(env_line("K", bad), Err(Refuse("internal")), "{bad:?}");
         }
         assert_eq!(env_line("K", &"a".repeat(513)), Err(Refuse("internal")));
+    }
+
+    #[test]
+    fn finishing_is_off_unless_asked_goes_to_the_env_and_the_pure_fly_takes_off_only() {
+        let plan_for = |brain: Brain, finish: Option<Finish>, server: &str| {
+            let mut r = req(server);
+            r.brain = Some(brain);
+            r.finish = finish;
+            decide_with(&r, &LiveServers::default(), Some(&State::default()), 0, 1000)
+        };
+        let env_of = |plan: &Plan| render_env("0123456789abcdef", plan).unwrap();
+        // No field (an old request) is off, and `off` is written explicitly so a stale env value can never leak through.
+        let plan = plan_for(Brain::Hybrid, None, "local").unwrap();
+        assert_eq!(plan.finish, Finish::Off);
+        assert!(env_of(&plan).contains("BOT_FINISH=\"off\"\n"), "{}", env_of(&plan));
+        // The hybrid brains take all three words.
+        for brain in [Brain::Hybrid, Brain::HybridFly] {
+            for (finish, word) in [(Finish::Off, "off"), (Finish::Target, "target"), (Finish::Full, "full")] {
+                let plan = plan_for(brain, Some(finish), "local").unwrap();
+                assert_eq!(plan.finish, finish);
+                assert!(
+                    env_of(&plan).contains(&format!("BOT_FINISH=\"{word}\"\n")),
+                    "{brain:?} {word}"
+                );
+            }
+        }
+        // The pure fly: `off` (or nothing) passes, `target` and `full` are refused with their own code, nothing is planned.
+        assert!(plan_for(Brain::Fly, None, "local").is_ok());
+        assert!(plan_for(Brain::Fly, Some(Finish::Off), "local").is_ok());
+        for finish in [Finish::Target, Finish::Full] {
+            assert_eq!(
+                plan_for(Brain::Fly, Some(finish), "local").unwrap_err(),
+                Refuse("finish_hybrid_only")
+            );
+        }
+        // Mirror and finishing are independent lines.
+        let mut r = req("local");
+        r.finish = Some(Finish::Target);
+        r.mirror = Some(Mirror::Off);
+        let plan = decide_with(&r, &LiveServers::default(), Some(&State::default()), 0, 1000).unwrap();
+        let env = env_of(&plan);
+        assert!(
+            env.contains("BOT_HYBRID_MIRROR=\"off\"\n") && env.contains("BOT_FINISH=\"target\"\n"),
+            "{env}"
+        );
+        // The status the site reads names the mode; a launch remembered before the field existed reads as off.
+        let info = LaunchInfo {
+            id: "0123456789abcdef".to_string(),
+            brain: Brain::Hybrid,
+            server: "local".to_string(),
+            duration: DurationChoice::M15,
+            sparring: 0,
+            public: false,
+            favourite: false,
+            bundle: None,
+            finish: Finish::Target,
+        };
+        assert_eq!(status_of(&info, RunState::Started, 5).finish, Some(Finish::Target));
+        let mut old = serde_json::to_value(&info).unwrap();
+        old.as_object_mut().unwrap().remove("finish");
+        let old: LaunchInfo = serde_json::from_value(old).unwrap();
+        assert_eq!(old.finish, Finish::Off);
     }
 
     #[test]

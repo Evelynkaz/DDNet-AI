@@ -220,3 +220,30 @@ fn the_bot_unit_is_unchanged_in_what_matters_no_extra_network_and_no_new_writabl
         "{rw:?}"
     );
 }
+
+#[test]
+fn the_bot_unit_takes_the_finishing_mode_from_the_environment_and_is_off_without_the_helper() {
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    // The default (a hand start, an env file from before task 5.13) is `off`; the helper's `BOT_FINISH` overrides it.
+    assert!(
+        values(&s, "Environment").contains(&"BOT_FINISH=off"),
+        "{:?}",
+        values(&s, "Environment")
+    );
+    let exec = values(&s, "ExecStart");
+    assert_eq!(exec.len(), 1);
+    assert!(exec[0].contains(" --finish ${BOT_FINISH} "), "{}", exec[0]);
+    // Every `${BOT_*}` the command line expands has a default in the unit, so a missing value never leaves an empty argument.
+    for var in exec[0]
+        .split("${")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
+    {
+        assert!(
+            values(&s, "Environment")
+                .iter()
+                .any(|e| e.split_once('=').is_some_and(|(k, _)| k == var)),
+            "{var} has no Environment= default"
+        );
+    }
+}

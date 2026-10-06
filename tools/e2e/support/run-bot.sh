@@ -9,7 +9,7 @@ source "$E2E_DIR/etc/bot-launch.env"
 # `$BOT_FLY_ARGS` is split at spaces and vanishes when empty, exactly as in the unit.
 # shellcheck disable=SC2086
 "$E2E_BIN" play --server "$BOT_SERVER" --name "$BOT_NAME" --brain "$BOT_BRAIN" --duration "$BOT_DURATION" \
-  --hybrid-mirror "$BOT_HYBRID_MIRROR" $BOT_FLY_ARGS --no-console --web-names --data-dir "$DATA" \
+  --hybrid-mirror "$BOT_HYBRID_MIRROR" --finish "${BOT_FINISH:-off}" $BOT_FLY_ARGS --no-console --web-names --data-dir "$DATA" \
   --live-servers "$DATA/live-servers.toml" --report "$DATA/bot/last-report.json" &
 child=$!
 trap 'kill -TERM "$child" 2>/dev/null' TERM INT

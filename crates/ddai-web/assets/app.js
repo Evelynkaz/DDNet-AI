@@ -498,6 +498,8 @@
     };
     var KIND_ORDER = ["friend", "war", "ignore", "clanfriend", "clanwar"];
     var MODE_LABELS = { fight: "бой", passive: "пассивный", hold: "стоит", goto: "идёт в точку" };
+    // Task 5.13 (D-097): the words of the status's `finish`; one this page does not know is shown as «—» (never as a mode).
+    var FINISH_LABELS = { off: "выкл", target: "цель", full: "полный (не рекомендуется)" };
     var APPLIED_TEXT = {
       applied: "применено к работающему боту (бот перечитал тот же файл)",
       mismatch: "ВНИМАНИЕ: бот перечитал другой файл списков, не тот, что правит сайт (проверьте --relations у бота и сайта): бот может не щадить ваших друзей",
@@ -628,7 +630,7 @@
                 ? "бот не запущен: сейчас на сайте показ (муха на арене), настоящей игры нет"
                 : "бот не запущен (нет живого статуса)";
         setText("bot-conn-text", why);
-        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-target", "bs-wb", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
+        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
           setText(id, "—");
         });
         cooldownEl.textContent = "—";
@@ -645,6 +647,8 @@
       setText("bs-map", s.map || "—");
       setText("bs-mode", MODE_LABELS[s.mode] || s.mode || "—");
       setText("bs-brain", s.brain || "—");
+      // Task 5.13: the finishing mode the bot runs with; a bot that does not report it (an older build) shows «—», not «выкл».
+      setText("bs-finish", Object.prototype.hasOwnProperty.call(FINISH_LABELS, s.finish) ? FINISH_LABELS[s.finish] : "—");
       setText("bs-target", s.target_tag || "нет");
       setText("bs-wb", (s.wb || "—") + (s.goto ? " · идёт: " + s.goto : ""));
       setText("bs-blocks", (s.blocks | 0) + " / " + (s.blocked_by | 0));

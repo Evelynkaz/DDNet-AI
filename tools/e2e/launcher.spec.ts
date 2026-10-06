@@ -58,11 +58,12 @@ test("start hybrid + fly with 2 sparring from the site, watch it play, stop it",
   expect(servers[0]).toBe("Локальный сервер");
   await expect(card.locator(".lc-bundle")).toContainText("E-005/e005-fly");
   await expect(card.locator(".lc-bundle")).not.toContainText("/home");
-  const selects = card.locator("select");
-  await expect(selects.nth(0)).toHaveValue("local");
-  await selects.nth(1).selectOption("hybrid-fly");
-  await selects.nth(2).selectOption("15m");
-  await selects.nth(3).selectOption("2");
+  // By label, not by position: the card gained fields (the opponent model, then «Дожим») between the old positions.
+  const field = (label: string) => card.locator("label.lc-field", { hasText: new RegExp("^" + label) }).locator("select");
+  await expect(field("Сервер")).toHaveValue("local");
+  await field("Мозг").selectOption("hybrid-fly");
+  await field("Длительность").selectOption("15m");
+  await field("Спарринг").selectOption("2");
 
   // Phone width: the card fits without a horizontal scroll.
   await page.setViewportSize({ width: 360, height: 740 });
@@ -116,10 +117,10 @@ test("a run that ends by itself (the bot gets SIGTERM behind the launcher's back
   await page.locator("#tab-bot").click();
   const card = page.locator(".launch-card");
   await expect(card.locator(".lc-state-text")).toHaveText("Бот остановлен", { timeout: 15_000 });
-  const selects = card.locator("select");
-  await selects.nth(1).selectOption("hybrid-fly");
-  await selects.nth(2).selectOption("15m");
-  await selects.nth(3).selectOption("1");
+  const field = (label: string) => card.locator("label.lc-field", { hasText: new RegExp("^" + label) }).locator("select");
+  await field("Мозг").selectOption("hybrid-fly");
+  await field("Длительность").selectOption("15m");
+  await field("Спарринг").selectOption("1");
   await card.locator(".lc-start").click();
   await expect(card.locator(".lc-state-text")).toHaveText("В игре", { timeout: 90_000 });
 

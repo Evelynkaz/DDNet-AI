@@ -10,9 +10,9 @@
 # StartLimit* stops a crash loop after 3 starts in 10 minutes.
 #
 # Task 5.9 (D-089), the web launcher: `--server`, `--name`, `--brain`, `--duration`, `--hybrid-mirror` (D-090: the hybrid's
-# opponent model, on/off) and the optional `--fly-bundle` come from the
-# environment below. The defaults here are today's: local server, hybrid, no time limit. For a launch from the site the root
-# helper (`ddnet-ai launch apply`, ddnet-ai-launch.service) writes /etc/ddnet-ai/bot-launch.env with validated values only (it
+# opponent model, on/off), `--finish` (task 5.13, D-097: off/target/full, off unless the helper says otherwise) and the optional
+# `--fly-bundle` come from the environment below. The defaults here are today's: local server, hybrid, no time limit. For a launch
+# from the site the root helper (`ddnet-ai launch apply`, ddnet-ai-launch.service) writes /etc/ddnet-ai/bot-launch.env with validated values only (it
 # overrides the defaults) and a cgroup drop-in /etc/systemd/system/ddnet-ai-bot.service.d/50-launch.conf (IPAddressAllow). After a
 # normal end of a run the stop hook below removes that file, so a later hand start is the plain local default again.
 # NO other drop-in may override ExecStart= here: `launch apply` refuses to start while one exists.
@@ -47,8 +47,9 @@ Environment=BOT_NAME=Muha
 Environment=BOT_BRAIN=hybrid
 Environment=BOT_DURATION=0
 Environment=BOT_HYBRID_MIRROR=on
+Environment=BOT_FINISH=off
 EnvironmentFile=-/etc/ddnet-ai/bot-launch.env
-ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} --hybrid-mirror ${BOT_HYBRID_MIRROR} $BOT_FLY_ARGS --no-console --web-names --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} --hybrid-mirror ${BOT_HYBRID_MIRROR} --finish ${BOT_FINISH} $BOT_FLY_ARGS --no-console --web-names --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
 # The stop hook runs as root (`+`), and a failure of it never fails the unit (`-`): it records how the bot ended (kick/ban memory
 # for a public server, the status the site shows) and removes the one-run environment file. The binary is the root-owned copy
 # that deploy/install-launcher.sh installs.

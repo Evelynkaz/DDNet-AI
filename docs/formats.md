@@ -5298,6 +5298,8 @@ BotRec  { target, brain (0 hybrid 1 planner 2 scripted 3 idle 4 fly), flags (BIT
 `connected` (сессия в игре), `server` (`ip:port`), `map`, `name` / `clan` / `skin` (облик самого бота), `target_tag` (метка цели, не ник), `wb` (строка вейблока `!wb`), `goto` (ход ходьбы), `deaths`, `clips_saved`,
 `kill_cooldown_ticks` (тиков сервера до разрешённого `Cl_Kill`, 50 в секунду: кулдаун 500 тиков = 10 с). `mode` теперь читается из бота, а не из снапшота (меняется сразу после `!mode`).
 
+(5.13, D-097: поле `finish` — `"off"` | `"target"` | `"full"`, режим дожима, с которым запущен процесс (`ddnet-ai play --finish`; правило цели действует у любого мозга, подтягивание `full` — только пока мозг гибрид). Карточка «Бот» показывает его строкой «Дожим»; бот старой сборки поля не шлёт — строка «—», не «выкл». Бот печатает при старте одну строку `finish blocks: <режим>` для `target`/`full`.)
+
 ### 26.3 HTTP-маршруты сайта (все только после входа)
 
 | Маршрут | Что |
@@ -5847,7 +5849,7 @@ IPv6-ретранслятор для IPv4-сервера клиент отвер
 ### 34.1 Запрос `request.json` (пишет сайт; один файл, атомарно: временный файл и `rename`)
 
 ```json
-{"v":1,"id":"0123456789abcdef","ts":1791103000,"action":"start","brain":"hybrid-fly","server":"local","duration":"15m","sparring":2,"mirror":"off"}
+{"v":1,"id":"0123456789abcdef","ts":1791103000,"action":"start","brain":"hybrid-fly","server":"local","duration":"15m","sparring":2,"mirror":"off","finish":"target"}
 {"v":1,"id":"fedcba9876543210","ts":1791103100,"action":"stop"}
 ```
 
@@ -5859,6 +5861,7 @@ IPv6-ретранслятор для IPv4-сервера клиент отвер
 - `server`: `"local"` (`127.0.0.1:8303`, ник `Muha`), **точный `address`** записи `live-servers.toml` с `ready = true` **или точный адрес избранного** (задача 5.12, §36.1: ник, прокси и адрес берутся из записи, не из запроса; запрос ≤ 1024 байт по-прежнему). Свободный адрес не принимается.
 - `sparring`: 0–3, только при `server = "local"`.
 - `mirror` (необязательное, D-090): `on` | `off`, модель соперника гибрида (`ddnet-ai play --hybrid-mirror`); без поля — `on`; другие значения и поле у `stop` — `bad_request`. У мозга `fly` игнорируется.
+- `finish` (необязательное, **задача 5.13, D-097**, аддитивно): `off` | `target` | `full` — «Дожим», `ddnet-ai play --finish`; закрытый список из трёх слов в нижнем регистре (`on`, другой регистр, пробелы, любой другой текст и тип — `bad_request`, поле у `stop` — тоже). **Нет поля = `off`** (старый запрос читается как раньше; карточка сайта шлёт поле только для `target` и `full`: «выкл» — это отсутствие поля, и старый помощник со строгой схемой принимает такой запуск). `target` — бот держит замороженную цель, пока её не удержали, не запечатали или она не погибла (кандидат на живую A/B-проверку, «рекомендуется»); `full` — то же плюс подтягивание замороженной жертвы к фризу в оценке гибрида (в ревью прирост не подтвердился, «не рекомендуется»). **Чистая муха (`brain = fly`) принимает только `off`**: `target` и `full` — отказ `finish_hybrid_only` (и на сайте: `400`, и у помощника: `refused`). Причина: мозг получает от выбора цели «главного соперника» (`Observation::target_or_nearest`), муха никогда не обучалась и не мерилась на удержанной жертве, а доказательство D-097 — арена с гибридом и планировщиком; гибридные мозги (`hybrid`, `hybrid-fly`) принимают все три значения, на локальном сервере, у записи списка и у избранного одинаково.
 - Помощник читает файл и **удаляет его до обработки**; следующий запрос нужен для нового действия.
 
 ### 34.2 Статус `status.json` (пишет root-помощник в **`/run/ddnet-ai/`** (root, `0755`; сайт читает), файл `0644` при любой umask, ≤ 8 КиБ)
@@ -5871,8 +5874,9 @@ IPv6-ретранслятор для IPv4-сервера клиент отвер
 ```
 
 - `state`: `started` (запуск принят, `systemctl start` выдан; «В игре» говорит живой мост) | `stopped` | `failed` (бот вышел с ошибкой) | `refused` (запрос отвергнут, ничего не изменено) | `error` (запрос верен, но выполнить не вышло).
+- `finish` (задача 5.13) — `off` | `target` | `full`, режим запуска (из памяти помощника, не из запроса); нет поля у статуса запуска, сделанного до 5.13 (память без поля читается как `off`).
 - `at` — секунды Unix; `reason` — фиксированный код; `bundle` — имя запуска мухи (`<эксперимент>/<запуск>`), никогда путь; `exit_code` — код выхода бота; остальные поля описывают запуск.
-- Коды `reason` отказа: `bad_request`, `request_too_large`, `request_not_regular`, `request_unreadable`, `request_stale`, `server_not_allowed`, `server_not_ready`, `server_ambiguous`, `server_bad_entry`, `sparring_local_only`, `bundle_missing`, `bundle_bad_path`, `config_bad`, `config_untrusted`, `blocked_after_ban`, `state_unreadable`, `cooldown`, `rate_limited`, `already_running`, `local_server_down`, `unit_overridden`, `proxy_error`, `live_servers_unreadable`, `internal`. Ошибки выполнения: `write_failed`, `state_write_failed`, `systemctl_failed`, `sparring_failed`. Окончания: `stopped_by_owner`, `finished` (время вышло: срок ограничен и бот проработал его, за вычетом 60 с, `stopped`), `ended` (чистый выход без кнопки и до срока: сигнал или остановка вручную, `stopped`), `kicked_or_banned` (3), `join_failed` (4), `crashed` (`failed`).
+- Коды `reason` отказа: `bad_request`, `request_too_large`, `request_not_regular`, `request_unreadable`, `request_stale`, `server_not_allowed`, `server_not_ready`, `server_ambiguous`, `server_bad_entry`, `sparring_local_only`, `bundle_missing`, `bundle_bad_path`, `finish_hybrid_only` (5.13: чистая муха с `finish` не `off`), `config_bad`, `config_untrusted`, `blocked_after_ban`, `state_unreadable`, `cooldown`, `rate_limited`, `already_running`, `local_server_down`, `unit_overridden`, `proxy_error`, `live_servers_unreadable`, `internal`. Ошибки выполнения: `write_failed`, `state_write_failed`, `systemctl_failed`, `sparring_failed`. Окончания: `stopped_by_owner`, `finished` (время вышло: срок ограничен и бот проработал его, за вычетом 60 с, `stopped`), `ended` (чистый выход без кнопки и до срока: сигнал или остановка вручную, `stopped`), `kicked_or_banned` (3), `join_failed` (4), `crashed` (`failed`).
 
 ### 34.3 Окружение юнита `/etc/ddnet-ai/bot-launch.env` (root, `0644`, переписывается при каждом запуске, удаляется хуком после нормального конца)
 
@@ -5884,9 +5888,10 @@ BOT_BRAIN="hybrid"
 BOT_DURATION="900"
 BOT_FLY_ARGS="--fly-bundle /home/ubuntu/aiddnet/data/runs/E-005/e005-fly/checkpoints/final.bundle"
 BOT_HYBRID_MIRROR="on"
+BOT_FINISH="off"
 ```
 
-Значения — только из `[A-Za-z0-9._/:- []]` (то есть и `[`, `]` для IPv6) (до 512 байт), всегда в двойных кавычках; `BOT_FLY_ARGS` пуст для `hybrid`; `BOT_HYBRID_MIRROR` — только `on` или `off`. Юнит: `ExecStart=… --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} $BOT_FLY_ARGS …`.
+Значения — только из `[A-Za-z0-9._/:- []]` (то есть и `[`, `]` для IPv6) (до 512 байт), всегда в двойных кавычках; `BOT_FLY_ARGS` пуст для `hybrid`; `BOT_HYBRID_MIRROR` — только `on` или `off`; `BOT_FINISH` (задача 5.13) — только `off`, `target` или `full`, пишется **всегда** (без поля в запросе — `off`), чтобы значение из старого окружения не просочилось в запуск. Юнит: `ExecStart=… --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} --hybrid-mirror ${BOT_HYBRID_MIRROR} --finish ${BOT_FINISH} $BOT_FLY_ARGS …`; в юните `Environment=BOT_FINISH=off` — запуск вручную и окружение до 5.13 дают `off`. **Порядок выкладки:** `deploy/install.sh`, затем `deploy/install-launcher.sh` при остановленном боте (скрипт ставит юнит и корневую копию помощника вместе). Помощник со старым юнитом (без `--finish`; бывает только после ручного возврата одного юнита из резервной копии) пишет `BOT_FINISH`, но флаг до бота не доходит — это видно на карточке «Бот»: строка «Дожим» покажет `выкл`, хотя в запуске выбрано «цель».
 Дроп-ин `/etc/systemd/system/ddnet-ai-bot.service.d/50-launch.conf`: `IPAddressAllow=` (сброс), `IPAddressAllow=127.0.0.0/8 ::1` и, для публичного сервера, IP прокси из файла секретов (без прокси — IP сервера). **Прокси с `relay = "public"`** (задача 2.6b, D-091: его UDP-ретранслятор на другой машине) получает противоположный фильтр (`Filter::DenyServer`): `IPAddressAllow=` (сброс), `IPAddressDeny=` (сброс), `IPAddressDeny=<IP сервера>` на каждый IP игрового сервера (адрес записи и IP из `for_server` файла прокси, без повторов), для сервера только с IPv4 ещё `IPAddressDeny=::/0`, затем частные диапазоны (`10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10`, по строке) и **никакого** разрешающего списка (allow сильнее deny, §33.9): ретранслятор доступен где угодно, игровой сервер напрямую недоступен ядру. После выхода бота дроп-ин возвращается к локальному по умолчанию, как и раньше.
 
 ### 34.4 Память помощника `/var/lib/ddnet-ai/launch-state.json` (root, `0600`, под `flock`)
@@ -5896,7 +5901,7 @@ BOT_HYBRID_MIRROR="on"
 ### 34.5 Маршруты сайта (все за сессией; POST — строгий Origin, CSRF, JSON)
 
 - `GET /api/bot/launch` → `{enabled, servers:[{id,label,kind,…}], favourites_error, brains, durations, max_sparring, bundle, bundle_present, status, launcher_down, pending, pending_age_s}`; `servers` — `local` (`kind: "local"`), готовые записи списка (`"allowlist"`) и избранное (`"favourite"` с `name`, `nick`, `proxy`, `blocked`); `favourites_error` — код, если файл избранного нельзя прочесть (избранного тогда нет); `launcher_down` — запрос не взяли за 60 с (его убрали), и помощник с тех пор ничего не писал.
-- `POST /api/bot/launch` с `{action, brain?, server?, duration?, sparring?, mirror?}` → `202 {ok, id, action}`; `400` (`bad_request`, `server_not_allowed`, `sparring_local_only`, `bundle_missing`), `409 pending`, `429 rate_limited` (не чаще одного в 2 с и не больше 6 в минуту: путь-юнит останавливается после 10 срабатываний в минуту), `503 launcher_unavailable`, `500 launch_write_failed`; `401/403/415` как у остальных.
+- `POST /api/bot/launch` с `{action, brain?, server?, duration?, sparring?, mirror?, finish?}` → `202 {ok, id, action}`; `400` (`bad_request`, `server_not_allowed`, `sparring_local_only`, `bundle_missing`, `finish_hybrid_only`), `409 pending`, `429 rate_limited` (не чаще одного в 2 с и не больше 6 в минуту: путь-юнит останавливается после 10 срабатываний в минуту), `503 launcher_unavailable`, `500 launch_write_failed`; `401/403/415` как у остальных.
 
 ## 35. Игра на сайте: слои карты, сцена `DWSC`, облик игроков, чат (задача 5.10, D-093, `ddai-map::scene`, `ddai-web::{live::visual_scene, live::chat, http::map, http::ddnet_assets}`, `assets/{ddmap,ddtee,game}.js`)
 

@@ -33,7 +33,7 @@ use serde::Deserialize;
 use crate::http::bot::{authorize_get, authorize_post, json_error};
 use crate::http::servers::{closing_block, favourite_choices};
 use crate::launch::{
-    Action, Brain, DurationChoice, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_SPARRING,
+    Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_SPARRING,
     MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, bundle_run_name,
     read_regular_nofollow, unix_now, write_atomic,
 };
@@ -176,6 +176,7 @@ struct LaunchForm {
     duration: Option<DurationChoice>,
     sparring: Option<u8>,
     mirror: Option<Mirror>,
+    finish: Option<Finish>,
 }
 
 fn new_id() -> String {
@@ -195,6 +196,7 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 || form.duration.is_some()
                 || form.sparring.is_some()
                 || form.mirror.is_some()
+                || form.finish.is_some()
             {
                 return Err("bad_request");
             }
@@ -208,6 +210,7 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 duration: None,
                 sparring: None,
                 mirror: None,
+                finish: None,
             })
         }
         Action::Start => {
@@ -227,6 +230,11 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
             if brain.needs_bundle() && !bundle_ok {
                 return Err("bundle_missing");
             }
+            // Task 5.13: finishing was measured with the hybrid (and the planner) only; the pure fly gets the target picker's tee as its
+            // opponent but was never trained or measured on a held victim, so «off» is the only finishing it takes (same code as the helper).
+            if brain == Brain::Fly && form.finish.is_some_and(Finish::is_on) {
+                return Err("finish_hybrid_only");
+            }
             Ok(LaunchRequest {
                 v: PROTOCOL_VERSION,
                 id,
@@ -237,6 +245,7 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 duration: Some(duration),
                 sparring: Some(sparring),
                 mirror: form.mirror,
+                finish: form.finish,
             })
         }
     }
@@ -431,5 +440,48 @@ mod tests {
             "bad_request"
         );
         assert!(ok(serde_json::json!({"action":"stop"})).is_ok());
+    }
+
+    #[test]
+    fn the_finishing_switch_is_a_closed_list_and_the_pure_fly_takes_only_off() {
+        let ready: Vec<String> = Vec::new();
+        let start = |brain: &str, finish: serde_json::Value| {
+            let mut v = serde_json::json!({"action":"start","brain":brain,"server":"local","duration":"15m"});
+            if !finish.is_null() {
+                v["finish"] = finish;
+            }
+            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true))
+        };
+        for brain in ["hybrid", "hybrid-fly"] {
+            for (word, want) in [("off", Finish::Off), ("target", Finish::Target), ("full", Finish::Full)] {
+                let req = start(brain, serde_json::json!(word)).unwrap().unwrap();
+                assert_eq!(req.finish, Some(want), "{brain} {word}");
+            }
+            assert_eq!(
+                start(brain, serde_json::Value::Null).unwrap().unwrap().finish,
+                None,
+                "absent stays absent"
+            );
+        }
+        // The pure fly: off (or nothing) only.
+        assert_eq!(
+            start("fly", serde_json::json!("off")).unwrap().unwrap().finish,
+            Some(Finish::Off)
+        );
+        assert_eq!(start("fly", serde_json::Value::Null).unwrap().unwrap().finish, None);
+        for word in ["target", "full"] {
+            assert_eq!(
+                start("fly", serde_json::json!(word)).unwrap().unwrap_err(),
+                "finish_hybrid_only",
+                "{word}"
+            );
+        }
+        // Anything outside the list never reaches `build_request`.
+        for bad in ["on", "Target", "TARGET", "target ", "maybe", "", "target --x"] {
+            assert!(start("hybrid", serde_json::json!(bad)).is_err(), "{bad:?}");
+        }
+        // A stop carries no finishing.
+        let stop = serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","finish":"off"})).unwrap();
+        assert_eq!(build_request(stop, &ready, true).unwrap_err(), "bad_request");
     }
 }

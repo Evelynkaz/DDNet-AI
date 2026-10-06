@@ -17,6 +17,15 @@
 
   var BRAIN_LABEL = { hybrid: "Гибрид", "hybrid-fly": "Гибрид + муха", fly: "Муха" };
   var DURATION_LABEL = { "15m": "15 мин", "60m": "1 час", unlimited: "До остановки" };
+  // Task 5.13 (D-097): the finishing switch. «цель» is the recommended live A/B; «полный» is offered behind a clear «не рекомендуется».
+  var FINISH_LABEL = { off: "выкл", target: "цель", full: "полный" };
+  var FINISH_HINT = {
+    off: "Дожим выключен: замороженную цель бот отпускает, как раньше.",
+    target:
+      "Рекомендуется для живой проверки. Бот держит замороженную цель, пока её не удержали, не запечатали или она не погибла. На арене в толпе удержанных блоков на 32% больше, первые заморозки те же. Включайте на одном запуске и сравнивайте с выключенным.",
+    full:
+      "Не рекомендуется: к «цели» добавляется подтягивание замороженной жертвы к фризу в оценке гибрида. В ревью прирост на дуэли не подтвердился. Нужен только для сравнения.",
+  };
 
   // What a refusal or an ending means, in words for the owner. The helper only ever sends these codes.
   var REASON_TEXT = {
@@ -43,6 +52,7 @@
     server_bad_entry: "Запись сервера в списке разрешённых некорректна.",
     sparring_local_only: "Спарринг-боты бывают только на локальном сервере.",
     bundle_missing: "Файл мухи (bundle) не найден.",
+    finish_hybrid_only: "Дожим бывает только у гибридных мозгов: для «Мухи» он выключен.",
     bundle_bad_path: "Путь к bundle в конфиге недопустим.",
     config_bad: "Конфиг запуска не читается.",
     config_untrusted: "Конфиг запуска доступен на запись не только root: отказ.",
@@ -76,6 +86,7 @@
       "Сервер закрыт после кика или бана: откройте его снова на вкладке «Серверы» (кнопка «Открыть снова»).",
     sparring_local_only: "Спарринг-боты бывают только на локальном сервере.",
     bundle_missing: "Файл мухи (bundle) не найден.",
+    finish_hybrid_only: "Дожим бывает только у гибридных мозгов: для «Мухи» он выключен.",
     rate_limited: "Слишком часто: подождите несколько секунд (не больше 6 запросов в минуту).",
     pending: "Предыдущий запрос ещё не обработан.",
     launcher_unavailable: "Запуск с сайта не установлен на сервере (нет каталога data/launch).",
@@ -184,16 +195,26 @@
         { value: "on", text: "вкл" },
         { value: "off", text: "выкл" },
       ]);
+      // The finishing switch (task 5.13): off by default; the fly brain has none (the helper refuses it), so it is hidden for the fly.
+      ui.finish = select([
+        { value: "off", text: "выкл" },
+        { value: "target", text: "цель (рекомендуется)" },
+        { value: "full", text: "полный (не рекомендуется)" },
+      ]);
       var form = el("div", "lc-form");
       form.appendChild(field("Сервер", ui.server));
       form.appendChild(field("Мозг", ui.brain));
       // The hybrid's opponent model (D-090); the fly brain alone has none, so the toggle is only shown for the hybrid brains.
       ui.mirrorField = field("Предсказание соперника", ui.mirror);
       form.appendChild(ui.mirrorField);
+      ui.finishField = field("Дожим", ui.finish);
+      form.appendChild(ui.finishField);
       form.appendChild(field("Длительность", ui.duration));
       ui.sparringField = field("Спарринг (только локальный сервер)", ui.sparring);
       form.appendChild(ui.sparringField);
       card.appendChild(form);
+      ui.finishHint = el("p", "hint lc-finish-hint");
+      card.appendChild(ui.finishHint);
       ui.bundle = el("p", "hint lc-bundle");
       card.appendChild(ui.bundle);
 
@@ -226,6 +247,7 @@
         render();
       });
       ui.brain.addEventListener("change", syncMirror);
+      ui.finish.addEventListener("change", syncMirror);
       syncMirror();
       ui.start.addEventListener("click", onStart);
       ui.stop.addEventListener("click", onStop);
@@ -238,7 +260,13 @@
     }
 
     function syncMirror() {
-      ui.mirrorField.hidden = ui.brain.value === "fly";
+      var fly = ui.brain.value === "fly";
+      ui.mirrorField.hidden = fly;
+      // Finishing is for the hybrid brains only: the fly's choice is always «выкл» and the control is not shown.
+      ui.finishField.hidden = fly;
+      ui.finishHint.hidden = fly;
+      ui.finishHint.textContent = FINISH_HINT[ui.finish.value] || "";
+      ui.finishHint.classList.toggle("lc-finish-warn", ui.finish.value === "full");
     }
 
     function syncSparring() {
@@ -316,6 +344,9 @@
       if (status.sparring) {
         parts.push("спарринг: " + status.sparring);
       }
+      if (status.finish && status.finish !== "off") {
+        parts.push("дожим: " + (FINISH_LABEL[status.finish] || status.finish));
+      }
       if (status.bundle && status.brain && status.brain !== "hybrid") {
         parts.push("муха " + status.bundle);
       }
@@ -386,7 +417,7 @@
       ui.start.disabled = busy || !enabled || info.pending || live || closed;
       ui.stop.disabled = busy || !enabled || info.pending;
       ui.watch.hidden = !live;
-      [ui.server, ui.brain, ui.duration, ui.mirror].forEach(function (c) {
+      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish].forEach(function (c) {
         c.disabled = busy || !enabled;
       });
       syncSparring();
@@ -459,6 +490,11 @@
       };
       if (ui.brain.value !== "fly") {
         body.mirror = ui.mirror.value === "off" ? "off" : "on";
+        // Only a mode that is on is sent: «off» is the absence of the field, so an older (or rolled-back) helper, whose strict request format
+        // does not know `finish`, still takes every default start.
+        if (ui.finish.value === "target" || ui.finish.value === "full") {
+          body.finish = ui.finish.value;
+        }
       }
       if (body.server !== "local") {
         var ok = window.confirm(

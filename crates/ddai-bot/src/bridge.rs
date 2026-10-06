@@ -267,6 +267,10 @@ pub struct StatusMessage {
     /// Additive since task 4.9b: the server has paused the bot (its own `DDNetPlayer` flag `SPEC`/`PAUSED`: the owner's `/pause` or
     /// `/spec`); the bot idles until the flag clears. The site shows «на паузе».
     pub paused: bool,
+    /// Additive since task 5.13: the finishing mode the process was started with (`ddnet-ai play --finish`, D-097): `off`, `target`
+    /// or `full`. `full`'s drag shaping only acts while the brain is the hybrid; the target rule acts with every brain. The site's
+    /// «Бот» card shows it, so a launch that did not take (an old unit without `--finish`) is visible.
+    pub finish: String,
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -803,6 +807,7 @@ mod tests {
             clips_saved: 1,
             kill_cooldown_ticks: 120,
             paused: false,
+            finish: "target".into(),
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
@@ -811,6 +816,7 @@ mod tests {
         assert_eq!(v["telemetry"]["x"], 1);
         assert_eq!(v["target_tag"], "c3-deadbeef");
         assert_eq!(v["kill_cooldown_ticks"], 120);
+        assert_eq!(v["finish"], "target");
     }
 
     #[test]

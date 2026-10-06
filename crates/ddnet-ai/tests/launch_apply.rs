@@ -321,6 +321,162 @@ fn the_opponent_model_switch_is_written_from_a_closed_list() {
 }
 
 #[test]
+fn the_finishing_mode_is_written_from_a_closed_list_for_the_local_server_the_allow_list_and_a_favourite() {
+    // No field (an old request): `off` is written explicitly, so no value left in a unit's environment can leak into the run.
+    let rig = Rig::new();
+    assert!(rig.send(&start("local")).status.success());
+    assert!(rig.env_file().contains("BOT_FINISH=\"off\"\n"), "{}", rig.env_file());
+    assert_eq!(rig.status()["finish"], "off", "{}", rig.status());
+
+    // The local server, both hybrid brains, all three words.
+    for brain in ["hybrid", "hybrid-fly"] {
+        for word in ["off", "target", "full"] {
+            let rig = Rig::new();
+            let mut body = start("local");
+            body["brain"] = json!(brain);
+            body["finish"] = json!(word);
+            let out = rig.send(&body);
+            assert!(out.status.success(), "{out:?}");
+            assert_eq!(rig.status()["state"], "started", "{brain} {word}: {}", rig.status());
+            assert!(
+                rig.env_file().contains(&format!("BOT_FINISH=\"{word}\"\n")),
+                "{brain} {word}: {}",
+                rig.env_file()
+            );
+            assert_eq!(rig.status()["finish"], word);
+            assert_eq!(rig.actions().last().unwrap(), "start ddnet-ai-bot.service");
+            // The whole file keeps its shape: one line per key, nothing but the closed character set.
+            for line in rig.env_file().lines().filter(|l| !l.starts_with('#')) {
+                assert!(line.contains("=\""), "{line}");
+            }
+        }
+    }
+
+    // An allow-list entry (public, through a proxy).
+    let rig = Rig::new();
+    rig.allow_list(&public_entry(true, true));
+    rig.proxy_file();
+    let mut body = start(&format!("{SERVER_IP}:8308"));
+    body["finish"] = json!("target");
+    assert!(rig.send(&body).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    assert!(rig.env_file().contains("BOT_FINISH=\"target\"\n"), "{}", rig.env_file());
+
+    // A favourite.
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    rig.favourites(&[(&addr, "direct", 0)]);
+    let mut body = start(&addr);
+    body["finish"] = json!("target");
+    assert!(rig.send(&body).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    let env = rig.env_file();
+    assert!(
+        env.contains(&format!("BOT_SERVER=\"{addr}\"\n")) && env.contains("BOT_FINISH=\"target\"\n"),
+        "{env}"
+    );
+
+    // The mode survives to the status the exit hook writes (it is read from the helper's memory, not from the request).
+    let out = rig.exited("exited", "0");
+    assert!(out.status.success(), "{out:?}");
+    let status = rig.status();
+    assert_eq!(
+        (status["state"].as_str(), status["finish"].as_str()),
+        (Some("stopped"), Some("target")),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_bad_finishing_value_is_refused_and_changes_nothing_not_even_an_injection() {
+    for bad in [
+        json!("on"),
+        json!("Target"),
+        json!("TARGET"),
+        json!("target "),
+        json!("target\n"),
+        json!("off; rm -rf /"),
+        json!("target --report /etc/passwd"),
+        json!("target\"\nBOT_SERVER=\"203.0.113.5:8308"),
+        json!("target\nBOT_NAME=\"evil"),
+        json!("$(id)"),
+        json!("`id`"),
+        json!(""),
+        json!(true),
+        json!(1),
+        json!(["target"]),
+        Value::Null,
+    ] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["finish"] = bad.clone();
+        let out = rig.send(&body);
+        assert!(out.status.success(), "{out:?}");
+        if bad.is_null() {
+            // `null` is the same as no field (serde: an absent option), i.e. `off`.
+            assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+            assert!(rig.env_file().contains("BOT_FINISH=\"off\"\n"));
+            continue;
+        }
+        assert_eq!(reason(&rig.status()), "bad_request", "{bad}: {}", rig.status());
+        assert!(rig.actions().is_empty(), "{bad}: {:?}", rig.actions());
+        assert!(
+            !rig.p("etc/bot-launch.env").exists(),
+            "{bad}: no environment file for a refused request"
+        );
+        assert!(!rig.request().exists(), "the request is consumed");
+    }
+    // A stop carries nothing.
+    let rig = Rig::new();
+    let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop","finish":"off"}));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(reason(&rig.status()), "bad_request");
+    assert!(rig.actions().is_empty());
+}
+
+#[test]
+fn the_pure_fly_takes_no_finishing_but_off() {
+    for word in ["target", "full"] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["brain"] = json!("fly");
+        body["finish"] = json!(word);
+        let out = rig.send(&body);
+        assert!(out.status.success(), "{out:?}");
+        let status = rig.status();
+        assert_eq!(
+            (status["state"].as_str(), reason(&status)),
+            (Some("refused"), "finish_hybrid_only"),
+            "{word}"
+        );
+        assert!(rig.actions().is_empty(), "{word}: {:?}", rig.actions());
+        assert!(!rig.p("etc/bot-launch.env").exists());
+    }
+    // The same request on the favourite path is refused the same way.
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    rig.favourites(&[(&addr, "direct", 0)]);
+    let mut body = start(&addr);
+    body["brain"] = json!("fly");
+    body["finish"] = json!("target");
+    assert!(rig.send(&body).status.success());
+    assert_eq!(reason(&rig.status()), "finish_hybrid_only");
+    assert!(rig.actions().is_empty());
+    // `off` (or nothing) is fine for the fly, and the line says off.
+    for finish in [Some("off"), None] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["brain"] = json!("fly");
+        if let Some(f) = finish {
+            body["finish"] = json!(f);
+        }
+        assert!(rig.send(&body).status.success());
+        assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+        assert!(rig.env_file().contains("BOT_BRAIN=\"fly\"\n") && rig.env_file().contains("BOT_FINISH=\"off\"\n"));
+    }
+}
+
+#[test]
 fn stop_stops_the_bot_and_all_sparring_units() {
     let rig = Rig::new();
     assert!(rig.send(&start("local")).status.success());

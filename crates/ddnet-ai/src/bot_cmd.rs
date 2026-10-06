@@ -209,6 +209,15 @@ impl FinishMode {
     pub fn hybrid_drag(self) -> bool {
         self == FinishMode::Full
     }
+
+    /// The word `--finish` takes for this mode (what the log line and the bot's STATUS say).
+    pub fn name(self) -> &'static str {
+        match self {
+            FinishMode::Off => "off",
+            FinishMode::Target => "target",
+            FinishMode::Full => "full",
+        }
+    }
 }
 
 fn parse_finish(s: &str) -> Result<FinishMode, String> {
@@ -393,6 +402,10 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
     brain.proposal_in_cap = !o.no_proposal_in_cap;
     brain.hybrid_mirror = o.hybrid_mirror;
     brain.hybrid_finish = o.finish.hybrid_drag();
+    if o.finish.target_logic() {
+        // One line at start (the journal of a launch from the site shows that `--finish` reached the bot; STATUS carries it too).
+        eprintln!("finish blocks: {} (--finish; D-097)", o.finish.name());
+    }
     if kind == BrainKind::Hybrid {
         eprintln!(
             "hybrid search threads: {search_threads} ({})",
@@ -847,6 +860,9 @@ mod search_threads_tests {
         assert_eq!(on(FinishMode::Off), (false, false));
         assert_eq!(on(FinishMode::Target), (true, false));
         assert_eq!(on(FinishMode::Full), (true, true));
+        for m in [FinishMode::Off, FinishMode::Target, FinishMode::Full] {
+            assert_eq!(parse_finish(m.name()).unwrap(), m, "the name round-trips");
+        }
     }
 
     #[test]

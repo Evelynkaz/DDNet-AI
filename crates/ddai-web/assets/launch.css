@@ -33,6 +33,13 @@
   min-width: 0;
 }
 
+/* `display: flex` above would win over the UA's `[hidden] { display: none }`: the opponent-model and finishing fields are toggled with
+   `hidden` for the fly brain (task 5.13 found that the former never actually disappeared). */
+.launch-card .lc-field[hidden],
+.launch-card .lc-finish-hint[hidden] {
+  display: none;
+}
+
 .launch-card .lc-label {
   font-size: 0.85rem;
   color: var(--muted);
@@ -73,4 +80,14 @@
 .launch-card select:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* Task 5.13: the one-line explanation under the form for the chosen finishing mode; «полный» is flagged as not recommended. */
+.launch-card .lc-finish-hint {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.launch-card .lc-finish-hint.lc-finish-warn {
+  color: var(--danger);
 }
