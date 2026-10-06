@@ -1,33 +1,30 @@
-/* Task 5.10: the «Игра» tab. The stage (map canvas and overlays) and a side column; a single column on a phone.
-   Colours come from the tokens in app.css (`--glass`, `--bot`, ...); the page has no inline styles (CSP). */
-
-.game-view[hidden] {
-  display: none;
-}
+/* The «Игра» tab: the stage (map canvas and overlays), a toolbar under it and a side column; a single column on a phone.
+   The stage's drawing is unchanged (WebGL, ddmap.js); this file styles the frame and the panels around it with the tokens of app.css.
+   The page has no inline styles (CSP). */
 
 .game-view {
   position: fixed;
   left: 0;
   right: 0;
-  top: var(--head-h);
-  bottom: var(--foot-h);
+  top: var(--nav-h);
+  bottom: var(--dock-h);
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 8px;
-  box-sizing: border-box;
+  padding: var(--sp-3);
+  animation: view-in var(--t) var(--ease) backwards;
 }
 
 .game-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
+  gap: var(--sp-3);
   min-height: 100%;
 }
 
 .stage-col {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--sp-2);
   min-width: 0;
 }
 
@@ -35,10 +32,11 @@
   position: relative;
   height: min(58vh, 150vw);
   min-height: 240px;
-  border-radius: 12px;
+  border-radius: var(--r-lg);
   overflow: hidden;
-  background: #0d0f14;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  background: #0b0e14;
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--sh-2);
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
@@ -58,8 +56,8 @@
 
 .stage-top {
   position: absolute;
-  left: 8px;
-  top: 8px;
+  left: var(--sp-3);
+  top: var(--sp-3);
   right: 190px;
   display: flex;
   flex-wrap: wrap;
@@ -73,16 +71,28 @@
   flex: 0 1 auto;
   margin: 0;
   max-width: 100%;
-  padding: 4px 9px;
-  font-size: 0.78rem;
+  padding: 4px 12px;
+  font-size: var(--fs-xs);
+  background: var(--glass);
+  border-color: var(--glass-line);
+}
+
+.stage-top .source-badge.source-live {
+  background: rgba(12, 40, 31, 0.78);
+  border-color: var(--ok-line);
+}
+
+.stage-top .source-badge.source-demo {
+  background: rgba(48, 36, 10, 0.82);
 }
 
 .stage-info {
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.38);
-  font-size: 0.72rem;
-  color: rgba(255, 255, 255, 0.85);
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  background: var(--glass);
+  border: 1px solid var(--glass-line);
+  font-size: var(--fs-xs);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
@@ -93,31 +103,29 @@
 .stage-msg {
   position: absolute;
   left: 50%;
-  top: 52px;
+  top: 56px;
   transform: translateX(-50%);
   max-width: 86%;
   margin: 0;
   padding: 10px 16px;
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.62);
-  font-size: 0.9rem;
+  border-radius: var(--r-md);
+  background: var(--glass);
+  border: 1px solid var(--glass-line);
+  font-size: var(--fs-sm);
   text-align: center;
   z-index: 4;
 }
 
-.stage-msg[hidden] {
-  display: none;
-}
-
 .stage-msg.bad {
-  background: rgba(120, 24, 24, 0.85);
+  background: rgba(88, 22, 22, 0.88);
+  border-color: var(--danger-line);
 }
 
 /* the freeze / unfreeze feed, top right under the FPS line */
 .game-feed {
   position: absolute;
-  right: 8px;
-  top: 30px;
+  right: var(--sp-3);
+  top: 34px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -132,10 +140,10 @@
 
 .game-feed li {
   padding: 3px 10px;
-  border-radius: 7px;
-  background: rgba(0, 0, 0, 0.38);
-  font-size: 0.78rem;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  border-radius: var(--r-pill);
+  background: var(--glass);
+  border: 1px solid var(--glass-line);
+  font-size: var(--fs-xs);
   overflow-wrap: anywhere;
 }
 
@@ -144,7 +152,7 @@
 }
 
 .game-feed .feed-thaw {
-  color: #d8ffd8;
+  color: #b8f5d0;
 }
 
 .game-feed .feed-death {
@@ -154,8 +162,8 @@
 /* the last chat lines over the map, like the client's chat */
 .chat-float {
   position: absolute;
-  left: 8px;
-  bottom: 8px;
+  left: var(--sp-3);
+  bottom: var(--sp-3);
   width: min(62%, 560px);
   max-height: 34%;
   overflow: hidden;
@@ -170,11 +178,11 @@
 .chat-float .chat-line {
   align-self: flex-start;
   max-width: 100%;
-  padding: 1px 8px;
-  border-radius: 7px;
-  background: rgba(0, 0, 0, 0.22);
-  font-size: 0.78rem;
-  line-height: 1.45;
+  padding: 1px 9px;
+  border-radius: 8px;
+  background: rgba(8, 10, 16, 0.5);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
   text-shadow: 0 0 2px #000, 0 1px 2px rgba(0, 0, 0, 0.9);
   transition: opacity 0.8s;
 }
@@ -192,150 +200,131 @@
   width: min(560px, 94%);
   max-height: 84%;
   overflow: auto;
-  padding: 10px 14px 12px;
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.62);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  border-radius: var(--r-lg);
+  background: rgba(11, 14, 20, 0.94);
+  border: 1px solid var(--glass-line);
+  box-shadow: var(--sh-2);
   z-index: 5;
 }
 
-.board[hidden] {
-  display: none;
-}
-
 .board h2 {
-  margin: 0 0 8px;
-  font-size: 1.05rem;
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-lg);
+  font-weight: 650;
 }
 
 .board table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
+  font-size: var(--fs-sm);
 }
 
 .board th {
-  color: rgba(255, 255, 255, 0.7);
-  font-weight: 400;
-  font-size: 0.72rem;
-  text-align: left;
-  padding: 0 6px 4px;
+  padding: 0 6px 6px;
 }
 
 .board td {
-  padding: 3px 6px;
-}
-
-.board .num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+  padding: 4px 6px;
+  border-top: 1px solid var(--line);
 }
 
 .board td.nm {
   display: flex;
   align-items: center;
   gap: 6px;
+  border-top: 0;
+}
+
+.board tr {
+  border-top: 1px solid var(--line);
 }
 
 .board tr.own td {
-  background: rgba(255, 210, 63, 0.14);
+  background: rgba(255, 210, 63, 0.12);
 }
 
 .board .ping {
-  color: #9fe8b0;
+  color: var(--ok);
 }
 
-/* controls under the stage */
-.viewbar {
+/* the toolbar under the stage */
+.viewbar,
+.replay-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
-  border-radius: 10px;
-  background: var(--glass-head);
+  padding: 6px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  border: 1px solid var(--line);
 }
 
 .vb-field {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  color: rgba(255, 255, 255, 0.78);
-  font-size: 0.75rem;
+  gap: 8px;
+  padding-left: 6px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
 }
 
-.viewbar select {
+.viewbar select,
+.replay-bar select {
+  min-height: 32px;
   max-width: 190px;
-  background: rgba(0, 0, 0, 0.3);
-  color: #fff;
-  border: 0;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font: inherit;
-  font-size: 0.8rem;
+  padding: 0 28px 0 10px;
+  background-color: var(--sunken);
+  font-size: var(--fs-sm);
+  border-radius: 8px;
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
 }
 
-.viewbar select option {
-  background: #2c3850;
+.vb-btn,
+.replay-bar button {
+  min-height: 32px;
+  padding: 0 12px;
+  background: var(--surface-3);
+  border-color: var(--line-strong);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  border-radius: 8px;
 }
 
-.vb-btn {
-  display: inline-flex;
-  align-items: center;
-  background: rgba(0, 0, 0, 0.3);
-  color: #fff;
-  border: 0;
-  border-radius: 6px;
-  padding: 6px 11px;
-  font-size: 0.8rem;
-  font-weight: 400;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+.vb-btn:hover:not(:disabled),
+.replay-bar button:hover:not(:disabled) {
+  background: #2b3550;
 }
 
-.vb-btn:hover {
-  background: rgba(255, 255, 255, 0.22);
+.vb-btn.active,
+.replay-bar button.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent-text);
 }
 
-.vb-btn.active {
-  background: rgba(255, 255, 255, 0.5);
-  color: #10131e;
-  text-shadow: none;
+.vb-btn .ic {
+  margin-right: 0;
 }
 
 .vb-sep {
   width: 1px;
-  height: 18px;
-  background: rgba(255, 255, 255, 0.2);
+  height: 20px;
+  background: var(--line-strong);
   margin: 0 2px;
 }
 
 .viewbar input[type="range"] {
   width: 110px;
-  accent-color: #dfe5ff;
 }
 
 .replay-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: 10px;
-  background: var(--glass-head);
-  font-size: 0.8rem;
-}
-
-.replay-bar[hidden] {
-  display: none;
+  flex-wrap: nowrap;
+  font-size: var(--fs-sm);
 }
 
 .replay-bar button {
-  padding: 6px 10px;
   min-width: 38px;
-  background: rgba(0, 0, 0, 0.3);
-}
-
-.replay-bar button.active {
-  background: rgba(255, 255, 255, 0.5);
-  color: #10131e;
 }
 
 .replay-bar input[type="range"] {
@@ -343,67 +332,47 @@
   min-width: 0;
 }
 
-.replay-bar select {
-  background: rgba(0, 0, 0, 0.3);
-  color: #fff;
-  border: 0;
-  border-radius: 6px;
-  padding: 6px;
-}
-
 /* side column */
 .side-col {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--sp-3);
   min-width: 0;
 }
 
 .game-view .card {
-  margin: 0;
-  padding: 0 0 10px;
-  background: var(--glass);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  overflow: hidden;
+  padding: var(--sp-3) var(--sp-4);
 }
 
 .game-view .card > h2 {
   display: flex;
   align-items: center;
-  margin: 0 0 8px;
-  padding: 8px 12px;
-  background: var(--glass-head);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  font-size: 0.82rem;
-  letter-spacing: 0.05em;
-  text-transform: none;
+  gap: 6px;
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-md);
 }
 
-.game-view .card > :not(h2) {
-  margin-left: 12px;
-  margin-right: 12px;
+.game-view .card > h2 .ic {
+  margin: 0;
+  color: var(--muted);
 }
 
 .game-view .count {
-  color: rgba(255, 255, 255, 0.6);
-  font-weight: 400;
-  margin-left: 4px;
+  color: var(--muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .gb-conn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 0;
-  margin-bottom: 8px;
-  font-weight: 600;
+  margin: 0 0 var(--sp-2);
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
 .gb-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
-  gap: 8px 12px;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: var(--sp-2);
 }
 
 .gb-cell {
@@ -413,39 +382,45 @@
 }
 
 .gb-cell .k {
-  color: rgba(255, 255, 255, 0.62);
-  font-size: 0.7rem;
+  color: var(--subtle);
+  font-size: var(--fs-xs);
 }
 
+/* ids such as the target tag must not break at their hyphens: one line, cut with an ellipsis if it is too long */
 .gb-cell .v {
+  font-size: var(--fs-sm);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .gb-links {
   display: flex;
-  gap: 8px;
-  margin-top: 10px;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
 }
 
 .gb-links button {
   flex: 1;
-  padding: 7px 10px;
-  font-size: 0.82rem;
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: var(--fs-sm);
 }
 
 .player-list {
   list-style: none;
-  margin: 0;
+  margin: 0 -6px;
   padding: 0;
   max-height: 260px;
   overflow-y: auto;
 }
 
 .player-list .empty {
-  color: rgba(255, 255, 255, 0.6);
-  padding: 4px 0;
-  font-size: 0.85rem;
+  color: var(--subtle);
+  padding: 4px 6px;
+  font-size: var(--fs-sm);
 }
 
 .player-row {
@@ -454,21 +429,23 @@
   align-items: center;
   gap: 6px;
   padding: 3px 6px;
-  border-radius: 7px;
+  border-radius: 8px;
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: var(--fs-sm);
+  transition: background-color var(--t-fast) var(--ease);
 }
 
 .player-row:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--surface-2);
 }
 
 .player-row.selected {
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--accent-soft);
 }
 
 .player-row.own .pr-name {
   color: var(--bot);
+  font-weight: 600;
 }
 
 .tee-icon {
@@ -497,8 +474,8 @@
 }
 
 .pr-clan {
-  color: rgba(255, 255, 255, 0.6);
-  font-size: 0.72rem;
+  color: var(--muted);
+  font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -506,48 +483,52 @@
 
 .pr-badge {
   flex: none;
-  padding: 0 6px;
-  border-radius: 9px;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
   background: var(--bot);
+  border-color: transparent;
   color: #1b1503;
   font-size: 0.65rem;
   font-weight: 700;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .pr-frozen {
   color: #9fd4ff;
-  font-size: 0.78rem;
+  font-size: var(--fs-xs);
 }
 
 .pr-score {
   min-width: 2.2em;
   text-align: right;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
 .pr-ping {
   min-width: 2.2em;
   text-align: right;
-  color: #9fe8b0;
-  font-size: 0.75rem;
+  color: var(--ok);
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
 }
 
 /* chat, styled like the client's */
 .chat-card .hint {
-  margin-top: 0;
-  margin-bottom: 6px;
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
 }
 
 .chat-log {
   max-height: 280px;
   overflow-y: auto;
-  padding: 6px 8px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.28);
-  font-size: 0.8rem;
-  line-height: 1.5;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
   overflow-wrap: anywhere;
 }
 
@@ -555,8 +536,17 @@
   display: none;
 }
 
+#chat-empty {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md);
+  text-align: center;
+  color: var(--subtle);
+}
+
 .chat-line .cn {
-  color: #cdd2dc;
+  color: #c3cad8;
 }
 
 .chat-line .ct {
@@ -581,11 +571,10 @@
 }
 
 .credits {
-  margin: 0 4px;
-  font-size: 0.7rem;
-  color: rgba(255, 255, 255, 0.8);
-  line-height: 1.45;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  margin: 0 var(--sp-1);
+  font-size: 0.6875rem;
+  color: var(--subtle);
+  line-height: 1.5;
 }
 
 .nowrap {
@@ -596,11 +585,12 @@
 @media (min-width: 1000px) {
   .game-view {
     overflow: hidden;
-    padding: 10px 12px 12px;
+    padding: var(--sp-3) var(--sp-4) var(--sp-4);
   }
 
   .game-grid {
-    grid-template-columns: minmax(0, 1fr) 340px;
+    grid-template-columns: minmax(0, 1fr) 348px;
+    gap: var(--sp-4);
     height: 100%;
     min-height: 0;
   }
@@ -635,7 +625,7 @@
   }
 
   .player-list {
-    max-height: 220px;
+    max-height: 190px;
   }
 
   /* The side column scrolls (above) rather than cutting its cards: only the chat card grows and gives way. */
@@ -647,6 +637,10 @@
 
 /* A short window (a laptop, 720 to 820 px): the chat log gives way first, so the input under it stays in view; the roster is shorter. */
 @media (min-width: 1000px) and (max-height: 820px) {
+  .chat-card .hint {
+    display: none; /* the same sentence stands on the «Бот» tab; the input needs the room */
+  }
+
   .chat-card .chat-log {
     flex-basis: 64px;
     min-height: 64px;
@@ -665,19 +659,29 @@
 }
 
 @media (max-width: 560px) {
+  .game-view {
+    padding: var(--sp-2);
+  }
+
   .viewbar input[type="range"] {
     width: 90px;
   }
 
+  .vb-btn,
+  .replay-bar button,
+  .viewbar select {
+    min-height: 36px;
+  }
+
   .stage-top {
-    right: 8px;
-    top: 34px;
+    right: var(--sp-3);
+    top: 36px;
   }
 
   .game-feed {
     top: auto;
-    bottom: 8px;
-    right: 8px;
+    bottom: var(--sp-3);
+    right: var(--sp-3);
     max-width: 52%;
   }
 

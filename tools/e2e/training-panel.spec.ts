@@ -337,13 +337,15 @@ test("desktop: list, run curves with DAgger markers, arena CIs, checkpoints, com
 test("phone: the same on 360x740 without horizontal scroll", async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   await runScenario(page, "phone");
-  // The five-tab bar fits.
+  // The six-tab bar fits (task 5.12 added «Серверы» to the five this test was written for).
   const tabs = page.locator("#tabbar button");
-  await expect(tabs).toHaveCount(5);
-  for (let i = 0; i < 5; i++) {
+  await expect(tabs).toHaveCount(6);
+  for (let i = 0; i < 6; i++) {
     const b = (await tabs.nth(i).boundingBox())!;
     expect(b.x + b.width).toBeLessThanOrEqual(361);
     expect(await tabs.nth(i).evaluate((n) => n.scrollWidth <= n.clientWidth + 1)).toBe(true);
+    // The label is a span that clips its own overflow with an ellipsis, so the button alone cannot tell: measure the span (task 5.14, review F2).
+    expect(await tabs.nth(i).locator("span").evaluate((n) => n.scrollWidth <= n.clientWidth), `tab ${i}: the label is cut`).toBe(true);
   }
 });
 

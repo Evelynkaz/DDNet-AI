@@ -3,21 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0b0e14" />
     <title>DDNet-AI</title>
+    <link rel="preload" href="/fonts/inter-cyrillic.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/app.css" />
     <link rel="stylesheet" href="/game.css" />
     <link rel="stylesheet" href="/launch.css" />
     <link rel="stylesheet" href="/servers.css" />
     <link rel="stylesheet" href="/say.css" />
   </head>
-  <body>
+  <body data-view="login">
     <main class="shell">
       <header class="topbar">
-        <span class="brand">DDNet-AI</span>
+        <span class="brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect class="bm-tile" width="32" height="32" rx="9"/><circle class="bm-face" cx="16" cy="17" r="10"/><ellipse class="bm-eye" cx="12.2" cy="15.2" rx="3" ry="4"/><ellipse class="bm-eye" cx="19.8" cy="15.2" rx="3" ry="4"/><circle class="bm-pupil" cx="13.2" cy="15.8" r="1.5"/><circle class="bm-pupil" cx="20.8" cy="15.8" r="1.5"/></svg>
+          <span class="brand-name">DDNet-AI</span>
+        </span>
         <span id="conn-dot" class="dot dot-off" aria-hidden="true"></span>
       </header>
 
-      <section id="login-view" class="view" hidden>
+      <section id="login-view" class="view card auth-card" hidden>
         <h1>Вход</h1>
         <form id="login-form" autocomplete="off">
           <label for="password">Пароль</label>
@@ -30,14 +37,20 @@
       <section id="status-view" class="view" hidden>
         <h1>Статус</h1>
         <dl class="status-grid">
-          <dt>Соединение</dt>
-          <dd id="ws-state">—</dd>
-          <dt>Бот</dt>
-          <dd id="bot-state">—</dd>
-          <dt>Время работы</dt>
-          <dd id="uptime">—</dd>
+          <div class="stat">
+            <dt>Соединение</dt>
+            <dd id="ws-state">—</dd>
+          </div>
+          <div class="stat">
+            <dt>Бот</dt>
+            <dd id="bot-state">—</dd>
+          </div>
+          <div class="stat">
+            <dt>Время работы</dt>
+            <dd id="uptime">—</dd>
+          </div>
         </dl>
-        <button id="logout-button" type="button">Выйти</button>
+        <button id="logout-button" class="alt" type="button">Выйти</button>
       </section>
     </main>
 
@@ -134,167 +147,178 @@
 
     <!-- Task 5.6: bot control (owner only) — status panel, commands, friends/war/ignore editor. Outside `.shell`
          like the game view, scrolls on its own; everything dynamic is set with `textContent` (never `innerHTML`). -->
-    <section id="bot-view" class="bot-view" hidden>
-      <h1>Бот</h1>
-      <div class="source-badge" id="bot-source" role="status" hidden>
-        <strong class="source-title"></strong>
-        <span class="source-detail"></span>
+    <section id="bot-view" class="bot-view page" hidden>
+      <header class="page-head">
+        <h1>Бот</h1>
+        <div class="source-badge" id="bot-source" role="status" hidden>
+          <strong class="source-title"></strong>
+          <span class="source-detail"></span>
+        </div>
+      </header>
+
+      <div class="page-grid">
+        <div class="page-col">
+        <!-- Task 5.9: the «Запуск» card (assets/launch.js builds it into this mount; start/stop the bot, choose its brain). -->
+        <div id="launch-mount"></div>
+
+        <section class="card" aria-labelledby="bot-status-title">
+          <h2 id="bot-status-title">Состояние</h2>
+          <p id="bot-conn" class="bot-conn"><span id="bot-conn-dot" class="dot dot-off" aria-hidden="true"></span> <span id="bot-conn-text">загрузка…</span></p>
+          <dl class="kv" id="bot-status-grid">
+            <dt>Сервер</dt><dd id="bs-server">—</dd>
+            <dt>Карта</dt><dd id="bs-map">—</dd>
+            <dt>Режим</dt><dd id="bs-mode">—</dd>
+            <dt>Мозг</dt><dd id="bs-brain">—</dd>
+            <dt>Дожим</dt><dd id="bs-finish">—</dd>
+            <dt>Цель</dt><dd id="bs-target">—</dd>
+            <dt>Вейблок</dt><dd id="bs-wb">—</dd>
+            <dt>Самоубийства</dt><dd id="bs-selfkill">—</dd>
+            <dt>Блоки / заблокирован</dt><dd id="bs-blocks">—</dd>
+            <dt>Смерти / самоубийства</dt><dd id="bs-deaths">—</dd>
+            <dt>Клипы</dt><dd id="bs-clips">—</dd>
+            <dt>Решение p50 / p99</dt><dd id="bs-latency">—</dd>
+            <dt>Мозг p99 / накладные p99</dt><dd id="bs-latency2">—</dd>
+            <dt>Облик (ник, клан, скин)</dt><dd id="bs-identity">—</dd>
+            <dt>Тик</dt><dd id="bs-tick">—</dd>
+          </dl>
+        </section>
+
+        <!-- Task 4.9 (D-094), moved by task 5.11: the chat input lives under the chat panel of the «Игра» tab (assets/say.js, embedded);
+             here only a pointer to it, so there is one input and one place for its refusals. -->
+        <section class="card" aria-labelledby="bot-chat-title">
+          <h2 id="bot-chat-title">Чат</h2>
+          <p class="hint">Поле ввода в игровой чат теперь на вкладке «Игра», прямо под панелью чата: то, что вы там напишете, бот скажет в игре.</p>
+          <button type="button" class="alt" id="bot-to-chat">К чату ▸</button>
+        </section>
+
+        </div>
+        <div class="page-col">
+        <section class="card" id="bot-cmd-card" aria-labelledby="bot-cmd-title">
+          <h2 id="bot-cmd-title">Команды</h2>
+          <p class="hint">Бот сам в игровой чат не пишет: здесь нет ни одной команды, которая могла бы это сделать. Строку в чат владелец набирает на вкладке «Игра», под чатом.</p>
+          <p id="cmd-demo-note" class="hint demo-note" hidden>
+            Команды отключены: сейчас на сайте показ (муха на арене), настоящего бота нет. Команды идут только живому боту и никогда не
+            уходят в показ.
+          </p>
+
+          <div class="cmd-row">
+            <span class="cmd-label">Режим</span>
+            <div class="btn-group" role="group" aria-label="Режим">
+              <button type="button" class="alt" data-cmd="mode" data-mode="fight">Бой</button>
+              <button type="button" class="alt" data-cmd="mode" data-mode="passive">Пассивный</button>
+              <button type="button" class="alt" data-cmd="mode" data-mode="hold">Стоять</button>
+          </div>
+        </div>
+          <div class="cmd-row">
+            <span class="cmd-label">Ход</span>
+            <div class="btn-row" role="group" aria-label="Стоп и ход">
+              <button type="button" class="alt" data-cmd="stop">Стоп</button>
+              <button type="button" class="alt" data-cmd="go">Играть</button>
+          </div>
+        </div>
+          <div class="cmd-row">
+            <span class="cmd-label">Вейблок</span>
+            <div class="btn-group" role="group" aria-label="Вейблок">
+              <button type="button" class="alt" data-cmd="wb" data-mode="auto">Авто</button>
+              <button type="button" class="alt" data-cmd="wb" data-mode="left">Лево</button>
+              <button type="button" class="alt" data-cmd="wb" data-mode="right">Право</button>
+              <button type="button" class="alt" data-cmd="wb" data-mode="off">Выкл</button>
+          </div>
+        </div>
+          <div class="cmd-row">
+            <label class="cmd-label" for="cmd-brain">Мозг</label>
+            <div class="inline-form">
+              <select id="cmd-brain">
+                <option value="hybrid">hybrid (муха + точный поиск)</option>
+                <option value="planner">planner</option>
+                <option value="scripted">scripted</option>
+                <option value="idle">idle (ничего не делает)</option>
+                <option value="fly">fly (муха одна)</option>
+              </select>
+              <button type="button" class="alt" id="cmd-brain-apply">Сменить</button>
+          </div>
+        </div>
+          <div class="cmd-row">
+            <span class="cmd-label">Убить и возродить</span>
+            <div class="inline-form">
+              <button type="button" class="danger" id="cmd-kill">Убить</button>
+              <span id="kill-cooldown" class="hint">—</span>
+          </div>
+        </div>
+          <div class="cmd-row">
+            <label class="cmd-label" for="cmd-clip-note">Клип (последние 30 с)</label>
+            <div class="inline-form">
+              <input id="cmd-clip-note" type="text" maxlength="60" autocomplete="off" placeholder="заметка (необязательно)" />
+              <button type="button" class="alt" id="cmd-clip">Сохранить клип</button>
+          </div>
+            <p class="hint warn">Заметка попадает в сам клип и в имя его файла. Клипами можно делиться, поэтому пишите без ников игроков.</p>
+        </div>
+          <div class="cmd-row">
+            <span class="cmd-label">Идти в тайл</span>
+            <div class="inline-form">
+              <input id="cmd-goto-x" type="number" inputmode="numeric" step="1" placeholder="x" aria-label="x" />
+              <input id="cmd-goto-y" type="number" inputmode="numeric" step="1" placeholder="y" aria-label="y" />
+              <button type="button" class="alt" id="cmd-goto">Идти</button>
+          </div>
+        </div>
+          <div class="cmd-row">
+            <span class="cmd-label">Наблюдатель</span>
+            <div class="btn-row" role="group" aria-label="Наблюдатель и игра">
+              <button type="button" class="alt" id="cmd-spec">В наблюдатели</button>
+              <button type="button" class="alt" data-cmd="join">В игру</button>
+          </div>
+        </div>
+          <p id="cmd-result" class="result" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="card" aria-labelledby="bot-rel-title">
+          <h2 id="bot-rel-title">Друзья, война, игнор</h2>
+          <p class="hint">
+            Совпадение точное после нормализации: пробелы по краям и повторы убираются, регистр не важен, префикс «(1)» от
+            дубликата ника снимается. Часть ника ничего не задевает. Имена видны только вам и нигде не пишутся в журнал.
+          </p>
+          <form id="rel-form" autocomplete="off">
+            <div class="inline-form">
+              <select id="rel-kind" aria-label="Список">
+                <option value="friend">Друзья — не трогать, защищать</option>
+                <option value="war">Война — бить при встрече</option>
+                <option value="ignore">Игнор — не трогать</option>
+                <option value="clanfriend">Клан-друзья (тег клана)</option>
+                <option value="clanwar">Клан-война (тег клана)</option>
+              </select>
+          </div>
+            <div class="inline-form">
+              <input id="rel-name" type="text" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ник или тег клана" aria-label="Ник или тег клана" required />
+              <button type="submit">Добавить</button>
+          </div>
+            <p id="rel-preview" class="hint"></p>
+          </form>
+          <p id="rel-result" class="result" role="status" aria-live="polite"></p>
+          <div id="rel-lists" class="rel-lists"></div>
+          <button type="button" class="alt" id="rel-reload">Перечитать списки в боте</button>
+        </section>
+        </div>
       </div>
-
-      <!-- Task 5.9: the «Запуск» card (assets/launch.js builds it into this mount; start/stop the bot, choose its brain). -->
-      <div id="launch-mount"></div>
-
-      <!-- Task 4.9 (D-094), moved by task 5.11: the chat input lives under the chat panel of the «Игра» tab (assets/say.js, embedded);
-           here only a pointer to it, so there is one input and one place for its refusals. -->
-      <section class="card" aria-labelledby="bot-chat-title">
-        <h2 id="bot-chat-title">Чат</h2>
-        <p class="hint">Поле ввода в игровой чат теперь на вкладке «Игра», прямо под панелью чата: то, что вы там напишете, бот скажет в игре.</p>
-        <button type="button" class="alt" id="bot-to-chat">К чату ▸</button>
-      </section>
-
-      <section class="card" aria-labelledby="bot-status-title">
-        <h2 id="bot-status-title">Состояние</h2>
-        <p id="bot-conn" class="bot-conn"><span id="bot-conn-dot" class="dot dot-off" aria-hidden="true"></span> <span id="bot-conn-text">загрузка…</span></p>
-        <dl class="kv" id="bot-status-grid">
-          <dt>Сервер</dt><dd id="bs-server">—</dd>
-          <dt>Карта</dt><dd id="bs-map">—</dd>
-          <dt>Режим</dt><dd id="bs-mode">—</dd>
-          <dt>Мозг</dt><dd id="bs-brain">—</dd>
-          <dt>Дожим</dt><dd id="bs-finish">—</dd>
-          <dt>Цель</dt><dd id="bs-target">—</dd>
-          <dt>Вейблок</dt><dd id="bs-wb">—</dd>
-          <dt>Блоки / заблокирован</dt><dd id="bs-blocks">—</dd>
-          <dt>Смерти / самоубийства</dt><dd id="bs-deaths">—</dd>
-          <dt>Клипы</dt><dd id="bs-clips">—</dd>
-          <dt>Решение p50 / p99</dt><dd id="bs-latency">—</dd>
-          <dt>Мозг p99 / накладные p99</dt><dd id="bs-latency2">—</dd>
-          <dt>Облик (ник, клан, скин)</dt><dd id="bs-identity">—</dd>
-          <dt>Тик</dt><dd id="bs-tick">—</dd>
-        </dl>
-      </section>
-
-      <section class="card" id="bot-cmd-card" aria-labelledby="bot-cmd-title">
-        <h2 id="bot-cmd-title">Команды</h2>
-        <p class="hint">Бот сам в игровой чат не пишет: здесь нет ни одной команды, которая могла бы это сделать. Строку в чат владелец набирает на вкладке «Игра», под чатом.</p>
-        <p id="cmd-demo-note" class="hint demo-note" hidden>
-          Команды отключены: сейчас на сайте показ (муха на арене), настоящего бота нет. Команды идут только живому боту и никогда не
-          уходят в показ.
-        </p>
-
-        <div class="cmd-row">
-          <span class="cmd-label">Режим</span>
-          <div class="btn-group" role="group" aria-label="Режим">
-            <button type="button" class="alt" data-cmd="mode" data-mode="fight">Бой</button>
-            <button type="button" class="alt" data-cmd="mode" data-mode="passive">Пассивный</button>
-            <button type="button" class="alt" data-cmd="mode" data-mode="hold">Стоять</button>
-          </div>
-        </div>
-        <div class="cmd-row">
-          <span class="cmd-label">Ход</span>
-          <div class="btn-group" role="group" aria-label="Стоп и ход">
-            <button type="button" class="alt" data-cmd="stop">Стоп</button>
-            <button type="button" class="alt" data-cmd="go">Играть</button>
-          </div>
-        </div>
-        <div class="cmd-row">
-          <span class="cmd-label">Вейблок</span>
-          <div class="btn-group" role="group" aria-label="Вейблок">
-            <button type="button" class="alt" data-cmd="wb" data-mode="auto">Авто</button>
-            <button type="button" class="alt" data-cmd="wb" data-mode="left">Лево</button>
-            <button type="button" class="alt" data-cmd="wb" data-mode="right">Право</button>
-            <button type="button" class="alt" data-cmd="wb" data-mode="off">Выкл</button>
-          </div>
-        </div>
-        <div class="cmd-row">
-          <label class="cmd-label" for="cmd-brain">Мозг</label>
-          <div class="inline-form">
-            <select id="cmd-brain">
-              <option value="hybrid">hybrid (муха + точный поиск)</option>
-              <option value="planner">planner</option>
-              <option value="scripted">scripted</option>
-              <option value="idle">idle (ничего не делает)</option>
-              <option value="fly">fly (муха одна)</option>
-            </select>
-            <button type="button" class="alt" id="cmd-brain-apply">Сменить</button>
-          </div>
-        </div>
-        <div class="cmd-row">
-          <span class="cmd-label">Убить и возродить</span>
-          <div class="inline-form">
-            <button type="button" class="danger" id="cmd-kill">Убить</button>
-            <span id="kill-cooldown" class="hint">—</span>
-          </div>
-        </div>
-        <div class="cmd-row">
-          <label class="cmd-label" for="cmd-clip-note">Клип (последние 30 с)</label>
-          <div class="inline-form">
-            <input id="cmd-clip-note" type="text" maxlength="60" autocomplete="off" placeholder="заметка (необязательно)" />
-            <button type="button" class="alt" id="cmd-clip">Сохранить клип</button>
-          </div>
-          <p class="hint warn">Заметка попадает в сам клип и в имя его файла. Клипами можно делиться, поэтому пишите без ников игроков.</p>
-        </div>
-        <div class="cmd-row">
-          <span class="cmd-label">Идти в тайл</span>
-          <div class="inline-form">
-            <input id="cmd-goto-x" type="number" inputmode="numeric" step="1" placeholder="x" aria-label="x" />
-            <input id="cmd-goto-y" type="number" inputmode="numeric" step="1" placeholder="y" aria-label="y" />
-            <button type="button" class="alt" id="cmd-goto">Идти</button>
-          </div>
-        </div>
-        <div class="cmd-row">
-          <span class="cmd-label">Наблюдатель</span>
-          <div class="btn-group" role="group" aria-label="Наблюдатель и игра">
-            <button type="button" class="alt" id="cmd-spec">В наблюдатели</button>
-            <button type="button" class="alt" data-cmd="join">В игру</button>
-          </div>
-        </div>
-        <p id="cmd-result" class="result" role="status" aria-live="polite"></p>
-      </section>
-
-      <section class="card" aria-labelledby="bot-rel-title">
-        <h2 id="bot-rel-title">Друзья, война, игнор</h2>
-        <p class="hint">
-          Совпадение точное после нормализации: пробелы по краям и повторы убираются, регистр не важен, префикс «(1)» от
-          дубликата ника снимается. Часть ника ничего не задевает. Имена видны только вам и нигде не пишутся в журнал.
-        </p>
-        <form id="rel-form" autocomplete="off">
-          <div class="inline-form">
-            <select id="rel-kind" aria-label="Список">
-              <option value="friend">Друзья — не трогать, защищать</option>
-              <option value="war">Война — бить при встрече</option>
-              <option value="ignore">Игнор — не трогать</option>
-              <option value="clanfriend">Клан-друзья (тег клана)</option>
-              <option value="clanwar">Клан-война (тег клана)</option>
-            </select>
-          </div>
-          <div class="inline-form">
-            <input id="rel-name" type="text" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ник или тег клана" aria-label="Ник или тег клана" required />
-            <button type="submit">Добавить</button>
-          </div>
-          <p id="rel-preview" class="hint"></p>
-        </form>
-        <p id="rel-result" class="result" role="status" aria-live="polite"></p>
-        <div id="rel-lists" class="rel-lists"></div>
-        <button type="button" class="alt" id="rel-reload">Перечитать списки в боте</button>
-      </section>
     </section>
 
     <!-- Task 5.12 (D-099): the «Серверы» tab (owner only): the DDNet server list from a cache another unit fetched, the favourites and the
          proxy profiles (assets/servers.js builds the panels into this mount). Outside `.shell` like the other tabs; everything dynamic is
          set with `textContent` (server names come from the internet) and the proxy password is write-only. -->
-    <section id="servers-view" class="servers-view" hidden>
-      <h1>Серверы</h1>
+    <section id="servers-view" class="servers-view page" hidden>
+      <header class="page-head"><h1>Серверы</h1></header>
       <div id="servers-mount"></div>
     </section>
 
     <!-- Task 7.4: the fly's panel (owner only): what the connectome brain does while it plays. Outside `.shell` like the
          bot tab. Everything dynamic is set with `textContent`; the drawings are canvases (the CSP forbids inline styles). -->
-    <section id="fly-view" class="fly-view" hidden>
-      <h1>Муха</h1>
-      <div class="source-badge" id="fly-source" role="status" hidden>
-        <strong class="source-title"></strong>
-        <span class="source-detail"></span>
-      </div>
+    <section id="fly-view" class="fly-view page" hidden>
+      <header class="page-head">
+        <h1>Муха</h1>
+        <div class="source-badge" id="fly-source" role="status" hidden>
+          <strong class="source-title"></strong>
+          <span class="source-detail"></span>
+        </div>
+      </header>
 
       <section class="card" aria-labelledby="fly-head-title">
         <h2 id="fly-head-title">Состояние</h2>
@@ -316,7 +340,7 @@
         </div>
       </section>
 
-      <p id="fly-empty" class="card hint" hidden>
+      <p id="fly-empty" class="card hint empty-state" hidden>
         Данных нет. Муху показывают два источника: живой бот с мозгом <code>fly</code> или <code>hybrid</code> и ключом
         <code>--fly-bundle</code>, и офлайн-просмотр <code>ddnet-ai fly watch --bundle … --arena …</code> (сайт тогда запускают с
         <code>--bot-socket</code> на его сокет).
@@ -398,8 +422,8 @@
     <!-- Task 5.8: the training panel (owner only, read-only): the runs under `<data-dir>/runs`, their curves, DAgger rounds, arena
          results with confidence intervals and checkpoints. Outside `.shell` like the other tabs; everything dynamic is built with
          `textContent` and SVG nodes (never `innerHTML`), colours come from the `--tr-*` tokens (the CSP forbids inline styles). -->
-    <section id="train-view" class="train-view" hidden>
-      <h1>Обучение</h1>
+    <section id="train-view" class="train-view page" hidden>
+      <header class="page-head"><h1>Обучение</h1></header>
       <p class="hint">Только чтение: сайт показывает файлы запусков (<code>status.json</code>, <code>metrics.jsonl</code>, конфиг, сводки арены) и список чекпоинтов (имя, размер, хэш). Весов он не отдаёт и ничего не меняет.</p>
       <p class="bot-conn"><span id="train-dot" class="dot dot-off" aria-hidden="true"></span> <span id="train-state" role="status">загрузка…</span></p>
 
@@ -422,7 +446,11 @@
          at every viewport width (review round 1, finding F4: a previous version switched this to
          `position: static` on wide screens, which let the fixed, full-viewport `#game-view`
          paint over it and made "Статус"/logout unreachable while on the "Игра" tab). -->
-    <nav class="tabbar" id="tabbar" hidden>
+    <nav class="tabbar" id="tabbar" aria-label="Разделы" hidden>
+      <span class="nav-brand" aria-hidden="true">
+        <svg class="brand-mark" viewBox="0 0 32 32"><rect class="bm-tile" width="32" height="32" rx="9"/><circle class="bm-face" cx="16" cy="17" r="10"/><ellipse class="bm-eye" cx="12.2" cy="15.2" rx="3" ry="4"/><ellipse class="bm-eye" cx="19.8" cy="15.2" rx="3" ry="4"/><circle class="bm-pupil" cx="13.2" cy="15.8" r="1.5"/><circle class="bm-pupil" cx="20.8" cy="15.8" r="1.5"/></svg>
+        <span class="brand-name">DDNet-AI</span>
+      </span>
       <button id="tab-status" type="button" class="active"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg><span>Статус</span></button>
       <button id="tab-game" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg><span>Игра</span></button>
       <button id="tab-bot" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/></svg><span>Бот</span></button>

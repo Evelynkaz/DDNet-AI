@@ -1,50 +1,53 @@
-/* Task 4.9: the chat input; since task 5.11 it sits under the chat panel of the «Игра» tab (embedded, no card of its own). Everything is scoped under
-   `.say-card`; no global element is restyled. The colours come from the page's own tokens (--muted, --ok, --danger) so a restyled theme
-   carries over. */
+/* The chat input (task 4.9, D-094); since task 5.11 it sits under the chat panel of the «Игра» tab (embedded, no card of its own). Scoped
+   under `.say-card`; the look comes from the components and tokens of app.css. */
 
 .say-card .say-form {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 8px 0 0;
+  margin: var(--sp-2) 0 0;
 }
 
 .say-card .say-row {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .say-card .say-input {
   flex: 1 1 auto;
   min-width: 0;
-  min-height: 44px;
 }
 
 .say-card .say-send {
   flex: 0 0 auto;
-  min-height: 44px;
   min-width: 6rem;
 }
 
 .say-card .say-note {
   margin: 0;
-  font-size: 0.8rem;
-  color: var(--muted);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--subtle);
 }
 
 .say-card .say-opts {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  font-size: 0.85rem;
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 
 .say-card .say-team {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
+  cursor: pointer;
+}
+
+.say-card .say-count {
+  font-variant-numeric: tabular-nums;
 }
 
 .say-card .say-count.bad {
@@ -52,21 +55,10 @@
 }
 
 .say-card .say-result {
-  min-height: 1.3em;
   margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.say-card .say-result.ok {
-  color: var(--ok);
-}
-
-.say-card .say-result.bad {
-  color: var(--danger);
 }
 
 .say-card .say-send:disabled {
-  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -75,59 +67,22 @@
   padding: 0;
 }
 
-/* Task 5.11: embedded under the chat panel of the «Игра» tab, in 5.10's dark glass: a compact row like the client's chat line, the same
-   translucent field as the chat log above it. The window's own side margins come from `.game-view .card > :not(h2)`. */
+/* Embedded under the chat panel of the «Игра» tab: a compact row like the client's chat line. */
 .say-card.say-embedded .say-form {
-  gap: 4px;
-  margin: 8px 0 0;
+  gap: 6px;
+  margin: var(--sp-2) 0 0;
 }
 
 .say-card.say-embedded .say-input {
   min-height: 36px;
-  padding: 6px 10px;
-  font-size: 0.85rem;
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
-}
-
-.say-card.say-embedded .say-input::placeholder {
-  color: rgba(255, 255, 255, 0.5);
-}
-
-.say-card.say-embedded .say-input:focus {
-  outline: none;
-  border-color: var(--accent);
+  font-size: var(--fs-sm);
 }
 
 .say-card.say-embedded .say-send {
   min-height: 36px;
   min-width: 5.2rem;
-  padding: 6px 12px;
-  font-size: 0.85rem;
-}
-
-.say-card.say-embedded .say-opts {
-  font-size: 0.75rem;
-  color: rgba(255, 255, 255, 0.72);
-}
-
-.say-card.say-embedded .say-note {
-  font-size: 0.72rem;
-  color: rgba(255, 255, 255, 0.72);
-}
-
-.say-card.say-embedded .say-team input {
-  margin: 0;
-  padding: 0;
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-}
-
-.say-card.say-embedded .say-result {
-  min-height: 0;
-  font-size: 0.78rem;
+  padding: 0 14px;
+  font-size: var(--fs-sm);
 }
 
 /* the bot takes no lines from the site (chat_disabled): the field shows it */
@@ -140,6 +95,11 @@
 /* A phone: 16 px in a field keeps the browser from zooming the page when it is focused. */
 @media (max-width: 760px) {
   .say-card.say-embedded .say-input {
+    min-height: 44px;
     font-size: 1rem;
+  }
+
+  .say-card.say-embedded .say-send {
+    min-height: 44px;
   }
 }

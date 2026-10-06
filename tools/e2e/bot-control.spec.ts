@@ -36,7 +36,7 @@ const fakeStatus: Record<string, unknown> = {
   decide_p50_us: 800, decide_p99_us: 4100, brain_p99_us: 3900, overhead_p99_us: 200, telemetry: null,
   connected: true, server: "127.0.0.1:8303", map: "Copy Love Box", name: "bot", clan: "Neuroset", skin: "pinky",
   target_tag: "c5-0a1b2c3d", wb: "WB: auto, holding the left; playing: 1 on the left, 2 on the right", goto: "",
-  deaths: 4, clips_saved: 2, kill_cooldown_ticks: 120,
+  deaths: 4, clips_saved: 2, kill_cooldown_ticks: 120, selfkill: "on",
 };
 
 // The same fingerprint as `Relations::digest` (FNV-1a 64 over kind name, 0x1e, entries each followed by 0x1f, 0x1d), computed
@@ -209,6 +209,17 @@ test("desktop: status, commands, and the lists editor round-trip", async ({ page
   await expect(page.locator("#bs-blocks")).toHaveText("7 / 2");
   await expect(page.locator("#bs-clips")).toHaveText("2");
   await expect(page.locator("#bs-identity")).toContainText("Neuroset");
+  // Task 4.11 (D-102): the duel switch. «вкл» is the usual state; a marker or flag that switches the bot's own kills off is flagged, and a
+  // status without the field (an older bot) is «—», never «вкл».
+  await expect(page.locator("#bs-selfkill")).toHaveText("вкл");
+  await expect(page.locator("#bs-selfkill")).not.toHaveClass(/kv-warn/);
+  fakeStatus.selfkill = "off";
+  await expect(page.locator("#bs-selfkill")).toHaveText("выкл (флажок)", { timeout: 5_000 });
+  await expect(page.locator("#bs-selfkill")).toHaveClass(/kv-warn/);
+  delete fakeStatus.selfkill;
+  await expect(page.locator("#bs-selfkill")).toHaveText("—", { timeout: 5_000 });
+  fakeStatus.selfkill = "on";
+  await expect(page.locator("#bs-selfkill")).toHaveText("вкл", { timeout: 5_000 });
   await expect(page.locator('[data-cmd="mode"][data-mode="fight"]')).toHaveClass(/current/);
   await expect(page.locator('[data-cmd="wb"][data-mode="auto"]')).toHaveClass(/current/);
 

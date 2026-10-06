@@ -666,6 +666,7 @@
 
   function table(headers, rows, cls) {
     var wrap = el("div", "tr-table-wrap");
+    wrap.tabIndex = 0; // a wide table scrolls sideways: the keyboard must be able to reach it
     var t = el("table", "tr-table" + (cls ? " " + cls : ""));
     var thead = el("thead");
     var hr = el("tr");

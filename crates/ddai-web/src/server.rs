@@ -109,7 +109,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/servers.js", get(http::assets::servers_js))
         .route("/servers.css", get(http::assets::servers_css))
         .route("/say.js", get(http::assets::say_js))
-        .route("/say.css", get(http::assets::say_css));
+        .route("/say.css", get(http::assets::say_css))
+        .route("/fonts/inter-latin.woff2", get(http::assets::font_inter_latin))
+        .route("/fonts/inter-cyrillic.woff2", get(http::assets::font_inter_cyrillic));
 
     let app: Router<SharedState> = Router::new().merge(api_and_ws).merge(map_route).merge(assets);
     // Order matters (review finding F5): `tower::Layer::layer` wraps the *current* service, so

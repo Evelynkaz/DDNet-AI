@@ -154,6 +154,7 @@
     var wanted = null; // a server the «Серверы» tab asked for («Играть здесь»), chosen when the choices have it
     var info = null; // the last GET /api/bot/launch
     var bridge = null; // the last GET /api/bot/status
+    var pressed = null; // the button whose request is in flight (it shows a spinner)
 
     function build() {
       clear(root);
@@ -416,6 +417,9 @@
       ui.detail.textContent = detail;
       ui.start.disabled = busy || !enabled || info.pending || live || closed;
       ui.stop.disabled = busy || !enabled || info.pending;
+      // Task 5.14: the button that was pressed shows a spinner while its request is in flight.
+      ui.start.classList.toggle("is-loading", busy && ui.start === pressed);
+      ui.stop.classList.toggle("is-loading", busy && ui.stop === pressed);
       ui.watch.hidden = !live;
       [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish].forEach(function (c) {
         c.disabled = busy || !enabled;
@@ -455,8 +459,9 @@
       }
     }
 
-    function send(body, label) {
+    function send(body, label, button) {
       busy = true;
+      pressed = button || null;
       render();
       setResult(label + "…", null);
       return api("POST", "/api/bot/launch", body)
@@ -504,11 +509,11 @@
           return;
         }
       }
-      send(body, "Запуск");
+      send(body, "Запуск", ui.start);
     }
 
     function onStop() {
-      send({ action: "stop" }, "Остановка");
+      send({ action: "stop" }, "Остановка", ui.stop);
     }
 
     function mount(rootEl, apiFn) {

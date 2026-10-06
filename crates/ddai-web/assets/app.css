@@ -1,243 +1,1213 @@
-/* Mobile-first: the default rules target a phone-sized viewport; the single breakpoint below
-   widens things a bit on a desktop browser. No external fonts/CDNs (CSP: default-src 'self'). */
+/* DDNet-AI web — the design system and the shared tabs (task 5.14).
+
+   One file carries the tokens and every shared component; game.css, launch.css, servers.css and say.css only lay out their own tab and
+   use these tokens. Dark theme only (the stage and the charts are drawn on dark surfaces). No external fonts, CDNs or images: the CSP is
+   `default-src 'self'` (and `img-src 'self'`, so no `data:` URLs either: the select arrow below is drawn with gradients). The typeface is
+   Inter, served from /fonts (SIL OFL 1.1, see NOTICE).
+
+   Contents: 1 fonts · 2 tokens · 3 base · 4 navigation · 5 login and status · 6 page layout · 7 components · 8 source badge ·
+             9 «Бот» · 10 «Муха» · 11 «Обучение» · 12 motion. */
+
+/* ---------------------------------------------------------------------------------------------
+   1 · Fonts: Inter (variable weight), Latin and Cyrillic subsets. The names carry "Var" so that a locally installed static Inter
+   never half-replaces the file.
+   --------------------------------------------------------------------------------------------- */
+
+@font-face {
+  font-family: "Inter Var";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "Inter Var";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   2 · Tokens
+   Contrast (WCAG 2.x, measured): --text on --surface 14.7:1, --muted 7.1:1, --subtle 5.0:1; white on --accent 5.1:1, on
+   --danger-solid 5.2:1; --accent-text 8.5:1, --ok 9.2:1, --warn 10.0:1, --danger 6.4:1 on --surface.
+   --------------------------------------------------------------------------------------------- */
 
 :root {
-  color-scheme: dark light;
-  --bg: #101318;
-  --panel: #181c24;
-  --text: #e8ebf0;
-  --muted: #8a93a3;
-  --accent: #4f8cff;
-  --danger: #ff5c5c;
-  --ok: #3ecf6f;
+  color-scheme: dark;
 
-  /* Task 5.10: the page's own look (the competitor's DDNet-menu style: a periwinkle backdrop with a drifting checker, dark
-     glass panels, white text). Panels keep the opaque dark surfaces above for everything drawn on a canvas. */
-  --page: #8792b6;
-  --page-dark: #5f6a8c;
-  --win: rgba(9, 12, 24, 0.6);
-  --win-line: rgba(255, 255, 255, 0.14);
-  --glass: rgba(10, 13, 25, 0.74);
-  --glass-head: rgba(0, 0, 0, 0.24);
+  /* surfaces, from the page down to a pressed control */
+  --bg: #0b0e14;
+  --surface: #131824;
+  --surface-2: #1a2030;
+  --surface-3: #222a3c;
+  --sunken: #0e121b;
+  --line: #232b3d;
+  --line-strong: #33405a;
+
+  /* ink */
+  --text: #e7eaf1;
+  --muted: #9aa5b8;
+  --subtle: #7d889c;
+
+  /* accent: DDNet-ice blue for actions, the bot's gold for identity */
+  --accent: #3566e0;
+  --accent-hover: #2f5fd6;
+  --accent-active: #2a54bd;
+  --accent-text: #8db3ff;
+  --accent-soft: rgba(79, 126, 255, 0.16);
+  --accent-line: rgba(124, 163, 255, 0.5);
+  --focus: #8db3ff;
   --bot: #ffd23f;
-  --font: "DejaVu Sans DDNet", "DejaVu Sans", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
-  --head-h: 0px;
-  --foot-h: calc(56px + env(safe-area-inset-bottom, 0px));
+
+  /* state colours: text ink, a soft tinted fill and a border for each */
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.13);
+  --ok-line: rgba(52, 211, 153, 0.4);
+  --warn: #f5b942;
+  --warn-soft: rgba(245, 185, 66, 0.13);
+  --warn-line: rgba(245, 185, 66, 0.4);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.13);
+  --danger-line: rgba(248, 113, 113, 0.42);
+  --danger-solid: #c53a3a;
+  --danger-solid-hover: #b23232;
+  --info: #7cc4ff;
+  --info-soft: rgba(124, 196, 255, 0.13);
+  --info-line: rgba(124, 196, 255, 0.4);
+
+  /* the stage's translucent chips */
+  --glass: rgba(11, 14, 20, 0.8);
+  --glass-line: rgba(255, 255, 255, 0.12);
+
+  /* spacing scale (4 px base), radii, elevation */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+  --sh-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.015) inset;
+  --sh-2: 0 10px 30px rgba(0, 0, 0, 0.45);
+
+  /* type */
+  --font: "Inter Var", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --fs-xs: 0.75rem;
+  --fs-sm: 0.8125rem;
+  --fs-md: 0.9375rem;
+  --fs-lg: 1.0625rem;
+  --fs-xl: 1.375rem;
+  --fs-2xl: 1.75rem;
+
+  /* controls and motion */
+  --ctl-h: 40px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --t-fast: 120ms;
+  --t: 200ms;
+
+  /* the navigation: a bar on top of a wide window, a dock at the bottom of a phone */
+  --nav-h: 0px;
+  --dock-h: calc(62px + env(safe-area-inset-bottom, 0px));
 }
+
+@media (min-width: 900px) {
+  :root {
+    --nav-h: 56px;
+    --dock-h: 0px;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   3 · Base
+   --------------------------------------------------------------------------------------------- */
 
 * {
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html {
-  background: var(--page);
+  background: var(--bg);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* The page's charts are as tall as they are wide: without a reserved gutter the scrollbar appearing narrows the page, the charts shrink,
+     the scrollbar goes away again, and the layout never settles. */
+  scrollbar-gutter: stable;
 }
 
 html,
 body {
   margin: 0;
   padding: 0;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding-top: var(--nav-h);
+  padding-bottom: var(--dock-h);
   color: var(--text);
   font-family: var(--font);
-  min-height: 100%;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  background: radial-gradient(900px 360px at 50% -140px, rgba(79, 126, 255, 0.11), transparent 70%) no-repeat, var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "kern", "calt";
 }
 
-.shell {
-  max-width: 480px;
-  margin: 0 auto;
-  padding: 16px;
-  padding-bottom: env(safe-area-inset-bottom, 16px);
+body[data-view="login"] {
+  padding: 0;
 }
 
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 4px 20px;
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  line-height: 1.25;
 }
 
-.brand {
+h1 {
+  font-size: var(--fs-xl);
   font-weight: 700;
-  font-size: 1.1rem;
-  letter-spacing: 0.02em;
+  letter-spacing: -0.015em;
 }
 
-.dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  display: inline-block;
-}
-
-.dot-off {
-  background: var(--danger);
-}
-
-.dot-on {
-  background: var(--ok);
-}
-
-.view h1 {
-  font-size: 1.3rem;
-  margin: 0 0 16px;
-}
-
-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-label {
-  font-size: 0.9rem;
-  color: var(--muted);
-}
-
-input {
-  background: var(--panel);
-  border: 1px solid #2a3040;
-  color: var(--text);
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 1rem;
-}
-
-button {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-button:active {
-  opacity: 0.85;
-}
-
-.error {
-  color: var(--danger);
-  font-size: 0.9rem;
+p {
   margin: 0;
 }
 
-.status-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 16px;
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 20px;
+code,
+kbd {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
 }
 
-.status-grid dt {
-  color: var(--muted);
-  font-size: 0.85rem;
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
-.status-grid dd {
-  margin: 0;
-  font-weight: 600;
-  text-align: right;
+::selection {
+  background: rgba(79, 126, 255, 0.4);
 }
 
-#logout-button {
-  background: var(--danger);
-  width: 100%;
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
 }
 
-@media (min-width: 640px) {
-  .shell {
-    padding-top: 48px;
-  }
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
-/* Every element below is toggled via the plain `hidden` HTML attribute from `app.js`, but also
-   gets its own unconditional `display: flex` further down (needed once shown) — author styles
-   always win over the UA stylesheet's `[hidden] { display: none }` regardless of selector
-   specificity (a same-origin, same-specificity rule falls back to source order, and these rules
-   necessarily come later), so without this override `hidden` alone would do nothing on any of
-   them. Kept in one place, ahead of those rules, rather than repeating `:not([hidden])` on each. */
-.tabbar[hidden],
-.game-view[hidden],
-.replay-bar[hidden] {
-  display: none;
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: var(--r-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------------------------------------------------------------------------------------------
-   Task 5.2a: bottom tab bar.
+   4 · Navigation: a dock at the bottom of a phone, a bar across the top of a wide window. Always `position: fixed` and above the
+   game view (a fixed, full-viewport sibling would otherwise cover it: review round 1 of task 5.2a, finding F4).
    --------------------------------------------------------------------------------------------- */
 
-/* Review round 1, finding F4: this used to switch to `position: static` at >=640px, which took
-   it out of its own stacking context — the still-`position: fixed`, full-viewport `.game-view`
-   then painted OVER it regardless of DOM order, making "Статус" (and therefore logout)
-   unreachable while on the "Игра" tab on any desktop-sized screen. Simplest robust fix: this stays
-   `position: fixed` with a high `z-index` at every viewport width, full stop — a fixed element
-   always paints above an unpositioned-or-equally-stacked one in the same stacking context, so
-   nothing on this page can cover it again by accident the same way. */
 .tabbar {
   position: fixed;
   left: 0;
   right: 0;
   bottom: 0;
-  display: flex;
-  background: var(--panel);
-  border-top: 1px solid #2a3040;
-  padding-bottom: env(safe-area-inset-bottom, 0);
   z-index: 20;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: var(--dock-h);
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: rgba(11, 14, 20, 0.97);
+  border-top: 1px solid var(--line);
 }
 
 .tabbar button {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--muted);
-  border-radius: 0;
-  font-weight: 600;
-  padding: 12px 8px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.tabbar button:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .tabbar button.active {
-  color: var(--text);
-  box-shadow: inset 0 2px 0 var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
 
-/* Task 5.7: what is on show — the live bot, or the offline demo (which is not a real game). The pair of colours is chosen
-   so that the two states differ by more than hue: the demo is the amber, dashed one and says so in words. */
-.source-badge {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 10px;
-  box-sizing: border-box;
+.tabbar button .ic {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  vertical-align: 0;
+}
+
+.tabbar button span {
   max-width: 100%;
-  padding: 6px 10px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  font-size: 0.85rem;
-  line-height: 1.3;
-  background: rgba(24, 28, 36, 0.92);
-  color: var(--text);
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.source-badge[hidden] {
+.nav-brand {
   display: none;
 }
 
-.source-badge .source-title {
+/* A narrow phone: six labels share the width, so every pixel counts («Обучение» must not be cut at 360 or «Серверы» at 320). */
+@media (max-width: 380px) {
+  .tabbar {
+    gap: 0;
+    padding-left: 2px;
+    padding-right: 2px;
+  }
+
+  .tabbar button {
+    padding-left: 0;
+    padding-right: 0;
+    font-size: 0.625rem;
+  }
+}
+
+@media (min-width: 900px) {
+  .tabbar {
+    top: 0;
+    bottom: auto;
+    height: var(--nav-h);
+    gap: 4px;
+    align-items: center;
+    padding: 0 20px;
+    border-top: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .nav-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin-right: 20px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+
+  .tabbar button {
+    flex: 0 0 auto;
+    flex-direction: row;
+    gap: 8px;
+    height: 36px;
+    padding: 0 14px;
+    font-size: var(--fs-md);
+  }
+
+  .tabbar button .ic {
+    width: 18px;
+    height: 18px;
+  }
+}
+
+/* The mark: a tee's face on the bot's gold. */
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   font-weight: 700;
+  font-size: var(--fs-lg);
+  letter-spacing: -0.01em;
+}
+
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+
+.bm-tile {
+  fill: var(--bot);
+}
+
+.bm-face {
+  fill: #0b0e14;
+}
+
+.bm-eye {
+  fill: #ffffff;
+}
+
+.bm-pupil {
+  fill: #0b0e14;
+}
+
+/* Inline icons (Lucide, ISC; see NOTICE) next to the text of tabs and buttons. */
+.ic {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+  vertical-align: -0.2em;
+  margin-right: 0.35em;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   5 · Login and status (the `.shell`)
+   --------------------------------------------------------------------------------------------- */
+
+.shell {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: var(--sp-6) var(--sp-5) var(--sp-7);
+  animation: view-in var(--t) var(--ease) backwards;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0 var(--sp-5);
+}
+
+/* Logged in, the navigation carries the brand and the status tab the connection: the bar is only for the login screen. */
+body:not([data-view="login"]) .topbar {
+  display: none;
+}
+
+body[data-view="login"] .shell {
+  max-width: 420px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-top: var(--sp-5);
+  padding-bottom: var(--sp-7);
+}
+
+body[data-view="login"] .topbar .brand {
+  font-size: var(--fs-xl);
+}
+
+body[data-view="login"] .topbar .brand-mark {
+  width: 40px;
+  height: 40px;
+}
+
+body[data-view="login"] #conn-dot {
+  display: none;
+}
+
+.auth-card {
+  padding: var(--sp-5);
+  box-shadow: var(--sh-2);
+}
+
+.auth-card h1 {
+  margin-bottom: var(--sp-4);
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+label {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+#login-form button[type="submit"] {
+  margin-top: var(--sp-1);
+  min-height: 44px;
+}
+
+.error {
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-line);
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+#status-view > h1 {
+  margin-bottom: var(--sp-5);
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-4);
+  margin: 0 0 var(--sp-5);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-1);
+}
+
+.stat dt {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+
+.stat dd {
+  margin: 0;
+  font-size: var(--fs-2xl);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.stat dd.badge {
+  align-self: flex-start;
+  font-size: var(--fs-md);
+  letter-spacing: 0;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   6 · Page layout (every tab but the game): a header, then one column or two
+   --------------------------------------------------------------------------------------------- */
+
+.page {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: var(--sp-6) var(--sp-5) var(--sp-7);
+  animation: view-in var(--t) var(--ease) backwards;
+}
+
+.servers-view {
+  max-width: 900px;
+}
+
+.train-view {
+  max-width: 1040px;
+}
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-5);
+}
+
+.page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-4);
+  align-items: start;
+}
+
+.page-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .page-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--sp-5);
+  }
+
+  .page-col {
+    gap: var(--sp-5);
+  }
+}
+
+@media (max-width: 640px) {
+  .status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--sp-3);
+  }
+
+  .stat {
+    padding: var(--sp-4);
+  }
+
+  .stat:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .page,
+  .shell {
+    padding: var(--sp-5) var(--sp-4) var(--sp-6);
+  }
+
+  .page-head {
+    margin-bottom: var(--sp-4);
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   7 · Components
+   --------------------------------------------------------------------------------------------- */
+
+/* --- cards -------------------------------------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--sp-5);
+  margin: 0;
+  box-shadow: var(--sh-1);
+  min-width: 0;
+}
+
+.card > h2,
+.sv-h3 {
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  margin: 0 0 var(--sp-3);
+}
+
+.card > h2 + .hint {
+  margin-top: calc(-1 * var(--sp-1));
+}
+
+h3 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .card {
+    padding: var(--sp-4);
+  }
+}
+
+/* --- text helpers ------------------------------------------------------------------------- */
+
+.hint {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  margin: 0 0 var(--sp-3);
+}
+
+.hint.warn,
+.hint.demo-note {
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  color: #f2cf86;
+}
+
+/* An empty or loading state: a quiet dashed frame instead of a bare line. */
+.empty-state {
+  padding: var(--sp-5);
+  border: 1px dashed var(--line-strong);
+  background: transparent;
+  box-shadow: none;
+  text-align: center;
+}
+
+/* --- key / value lists -------------------------------------------------------------------- */
+
+.kv {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  margin: 0;
+}
+
+.kv dt,
+.kv dd {
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.kv dt:nth-last-child(2),
+.kv dd:last-child {
+  border-bottom: 0;
+}
+
+.kv dt {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  padding-right: var(--sp-4);
+}
+
+.kv dd.kv-warn {
+  color: var(--warn);
+}
+
+.kv dd {
+  margin: 0;
+  text-align: right;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* --- buttons: primary by default, `.alt` secondary, `.danger`, `.is-loading` ------------------ */
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+  min-height: var(--ctl-h);
+  padding: 0 var(--sp-4);
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button:active:not(:disabled) {
+  background: var(--accent-active);
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.alt {
+  background: var(--surface-3);
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+button.alt:hover:not(:disabled) {
+  background: #2b3550;
+  border-color: #44547a;
+}
+
+button.alt:active:not(:disabled) {
+  background: #323d5c;
+}
+
+button.alt.current {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent-text);
+}
+
+button.danger {
+  background: var(--danger-solid);
+  color: #fff;
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--danger-solid-hover);
+}
+
+button.danger:active:not(:disabled) {
+  background: #9c2c2c;
+}
+
+/* A request is in flight: the label gives way to a spinner and the button keeps its size. */
+button.is-loading {
+  position: relative;
+  color: transparent;
+  pointer-events: none;
+}
+
+button.is-loading::after {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  animation: spin 0.7s linear infinite;
+}
+
+@media (max-width: 760px) {
+  button {
+    min-height: 44px;
+  }
+}
+
+/* Groups: `.btn-group` is a segmented control (one is `.current`); `.btn-row` is a few separate actions. */
+.btn-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  background: var(--sunken);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+}
+
+.btn-group button.alt {
+  min-height: 34px;
+  padding: 0 14px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  font-weight: 550;
+  border-radius: 8px;
+}
+
+.btn-group button.alt:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.btn-group button.alt.current {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.btn-row,
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+/* --- inputs, selects, checkboxes ---------------------------------------------------------- */
+
+input[type="text"],
+input[type="search"],
+input[type="number"],
+input[type="password"],
+input:not([type]),
+select,
+textarea {
+  min-width: 0;
+  min-height: var(--ctl-h);
+  padding: 0 12px;
+  background-color: var(--sunken);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  font: inherit;
+  font-size: var(--fs-md);
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled) {
+  border-color: #44547a;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid transparent;
+  border-color: var(--accent-text);
+  box-shadow: 0 0 0 3px rgba(124, 163, 255, 0.28);
+}
+
+input::placeholder {
+  color: var(--subtle);
+  opacity: 1;
+}
+
+input:disabled,
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 34px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+select option {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+input[type="range"] {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent-text);
+  box-shadow: none;
+}
+
+.inline-form > input,
+.inline-form > select {
+  flex: 1 1 8rem;
+}
+
+.inline-form > .hint {
+  margin: 0;
+}
+
+.inline-form > input[type="number"] {
+  flex: 1 1 4.5rem;
+}
+
+@media (max-width: 760px) {
+  input[type="text"],
+  input[type="search"],
+  input[type="number"],
+  input[type="password"],
+  input:not([type]),
+  select {
+    min-height: 44px;
+    font-size: 1rem; /* 16 px keeps the browser from zooming the page when a field is focused */
+  }
+}
+
+/* --- status dots and chips ---------------------------------------------------------------- */
+
+.dot {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--subtle);
+  box-shadow: 0 0 0 3px rgba(125, 136, 156, 0.18);
+}
+
+.dot-on {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.2);
+}
+
+.dot-wait {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px rgba(245, 185, 66, 0.2);
+}
+
+/* The live pulse is a ring that grows and fades (transform and opacity only: the compositor draws it, the page does not repaint). */
+.dot-on::after,
+.dot-wait::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  opacity: 0;
+  animation: pulse 2.4s ease-out infinite;
+}
+
+.dot-wait::after {
+  animation-duration: 1.6s;
+}
+
+/* A line with a dot and a state word is a status chip, tinted by the dot it holds. */
+.bot-conn,
+.lc-state,
+.gb-conn {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px 6px 12px;
+  margin: 0 0 var(--sp-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.bot-conn:has(.dot-on),
+.lc-state:has(.dot-on),
+.gb-conn:has(.dot-on) {
+  background: var(--ok-soft);
+  border-color: var(--ok-line);
+}
+
+.bot-conn:has(.dot-wait),
+.lc-state:has(.dot-wait),
+.gb-conn:has(.dot-wait) {
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+}
+
+/* Badges: a short label. Tones: ok, warn, bad, info; the default is neutral. */
+.badge,
+.sv-badge,
+.tr-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.badge-lg {
+  padding: 4px 12px;
+  font-size: var(--fs-md);
+}
+
+.badge-ok,
+.sv-badge.fav {
+  background: var(--ok-soft);
+  border-color: var(--ok-line);
+  color: var(--ok);
+}
+
+.badge-warn,
+.sv-badge.warn {
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+  color: var(--warn);
+}
+
+.badge-bad,
+.sv-badge.bad {
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
+  color: var(--danger);
+}
+
+.badge-info {
+  background: var(--info-soft);
+  border-color: var(--info-line);
+  color: var(--info);
+}
+
+.badge-idle {
+  background: var(--surface-3);
+  color: var(--muted);
+}
+
+/* --- results: an inline message under a form, shown only when it has text ------------------- */
+
+.result,
+.lc-result,
+.sv-result,
+.say-result {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* An empty live region stays in the page (it is `role="status"` or `aria-live`, and a screen reader only announces text put into a region
+   it already knows); with no text it has no height, so only its margin is taken away. */
+.result:empty,
+.lc-result:empty,
+.sv-result:empty,
+.say-result:empty {
+  margin: 0;
+}
+
+.result.ok,
+.result.bad,
+.lc-result.ok,
+.lc-result.bad,
+.sv-result.ok,
+.sv-result.bad,
+.say-result.ok,
+.say-result.bad {
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid;
+}
+
+.result.ok,
+.lc-result.ok,
+.sv-result.ok,
+.say-result.ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: var(--ok-line);
+}
+
+.result.bad,
+.lc-result.bad,
+.sv-result.bad,
+.say-result.bad {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
+}
+
+/* --- details / disclosure ----------------------------------------------------------------- */
+
+details > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  list-style: none;
+  cursor: pointer;
+  font-weight: 600;
+  border-radius: var(--r-sm);
+}
+
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+details > summary::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 3px 0 1px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform var(--t-fast) var(--ease);
+}
+
+details[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+/* --- tables ------------------------------------------------------------------------------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+th {
+  color: var(--subtle);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: left;
+}
+
+.num {
+  text-align: right;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   8 · What is on show: the live bot, or the offline demo (not a real game), or nothing. The demo is the amber, dashed one: the
+   two states differ by more than hue.
+   --------------------------------------------------------------------------------------------- */
+
+.source-badge {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  max-width: 100%;
+  padding: 6px 14px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.source-badge .source-title {
+  font-weight: 650;
 }
 
 .source-badge .source-detail {
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: var(--fs-xs);
 }
 
 .source-badge.source-live {
-  border-color: var(--ok);
+  background: var(--ok-soft);
+  border-color: var(--ok-line);
 }
 
 .source-badge.source-live .source-title {
@@ -245,186 +1215,110 @@ button:active {
 }
 
 .source-badge.source-demo {
-  border: 1px dashed #e0a526;
-  background: rgba(60, 44, 8, 0.92);
+  background: var(--warn-soft);
+  border: 1px dashed var(--warn);
 }
 
 .source-badge.source-demo .source-title {
-  color: #f2c14e;
-}
-
-.source-badge.source-none {
-  border-color: #2a3040;
+  color: var(--warn);
 }
 
 .source-badge.source-none .source-title {
   color: var(--muted);
 }
 
-.bot-view .source-badge,
-.fly-view .source-badge {
-  margin: 0 0 16px;
-}
-
 /* ---------------------------------------------------------------------------------------------
-   Task 5.6: bot control tab (owner only): status panel, commands, friends/war/ignore editor.
+   9 · «Бот»: the status list, the commands, the friends / war / ignore editor (the «Запуск» card is in launch.css)
    --------------------------------------------------------------------------------------------- */
-
-.bot-view[hidden] {
-  display: none;
-}
-
-.bot-view {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 16px 16px calc(80px + env(safe-area-inset-bottom, 0));
-}
-
-.bot-view h1 {
-  font-size: 1.3rem;
-  margin: 8px 0 16px;
-}
-
-.bot-view h2 {
-  font-size: 1.05rem;
-  margin: 0 0 12px;
-}
-
-.card {
-  background: var(--panel);
-  border-radius: 10px;
-  padding: 16px;
-  margin-bottom: 16px;
-}
-
-.bot-conn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 12px;
-  font-weight: 600;
-}
-
-.kv {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
-  gap: 6px 16px;
-  margin: 0;
-}
-
-.kv dt {
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.kv dd {
-  margin: 0;
-  text-align: right;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
-
-.hint {
-  color: var(--muted);
-  font-size: 0.85rem;
-  margin: 4px 0 8px;
-}
-
-.hint.warn,
-.hint.demo-note {
-  color: #e0b04a;
-}
 
 .cmd-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 0;
-  border-top: 1px solid #232a38;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
 }
 
 .cmd-row:first-of-type {
-  border-top: none;
+  border-top: 0;
+  padding-top: var(--sp-1);
+}
+
+.cmd-row:last-of-type {
+  padding-bottom: 0;
 }
 
 .cmd-label {
-  font-size: 0.9rem;
+  font-size: var(--fs-sm);
+  font-weight: 550;
   color: var(--muted);
 }
 
-.btn-group,
-.inline-form {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
+.cmd-row > .inline-form,
+.cmd-row > .btn-row {
+  width: 100%;
 }
 
-.inline-form > input,
-.inline-form > select {
-  flex: 1 1 8rem;
-  min-width: 0;
+.cmd-row > .hint {
+  margin: 0;
 }
 
-.bot-view select {
-  background: var(--bg);
-  border: 1px solid #2a3040;
-  color: var(--text);
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 1rem;
+.bot-view .cmd-row > .btn-group {
+  max-width: 100%;
 }
 
-.bot-view button {
-  min-height: 44px;
+@media (min-width: 640px) {
+  .cmd-row {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--sp-4);
+  }
+
+  .cmd-row > .cmd-label {
+    flex: 0 0 9.5rem;
+  }
+
+  .cmd-row > .btn-group,
+  .cmd-row > .btn-row,
+  .cmd-row > .inline-form {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+  }
+
+  .cmd-row > .btn-group {
+    flex: 0 1 auto;
+  }
+
+  .cmd-row > .hint {
+    flex-basis: 100%;
+  }
 }
 
-button.alt {
-  background: #28324a;
-  color: var(--text);
+#rel-form {
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
 }
 
-button.alt.current {
-  background: var(--accent);
-  color: #fff;
+#rel-preview:empty {
+  display: none;
 }
 
-button.danger {
-  background: var(--danger);
-}
-
-.bot-view button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.result {
-  min-height: 1.3em;
-  margin: 10px 0 0;
-  font-size: 0.9rem;
-  overflow-wrap: anywhere;
-}
-
-.result.ok {
-  color: var(--ok);
-}
-
-.result.bad {
-  color: var(--danger);
+#rel-preview {
+  margin: 0;
 }
 
 .rel-lists {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin: 12px 0;
+  gap: var(--sp-4);
+  margin: var(--sp-4) 0;
 }
 
 .rel-group h3 {
-  font-size: 0.9rem;
-  margin: 0 0 6px;
-  color: var(--muted);
+  margin: 0 0 var(--sp-2);
 }
 
 .rel-entries {
@@ -439,67 +1333,57 @@ button.danger {
 .rel-entries li {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  background: var(--bg);
-  border: 1px solid #2a3040;
-  border-radius: 999px;
-  padding: 2px 4px 2px 12px;
+  gap: 2px;
+  padding: 2px 3px 2px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-sm);
   overflow-wrap: anywhere;
 }
 
 .rel-entries li button {
-  background: transparent;
-  color: var(--danger);
+  min-width: 28px;
+  min-height: 28px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  min-height: 36px;
-  min-width: 36px;
-  font-size: 1.2rem;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.1rem;
   line-height: 1;
 }
 
-.rel-empty {
-  color: var(--muted);
-  font-size: 0.85rem;
+.rel-entries li button:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
-@media (min-width: 640px) {
-  .cmd-row {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-  }
+.rel-empty {
+  display: inline-block;
+  padding: 2px 0;
+  color: var(--subtle);
+  font-size: var(--fs-sm);
+}
 
-  .cmd-row > .cmd-label {
-    flex: 0 0 11rem;
-  }
-
-  .cmd-row > .btn-group,
-  .cmd-row > .inline-form {
-    flex: 1;
-  }
-
-  .cmd-row > .hint {
-    flex-basis: 100%;
-  }
+#bot-cmd-card button:disabled {
+  opacity: 0.4;
 }
 
 /* ---------------------------------------------------------------------------------------------
-   Task 7.4: the «Муха» tab — the fly brain at work. One palette for the whole tab, as tokens: the four pipeline
-   families, the seven eye channels (a fixed order validated as a set against the dark surface), a diverging pair for
-   z-scores and a one-hue sequential ramp for rates. The site is dark; these values are the dark-mode steps.
+   10 · «Муха» — the fly brain at work. One palette for the whole tab, as tokens: the four pipeline families, the seven eye channels
+   (a fixed order validated as a set against the dark surface), a diverging pair for z-scores and a one-hue sequential ramp for rates.
+   fly.js reads these as hex strings: keep them hex.
    --------------------------------------------------------------------------------------------- */
 
-.fly-view[hidden] {
-  display: none;
-}
-
 .fly-view {
-  --fly-panel: var(--panel);
-  --fly-bg: var(--bg);
-  --fly-text: var(--text);
-  --fly-muted: var(--muted);
-  --fly-grid: #2a3040;
+  --fly-panel: #131824;
+  --fly-bg: #0b0e14;
+  --fly-text: #e7eaf1;
+  --fly-muted: #9aa5b8;
+  --fly-grid: #2a3347;
   /* Pipeline families: blue (eye), aqua (body), violet (centre), orange (outputs). */
   --fly-fam-vpn: #3987e5;
   --fly-fam-an: #199e70;
@@ -517,56 +1401,82 @@ button.danger {
   --fly-div-neg: #3987e5;
   --fly-div-pos: #e66767;
   --fly-div-mid: #383835;
-  --fly-ramp-0: #181c24;
+  --fly-ramp-0: #131824;
   --fly-ramp-1: #184f95;
   --fly-ramp-2: #3987e5;
   --fly-ramp-3: #9ec5f4;
   --fly-ramp-4: #cde2fb;
-
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 16px 16px calc(80px + env(safe-area-inset-bottom, 0));
 }
 
-.fly-view h1 {
-  font-size: 1.3rem;
-  margin: 8px 0 16px;
+.fly-view,
+.train-view,
+#train-compare,
+#train-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
 }
 
-.fly-view h2 {
-  font-size: 1.05rem;
-  margin: 0 0 12px;
+.fly-view > .page-head,
+.train-view > .page-head {
+  margin-bottom: var(--sp-1);
 }
 
-.fly-view .ts-title {
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: var(--muted);
-  margin: 14px 0 4px;
+#fly-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-4);
+  align-items: start;
 }
 
-.fly-view select {
-  background: var(--bg);
-  border: 1px solid #2a3040;
-  color: var(--text);
-  border-radius: 8px;
-  padding: 10px;
-  font-size: 1rem;
-  min-height: 44px;
+#fly-content > * {
+  min-width: 0;
 }
 
-.fly-view code {
-  background: var(--bg);
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 0.85em;
+@media (min-width: 1024px) {
+  #fly-content {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--sp-5);
+  }
+
+  /* Auto-placement with `dense`: the proposer line (1st child), the group heat strips (4th), the dynamics (6th) and the table (7th) span
+     both columns; the eye (2nd) spans two rows on the left, the action (3rd) and the DN outputs (5th) stack beside it. */
+  #fly-content {
+    grid-auto-flow: row dense;
+  }
+
+  #fly-content > :nth-child(1),
+  #fly-content > :nth-child(4),
+  #fly-content > :nth-child(6),
+  #fly-content > :nth-child(7) {
+    grid-column: 1 / -1;
+  }
+
+  #fly-content > :nth-child(2) {
+    grid-column: 1;
+    grid-row: span 2;
+  }
+
+  #fly-content > :nth-child(3),
+  #fly-content > :nth-child(5) {
+    grid-column: 2;
+  }
 }
 
-.fly-view .plot {
+.ts-title {
+  margin: var(--sp-4) 0 var(--sp-1);
+}
+
+.ts-title:first-of-type {
+  margin-top: 0;
+}
+
+.plot {
   width: 100%;
+  min-width: 0;
 }
 
-.fly-view .plot.rel {
+.plot.rel {
   position: relative;
 }
 
@@ -575,28 +1485,26 @@ button.danger {
   max-width: 100%;
 }
 
-.fly-view .tip {
+.tip,
+.tr-tip {
   position: absolute;
   z-index: 5;
-  background: var(--bg);
-  border: 1px solid #2a3040;
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 0.75rem;
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  padding: 6px 10px;
+  font-size: var(--fs-xs);
+  box-shadow: var(--sh-2);
   pointer-events: none;
   max-width: 260px;
-}
-
-.fly-view .tip[hidden] {
-  display: none;
 }
 
 .legend-row {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 14px;
-  margin: 8px 0 0;
-  font-size: 0.8rem;
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 
@@ -610,7 +1518,7 @@ button.danger {
   display: inline-block;
   width: 10px;
   height: 10px;
-  border-radius: 2px;
+  border-radius: 3px;
   flex: none;
 }
 
@@ -637,20 +1545,25 @@ button.danger {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 36px;
-  padding: 6px 10px;
-  border-radius: 18px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--r-pill);
   background: transparent;
   color: var(--muted);
-  border: 1px solid #2a3040;
-  font-size: 0.8rem;
-  font-weight: 500;
+  border: 1px solid var(--line-strong);
+  font-size: var(--fs-xs);
+  font-weight: 550;
+}
+
+.chip:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .chip[aria-pressed="true"] {
-  background: #222a3b;
+  background: var(--accent-soft);
   color: var(--text);
-  border-color: #3a4560;
+  border-color: var(--accent-line);
 }
 
 .chip[aria-pressed="false"] .swatch {
@@ -660,16 +1573,16 @@ button.danger {
 .act-grid {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 12px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
 }
 
 .prob-row {
   display: grid;
   grid-template-columns: 4.5rem minmax(0, 1fr) 3rem;
   align-items: center;
-  gap: 10px;
-  font-size: 0.9rem;
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
 }
 
 .prob-label {
@@ -679,45 +1592,48 @@ button.danger {
 .prob-val {
   text-align: right;
   font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
-.fly-view progress {
+progress {
   width: 100%;
-  height: 10px;
+  height: 8px;
   appearance: none;
-  border: none;
-  border-radius: 5px;
-  background: #222a3b;
+  -webkit-appearance: none;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
   overflow: hidden;
 }
 
-.fly-view progress::-webkit-progress-bar {
-  background: #222a3b;
-  border-radius: 5px;
+progress::-webkit-progress-bar {
+  background: var(--surface-3);
+  border-radius: var(--r-pill);
 }
 
-.fly-view progress::-webkit-progress-value {
-  background: var(--fly-fam-vpn);
-  border-radius: 5px;
+progress::-webkit-progress-value {
+  background: var(--fly-fam-vpn, var(--accent));
+  border-radius: var(--r-pill);
 }
 
-.fly-view progress::-moz-progress-bar {
-  background: var(--fly-fam-vpn);
-  border-radius: 5px;
+progress::-moz-progress-bar {
+  background: var(--fly-fam-vpn, var(--accent));
+  border-radius: var(--r-pill);
 }
 
 .pill-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .pill {
-  padding: 6px 12px;
-  border-radius: 16px;
-  border: 1px solid #2a3040;
+  padding: 5px 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: var(--fs-sm);
 }
 
 .pill strong {
@@ -726,8 +1642,8 @@ button.danger {
 
 /* A held key: filled and marked with a tick, so it never rests on colour alone. */
 .pill.on {
-  background: #28324a;
-  border-color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
   color: var(--text);
 }
 
@@ -736,40 +1652,35 @@ button.danger {
 }
 
 .fly-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-  margin-top: 10px;
+  margin-top: var(--sp-3);
+  font-size: var(--fs-sm);
 }
 
 .fly-table th,
 .fly-table td {
+  padding: 7px 8px;
   text-align: left;
-  padding: 4px 6px;
-  border-top: 1px solid #232a38;
+  border-top: 1px solid var(--line);
+}
+
+.fly-table th {
+  border-top: 0;
 }
 
 .fly-table .num {
   text-align: right;
-  font-variant-numeric: tabular-nums;
 }
 
-#fly-table summary {
-  cursor: pointer;
-  font-weight: 600;
+#fly-table {
+  padding: var(--sp-4) var(--sp-5);
 }
 
 /* ---------------------------------------------------------------------------------------------
-   Task 5.8: the «Обучение» tab (training runs, read-only). The site is dark; the series colours are the
-   categorical slots of the fly panel's palette (validated on the dark surface: lightness band, chroma, adjacent CVD
-   separation >= 8, contrast >= 3:1), in the same fixed order, plus dash patterns so a series is never told apart by
-   colour alone (the compare view uses colour + dash per run). Colour follows the entity, never its rank: the
-   same loss head / eval set / arena has the same slot in every chart.
+   11 · «Обучение» (training runs, read-only). The series colours are the categorical slots of the fly panel's palette, validated on
+   the dark surface (lightness band, chroma, adjacent CVD separation >= 8, contrast >= 3:1), in the same fixed order, plus dash patterns
+   so a series is never told apart by colour alone. Colour follows the entity, never its rank: the same loss head / eval set / arena has
+   the same slot in every chart.
    --------------------------------------------------------------------------------------------- */
-
-.train-view[hidden] {
-  display: none;
-}
 
 .train-view {
   --tr-s1: #3987e5;
@@ -779,102 +1690,67 @@ button.danger {
   --tr-s5: #d55181;
   --tr-s6: #9085e9;
   --tr-s7: #e66767;
-  --tr-neutral: #e8ebf0;
-  --tr-grid: #262d3b;
-  --tr-axis: #8a93a3;
-  --tr-ok: #3ecf6f;
-  --tr-warn: #e0b04a;
-
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 16px 16px calc(80px + env(safe-area-inset-bottom, 0));
+  --tr-neutral: #e7eaf1;
+  --tr-grid: #263047;
+  --tr-axis: #9aa5b8;
+  --tr-ok: #34d399;
+  --tr-warn: #f5b942;
 }
 
-.train-view h1 {
-  font-size: 1.3rem;
-  margin: 8px 0 12px;
+.train-view > .hint {
+  max-width: 70ch;
+  margin: 0;
 }
 
-.train-view h2 {
-  font-size: 1.05rem;
-  margin: 0 0 12px;
-}
-
-.train-view h3 {
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: var(--muted);
-  margin: 14px 0 4px;
-}
-
-.train-view code {
-  background: var(--bg);
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 0.85em;
-}
-
-.train-view select {
-  background: var(--bg);
-  border: 1px solid #2a3040;
-  color: var(--text);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 0.95rem;
-  min-height: 40px;
-}
-
-.train-view button {
-  min-height: 40px;
-}
-
-.train-view button:disabled {
-  opacity: 0.45;
+.train-view > .bot-conn {
+  margin: 0;
 }
 
 .tr-toolbar {
-  margin-bottom: 10px;
+  margin-bottom: var(--sp-3);
 }
 
-/* --- experiments and runs ---------------------------------------------------------------- */
+/* --- experiments and runs ----------------------------------------------------------------- */
 
 .tr-exp {
-  border-top: 1px solid #232a38;
+  border-top: 1px solid var(--line);
 }
 
 .tr-exp > summary {
-  cursor: pointer;
-  padding: 12px 0;
-  font-weight: 600;
-  display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
-  align-items: baseline;
+  gap: 4px 12px;
+  padding: 12px 4px;
+  font-weight: 650;
 }
 
 .tr-exp > summary small {
   color: var(--muted);
   font-weight: 400;
+  font-size: var(--fs-sm);
 }
 
 .tr-run {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   grid-template-areas:
     "pick name state"
     ". meta meta";
   gap: 2px 8px;
   align-items: center;
-  padding: 6px 0;
-  border-top: 1px solid #1e2430;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  border-top: 1px solid var(--line);
+  border-radius: var(--r-md);
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+.tr-run:hover {
+  background: var(--surface-2);
 }
 
 .tr-run.current {
-  background: #1c2230;
-  margin: 0 -8px;
-  padding-left: 8px;
-  padding-right: 8px;
-  border-radius: 8px;
+  background: var(--accent-soft);
+  border-top-color: transparent;
 }
 
 .tr-pick {
@@ -885,87 +1761,101 @@ button.danger {
   min-height: 40px;
 }
 
-.tr-pick input {
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  accent-color: var(--accent);
-}
-
 .train-view button.tr-name {
   grid-area: name;
+  /* a block, not the global inline-flex: the name and its badge are inline content, so the badge wraps as a whole */
+  display: block;
+  min-height: 36px;
+  padding: 4px 8px;
   background: transparent;
   color: var(--text);
   text-align: left;
-  padding: 6px 4px;
   font-weight: 600;
-  font-size: 0.95rem;
+  font-size: var(--fs-md);
   overflow-wrap: anywhere;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
 }
 
-.train-view button.tr-name:hover,
-.train-view button.tr-name:focus-visible {
-  background: #28324a;
+.train-view button.tr-name:hover {
+  background: var(--surface-3);
+}
+
+.tr-badge {
+  margin-left: 6px;
+  vertical-align: middle;
 }
 
 .tr-state {
   grid-area: state;
+  justify-self: end;
   white-space: nowrap;
-  font-size: 0.85rem;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-3);
+  font-size: var(--fs-xs);
   font-weight: 600;
 }
 
 .tr-state.running {
   color: var(--tr-ok);
+  background: var(--ok-soft);
+  border-color: var(--ok-line);
 }
 
-.tr-state.done {
+.tr-state.done,
+.tr-state.unknown {
   color: var(--muted);
 }
 
 .tr-state.stalled {
   color: var(--tr-warn);
-}
-
-.tr-state.unknown {
-  color: var(--muted);
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
 }
 
 .tr-meta {
   grid-area: meta;
-  color: var(--muted);
-  font-size: 0.8rem;
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 12px;
   align-items: center;
+  gap: 2px 12px;
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
 }
 
 .train-view progress {
   width: 90px;
-  height: 8px;
-  accent-color: var(--accent);
+  height: 6px;
 }
 
-.tr-badge {
-  display: inline-block;
-  font-size: 0.7rem;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: #28324a;
-  color: var(--text);
-  margin-left: 6px;
-  vertical-align: middle;
+.train-view progress::-webkit-progress-value {
+  background: var(--accent);
 }
 
-/* --- detail ------------------------------------------------------------------------------ */
+.train-view progress::-moz-progress-bar {
+  background: var(--accent);
+}
+
+@media (min-width: 640px) {
+  .tr-run {
+    grid-template-columns: 32px minmax(0, 1.3fr) minmax(0, 1.6fr) 9rem;
+    grid-template-areas: "pick name meta state";
+  }
+
+  .tr-meta {
+    justify-content: flex-start;
+  }
+}
+
+/* --- detail ------------------------------------------------------------------------------- */
 
 .tr-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .tr-head h2 {
@@ -974,17 +1864,18 @@ button.danger {
 
 .tr-live {
   color: var(--tr-ok);
-  font-size: 0.85rem;
+  font-size: var(--fs-sm);
+  font-weight: 600;
 }
 
 .tr-note {
+  margin: var(--sp-1) 0 var(--sp-2);
   color: var(--tr-warn);
-  font-size: 0.8rem;
-  margin: 4px 0;
+  font-size: var(--fs-xs);
 }
 
 .tr-chart {
-  margin: 4px 0 14px;
+  margin: var(--sp-1) 0 var(--sp-4);
 }
 
 .tr-plot {
@@ -1040,7 +1931,7 @@ button.danger {
 }
 
 .tr-dot {
-  stroke: var(--panel);
+  stroke: var(--surface);
   stroke-width: 2;
 }
 
@@ -1065,20 +1956,8 @@ button.danger {
 .d3 { stroke-dasharray: 9 3 2 3; }
 
 .tr-tip {
-  position: absolute;
-  z-index: 5;
-  background: var(--bg);
-  border: 1px solid #2a3040;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 0.75rem;
-  pointer-events: none;
+  padding: 8px 10px;
   min-width: 120px;
-  max-width: 260px;
-}
-
-.tr-tip[hidden] {
-  display: none;
 }
 
 .tr-tip .tr-tip-head {
@@ -1112,8 +1991,8 @@ button.danger {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
-  margin: 4px 0 0;
-  font-size: 0.8rem;
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 
@@ -1130,9 +2009,9 @@ button.danger {
 }
 
 .tr-empty {
+  margin: var(--sp-1) 0 var(--sp-3);
   color: var(--muted);
-  font-size: 0.85rem;
-  margin: 4px 0 10px;
+  font-size: var(--fs-sm);
 }
 
 .tr-table-wrap {
@@ -1141,17 +2020,14 @@ button.danger {
 }
 
 .tr-table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 0.8rem;
-  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
 }
 
 .tr-table th,
 .tr-table td {
+  padding: 7px 10px;
   text-align: right;
-  padding: 5px 8px;
-  border-top: 1px solid #232a38;
+  border-top: 1px solid var(--line);
   white-space: nowrap;
 }
 
@@ -1160,22 +2036,24 @@ button.danger {
   text-align: left;
   position: sticky;
   left: 0;
-  background: var(--panel);
+  background: var(--surface);
 }
 
 .tr-table th {
-  color: var(--muted);
-  font-weight: 600;
-  border-top: none;
+  border-top: 0;
   white-space: normal;
   vertical-align: bottom;
   min-width: 4.5rem;
 }
 
+.tr-table tbody tr:hover td {
+  background: var(--surface-2);
+}
+
 .tr-table .ci-inner {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   justify-content: flex-end;
 }
 
@@ -1196,241 +2074,82 @@ button.danger {
 
 .tr-ci .ci-dot {
   fill: var(--tr-s1);
-  stroke: var(--panel);
+  stroke: var(--surface);
   stroke-width: 2;
 }
 
 details.tr-tbl {
-  margin: 6px 0 0;
-  font-size: 0.8rem;
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
 }
 
 details.tr-tbl > summary {
-  cursor: pointer;
   color: var(--muted);
+  font-weight: 500;
   padding: 4px 0;
 }
 
 .tr-sub {
-  border-top: 1px solid #232a38;
-  margin-top: 12px;
-  padding-top: 4px;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line);
 }
 
 .tr-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 16px;
+  gap: var(--sp-2) var(--sp-4);
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: var(--sp-2);
 }
 
 .tr-controls label {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-}
-
-@media (min-width: 640px) {
-  .tr-run {
-    grid-template-columns: 28px minmax(0, 1.3fr) minmax(0, 1.6fr) auto;
-    grid-template-areas: "pick name meta state";
-  }
-
-  .tr-meta {
-    justify-content: flex-start;
-  }
-}
-
-/* The tab bar has six tabs now (task 5.12 added «Серверы»): a little tighter on a phone so «Обучение» and «Серверы» fit at 360 px. */
-.tabbar button {
-  padding-left: 2px;
-  padding-right: 2px;
-  font-size: 0.85rem;
-}
-
-@media (min-width: 640px) {
-  .tabbar button {
-    font-size: 1rem;
-  }
+  gap: var(--sp-2);
 }
 
 /* ---------------------------------------------------------------------------------------------
-   Task 5.10: the global theme. A periwinkle backdrop with a slowly drifting checker and a soft vignette sits behind every tab;
-   each tab's content is a dark glass window on it, with the existing opaque cards inside. Markup of the other tabs is not
-   touched: generic `.card`, `.kv`, `.hint`, `.cmd-row`, `.inline-form`, `button.alt` keep working as they were.
+   12 · Motion: a short fade when a tab opens, a pulse on the live dot, a spinner on a busy button. All of it off for
+   `prefers-reduced-motion`.
    --------------------------------------------------------------------------------------------- */
 
-body::before {
-  content: "";
-  position: fixed;
-  left: -20vh;
-  top: -20vh;
-  width: calc(100vw + 40vh);
-  height: calc(100vh + 40vh);
-  z-index: -2;
-  pointer-events: none;
-  background: conic-gradient(rgba(0, 0, 0, 0.05) 25%, transparent 0 50%, rgba(0, 0, 0, 0.05) 0 75%, transparent 0) 0 0 / 10vh 10vh;
-  animation: backdrop-drift 13.3s linear infinite;
-}
-
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background: radial-gradient(ellipse at 50% 45%, transparent 50%, rgba(0, 0, 0, 0.32) 100%);
-}
-
-@keyframes backdrop-drift {
+@keyframes view-in {
   from {
-    transform: translate(0, 0);
+    opacity: 0;
+    transform: translateY(6px);
   }
   to {
-    transform: translate(-10vh, 5vh);
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  body::before {
-    animation: none;
-  }
-}
-
-.shell {
-  margin-top: var(--head-h);
-  margin-bottom: 24px;
-  background: var(--win);
-  border: 1px solid var(--win-line);
-  border-radius: 14px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
-}
-
-.brand {
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
-}
-
-.bot-view,
-.fly-view,
-.train-view,
-.servers-view {
-  box-sizing: border-box;
-  margin-top: calc(var(--head-h) + 12px);
-  margin-bottom: calc(var(--foot-h) + 12px);
-  padding: 16px;
-  background: var(--win);
-  border: 1px solid var(--win-line);
-  border-radius: 14px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
-}
-
-@media (max-width: 760px) {
-  .bot-view,
-  .fly-view,
-  .train-view,
-  .servers-view {
-    margin-left: 8px;
-    margin-right: 8px;
-    padding: 12px 10px;
-  }
-}
-
-.card {
-  border: 1px solid rgba(255, 255, 255, 0.07);
-}
-
-.card h2 {
-  letter-spacing: 0.02em;
-}
-
-/* The tab bar: at the bottom on a phone, across the top of a desktop window with the brand at its left. */
-.tabbar {
-  background: rgba(12, 15, 28, 0.9);
-  border-top: 1px solid var(--win-line);
-}
-
-.tabbar button {
-  border-radius: 8px;
-  margin: 6px 3px;
-  flex: 1;
-}
-
-.tabbar button.active {
-  background: rgba(255, 255, 255, 0.16);
-  box-shadow: none;
-  color: #fff;
-}
-
-@media (min-width: 900px) {
-  :root {
-    --head-h: 52px;
-    --foot-h: 0px;
-  }
-
-  .tabbar {
-    top: 0;
-    bottom: auto;
-    height: var(--head-h);
-    padding: 0 16px;
-    border-top: 0;
-    border-bottom: 1px solid var(--win-line);
-    align-items: center;
-    justify-content: flex-start;
-  }
-
-  .tabbar::before {
-    content: "DDNet-AI";
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    margin-right: 18px;
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-  }
-
-  .tabbar button {
-    flex: 0 0 auto;
-    margin: 0 2px;
-    padding: 8px 20px;
-    font-size: 0.95rem;
-  }
-
-  .shell {
-    margin-top: calc(var(--head-h) + 16px);
-  }
-}
-
-/* Task 5.10: inline icons (Lucide, ISC; see NOTICE) next to the text of tabs and buttons. */
-.ic {
-  width: 1.15em;
-  height: 1.15em;
-  flex: none;
-  vertical-align: -0.2em;
-  margin-right: 0.35em;
-}
-
-.tabbar button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
-
-.tabbar button .ic {
-  margin-right: 0;
-}
-
-@media (max-width: 899px) {
-  .tabbar button {
-    flex-direction: column;
-    gap: 1px;
-    font-size: 0.7rem;
-    padding-top: 6px;
-    padding-bottom: 5px;
-    letter-spacing: 0;
-  }
-
-  .tabbar button .ic {
-    width: 1.5em;
-    height: 1.5em;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 }

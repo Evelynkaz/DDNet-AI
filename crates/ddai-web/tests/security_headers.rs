@@ -69,6 +69,41 @@ async fn page_and_assets_serve_expected_content_types() {
     assert!(js.header("content-type").unwrap_or_default().contains("javascript"));
 }
 
+/// Task 5.14: the self-hosted typeface (the CSP allows no other origin) is served as woff2, with the site headers, and every file
+/// the stylesheet names by URL exists as a route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_self_hosted_fonts_are_served_and_the_stylesheet_names_only_served_files() {
+    let server = TestServer::start().await;
+    for path in ["/fonts/inter-latin.woff2", "/fonts/inter-cyrillic.woff2"] {
+        let font = send(server.addr, Req::new("GET", path));
+        assert_eq!(font.status, 200, "{path}");
+        assert_eq!(font.header("content-type"), Some("font/woff2"), "{path}");
+        assert_eq!(&font.body[..4], b"wOF2", "{path}: not a woff2 file");
+        assert!(font.body.len() > 10_000, "{path}: suspiciously small");
+        assert!(font.header("content-security-policy").is_some(), "{path}");
+        assert_eq!(font.header("x-content-type-options"), Some("nosniff"), "{path}");
+        // the file never changes under its name: a week of caching (any future font update needs a new file name)
+        assert_eq!(font.header("cache-control"), Some("public, max-age=604800"), "{path}");
+    }
+    let css = String::from_utf8(send(server.addr, Req::new("GET", "/app.css")).body).unwrap();
+    for part in css.split("url(").skip(1) {
+        let url = part.split(')').next().unwrap().trim_matches(|c| c == '"' || c == '\'');
+        assert!(
+            url.starts_with("/fonts/"),
+            "the stylesheet may only name the self-hosted fonts, found {url}"
+        );
+        assert_eq!(send(server.addr, Req::new("GET", url)).status, 200, "{url}");
+    }
+    for sheet in ["/game.css", "/launch.css", "/servers.css", "/say.css"] {
+        let body = String::from_utf8(send(server.addr, Req::new("GET", sheet)).body).unwrap();
+        assert!(
+            !body.contains("url("),
+            "{sheet}: no external or data: URLs in stylesheets (img-src 'self')"
+        );
+        assert!(!body.contains("@import"), "{sheet}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_path_is_404_without_leaking_internals() {
     let server = TestServer::start().await;

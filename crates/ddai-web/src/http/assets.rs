@@ -1,6 +1,6 @@
 //! The single static page (login form → status screen, acceptance criterion 7) and its CSS/JS,
 //! embedded into the binary with `include_str!` so the running server never reads from disk (and
-//! there is nothing resembling a directory to list). No routes besides these four exist for
+//! there is nothing resembling a directory to list). No routes besides these exist for
 //! static content, so any other path falls through to the router's default 404.
 
 use axum::http::header;
@@ -21,6 +21,8 @@ const SERVERS_JS: &str = include_str!("../../assets/servers.js");
 const SERVERS_CSS: &str = include_str!("../../assets/servers.css");
 const SAY_JS: &str = include_str!("../../assets/say.js");
 const SAY_CSS: &str = include_str!("../../assets/say.css");
+const FONT_INTER_LATIN: &[u8] = include_bytes!("../../assets/fonts/inter-latin.woff2");
+const FONT_INTER_CYRILLIC: &[u8] = include_bytes!("../../assets/fonts/inter-cyrillic.woff2");
 
 pub async fn page() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX_HTML)
@@ -91,4 +93,28 @@ pub async fn servers_js() -> impl IntoResponse {
 /// Task 5.12: the «Серверы» tab's styles (scoped under `.servers-view`).
 pub async fn servers_css() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], SERVERS_CSS)
+}
+
+/// Task 5.14: the page's typeface, Inter (variable, SIL OFL 1.1; see `NOTICE`), as two subsets so a phone fetches only what it draws.
+/// Self-hosted: the CSP allows no other origin. The files never change under one name, so they may be cached for a week.
+const FONT_CACHE: &str = "public, max-age=604800";
+
+pub async fn font_inter_latin() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, FONT_CACHE),
+        ],
+        FONT_INTER_LATIN,
+    )
+}
+
+pub async fn font_inter_cyrillic() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, FONT_CACHE),
+        ],
+        FONT_INTER_CYRILLIC,
+    )
 }

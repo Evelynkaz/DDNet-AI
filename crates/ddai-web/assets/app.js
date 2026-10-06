@@ -45,7 +45,16 @@
   var explicitlyClosed = true;
   var currentTab = "status";
 
+  // Task 5.14: the stylesheet lays the page out by what is on show (`body[data-view]`: login, status, game, bot, servers, fly, train).
+  function setView(name) {
+    document.body.setAttribute("data-view", name);
+  }
+
+  // Task 5.14: a state word is also a coloured badge (the colour never stands alone: the word is always there).
+  var BOT_STATE_TONE = { in_game: "ok", paused: "warn", connecting: "warn", stopped: "idle", demo: "info" };
+
   function showLogin() {
+    setView("login");
     shellEl.hidden = false;
     loginView.hidden = false;
     statusView.hidden = true;
@@ -64,6 +73,7 @@
 
   function showTab(name) {
     currentTab = name;
+    setView(name);
     // Task 5.10: the window around login and status is only there for those two (the other tabs have windows of their own).
     shellEl.hidden = name !== "status";
     loginView.hidden = true;
@@ -118,6 +128,7 @@
     connDot.classList.toggle("dot-on", on);
     connDot.classList.toggle("dot-off", !on);
     wsStateEl.textContent = on ? "подключено" : "не подключено";
+    wsStateEl.className = "badge badge-lg " + (on ? "badge-ok" : "badge-bad");
     if (!on) {
       SourceBadge.hide();
     }
@@ -200,6 +211,7 @@
           break;
         case "status":
           botStateEl.textContent = BOT_STATE_TEXT[msg.bot_state] || msg.bot_state;
+          botStateEl.className = "badge badge-lg badge-" + (BOT_STATE_TONE[msg.bot_state] || "idle");
           uptimeEl.textContent = formatUptime(msg.uptime_s);
           break;
         case "map":
@@ -499,6 +511,9 @@
     var KIND_ORDER = ["friend", "war", "ignore", "clanfriend", "clanwar"];
     var MODE_LABELS = { fight: "бой", passive: "пассивный", hold: "стоит", goto: "идёт в точку" };
     // Task 5.13 (D-097): the words of the status's `finish`; one this page does not know is shown as «—» (never as a mode).
+    // Task 4.11 (D-102): the duel switch (`--no-selfkill` or the marker file `bot/selfkill.off`). «выкл» is the unusual state: the bot then never kills
+    // itself, which also takes away its way out of a stuck spot, so it is flagged (a forgotten marker would switch unsticking off unnoticed).
+    var SELFKILL_LABELS = { on: "вкл", off: "выкл (флажок)" };
     var FINISH_LABELS = { off: "выкл", target: "цель", full: "полный (не рекомендуется)" };
     var APPLIED_TEXT = {
       applied: "применено к работающему боту (бот перечитал тот же файл)",
@@ -630,9 +645,10 @@
                 ? "бот не запущен: сейчас на сайте показ (муха на арене), настоящей игры нет"
                 : "бот не запущен (нет живого статуса)";
         setText("bot-conn-text", why);
-        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
+        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
           setText(id, "—");
         });
+        el("bs-selfkill").classList.remove("kv-warn");
         cooldownEl.textContent = "—";
         updateButtons();
         return;
@@ -651,6 +667,9 @@
       setText("bs-finish", Object.prototype.hasOwnProperty.call(FINISH_LABELS, s.finish) ? FINISH_LABELS[s.finish] : "—");
       setText("bs-target", s.target_tag || "нет");
       setText("bs-wb", (s.wb || "—") + (s.goto ? " · идёт: " + s.goto : ""));
+      // A status without the field (an older bot) shows «—», never «вкл».
+      setText("bs-selfkill", Object.prototype.hasOwnProperty.call(SELFKILL_LABELS, s.selfkill) ? SELFKILL_LABELS[s.selfkill] : "—");
+      el("bs-selfkill").classList.toggle("kv-warn", s.selfkill === "off");
       setText("bs-blocks", (s.blocks | 0) + " / " + (s.blocked_by | 0));
       setText("bs-deaths", (s.deaths | 0) + " / " + (s.self_kills | 0));
       setText("bs-clips", String(s.clips_saved | 0));

@@ -1,47 +1,37 @@
-/* Task 5.9: the «Запуск» card of the «Бот» tab. Everything is scoped under `.launch-card`; no global element is restyled. The
-   colours come from the page's own tokens (--panel, --muted, --accent, --danger, --ok) so a restyled theme carries over. */
+/* The «Запуск» card of the «Бот» tab (task 5.9): start and stop the bot, choose its brain. Scoped under `.launch-card`; the look comes
+   from the components and tokens of app.css (status chip `.lc-state`, buttons, selects, inline results). */
 
 .launch-card .lc-state {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 4px;
-  font-weight: 600;
-}
-
-.launch-card .dot-wait {
-  background: #e0b04a;
+  margin-bottom: var(--sp-2);
 }
 
 .launch-card .lc-detail {
-  min-height: 1.2em;
-  margin-top: 0;
+  min-height: 0;
+  margin: 0 0 var(--sp-2);
   overflow-wrap: anywhere;
+}
+
+.launch-card .lc-detail:empty {
+  display: none;
 }
 
 .launch-card .lc-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: 10px 12px;
-  margin: 12px 0 4px;
+  gap: var(--sp-3) var(--sp-4);
+  margin: var(--sp-4) 0 var(--sp-2);
 }
 
 .launch-card .lc-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
 }
 
-/* `display: flex` above would win over the UA's `[hidden] { display: none }`: the opponent-model and finishing fields are toggled with
-   `hidden` for the fly brain (task 5.13 found that the former never actually disappeared). */
-.launch-card .lc-field[hidden],
-.launch-card .lc-finish-hint[hidden] {
-  display: none;
-}
-
 .launch-card .lc-label {
-  font-size: 0.85rem;
+  font-size: var(--fs-sm);
+  font-weight: 550;
   color: var(--muted);
 }
 
@@ -50,44 +40,53 @@
   min-width: 0;
 }
 
-.launch-card .lc-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 12px 0 4px;
-}
-
-.launch-card .lc-buttons button {
-  flex: 1 1 8rem;
-  min-height: 44px;
-}
-
-.launch-card .lc-result {
-  min-height: 1.3em;
-  margin: 6px 0;
-  overflow-wrap: anywhere;
-}
-
-.launch-card .lc-result.ok {
-  color: var(--ok);
-}
-
-.launch-card .lc-result.bad {
-  color: var(--danger);
-}
-
-.launch-card button:disabled,
-.launch-card select:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-/* Task 5.13: the one-line explanation under the form for the chosen finishing mode; «полный» is flagged as not recommended. */
+/* The one-line explanation under the form for the chosen finishing mode (task 5.13); «полный» is flagged as not recommended. */
 .launch-card .lc-finish-hint {
-  margin: 4px 0 0;
+  margin: var(--sp-1) 0 0;
   overflow-wrap: anywhere;
 }
 
 .launch-card .lc-finish-hint.lc-finish-warn {
   color: var(--danger);
+}
+
+.launch-card .lc-bundle {
+  margin: var(--sp-1) 0 0;
+}
+
+.launch-card .lc-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: var(--sp-4) 0 var(--sp-2);
+}
+
+.launch-card .lc-buttons button {
+  flex: 1 1 auto;
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.launch-card .lc-start {
+  flex-grow: 2;
+}
+
+.launch-card .lc-result {
+  margin: var(--sp-2) 0;
+}
+
+.launch-card .lc-result:empty {
+  margin: 0;
+}
+
+.launch-card > .hint:last-child {
+  margin: var(--sp-3) 0 0;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 640px) {
+  .launch-card .lc-form {
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  }
 }

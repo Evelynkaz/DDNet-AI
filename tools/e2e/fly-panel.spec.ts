@@ -43,7 +43,7 @@ function runCli(args: string[]): Promise<string> {
 }
 
 test.describe.configure({ mode: "serial" });
-test.setTimeout(60_000); // the desktop test waits for the first frame, fills the history and polls: a slow start must not trip the default 30 s
+test.setTimeout(300_000); // the desktop test waits for the first frame, fills the history and polls; its element screenshots of the canvases take tens of seconds on a loaded software-GL machine (task 5.14 raised this from 60 s)
 
 test.beforeAll(async () => {
   test.skip(!existsSync(BUNDLE) || !existsSync(FLYG) || !existsSync(BINARY), "needs a trained bundle, the S graph and a built ddnet-ai");

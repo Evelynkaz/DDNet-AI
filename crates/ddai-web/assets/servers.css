@@ -1,64 +1,61 @@
-/* Task 5.12 (D-099): the «Серверы» tab. Everything is scoped under `.servers-view`; no global element is restyled. Colours come from the
-   page's own tokens (--panel, --muted, --accent, --danger, --ok) so the 5.10 theme carries over. The CSP forbids inline styles. */
+/* The «Серверы» tab (task 5.12, D-099): the list, the favourites, the proxies. Scoped under `.servers-view`; the look comes from the
+   components and tokens of app.css. The CSP forbids inline styles. */
 
-.servers-view[hidden] {
-  display: none;
+#servers-mount {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
 }
 
-/* The window itself (margins, padding, glass) comes from app.css, shared with the other tabs; only the width of a wide window is set here. */
-.servers-view {
-  max-width: 820px;
-}
-
-@media (min-width: 761px) {
-  .servers-view {
-    margin-left: auto;
-    margin-right: auto;
-  }
-}
-
-.servers-view h1 {
-  font-size: 1.3rem;
-  margin: 8px 0 16px;
-}
-
-.servers-view .sv-h3 {
-  font-size: 1.05rem;
-  margin: 0 0 8px;
+/* a title-less card at the top: the consent note and the three panels */
+.servers-view .sv-intro > .hint:first-child {
+  margin-top: 0;
 }
 
 .servers-view .sv-h4 {
-  font-size: 0.95rem;
-  margin: 0 0 6px;
   grid-column: 1 / -1;
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-md);
+  font-weight: 650;
+  color: var(--text);
 }
 
+/* the panel switch: a segmented control */
 .servers-view .sv-seg {
   display: flex;
-  gap: 6px;
-  margin-top: 10px;
+  gap: 2px;
+  margin-top: var(--sp-3);
+  padding: 3px;
+  background: var(--sunken);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
 }
 
 .servers-view .sv-seg-btn {
   flex: 1 1 0;
-  min-height: 44px;
+  min-height: 38px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  border-radius: 8px;
 }
 
-.servers-view button {
-  min-height: 44px;
+.servers-view .sv-seg-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
 }
 
-.servers-view button:disabled,
-.servers-view select:disabled,
-.servers-view input:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+.servers-view .sv-seg-btn.current {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 .servers-view .sv-head {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 12px;
+  gap: var(--sp-3) var(--sp-4);
   align-items: center;
   justify-content: space-between;
 }
@@ -72,24 +69,28 @@
 .servers-view .sv-filters,
 .servers-view .sv-form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: 10px 12px;
-  margin: 12px 0 8px;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: var(--sp-3) var(--sp-3);
+  margin: var(--sp-4) 0 var(--sp-3);
 }
 
 .servers-view .sv-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
 }
 
-.servers-view .sv-wide {
+.servers-view .sv-wide,
+.servers-view .sv-form > .sv-check,
+.servers-view .sv-form > .sv-actions,
+.servers-view .sv-form > .sv-result {
   grid-column: 1 / -1;
 }
 
 .servers-view .sv-label {
-  font-size: 0.85rem;
+  font-size: var(--fs-sm);
+  font-weight: 550;
   color: var(--muted);
 }
 
@@ -99,159 +100,141 @@
 .servers-view input[type="password"],
 .servers-view select {
   width: 100%;
-  min-width: 0;
-  background: var(--bg);
-  border: 1px solid #2a3040;
-  color: var(--text);
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 1rem;
 }
 
 .servers-view .sv-checks {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 16px;
-  margin: 4px 0 8px;
+  gap: var(--sp-2) var(--sp-5);
+  margin: var(--sp-1) 0 var(--sp-3);
 }
 
 .servers-view .sv-check {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--text);
-  font-size: 0.9rem;
+  gap: 10px;
   min-height: 32px;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
 }
 
-.servers-view .sv-check input {
-  width: 1.2rem;
-  height: 1.2rem;
-  flex: none;
-}
-
+/* a server, a favourite or a proxy: a row inside the card */
 .servers-view .sv-rows {
   list-style: none;
-  margin: 8px 0 0;
+  margin: var(--sp-3) 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .servers-view .sv-row {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
-  padding: 10px 12px;
   min-width: 0;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  transition: border-color var(--t-fast) var(--ease);
+}
+
+.servers-view .sv-row:hover {
+  border-color: var(--line-strong);
 }
 
 .servers-view .sv-row-top {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 8px;
-  align-items: baseline;
+  gap: 4px var(--sp-2);
+  align-items: center;
   justify-content: space-between;
 }
 
 .servers-view .sv-name {
-  overflow-wrap: anywhere;
   min-width: 0;
+  font-size: var(--fs-md);
+  font-weight: 650;
+  overflow-wrap: anywhere;
 }
 
 .servers-view .sv-badges {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 4px;
-}
-
-.servers-view .sv-badge {
-  font-size: 0.72rem;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #28324a;
-  color: var(--text);
-  white-space: nowrap;
-}
-
-.servers-view .sv-badge.warn {
-  background: #5a4510;
-  color: #f2c14e;
-}
-
-.servers-view .sv-badge.bad {
-  background: #5c1f1f;
-  color: #ffb3b3;
-}
-
-.servers-view .sv-badge.fav {
-  background: #1f4a2e;
-  color: #9ee6b4;
+  gap: 6px;
 }
 
 .servers-view .sv-meta,
 .servers-view .sv-players {
-  color: var(--muted);
-  font-size: 0.85rem;
   margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
 .servers-view .sv-blocked {
+  margin: var(--sp-3) 0 var(--sp-1);
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-line);
   color: #ffb3b3;
-  font-size: 0.88rem;
-  margin: 8px 0 4px;
+  font-size: var(--fs-sm);
   overflow-wrap: anywhere;
+}
+
+.servers-view .sv-row .sv-field {
+  margin-top: var(--sp-3);
 }
 
 .servers-view .sv-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin: 10px 0 2px;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0 2px;
 }
 
 .servers-view .sv-actions button {
-  flex: 1 1 8rem;
+  flex: 0 1 auto;
+  min-width: 9rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .servers-view .sv-actions button {
+    flex: 1 1 8rem;
+  }
 }
 
 .servers-view .sv-more {
   width: 100%;
-  margin-top: 10px;
+  margin-top: var(--sp-3);
 }
 
 .servers-view .sv-result {
-  min-height: 1.2em;
-  margin: 6px 0 0;
-  font-size: 0.9rem;
-  overflow-wrap: anywhere;
-}
-
-.servers-view .sv-result.ok {
-  color: var(--ok);
-}
-
-.servers-view .sv-result.bad {
-  color: var(--danger);
+  margin-top: var(--sp-2);
 }
 
 .servers-view .sv-empty {
-  padding: 8px 0;
+  padding: var(--sp-5) var(--sp-3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md);
+  text-align: center;
+  color: var(--subtle);
 }
 
 .servers-view .sv-manual {
-  margin-top: 14px;
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
 }
 
 .servers-view .sv-manual summary {
-  cursor: pointer;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
+  min-height: 40px;
 }
 
-.servers-view button.current {
-  background: var(--accent);
-  color: #fff;
+.servers-view button:disabled,
+.servers-view select:disabled,
+.servers-view input:disabled {
+  cursor: not-allowed;
 }

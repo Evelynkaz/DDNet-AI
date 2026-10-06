@@ -148,7 +148,7 @@ export function startGameBot(options) {
         blocks: 7, blocked_by: 2, self_kills: 0, decisions: 99, collapsed: 0, decide_p50_us: 800, decide_p99_us: 4100,
         brain_p99_us: 3900, overhead_p99_us: 200, telemetry: null, connected, server: "127.0.0.1:8303", map: mapName,
         name: "bot", clan: "Neuroset", skin: "default", target_tag: "c1-0a1b2c3d", wb: "WB: auto", goto: "", deaths: 4,
-        clips_saved: 2, kill_cooldown_ticks: 0,
+        clips_saved: 2, kill_cooldown_ticks: 0, selfkill: "on",
       }),
     );
   }

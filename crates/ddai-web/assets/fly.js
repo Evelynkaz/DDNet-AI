@@ -287,7 +287,7 @@
   }
 
   function font(ctx, px, weight) {
-    ctx.font = (weight || 400) + " " + px + "px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+    ctx.font = (weight || 400) + " " + px + "px 'Inter Var', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
   }
 
   // ---------------------------------------------------------------------------------------------
