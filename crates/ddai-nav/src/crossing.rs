@@ -6,7 +6,7 @@
 //! bit-for-bit those of the TS code, on `ddai_physics::World<f32>` they drive the live bot.
 
 use ddai_planner::plan_world::{PlanCollision, PlanWorld};
-use ddai_planner::types::{HOOK_GRABBED, PlayerInput, TeeState, empty_input};
+use ddai_planner::types::{HOOK_GRABBED, HOOK_RETRACTED, PlayerInput, TeeState, empty_input};
 use ddai_planner::vmath::Vec2;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -115,6 +115,14 @@ impl Crossing {
         }
     }
 }
+
+/// [`CrossSmart::others`]: the other tees that enter the rollouts, the nearest first, and how far from us they may be.
+pub const MAX_SIM_OTHERS: usize = 6;
+const UNBLOCK_TICKS: i64 = 12;
+const UNBLOCK_MOVE_PX: f64 = 12.0;
+const UNBLOCK_REACH_PX: f64 = 40.0;
+const UNBLOCK_REPEAT_TICKS: i64 = 30;
+pub const SIM_OTHERS_PX: f64 = 700.0;
 
 const HOLDS: [i32; 4] = [10, 16, 24, 40];
 const PUSH_AFTER_TICKS: i64 = 30;
@@ -321,6 +329,16 @@ impl<'a, W: PlanWorld> RollOpts<'a, W> {
     }
 }
 
+/// Task 3.12b (`--wb-smart`): what the crossing does beyond the TS behaviour. All off is the TS behaviour byte for byte.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CrossSmart {
+    /// Roll the searches out with the other tees of the world ([`SwingCrosser::set_others`]).
+    pub others: bool,
+    /// Jump over a tee that stands in the way while the tee approaches the edge of the ledge (an AFK player on the start of the
+    /// tube walls the approach in: the live clips show one at 34 px).
+    pub unblock: bool,
+}
+
 /// `class SwingCrosser`.
 pub struct SwingCrosser<W: PlanWorld> {
     pub crossing: Crossing,
@@ -353,6 +371,19 @@ pub struct SwingCrosser<W: PlanWorld> {
     pub use_wall: bool,
     wall_thrown: bool,
     wall_dropped: bool,
+    /// Task 3.12b options.
+    pub smart: CrossSmart,
+    /// The other tees of the world, as the rollouts of [`CrossSmart::others`] put them (ids renumbered `1..`, a held input each).
+    others: RefCell<Vec<(TeeState, PlayerInput)>>,
+    /// Ids of the sim's other tees that exist already.
+    others_in_sim: Cell<usize>,
+    /// Real client id -> sim id of the tees in `others` and of our own (0); see [`SwingCrosser::set_others`].
+    id_map: RefCell<Vec<(i32, i32)>>,
+    /// Scratch of `set_others` (kept between steps: no allocation per step).
+    near_scratch: RefCell<Vec<(f64, usize)>>,
+    /// [`CrossSmart::unblock`]: where the tee was and for how many ticks it has hardly moved while approaching.
+    approach_ref: Cell<(f64, f64)>,
+    approach_still: Cell<i64>,
 }
 
 impl<W: PlanWorld> SwingCrosser<W> {
@@ -385,11 +416,104 @@ impl<W: PlanWorld> SwingCrosser<W> {
             use_wall: false,
             wall_thrown: false,
             wall_dropped: false,
+            smart: CrossSmart::default(),
+            others: RefCell::new(Vec::new()),
+            others_in_sim: Cell::new(0),
+            id_map: RefCell::new(Vec::new()),
+            near_scratch: RefCell::new(Vec::new()),
+            approach_ref: Cell::new((0.0, 0.0)),
+            approach_still: Cell::new(0),
         }
     }
 
     pub fn phase(&self) -> CrossPhase {
         self.phase
+    }
+
+    /// Task 3.12b ([`CrossSmart::others`]): the other tees of the world as of this step. The rollouts of the search put the nearest
+    /// [`MAX_SIM_OTHERS`] of them within [`SIM_OTHERS_PX`] of `me` into the private world, holding the input each is seen to hold
+    /// (direction, hook out, aim), so a body in the way or a hook already out is part of what the search predicts. A tee that is
+    /// not in the list is not in the world. No-op unless the option is on.
+    pub fn set_others(&self, me: &TeeState, others: &[TeeState]) {
+        if !self.smart.others && !self.smart.unblock {
+            return;
+        }
+        let mut near = self.near_scratch.borrow_mut();
+        near.clear();
+        for (i, o) in others.iter().enumerate() {
+            if !o.alive || o.id == me.id {
+                continue;
+            }
+            let d = ddai_jsmath::hypot2(o.pos.x - me.pos.x, o.pos.y - me.pos.y);
+            if d <= SIM_OTHERS_PX {
+                near.push((d, i));
+            }
+        }
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        near.truncate(MAX_SIM_OTHERS);
+        // Real client ids -> sim ids (review F10): ours is 0 in the private world, the others are `1..`, every other id is nobody (-1).
+        // `hooked_player` is rewritten through this map, for the others here and for our own tee in [`SwingCrosser::sim_me`].
+        let mut map = self.id_map.borrow_mut();
+        map.clear();
+        map.push((me.id, 0));
+        for (k, &(_, i)) in near.iter().enumerate() {
+            map.push((others[i].id, k as i32 + 1));
+        }
+        let mut v = self.others.borrow_mut();
+        v.clear();
+        for (k, &(_, i)) in near.iter().enumerate() {
+            let o = &others[i];
+            let mut st = *o;
+            st.id = k as i32 + 1;
+            Self::remap_hook(&map, &mut st);
+            v.push((st, ddai_planner::brains::enemy_input_from_tee(o)));
+        }
+    }
+
+    fn remap(map: &[(i32, i32)], real: i32) -> i32 {
+        map.iter().find(|m| m.0 == real).map_or(-1, |m| m.1)
+    }
+
+    /// Rewrites `st.hooked_player` through `map`. A grabbed hook whose tee is not in the private world would stay `HOOK_GRABBED` on nobody,
+    /// which the physics holds as an endless ground hook at `hook_pos`: it is retracted instead, at the tee (review F15).
+    fn remap_hook(map: &[(i32, i32)], st: &mut TeeState) {
+        if st.hooked_player < 0 {
+            return;
+        }
+        st.hooked_player = Self::remap(map, st.hooked_player);
+        if st.hooked_player < 0 && st.hook_state == HOOK_GRABBED {
+            st.hook_state = HOOK_RETRACTED;
+            st.hook_pos = st.pos;
+        }
+    }
+
+    /// Our tee as the private world holds it: id 0 and, with [`CrossSmart::others`], `hooked_player` in sim ids (review F10).
+    fn sim_me(&self, me: &TeeState) -> TeeState {
+        let mut st = *me;
+        st.id = 0;
+        if self.smart.others {
+            Self::remap_hook(&self.id_map.borrow(), &mut st);
+        }
+        st
+    }
+
+    /// Puts the other tees into `sim` at their state of this step (the rollouts start from here).
+    fn load_others(&self, sim: &mut W) {
+        let v = self.others.borrow();
+        for (i, (st, inp)) in v.iter().enumerate() {
+            let id = i as i32 + 1;
+            if i >= self.others_in_sim.get() {
+                sim.add_tee(id, st.pos);
+                self.others_in_sim.set(i + 1);
+            }
+            sim.apply_tee_state(id, st);
+            sim.set_input(id, *inp);
+        }
+        // tees of an earlier step that are not near any more
+        for i in v.len()..self.others_in_sim.get() {
+            sim.remove_tee(i as i32 + 1);
+        }
+        self.others_in_sim.set(v.len());
     }
     pub fn done(&self) -> bool {
         matches!(self.phase, CrossPhase::Arrived | CrossPhase::Failed)
@@ -950,7 +1074,36 @@ impl<W: PlanWorld> SwingCrosser<W> {
             self.phase = CrossPhase::Swinging;
             return self.program_input(col, me, p.mv, 0, input);
         }
-        self.approach_input(input)
+        let mut input = self.approach_input(input);
+        if self.smart.unblock {
+            self.unblock_jump(col, me, &mut input);
+        }
+        input
+    }
+
+    /// [`CrossSmart::unblock`]: standing on the ground, pushing sideways and not moving for [`UNBLOCK_TICKS`] with a tee next to
+    /// us in that direction: jump (a tee is a circle: the jump clears it).
+    fn unblock_jump(&self, col: &W::Collision, me: &TeeState, input: &mut PlayerInput) {
+        let (rx, ry) = self.approach_ref.get();
+        if (me.pos.x - rx).abs() > UNBLOCK_MOVE_PX || (me.pos.y - ry).abs() > UNBLOCK_MOVE_PX {
+            self.approach_ref.set((me.pos.x, me.pos.y));
+            self.approach_still.set(0);
+            return;
+        }
+        let still = self.approach_still.get() + 1;
+        self.approach_still.set(still);
+        if still < UNBLOCK_TICKS || input.direction == 0 || !self.supported(col, me) {
+            return;
+        }
+        let side = f64::from(input.direction);
+        let blocked = self.others.borrow().iter().any(|(o, _)| {
+            (o.pos.x - me.pos.x) * side > 0.0
+                && (o.pos.x - me.pos.x).abs() <= UNBLOCK_REACH_PX
+                && (o.pos.y - me.pos.y).abs() <= 28.0
+        });
+        if blocked && (still - UNBLOCK_TICKS) % UNBLOCK_REPEAT_TICKS < 4 {
+            input.jump = 1;
+        }
     }
 
     fn approach_input(&self, mut input: PlayerInput) -> PlayerInput {
@@ -1064,8 +1217,7 @@ impl<W: PlanWorld> SwingCrosser<W> {
             }
             d += 1;
         }
-        let mut with_id = *me;
-        with_id.id = 0;
+        let with_id = self.sim_me(me);
         for d in lags {
             let ok = self.with_sim(me, |sim| {
                 sim.apply_tee_state(0, &with_id);
@@ -1252,8 +1404,7 @@ impl<W: PlanWorld> SwingCrosser<W> {
             let key = (p.anchor.0, p.anchor.1, p.hold);
             if !frames.borrow().contains_key(&key) {
                 let mut save = Frame::<W>::empty();
-                let mut with_id = *me;
-                with_id.id = 0;
+                let with_id = self.sim_me(me);
                 self.with_sim(me, |sim| {
                     sim.apply_tee_state(0, &with_id);
                     let opts = RollOpts {
@@ -1567,8 +1718,7 @@ impl<W: PlanWorld> SwingCrosser<W> {
             Move::Swing(s) => (lag + 20).max(lag + s.rope_to() + settle - t),
             Move::Hop(h) => (lag + 20).max(lag + h.ticks - t),
         };
-        let mut with_id = *me;
-        with_id.id = 0;
+        let with_id = self.sim_me(me);
         self.with_sim(me, |sim| {
             sim.apply_tee_state(0, &with_id);
             self.rollout(col, sim, mv, lag, done, ticks, false, t, RollOpts::none())
@@ -1619,6 +1769,8 @@ impl<W: PlanWorld> SwingCrosser<W> {
             held = resume.held;
             pending = resume.pending.clone();
             from = resume.t;
+        } else if self.smart.others {
+            self.load_others(sim);
         }
         let mut t = from;
         while t < ticks {
@@ -1673,5 +1825,86 @@ impl<W: PlanWorld> SwingCrosser<W> {
             t += 1;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ddai_planner::physics_adapter::PhysicsWorld;
+    use ddai_planner::types::{HOOK_GRABBED, HOOK_RETRACTED};
+    use std::sync::Arc;
+
+    fn clb() -> Option<Arc<ddai_physics::map::MapData>> {
+        let path = std::path::PathBuf::from(std::env::var("HOME").ok()?).join(
+            "aiddnet/data/maps/copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map",
+        );
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("skipped: no Copy Love Box map");
+            return None;
+        };
+        Some(Arc::new(ddai_map::load_map(&bytes).ok()?.data))
+    }
+
+    fn tee(id: i32, x: f64, y: f64) -> TeeState {
+        let mut t = crate::harness::respawn_state(id, Vec2 { x, y });
+        t.alive = true;
+        t
+    }
+
+    /// Review F10: the other tees' `hooked_player` (and ours) are real client ids; the private world numbers us 0 and them 1.. -- the
+    /// map turns a hook on us into 0, a hook between two others into their sim ids, and a hook on a tee that is not in the world into -1.
+    #[test]
+    fn hooked_player_ids_are_rewritten_into_the_ids_of_the_private_world() {
+        let Some(map) = clb() else { return };
+        let template = PhysicsWorld::new(Arc::clone(&map), 1);
+        let def = crate::wayblock::wayblock_for("Copy Love Box", Some(template.collision())).expect("wayblock");
+        let crosser: SwingCrosser<PhysicsWorld> = {
+            let mut c = SwingCrosser::new(template.new_scratch(), def.right.crossing.clone());
+            c.smart = CrossSmart {
+                others: true,
+                unblock: false,
+            };
+            c
+        };
+        let (x, y) = (145.0 * 32.0 + 16.0, 79.0 * 32.0 + 16.0);
+        let mut me = tee(12, x, y); // a live client id: not 0
+        me.hooked_player = 20;
+        // Nearest first: real 20 (100 px) -> sim 1, real 30 (150 px) -> sim 2, real 31 (200 px) -> sim 3.
+        let mut hooks_us = tee(20, x + 100.0, y);
+        hooks_us.hook_state = HOOK_GRABBED;
+        hooks_us.hooked_player = 12;
+        let mut hooks_a_friend = tee(30, x - 150.0, y);
+        hooks_a_friend.hook_state = HOOK_GRABBED;
+        hooks_a_friend.hooked_player = 20;
+        let mut hooks_nobody_here = tee(31, x, y - 200.0);
+        hooks_nobody_here.hook_state = HOOK_GRABBED;
+        hooks_nobody_here.hooked_player = 0; // the real id 0 is not in the world: it must not become us
+        crosser.set_others(&me, &[hooks_nobody_here, hooks_a_friend, hooks_us]);
+        let mut sim = template.new_scratch();
+        sim.add_tee(0, me.pos);
+        crosser.load_others(&mut sim);
+        assert_eq!(sim.get_tee(1).expect("20").hooked_player, 0, "he hooks us: our sim id");
+        assert_eq!(
+            sim.get_tee(2).expect("30").hooked_player,
+            1,
+            "he hooks the tee that is sim 1"
+        );
+        assert_eq!(
+            sim.get_tee(3).expect("31").hooked_player,
+            -1,
+            "a hook on a tee that is not in the world is on nobody"
+        );
+        let mine = crosser.sim_me(&me);
+        assert_eq!((mine.id, mine.hooked_player), (0, 1), "our own hook is on sim 1");
+        // Our own grabbed hook on a tee that is not in the world is retracted too (F15).
+        let mut stranded = me;
+        stranded.hook_state = HOOK_GRABBED;
+        stranded.hooked_player = 77;
+        let mine = crosser.sim_me(&stranded);
+        assert_eq!((mine.hooked_player, mine.hook_state), (-1, HOOK_RETRACTED));
+        // Off: nothing is rewritten (the TS behaviour).
+        let off: SwingCrosser<PhysicsWorld> = SwingCrosser::new(template.new_scratch(), def.right.crossing.clone());
+        assert_eq!(off.sim_me(&me).hooked_player, 20);
     }
 }

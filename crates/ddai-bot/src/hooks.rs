@@ -187,6 +187,12 @@ pub trait WayBlock {
     fn foe_target(&mut self) -> Option<i32> {
         None
     }
+    /// Task 3.12 (`--wb-smart`): an idle (AFK) candidate that the target selection would skip is fought after all because it is in
+    /// the way (the hall we hold, next to us, on the route of our walk). `current`: the candidate is our target now (the "next to us" rule
+    /// then reaches farther: hysteresis). Off (`false`) unless the option is on.
+    fn afk_in_the_way(&mut self, _ctx: &HookContext<'_>, _candidate: &Tee, _current: bool) -> bool {
+        false
+    }
 }
 
 /// [`WayBlock::wander_hint`]'s answer, pixels.

@@ -234,7 +234,11 @@ impl TargetPicker {
             // A spectator or a paused player whose tee is still on the map is fought like anybody else
             // (`awayInGame`), except in the AFK room (`wbWalkAllowed`); only a tee that is AFK while it
             // plays is skipped.
-            if !at_war && ctx.clock.away_in_game(tee.id, tick, ctx.players) {
+            // Task 3.12 (`--wb-smart`): not when the idle tee is in the way (the hall we hold, next to us, on the route).
+            if !at_war
+                && ctx.clock.away_in_game(tee.id, tick, ctx.players)
+                && !hooks.wayblock.afk_in_the_way(&hook_ctx, tee, tee.id == self.target)
+            {
                 continue;
             }
             let not_playing = slot.is_some_and(|s| s.not_playing());
@@ -1248,5 +1252,130 @@ mod tests {
         let mut pal = *f.tees.get(2).unwrap();
         pal.frozen = true;
         assert!(!is_spared(&pal, 1000, &f.players, &f.clock));
+    }
+    // ---- task 3.12 (`--wb-smart`, D-103) ----------------------------------------------------------------------------------
+
+    /// A hook that calls the listed idle candidates "in the way" (the real rule is tested with the navigation hooks).
+    struct InTheWay(Vec<i32>);
+    impl WayBlock for InTheWay {
+        fn afk_in_the_way(&mut self, _c: &crate::hooks::HookContext<'_>, t: &Tee, _current: bool) -> bool {
+            self.0.contains(&t.id)
+        }
+    }
+
+    fn idle_for_a_while(f: &mut Fx) {
+        for t in (0..=600).step_by(2) {
+            f.tick = t;
+            f.clock.update(t, &f.tees, &f.players, 0);
+        }
+        f.tick = 602;
+    }
+
+    #[test]
+    fn an_idle_tee_is_fought_only_when_the_hook_says_it_is_in_the_way_and_friends_stay_out_whatever_it_says() {
+        let mut f = single();
+        idle_for_a_while(&mut f);
+        assert_eq!(f.pick(), -1, "the port's rule: an idle tee is skipped");
+        let mut g = single();
+        g.hooks.wayblock = Box::new(InTheWay(vec![1]));
+        idle_for_a_while(&mut g);
+        assert_eq!(g.pick(), 1, "in the way: a target like anybody else");
+        assert_eq!(g.score(), -50.0, "with the ordinary score");
+        let mut h = single();
+        h.hooks.wayblock = Box::new(InTheWay(vec![2]));
+        idle_for_a_while(&mut h);
+        assert_eq!(h.pick(), -1, "another idle tee is in the way, not this one");
+        let mut k = single();
+        k.rel.add(ListKind::Friend, "foe");
+        k.set_players(&[(0, "me"), (1, "foe")]);
+        k.hooks.wayblock = Box::new(InTheWay(vec![1]));
+        idle_for_a_while(&mut k);
+        assert_eq!(k.pick(), -1, "a friend is never a target");
+    }
+
+    /// The live case of 2026-10-06: an idle player on the lower shelf of the hall we hold, never touched. Real hooks, the real map.
+    #[test]
+    fn diagnosis_the_idle_tee_on_the_lower_shelf_of_the_held_hall_is_skipped_by_the_awayingame_filter_and_fought_with_wb_smart()
+     {
+        use crate::hooks::MapIdent;
+        use crate::nav_hooks::{NavConfig, NavHandle, nav_hooks};
+        let load = || {
+            let path = std::path::PathBuf::from(std::env::var("HOME").ok()?)
+                .join("aiddnet/data/maps/copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map");
+            Some(ddai_map::load_map(&std::fs::read(path).ok()?).ok()?.data)
+        };
+        if load().is_none() {
+            eprintln!("skipping: the Copy Love Box map is not present");
+            return;
+        }
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let def = ddai_nav::wayblock::wayblocks().remove(0);
+                let spot = def.right.spots[0];
+                let run = |smart: bool, idle: bool| {
+                    let mut f = Fx::new(load().unwrap(), None);
+                    let cfg = NavConfig {
+                        memory_dir: None,
+                        wb_smart: smart,
+                        seed: Some(1),
+                        ..NavConfig::default()
+                    };
+                    f.hooks = nav_hooks(cfg, NavHandle::new());
+                    f.hooks.navigator.on_map(
+                        &Arc::new(load().unwrap()),
+                        &MapIdent {
+                            name: "Copy Love Box".to_string(),
+                            sha256: [3; 32],
+                        },
+                    );
+                    f.set_players(&[(0, "me"), (1, "idle")]);
+                    let at = |id: i32, tx: i32, ty: i32| Tee {
+                        id,
+                        alive: true,
+                        pos: Vec2::new((tx * 32 + 16) as f32, (ty * 32 + 16) as f32),
+                        attack_tick: -10_000,
+                        ..Tee::DEAD
+                    };
+                    f.put(at(0, spot.0, spot.1));
+                    // The left end of the right hall's lower shelf, where the live clips had one.
+                    f.put(at(1, 134, 84));
+                    for t in (0..=600).step_by(2) {
+                        if !idle {
+                            let mut tee = *f.tees.get(1).unwrap();
+                            tee.angle = t * 7;
+                            f.tees.set_for_test(tee);
+                        }
+                        f.clock.update(t, &f.tees, &f.players, 0);
+                    }
+                    f.tick = 602;
+                    let own = *f.tees.get(0).unwrap();
+                    let ctx = crate::hooks::HookContext {
+                        tick: f.tick,
+                        own: &own,
+                        tees: &f.tees,
+                        players: &f.players,
+                        grid: &f.grid,
+                        clock: &f.clock,
+                        world: &f.world,
+                        lag_ticks: 0,
+                        mode: Mode::Fight,
+                        fixed_target: false,
+                    };
+                    f.hooks.navigator.poll(&ctx);
+                    assert!(f.hooks.wayblock.holding(), "the wayblock is held");
+                    f.pick()
+                };
+                assert_eq!(run(false, false), 1, "an active tee on the shelf is fought");
+                assert_eq!(run(false, true), -1, "the live case: idle, so skipped (the AFK filter)");
+                assert_eq!(
+                    run(true, true),
+                    1,
+                    "--wb-smart: idle but in the hall we hold, so in the way"
+                );
+            })
+            .expect("thread")
+            .join()
+            .expect("the test body");
     }
 }

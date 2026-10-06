@@ -62,6 +62,22 @@ pub const WB_SWITCH_MARGIN: i32 = 2;
 pub const WB_SIDE_HOPPING: bool = false;
 pub const WB_PROVISIONAL_TICKS: i64 = 5 * 50;
 pub const WB_SWITCH_TICKS: i64 = 5 * 50;
+/// Task 3.12 (`--wb-smart`): after a side change the side is kept at least this long (a change costs a walk through a freeze tube).
+pub const WB_SMART_SWITCH_COOLDOWN_TICKS: i64 = 40 * 50;
+/// Task 3.12: a failed crossing of a side's tube counts against that side for this long, and each one is worth
+/// [`WB_FAIL_PENALTY`] blockable targets.
+pub const WB_FAIL_MEMORY_TICKS: i64 = 3 * 60 * 50;
+pub const WB_FAIL_PENALTY: i32 = 2;
+/// Task 3.12 (`--wb-smart`): until this long after the first look at the tees -- and until we first stand in a hall -- the side is only
+/// a provisional pick, taken again at every look, with no cooldown. (Who is AFK is not known earlier: the activity clock needs 10 s of
+/// unchanged input to call a tee idle, and until then only the tees inside a hall count as blockable.)
+pub const WB_SMART_WARMUP_TICKS: i64 = 12 * 50;
+/// Task 3.12 review F6: during the warm-up a **different** side than the one picked must lead this long without a break before the
+/// pick changes (a count that flips by one at a hall boundary must not flip the side, and cancel the walk, every look).
+pub const WB_SMART_WARMUP_HOLD_TICKS: i64 = 50;
+/// Task 3.12 review F11: a fight (`WbState::fight_here`) counts for this long after it was last seen, so that a fight test that
+/// flickers (a target at the edge of its radius, a hook that goes on and off) neither flaps a committed switch nor cancels it on a blink.
+pub const WB_FIGHT_HOLD_TICKS: i64 = 75;
 /// `WB_NO_CLIMB_TILES` (`bot.ts:222`).
 pub const WB_NO_CLIMB_TILES: i32 = 3;
 /// `WB_ZONE_SCORE` (`bot.ts:228`): the target-score bonus for a tee in the WB zone.
@@ -628,6 +644,24 @@ pub struct WbSideChooser {
     pending_since: i64,
     provisional: bool,
     picked_at: i64,
+    /// Task 3.12 (`--wb-smart`, off by default): the side with **more** blockable targets, ties random, with hysteresis
+    /// ([`WbSideChooser::update_targets`]).
+    smart: bool,
+    /// The tie-break generator of the smart chooser (splitmix64; seeded once per session, kept over map changes).
+    rng: u64,
+    /// The tick of the last change of side (smart).
+    changed_at: i64,
+    /// Ticks of the failed crossings of the left / right tube (smart), newest last.
+    fails: [Vec<i64>; 2],
+    /// The tick of the first smart look (warm-up, smart); -1 before it.
+    first_tick: i64,
+    /// We have stood free in a hall since the map was loaded (smart): the warm-up is over for the side choice and the cooldown runs.
+    reached: bool,
+    /// A committed smart switch to this side whose hall we have not reached yet: the "standing" override must not undo it.
+    leaving: Option<WbSide>,
+    /// What the commit of the switch in `leaving` overwrote: `changed_at` and the age of the lead (`pending_since`). A switch that is
+    /// cancelled before we leave the zone puts them back (review F7): a cancelled switch starts no cooldown and keeps its lead.
+    commit_prev: Option<(i64, i64)>,
 }
 
 impl Default for WbSideChooser {
@@ -637,19 +671,97 @@ impl Default for WbSideChooser {
             pending_since: -1,
             provisional: false,
             picked_at: -1,
+            smart: false,
+            rng: 0,
+            changed_at: i64::MIN / 2,
+            fails: [Vec::new(), Vec::new()],
+            first_tick: -1,
+            reached: false,
+            leaving: None,
+            commit_prev: None,
         }
     }
 }
 
 impl WbSideChooser {
+    /// A new map: the choice and the failures of the tubes start over. The smart switch and its generator stay (the session's).
     pub fn reset(&mut self) {
-        *self = WbSideChooser::default();
+        let (smart, rng) = (self.smart, self.rng);
+        *self = WbSideChooser {
+            smart,
+            rng,
+            ..WbSideChooser::default()
+        };
+    }
+
+    /// Task 3.12: choose by blockable targets from now on (`seed` starts the tie-break generator).
+    pub fn set_smart(&mut self, on: bool, seed: u64) {
+        self.smart = on;
+        self.rng = seed;
+    }
+
+    pub fn is_smart(&self) -> bool {
+        self.smart
+    }
+
+    /// The side a committed smart switch is taking us to, until we stand in its hall.
+    pub fn leaving(&self) -> Option<WbSide> {
+        self.leaving
+    }
+
+    /// We stand free in the zone of `side` (smart): the warm-up is over, the cooldown of a change starts, a switch to it is complete.
+    pub fn note_reached(&mut self, side: WbSide, tick: i64) {
+        if !self.reached {
+            self.reached = true;
+            self.changed_at = tick;
+        }
+        if self.leaving == Some(side) {
+            self.leaving = None;
+            self.commit_prev = None;
+        }
+    }
+
+    /// What a committed switch changes, to put back a switch that is not to be (see [`WbState::update_side`]).
+    fn smart_snapshot(&self) -> (Option<WbSide>, i64, i64, Option<WbSide>) {
+        (self.side, self.pending_since, self.changed_at, self.leaving)
+    }
+
+    fn smart_restore(&mut self, snap: (Option<WbSide>, i64, i64, Option<WbSide>)) {
+        (self.side, self.pending_since, self.changed_at, self.leaving) = snap;
+    }
+
+    fn next_bit(&mut self) -> bool {
+        // splitmix64
+        self.rng = self.rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (z ^ (z >> 31)) & 1 == 1
+    }
+
+    /// A walk through `side`'s freeze tube failed at `tick` (the navigator's "...; trying again from the spawn").
+    pub fn note_cross_fail(&mut self, side: WbSide, tick: i64) {
+        let v = &mut self.fails[usize::from(side == WbSide::Right)];
+        v.retain(|&t| t <= tick && tick - t < WB_FAIL_MEMORY_TICKS);
+        if v.len() < 8 {
+            v.push(tick);
+        }
+    }
+
+    /// Failed crossings of `side`'s tube in the last [`WB_FAIL_MEMORY_TICKS`].
+    pub fn recent_fails(&self, side: WbSide, tick: i64) -> i32 {
+        self.fails[usize::from(side == WbSide::Right)]
+            .iter()
+            .filter(|&&t| t <= tick && tick - t < WB_FAIL_MEMORY_TICKS)
+            .count() as i32
     }
 
     pub fn adopt(&mut self, side: WbSide) {
         self.side = Some(side);
         self.provisional = false;
         self.pending_since = -1;
+        self.leaving = None;
+        self.commit_prev = None;
     }
 
     /// `update(counts, here, tick, nearer)`.
@@ -699,6 +811,98 @@ impl WbSideChooser {
         if tick - self.pending_since >= WB_SWITCH_TICKS {
             self.side = Some(other);
             self.pending_since = -1;
+        }
+        self.side.expect("side")
+    }
+}
+
+impl WbSideChooser {
+    /// Task 3.12: the smart `update`. `counts` are the **blockable** targets of the left and right hall (the caller decides
+    /// who is blockable); a side's score is its count less [`WB_FAIL_PENALTY`] per recent failed crossing of its tube.
+    ///
+    /// - Nothing chosen yet (or the pick is provisional and somebody showed up): the side with the higher score; a tie goes
+    ///   to the side we stand in, else **random**. With nobody on either side the pick is provisional for
+    ///   [`WB_PROVISIONAL_TICKS`] (as `update`).
+    /// - Warm-up: until [`WB_SMART_WARMUP_TICKS`] after the first look, and until [`WbSideChooser::note_reached`], the pick is taken
+    ///   again at every look (a tie keeps the side), starts no cooldown and needs no margin.
+    /// - Hysteresis: the other side wins only when its score is ahead by [`WB_SWITCH_MARGIN`] (when we stand in it: not behind) for
+    ///   [`WB_SWITCH_TICKS`] without a break, and not within [`WB_SMART_SWITCH_COOLDOWN_TICKS`] of the last change (a change made once
+    ///   we have been in a hall; the cooldown starts at the first arrival). A committed switch sets [`WbSideChooser::leaving`].
+    pub fn update_targets(&mut self, counts: (i32, i32), here: Option<WbSide>, tick: i64) -> WbSide {
+        let score = |me: &Self, s: WbSide| {
+            (if s == WbSide::Left { counts.0 } else { counts.1 }) - WB_FAIL_PENALTY * me.recent_fails(s, tick)
+        };
+        if self.first_tick < 0 || tick < self.first_tick {
+            self.first_tick = tick;
+        }
+        let warm = !self.reached && tick - self.first_tick < WB_SMART_WARMUP_TICKS;
+        if self.provisional
+            && (here == self.side || tick < self.picked_at || tick - self.picked_at >= WB_PROVISIONAL_TICKS)
+        {
+            self.provisional = false;
+        }
+        let first = self.side.is_none() || (self.provisional && counts.0 + counts.1 > 0);
+        if first || warm {
+            let (l, r) = (score(self, WbSide::Left), score(self, WbSide::Right));
+            let side = if l > r {
+                WbSide::Left
+            } else if r > l {
+                WbSide::Right
+            } else if let Some(h) = here {
+                h
+            } else if let Some(cur) = self.side {
+                cur
+            } else if self.next_bit() {
+                WbSide::Left
+            } else {
+                WbSide::Right
+            };
+            if !first && Some(side) != self.side {
+                // Warm-up, a pick that would change the side: it has to lead for WB_SMART_WARMUP_HOLD_TICKS first (review F6).
+                if self.pending_since < 0 || tick < self.pending_since {
+                    self.pending_since = tick;
+                }
+                if tick - self.pending_since < WB_SMART_WARMUP_HOLD_TICKS {
+                    return self.side.expect("side");
+                }
+            }
+            self.side = Some(side);
+            self.provisional = counts.0 + counts.1 == 0;
+            self.picked_at = tick;
+            self.pending_since = -1;
+            return side;
+        }
+        let cur = self.side.expect("side");
+        if tick < self.pending_since {
+            self.pending_since = tick;
+        }
+        if tick < self.changed_at {
+            self.changed_at = tick;
+        }
+        let other = cur.other();
+        let lead = score(self, other) - score(self, cur);
+        let wants = if here == Some(other) {
+            lead >= 0
+        } else {
+            lead >= WB_SWITCH_MARGIN
+        };
+        if !wants || tick - self.changed_at < WB_SMART_SWITCH_COOLDOWN_TICKS {
+            if !wants {
+                self.pending_since = -1;
+            }
+            return cur;
+        }
+        if self.pending_since < 0 {
+            self.pending_since = tick;
+        }
+        if tick - self.pending_since >= WB_SWITCH_TICKS {
+            self.side = Some(other);
+            self.commit_prev = Some((self.changed_at, self.pending_since));
+            self.pending_since = -1;
+            self.leaving = Some(other);
+            if self.reached {
+                self.changed_at = tick;
+            }
         }
         self.side.expect("side")
     }
@@ -823,6 +1027,11 @@ pub struct WbState {
     pub chooser: WbSideChooser,
     /// Players seen playing on each side at the last update (`wbCounts`).
     pub counts: (i32, i32),
+    /// Task 3.12 (`--wb-smart`): a fight is going on where we stand (set by the caller before `update_side`): a committed switch of side
+    /// then waits (the standing override keeps us in this hall) until it is over.
+    pub fight_here: bool,
+    /// The tick `fight_here` was last true ([`WB_FIGHT_HOLD_TICKS`]).
+    fight_last: i64,
     walk_fails: i32,
     pauses: i32,
     paused_until_ms: i64,
@@ -835,6 +1044,8 @@ impl WbState {
             mode,
             chooser: WbSideChooser::default(),
             counts: (0, 0),
+            fight_here: false,
+            fight_last: i64::MIN / 2,
             walk_fails: 0,
             pauses: 0,
             paused_until_ms: 0,
@@ -906,6 +1117,13 @@ impl WbState {
     ) -> Option<SideChange> {
         let def = self.def.as_ref()?;
         self.counts = counts;
+        if tick < self.fight_last {
+            self.fight_last = i64::MIN / 2; // the clock went back (a new session): forget the old fight
+        }
+        if self.fight_here {
+            self.fight_last = tick;
+        }
+        let fight = tick - self.fight_last < WB_FIGHT_HOLD_TICKS;
         let before = self.chooser.side;
         let side;
         match self.mode {
@@ -926,7 +1144,13 @@ impl WbState {
                 } else {
                     WbSide::Right
                 };
-                let mut s = self.chooser.update(counts, here, tick, nearer);
+                let smart = self.chooser.is_smart();
+                let snap = self.chooser.smart_snapshot();
+                let mut s = if smart {
+                    self.chooser.update_targets(counts, here, tick)
+                } else {
+                    self.chooser.update(counts, here, tick, nearer)
+                };
                 let standing = if own_free {
                     [WbSide::Left, WbSide::Right]
                         .into_iter()
@@ -934,11 +1158,36 @@ impl WbState {
                 } else {
                     None
                 };
-                if let Some(st) = standing
-                    && st != s
-                {
-                    self.chooser.adopt(st);
-                    s = st;
+                if let Some(st) = standing {
+                    if st == s {
+                        if smart {
+                            self.chooser.note_reached(st, tick);
+                        }
+                    } else if smart && self.chooser.leaving() == Some(s) && !fight {
+                        // A committed switch: we leave the hall we stand in for the busier one.
+                    } else {
+                        // We stay where we stand; a switch committed by this very call is not made (and starts no cooldown).
+                        let undone = smart && self.chooser.leaving() == Some(s) && snap.3 != Some(s);
+                        // Committed on an earlier look and cancelled now, before we left the zone (review F7): the same, from `commit_prev`.
+                        let cancelled = smart && self.chooser.leaving() == Some(s) && snap.3 == Some(s);
+                        let prev = self.chooser.commit_prev;
+                        if undone {
+                            self.chooser.smart_restore(snap);
+                        }
+                        self.chooser.adopt(st);
+                        if undone {
+                            // The lead keeps its age: the switch comes when the fight is over, not 250 ticks later.
+                            self.chooser.pending_since = snap.1;
+                        }
+                        if cancelled && let Some((changed_at, pending)) = prev {
+                            self.chooser.changed_at = changed_at;
+                            self.chooser.pending_since = pending;
+                        }
+                        if smart {
+                            self.chooser.note_reached(st, tick);
+                        }
+                        s = st;
+                    }
                 }
                 side = s;
             }
@@ -1113,5 +1362,344 @@ mod state_tests {
             !s.walk_cuttable((zone.x0 + 1, zone.y0), false, true),
             "the top row of the zone is excluded"
         );
+    }
+    // ---- task 3.12: `--wb-smart` -------------------------------------------------------------------------------------
+
+    fn smart(seed: u64) -> WbSideChooser {
+        let mut c = WbSideChooser::default();
+        c.set_smart(true, seed);
+        c
+    }
+
+    #[test]
+    fn smart_picks_the_side_with_more_blockable_targets_the_reverse_of_the_default() {
+        let mut c = smart(1);
+        assert_eq!(c.update_targets((1, 4), None, 0), WbSide::Right, "more on the right");
+        let mut c = smart(1);
+        assert_eq!(c.update_targets((5, 2), None, 0), WbSide::Left, "more on the left");
+        // The default chooser still takes the emptier side.
+        let mut d = WbSideChooser::default();
+        assert_eq!(d.update((1, 4), None, 0, WbSide::Left), WbSide::Left);
+    }
+
+    #[test]
+    fn smart_ties_are_random_per_seed_deterministic_and_the_side_we_stand_in_wins_them() {
+        let pick = |seed: u64, here: Option<WbSide>| smart(seed).update_targets((3, 3), here, 0);
+        let sides: Vec<WbSide> = (0..64).map(|s| pick(s, None)).collect();
+        assert!(
+            sides.contains(&WbSide::Left) && sides.contains(&WbSide::Right),
+            "both sides come up"
+        );
+        let lefts = sides.iter().filter(|&&s| s == WbSide::Left).count();
+        assert!((16..=48).contains(&lefts), "roughly even: {lefts} of 64");
+        assert_eq!(pick(7, None), pick(7, None), "same seed, same pick");
+        assert_eq!(pick(7, Some(WbSide::Left)), WbSide::Left);
+        assert_eq!(
+            pick(8, Some(WbSide::Right)),
+            WbSide::Right,
+            "standing in a hall is not a coin toss"
+        );
+    }
+
+    #[test]
+    fn smart_nobody_anywhere_is_provisional_and_is_picked_again_when_somebody_shows_up() {
+        let mut c = smart(3);
+        let first = c.update_targets((0, 0), None, 0);
+        // Somebody on the other side within 5 s: the pick is redone.
+        let other = first.other();
+        let counts = if other == WbSide::Left { (2, 0) } else { (0, 2) };
+        assert_eq!(c.update_targets(counts, None, 100), other);
+        // Once we stand in a hall it is a real pick: a smaller lead on the first side does not undo it.
+        c.note_reached(other, 120);
+        assert_eq!(c.update_targets((counts.1, counts.0), None, 150), other);
+    }
+
+    #[test]
+    fn smart_hysteresis_needs_the_margin_for_five_seconds_without_a_break_and_obeys_the_cooldown() {
+        let mut c = smart(1);
+        assert_eq!(c.update_targets((6, 2), None, 0), WbSide::Left);
+        c.note_reached(WbSide::Left, 0); // in a hall: the warm-up is over and the cooldown runs from here
+        // A lead of one is never enough.
+        for t in (1..4000).step_by(25) {
+            assert_eq!(c.update_targets((3, 4), None, t), WbSide::Left, "tick {t}");
+        }
+        // A lead of the margin must hold for WB_SWITCH_TICKS; a dip below it starts the count over. (Past the cooldown.)
+        let t0 = WB_SMART_SWITCH_COOLDOWN_TICKS + 10;
+        assert_eq!(c.update_targets((1, 3), None, t0), WbSide::Left);
+        assert_eq!(
+            c.update_targets((1, 3), None, t0 + WB_SWITCH_TICKS - 1),
+            WbSide::Left,
+            "not yet"
+        );
+        assert_eq!(
+            c.update_targets((2, 3), None, t0 + WB_SWITCH_TICKS),
+            WbSide::Left,
+            "a dip: the count is cleared"
+        );
+        assert_eq!(
+            c.update_targets((1, 3), None, t0 + WB_SWITCH_TICKS + 10),
+            WbSide::Left,
+            "starts again"
+        );
+        assert_eq!(
+            c.update_targets((1, 3), None, t0 + 2 * WB_SWITCH_TICKS + 10),
+            WbSide::Right,
+            "held for the whole window"
+        );
+        // Straight back is held off by the cooldown, whatever the lead.
+        let t1 = t0 + 2 * WB_SWITCH_TICKS + 10;
+        for t in (t1 + 1..t1 + WB_SMART_SWITCH_COOLDOWN_TICKS - 1).step_by(50) {
+            assert_eq!(c.update_targets((9, 0), None, t), WbSide::Right, "cooldown, tick {t}");
+        }
+    }
+
+    #[test]
+    fn smart_failed_crossings_of_a_tube_count_against_its_side_for_three_minutes() {
+        let mut c = smart(1);
+        assert_eq!(c.update_targets((3, 3), Some(WbSide::Left), 0), WbSide::Left);
+        c.note_cross_fail(WbSide::Left, 10);
+        c.note_cross_fail(WbSide::Left, 20);
+        assert_eq!(c.recent_fails(WbSide::Left, 30), 2);
+        assert_eq!(c.recent_fails(WbSide::Right, 30), 0);
+        // 3 vs 3 with two failures on the left: the right is ahead by 4 (2 * WB_FAIL_PENALTY), after the cooldown and the window.
+        let t0 = WB_SMART_SWITCH_COOLDOWN_TICKS + 100;
+        assert_eq!(c.update_targets((3, 3), None, t0), WbSide::Left);
+        assert_eq!(c.update_targets((3, 3), None, t0 + WB_SWITCH_TICKS), WbSide::Right);
+        // They are forgotten.
+        assert_eq!(c.recent_fails(WbSide::Left, 20 + WB_FAIL_MEMORY_TICKS), 0);
+    }
+
+    #[test]
+    fn smart_state_uses_the_target_chooser_only_when_asked_and_keeps_it_over_a_new_map() {
+        let mut s = state();
+        s.chooser.set_smart(true, 5);
+        s.update_side((100, 100), 100.0, true, (1, 4), 0, true);
+        assert_eq!(s.side(), Some(WbSide::Right), "more blockable targets on the right");
+        s.on_map(Some(clb()));
+        assert!(s.chooser.is_smart(), "the session's choice survives a map change");
+        assert!(s.side().is_none());
+        // A fixed mode still wins outright.
+        s.set_mode(WbMode::Left);
+        s.update_side((100, 100), 100.0, true, (1, 4), 10, true);
+        assert_eq!(s.side(), Some(WbSide::Left));
+    }
+    fn smart_state() -> WbState {
+        let mut s = state();
+        s.chooser.set_smart(true, 1);
+        s
+    }
+
+    /// A tile inside the zone of the right hall, away from its top row.
+    fn in_right_zone() -> (i32, i32) {
+        let z = clb().right.zone[0];
+        (z.x0 + 3, z.y0 + 2)
+    }
+
+    /// Drives `update_side` for a bot standing free at `tile` from `from` to `to`; returns the ticks at which the side changed.
+    fn drive(s: &mut WbState, tile: (i32, i32), counts: (i32, i32), from: i64, to: i64, fight: bool) -> Vec<i64> {
+        let mut changes = Vec::new();
+        for t in (from..to).step_by(25) {
+            s.fight_here = fight;
+            if s.update_side(tile, f64::from(tile.0), true, counts, t, true).is_some() {
+                changes.push(t);
+            }
+        }
+        changes
+    }
+
+    #[test]
+    fn smart_a_committed_switch_takes_us_out_of_the_hall_we_stand_in_and_is_not_undone_by_the_standing_override() {
+        let mut s = smart_state();
+        let tile = in_right_zone();
+        assert!(drive(&mut s, tile, (0, 3), 0, 100, false).is_empty());
+        assert_eq!(s.side(), Some(WbSide::Right));
+        // The left gets the crowd. The cooldown (from the arrival at tick 0) and the 250 ticks of lead come first; then the side is Left
+        // and stays Left while we are still standing in the right zone.
+        let changes = drive(&mut s, tile, (6, 0), 100, 4000, false);
+        assert_eq!(changes.len(), 1, "one change, no flapping: {changes:?}");
+        assert!(
+            changes[0] >= WB_SMART_SWITCH_COOLDOWN_TICKS,
+            "not inside the cooldown: {changes:?}"
+        );
+        assert!(
+            changes[0] <= WB_SMART_SWITCH_COOLDOWN_TICKS + WB_SWITCH_TICKS + 50,
+            "and as soon as it is allowed: {changes:?}"
+        );
+        assert_eq!(s.side(), Some(WbSide::Left));
+        assert_eq!(s.chooser.leaving(), Some(WbSide::Left));
+        // Arriving in the left zone completes it.
+        let z = clb().left.zone[0];
+        drive(&mut s, (z.x0 + 3, z.y0 + 2), (6, 0), 4000, 4100, false);
+        assert_eq!(s.chooser.leaving(), None);
+        assert_eq!(s.side(), Some(WbSide::Left));
+    }
+
+    #[test]
+    fn smart_a_fight_in_our_hall_holds_a_switch_back_and_starts_no_cooldown() {
+        let mut s = smart_state();
+        let tile = in_right_zone();
+        drive(&mut s, tile, (0, 3), 0, 100, false);
+        // The lead is there from tick 100; a fight goes on until tick 3000: no change, however long.
+        assert!(drive(&mut s, tile, (6, 0), 100, 3000, true).is_empty());
+        assert_eq!(s.side(), Some(WbSide::Right));
+        assert_eq!(s.chooser.leaving(), None, "nothing is half done");
+        // The fight is over: the switch comes once it has been gone for WB_FIGHT_HOLD_TICKS (a refused switch started no new cooldown, and the 250 ticks of lead have passed).
+        let changes = drive(&mut s, tile, (6, 0), 3000, 3200, false);
+        let first = changes.first().copied().expect("the switch comes");
+        assert!(
+            (3000 + WB_FIGHT_HOLD_TICKS - 25..=3000 + WB_FIGHT_HOLD_TICKS + 25).contains(&first),
+            "as soon as the fight has been gone for the hold time, and with no new cooldown: {changes:?}"
+        );
+        assert_eq!(s.side(), Some(WbSide::Left));
+    }
+
+    #[test]
+    fn smart_the_first_seconds_are_a_provisional_pick_taken_again_at_every_look_with_no_cooldown() {
+        let mut s = smart_state();
+        let away = (100, 100); // spawn: in no hall
+        let f = |s: &mut WbState, counts, t| {
+            s.update_side(away, 100.0, true, counts, t, true);
+            s.side()
+        };
+        assert!(f(&mut s, (0, 0), 0).is_some());
+        // One hall occupant on the left on the first looks, then the crowd turns out to be on the right: no lock-in.
+        assert_eq!(f(&mut s, (1, 0), 2), Some(WbSide::Left));
+        assert_eq!(
+            f(&mut s, (1, 4), 4),
+            Some(WbSide::Left),
+            "a pick that changes the side has to hold first (F6)"
+        );
+        assert_eq!(f(&mut s, (1, 4), 40), Some(WbSide::Left), "still inside the hold");
+        assert_eq!(
+            f(&mut s, (1, 4), 60),
+            Some(WbSide::Right),
+            "re-picked freely during the warm-up, without the margin, once the lead has held"
+        );
+        assert_eq!(f(&mut s, (4, 1), 300), Some(WbSide::Right));
+        assert_eq!(
+            f(&mut s, (4, 1), 351),
+            Some(WbSide::Left),
+            "held again for the 50 ticks: taken again"
+        );
+        assert_eq!(f(&mut s, (4, 4), 400), Some(WbSide::Left), "a tie keeps the side");
+        // After the warm-up the margin and the 250 ticks apply -- but no cooldown, as we have not been in a hall.
+        let mut changed = None;
+        for t in (WB_SMART_WARMUP_TICKS..WB_SMART_WARMUP_TICKS + 600).step_by(25) {
+            if s.update_side(away, 100.0, true, (1, 4), t, true).is_some() {
+                changed = Some(t);
+                break;
+            }
+        }
+        let t = changed.expect("the side changes");
+        assert!(
+            t <= WB_SMART_WARMUP_TICKS + WB_SWITCH_TICKS + 25,
+            "no cooldown on a side nobody stood in: {t}"
+        );
+        assert_eq!(s.side(), Some(WbSide::Right));
+    }
+
+    /// Review F6 (probe): the counts alternate (2,1)/(1,2) every 10 ticks through the whole warm-up: the side does not flap, and no walk is cut.
+    #[test]
+    fn smart_the_warm_up_does_not_flap_when_the_counts_flip_every_few_ticks() {
+        let mut s = smart_state();
+        let away = (100, 100);
+        let mut changes = 0;
+        for (i, t) in (0..WB_SMART_WARMUP_TICKS).step_by(10).enumerate() {
+            let counts = if i % 2 == 0 { (2, 1) } else { (1, 2) };
+            if s.update_side(away, 100.0, true, counts, t, true).is_some() {
+                changes += 1;
+            }
+        }
+        assert_eq!(changes, 0, "no reported side change (each one cancels the walk)");
+        assert_eq!(s.side(), Some(WbSide::Left), "the first pick stands");
+    }
+
+    /// Review F7 (probe): a switch committed on one look and cancelled on the next by a fight starts no cooldown and keeps its lead:
+    /// it is made again as soon as the fight is over.
+    #[test]
+    fn smart_a_fight_right_after_the_commit_cancels_it_without_the_cooldown() {
+        let mut s = smart_state();
+        let tile = in_right_zone();
+        drive(&mut s, tile, (0, 3), 0, 100, false);
+        let mut commit = None;
+        for t in (100..4000).step_by(2) {
+            s.fight_here = false;
+            if s.update_side(tile, f64::from(tile.0), true, (6, 0), t, true).is_some() {
+                commit = Some(t);
+                break;
+            }
+        }
+        let c = commit.expect("committed");
+        assert_eq!(s.chooser.leaving(), Some(WbSide::Left));
+        // Next look: still in the right zone, somebody awake comes near.
+        s.fight_here = true;
+        let back = s.update_side(tile, f64::from(tile.0), true, (6, 0), c + 2, true);
+        assert!(
+            back.is_some_and(|b| b.to == WbSide::Right),
+            "the fight cancels the switch: {back:?}"
+        );
+        assert_eq!(s.chooser.leaving(), None);
+        // The fight is over: the switch is made again once it has been gone for the hold time -- not a cooldown later.
+        s.fight_here = false;
+        let mut again = None;
+        for t in (c + 4..c + 400).step_by(2) {
+            if s.update_side(tile, f64::from(tile.0), true, (6, 0), t, true).is_some() {
+                again = Some(t);
+                break;
+            }
+        }
+        let again = again.expect("made again");
+        assert!(
+            again <= c + 2 + WB_FIGHT_HOLD_TICKS + 4,
+            "made again as soon as the hold is over, with the cooldown not restarted: {again} after a fight at {}",
+            c + 2
+        );
+    }
+
+    /// Review F11 (probe): a fight that flickers on and off after a committed switch (our target at the edge of its 128 px, a hook on and
+    /// off) does not flap the side at tick rate: one change (the cancel) and then none while it flickers.
+    #[test]
+    fn smart_a_flickering_fight_after_the_commit_does_not_flap_the_side() {
+        let mut s = smart_state();
+        let tile = in_right_zone();
+        drive(&mut s, tile, (0, 3), 0, 100, false);
+        let mut commit = None;
+        for t in (100..4000).step_by(2) {
+            s.fight_here = false;
+            if s.update_side(tile, f64::from(tile.0), true, (6, 0), t, true).is_some() {
+                commit = Some(t);
+                break;
+            }
+        }
+        let c = commit.expect("committed");
+        let mut changes = 0;
+        for (i, t) in (c + 2..c + 502).enumerate() {
+            s.fight_here = i % 2 == 0; // on/off every tick
+            changes += usize::from(s.update_side(tile, f64::from(tile.0), true, (6, 0), t, true).is_some());
+        }
+        assert_eq!(
+            changes, 1,
+            "the cancel, and nothing else, for 500 ticks of a fight that blinks every tick"
+        );
+        for (i, t) in (c + 600..c + 1100).enumerate() {
+            s.fight_here = (i / 10) % 2 == 0; // on/off every 10 ticks
+            changes += usize::from(s.update_side(tile, f64::from(tile.0), true, (6, 0), t, true).is_some());
+        }
+        assert_eq!(changes, 1, "and nothing while it blinks every 10 ticks");
+        assert_eq!(s.side(), Some(WbSide::Right), "the side we hold stays");
+    }
+
+    #[test]
+    fn smart_the_cooldown_starts_when_we_first_stand_in_a_hall() {
+        let mut s = smart_state();
+        let tile = in_right_zone();
+        // Walking in: the pick follows the counts. At tick 500 we stand in the right zone.
+        s.update_side((100, 100), 100.0, true, (0, 2), 0, true);
+        assert_eq!(s.side(), Some(WbSide::Right));
+        assert!(drive(&mut s, tile, (0, 2), 500, 600, false).is_empty());
+        // From the arrival on, a lead for the other side must wait out the cooldown.
+        let changes = drive(&mut s, tile, (6, 0), 600, 3000, false);
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0] >= 500 + WB_SMART_SWITCH_COOLDOWN_TICKS, "{changes:?}");
     }
 }

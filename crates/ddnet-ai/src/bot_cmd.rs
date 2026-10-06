@@ -70,6 +70,14 @@ pub struct BotOpts {
     /// people do against it.
     #[arg(long, default_value = "off", value_parser = parse_finish, action = clap::ArgAction::Set)]
     pub finish: FinishMode,
+    /// Copy Love Box targeting (task 3.12, D-103): `off` (the default) or `on`. `on`: the hall is chosen by the number of blockable targets on
+    /// each side (more is better, a tie is random, with hysteresis and a memory of failed tube crossings), and an idle (AFK) player is fought
+    /// when he is in the way (in the hall we hold, next to us, on the route of our walk). The same switch (task 3.12b, D-104) also turns on
+    /// the tube-crossing changes: after a respawn outside the hall the bot stands still and starts its walk at once, the crossing search
+    /// rolls out with the other tees of the world, and an idle player on the ledge of the tube's start is jumped over.
+    /// Off until the owner turns it on.
+    #[arg(long, default_value = "off", value_parser = parse_on_off, action = clap::ArgAction::Set)]
+    pub wb_smart: bool,
     /// Live input timing (task 3.11, E-024, D-101; **on** by default, `off` is the way back): a comma-separated list of
     /// `precise` (the driver sleeps on its input channel with a precise timeout instead of blocking in `recv` for up to 2 ms:
     /// a decision is picked up and an input sent when due, not ~1.5 ms later on average, ~4-8 ms at the tail; costs about 2 000
@@ -107,7 +115,7 @@ pub struct BotOpts {
     /// Walk to the player with this client id and keep following them while they move (task 4.2).
     #[arg(long)]
     pub follow: Option<i32>,
-    /// Wayblock on Copy Love Box: `auto` (default; the side with fewer players), `left`, `right`, `off`.
+    /// Wayblock on Copy Love Box: `auto` (default; the side with fewer players, or with `--wb-smart on` the side with more blockable targets), `left`, `right`, `off`.
     #[arg(long, default_value = "auto")]
     pub wb: String,
     /// Strong mode: inside a wayblock hall the planner searches wider (`STRONG_WB`, more CPU).
@@ -541,8 +549,14 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         wb_mode,
         strong,
         seek: !o.no_seek,
+        wb_smart: o.wb_smart,
         ..NavConfig::default()
     };
+    if o.wb_smart {
+        eprintln!(
+            "wb smart: on (--wb-smart; D-103, D-104): more blockable targets, ties random; an AFK player only when in the way; tube crossings: stand still and walk at once after a respawn, search with the other tees, jump over a blocker on the ledge"
+        );
+    }
     let nav_handle = NavHandle::new();
     if let Some((tx, ty)) = o.goto {
         nav_handle.send(NavCommand::Goto {
@@ -962,6 +976,19 @@ mod search_threads_tests {
         };
         assert!(!get(&[]).unwrap());
         assert!(get(&["--no-timeout-code"]).unwrap());
+    }
+
+    #[test]
+    fn wb_smart_is_off_by_default_and_takes_on_or_off() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.wb_smart)
+        };
+        assert!(!get(&[]).unwrap(), "the Copy Love Box targeting is opt-in (D-103)");
+        assert!(get(&["--wb-smart", "on"]).unwrap());
+        assert!(!get(&["--wb-smart", "off"]).unwrap());
+        assert!(get(&["--wb-smart", "maybe"]).is_err());
     }
 
     #[test]

@@ -12,7 +12,7 @@ use ddai_planner::vmath::{Vec2, vdistance};
 use std::collections::{HashMap, HashSet};
 
 use crate::TILE_PX;
-use crate::crossing::{CrossPhase, Crossing, SwingCrosser, in_any_box};
+use crate::crossing::{CrossPhase, CrossSmart, Crossing, SwingCrosser, in_any_box};
 use crate::route::{MoveKind, RouteOpts, Router};
 use crate::runner::{RouteRunner, RunnerState};
 
@@ -276,6 +276,8 @@ pub struct Navigator<W: PlanWorld> {
     pub cross_budget_ms: f64,
     /// `wallRoute`: the crossing takes route 2 (through the wall of the passage) where the tube has one.
     pub wall_route: bool,
+    /// Task 3.12b (`--wb-smart`): the crossing's own options (all off: the TS behaviour).
+    pub smart: CrossSmart,
     to_crossing: Option<usize>,
     crosser: Option<SwingCrosser<W>>,
     cross_tries: i32,
@@ -322,6 +324,7 @@ impl<W: PlanWorld> Navigator<W> {
             crossings: if through_freeze { opts.crossings } else { Vec::new() },
             cross_budget_ms: 0.0,
             wall_route: false,
+            smart: CrossSmart::default(),
             to_crossing: None,
             crosser: None,
             cross_tries: 0,
@@ -554,7 +557,7 @@ impl<W: PlanWorld> Navigator<W> {
             self.next_goal(format!("route to {} broke off: {give_up}", goal.label), tick);
             return empty_input();
         }
-        if let Some(crossed) = self.step_crossing(ctx, me, tick, &goal) {
+        if let Some(crossed) = self.step_crossing(ctx, me, tick, &goal, others) {
             return crossed;
         }
         if self.field.is_none() && me.frozen {
@@ -926,6 +929,7 @@ impl<W: PlanWorld> Navigator<W> {
         me: &TeeState,
         tick: i64,
         goal: &NavGoal,
+        others: &[TeeState],
     ) -> Option<PlayerInput> {
         let ci = self.to_crossing?;
         if self.crosser.is_none() {
@@ -934,7 +938,9 @@ impl<W: PlanWorld> Navigator<W> {
                 return None;
             }
             self.runner = None;
-            self.crosser = Some(SwingCrosser::new((ctx.make_sim)(), c.clone()));
+            let mut crosser = SwingCrosser::new((ctx.make_sim)(), c.clone());
+            crosser.smart = self.smart;
+            self.crosser = Some(crosser);
             let label = c.label.clone();
             self.note(format!(
                 "at the start of {label}: swinging through on the rope (try {} of {MAX_CROSS_TRIES})",
@@ -949,6 +955,7 @@ impl<W: PlanWorld> Navigator<W> {
             let crosser = self.crosser.as_mut().expect("crosser");
             crosser.budget_ms = budget;
             crosser.use_wall = wall_route;
+            crosser.set_others(me, others);
             let was = crosser.doing();
             let out = crosser.step(ctx.col, me, tick, lag);
             let doing = crosser.doing();

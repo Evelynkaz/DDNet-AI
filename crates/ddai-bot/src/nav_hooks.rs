@@ -61,6 +61,7 @@ use crate::mapgrid::MapGrid;
 use crate::reach::{RouteFinder, Tile};
 use crate::tees::{HOOK_FLYING, Tee, dist};
 
+mod in_the_way;
 mod wb_extra;
 
 /// `TRAVEL_RETRY_TICKS` (`bot.ts:235`).
@@ -88,6 +89,13 @@ pub struct NavConfig {
     pub seek: bool,
     /// Wall-clock budget of one crossing search step in milliseconds (`navBudgetMs`; 0 = unbounded).
     pub cross_budget_ms: f64,
+    /// Task 3.12 (`--wb-smart`, opt-in, off by default; D-103): on Copy Love Box the hall is chosen by the number of **blockable** targets on
+    /// each side (the more the better, a tie at random, with hysteresis and a memory of failed tube crossings), and an idle (AFK) tee is
+    /// fought when he is in the way (`in_the_way`).
+    pub wb_smart: bool,
+    /// The seed of the side choice's tie-break (`wb_smart`). `None`: a fresh one per process (the live default: another side each
+    /// session); tests pass one.
+    pub seed: Option<u64>,
 }
 
 impl Default for NavConfig {
@@ -98,6 +106,8 @@ impl Default for NavConfig {
             strong: false,
             seek: true,
             cross_budget_ms: 10.0,
+            wb_smart: false,
+            seed: None,
         }
     }
 }
@@ -258,6 +268,13 @@ struct Core {
     home: Option<Home>,
     map_name: String,
     idle_since: i64,
+    /// `--wb-smart` (3.12b, review F12): the life has just begun (a join, a respawn) and the walk to the WB has not been tried yet: that
+    /// first walk starts at once ([`Core::wb_return_ticks`]); any later one waits [`WB_RETURN_TICKS`] again.
+    fresh_life: bool,
+    /// Walks to the WB begun from the idle branch of the steering (tests).
+    wb_walk_tries: u32,
+    /// The target the steering last saw and when (`-1` none): the fight test of `--wb-smart` ([`Core::fighting_here`]).
+    target_seen: (i32, i32),
     travel_since: i64,
     dull_since: i64,
     kill_wanted: bool,
@@ -284,7 +301,14 @@ struct Core {
 
 impl Core {
     fn new(cfg: NavConfig, handle: NavHandle) -> Core {
-        let wb = WbState::new(None, cfg.wb_mode);
+        let mut wb = WbState::new(None, cfg.wb_mode);
+        if cfg.wb_smart {
+            let seed = cfg.seed.unwrap_or_else(|| {
+                let salt = crate::players::random_salt();
+                u64::from_le_bytes(salt[..8].try_into().expect("a salt of at least 8 bytes"))
+            });
+            wb.chooser.set_smart(true, seed);
+        }
         let seek_enabled = cfg.seek;
         Core {
             cfg,
@@ -310,6 +334,9 @@ impl Core {
             home: None,
             map_name: String::new(),
             idle_since: -1,
+            fresh_life: true,
+            wb_walk_tries: 0,
+            target_seen: (-1, i32::MIN / 2),
             travel_since: i64::MIN / 2,
             dull_since: -1,
             kill_wanted: false,
@@ -854,6 +881,7 @@ impl Core {
             let holding = self.wb_holding();
             let counts = self.wb_counts(ctx);
             let own_free = own.alive && !own.frozen;
+            self.wb.fight_here = self.cfg.wb_smart && self.fighting_here(ctx);
             let change = self.wb.update_side(
                 tile,
                 f64::from(own.pos.x) / 32.0,
@@ -863,8 +891,13 @@ impl Core {
                 holding,
             );
             if let Some(c) = change {
+                let what = if self.cfg.wb_smart {
+                    "blockable targets"
+                } else {
+                    "playing"
+                };
                 self.log(&format!(
-                    "WB: over to the {} ({} playing on the left, {} on the right)",
+                    "WB: over to the {} ({} {what} on the left, {} on the right)",
                     c.to.name(),
                     counts.0,
                     counts.1
@@ -942,6 +975,9 @@ impl Core {
     }
 
     fn wb_counts(&self, ctx: &HookContext<'_>) -> (i32, i32) {
+        if self.cfg.wb_smart {
+            return self.wb_blockable_counts(ctx);
+        }
         let Some(def) = &self.wb.def else { return (0, 0) };
         let (mut l, mut r) = (0, 0);
         for t in ctx.tees.iter() {
@@ -1034,8 +1070,14 @@ impl Core {
             )
         };
         format!(
-            "WB: {why}; playing: {} on the left, {} on the right",
-            self.wb.counts.0, self.wb.counts.1
+            "WB: {why}; {}: {} on the left, {} on the right",
+            if self.cfg.wb_smart {
+                "blockable targets"
+            } else {
+                "playing"
+            },
+            self.wb.counts.0,
+            self.wb.counts.1
         )
     }
 
@@ -1053,7 +1095,7 @@ impl Core {
                 || self
                     .wb
                     .walk_cuttable(tile_of(ctx.own.pos), ctx.own.frozen, self.wb_holding()))
-            && Self::someone_worth_fighting(ctx, SEEK_ARRIVED_PX)
+            && (Self::someone_worth_fighting(ctx, SEEK_ARRIVED_PX) || self.afk_blocks_the_walk(ctx))
         {
             self.seeking_game = false;
             self.end_nav();
@@ -1096,6 +1138,10 @@ impl Core {
         let mut make = || template.new_scratch();
         let nav = self.nav.as_mut()?;
         nav.cross_budget_ms = budget;
+        nav.smart = ddai_nav::crossing::CrossSmart {
+            others: self.cfg.wb_smart,
+            unblock: self.cfg.wb_smart,
+        };
         let want = {
             let mut nctx = NavCtx {
                 col: world.collision(),
@@ -1114,6 +1160,14 @@ impl Core {
         for n in notes {
             self.log(&format!("goto: {n}"));
             if ddai_clip::store::is_cross_fail_note(&n) {
+                if self.cfg.wb_smart
+                    && let Some(def) = &self.wb.def
+                    && let Some(side) = [ddai_nav::wayblock::WbSide::Left, ddai_nav::wayblock::WbSide::Right]
+                        .into_iter()
+                        .find(|&s| n.starts_with(&def.side(s).crossing.label))
+                {
+                    self.wb.chooser.note_cross_fail(side, tick);
+                }
                 self.cross_fail = Some(n);
             }
         }
@@ -1237,6 +1291,9 @@ impl Core {
     }
 
     fn steer(&mut self, ctx: &HookContext<'_>, target: i32) {
+        if target != -1 {
+            self.target_seen = (target, ctx.tick);
+        }
         if self.ms.is_none() || self.nav.is_some() {
             return;
         }
@@ -1304,7 +1361,9 @@ impl Core {
                 self.log(&format!("nobody to fight: walking home to ({hx},{hy}) -- {reply}"));
             }
             self.idle_since = tick;
-        } else if holding && self.nav.is_none() && tick - self.idle_since > WB_RETURN_TICKS {
+        } else if holding && self.nav.is_none() && tick - self.idle_since > self.wb_return_ticks(ctx) {
+            self.wb_walk_tries += 1;
+            self.fresh_life = false;
             self.walk_to_wb(ctx);
             self.idle_since = tick;
         }
@@ -1343,6 +1402,23 @@ impl Core {
             spot.tees,
             spot.busy
         ));
+    }
+
+    /// How long the tee idles outside the spot before it walks back to it: [`WB_RETURN_TICKS`] (TS). Under `--wb-smart` a tee that is
+    /// not in the hall goes at once (task 3.12b), **for the first walk of a life only** (review F12): it has just respawned, and the spawns
+    /// of Copy Love Box hang over the freeze chamber or stand at the edge of its ledge. A walk that ends without arriving (no route, a
+    /// route that needs a kill under `--no-selfkill`) is not restarted every tick: the second try waits the full second again.
+    fn wb_return_ticks(&self, ctx: &HookContext<'_>) -> i64 {
+        if self.cfg.wb_smart
+            && self.fresh_life
+            && let (Some(def), Some(side)) = (&self.wb.def, self.wb.side())
+        {
+            let (tx, ty) = tile_of(ctx.own.pos);
+            if !def.in_hall(side, tx, ty) {
+                return 0;
+            }
+        }
+        WB_RETURN_TICKS
     }
 
     /// `walkToWb`.
@@ -1490,6 +1566,16 @@ impl Core {
         let (def, side) = (self.wb.def.clone()?, self.wb.side()?);
         let (tx, ty) = tile_of(ctx.own.pos);
         if !def.in_hall(side, tx, ty) {
+            // Task 3.12b (`--wb-smart`): outside the hall with the WB held (just respawned in the top room, the walk not begun) the tee
+            // stands where it is. The free wander walks off the ledge of the tube's start into the freeze chamber (a drop it takes
+            // with probability 0.3): 6 of the 34 failed crossings of the 2026-10-06 session ended that way.
+            if self.cfg.wb_smart && self.wb_holding() {
+                return Some(WanderHint {
+                    anchor_x: ctx.own.pos.x,
+                    look_at: None,
+                    still: true,
+                });
+            }
             return None;
         }
         let spot = self.wb_spot_for(ctx, &def, side, (tx, ty));
@@ -1589,12 +1675,14 @@ impl Navigator for NavHook {
         c.trek = None;
         c.ms = None;
         c.x.reset();
+        c.fresh_life = true;
     }
     fn respawned(&mut self) {
         let mut c = self.0.borrow_mut();
         if let Some(n) = &mut c.nav {
             n.respawned();
         }
+        c.fresh_life = true;
         // A new try: route 2 is said (and the crowd judged) again.
         c.x.route2_crowd = false;
         c.x.route2_said = false;
@@ -1687,6 +1775,9 @@ impl WayBlock for WbHook {
     fn foe_target(&mut self) -> Option<i32> {
         self.0.borrow().x.foe.as_ref().map(|f| f.id)
     }
+    fn afk_in_the_way(&mut self, ctx: &HookContext<'_>, candidate: &Tee, current: bool) -> bool {
+        self.0.borrow().afk_in_the_way(ctx, candidate, current).is_some()
+    }
 }
 
 impl Trek for TrekHook {
@@ -1722,7 +1813,7 @@ pub fn nav_hooks(cfg: NavConfig, handle: NavHandle) -> Hooks {
 mod tests {
     use super::*;
     use crate::activity::ActivityClock;
-    use crate::mapgrid::test_maps::{FREEZE, room};
+    use crate::mapgrid::test_maps::{FREEZE, SOLID, room};
     use crate::players::{PlayerTable, Salt, test_support::player};
     use crate::relations::Relations;
     use crate::tees::TeeSet;
@@ -2417,8 +2508,12 @@ mod tests {
 
     impl CoreFx {
         fn on(map: MapData, name: &str, relations: &Relations) -> CoreFx {
+            Self::with(no_memory(), map, name, relations)
+        }
+
+        fn with(cfg: NavConfig, map: MapData, name: &str, relations: &Relations) -> CoreFx {
             let map = Arc::new(map);
-            let mut core = Core::new(no_memory(), NavHandle::new());
+            let mut core = Core::new(cfg, NavHandle::new());
             core.on_map(
                 &map,
                 &MapIdent {
@@ -2432,6 +2527,9 @@ mod tests {
                 player(0, "bot", "", true, 0, None),
                 player(1, "foe", "", false, 0, None),
                 player(2, "pal", "", false, 0, None),
+                player(3, "p3", "", false, 0, None),
+                player(4, "p4", "", false, 0, None),
+                player(5, "p5", "", false, 0, None),
             ];
             players.update(&views, relations);
             CoreFx {
@@ -2745,6 +2843,451 @@ mod tests {
             him.attack_tick = 0;
             him.angle = ((dy.atan2(dx) + std::f32::consts::TAU) % std::f32::consts::TAU * 256.0) as i32;
             assert!(!f.core.foe_acting(&ctx, &him), "no action in the last 2 s");
+        });
+    }
+    // ---- task 3.12: `--wb-smart` -------------------------------------------------------------------------------------
+
+    fn smart_cfg() -> NavConfig {
+        NavConfig {
+            wb_smart: true,
+            seed: Some(1),
+            ..no_memory()
+        }
+    }
+
+    /// Updates the clock so that the tees in `idle` never change (AFK after 10 s) and the others turn their aim every snapshot.
+    fn age_the_clock(env: &mut CoreEnv, idle: &[i32], from: i32, to: i32) {
+        for t in (from..=to).step_by(2) {
+            for id in 1..6 {
+                if idle.contains(&id) {
+                    continue;
+                }
+                if let Some(mut tee) = env.tees.get(id).copied() {
+                    tee.angle = t * 7;
+                    env.tees.set_for_test(tee);
+                }
+            }
+            env.clock.update(t, &env.tees, &env.players, 0);
+        }
+    }
+
+    /// Task 3.12b: a tee that has just respawned on the ledge of the right tube's start (outside the hall, the WB held, no walk yet)
+    /// stands still and walks at once under `--wb-smart`; the port's rule (free wander, a second of idling first) is the default.
+    #[test]
+    fn outside_the_hall_with_the_wb_held_the_smart_tee_stands_still_and_starts_its_walk_at_once() {
+        on_big_stack(|| {
+            if clb_map().is_none() {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            }
+            let run = |cfg: NavConfig, at: (i32, i32)| {
+                let mut f = CoreFx::with(cfg, clb_map().unwrap(), "Copy Love Box", &Relations::new());
+                f.core.wb.chooser.adopt(ddai_nav::wayblock::WbSide::Right);
+                f.env.tees.set_for_test(tee_at(0, at.0, at.1));
+                let own = *f.env.tees.get(0).unwrap();
+                let world = f.env.pw.inner().clone();
+                let ctx = f.env.ctx(&own, 1000, &world);
+                assert!(f.core.wb_holding(), "the WB is held");
+                (
+                    f.core.wb_wander_hint(&ctx).map(|h| h.still),
+                    f.core.wb_return_ticks(&ctx),
+                )
+            };
+            let ledge = (131, 35);
+            assert_eq!(
+                run(no_memory(), ledge),
+                (None, WB_RETURN_TICKS),
+                "default: the port's rule"
+            );
+            assert_eq!(
+                run(smart_cfg(), ledge),
+                (Some(true), 0),
+                "smart: still, and the walk at once"
+            );
+            // In the hall nothing changes: the guard's own hint and the second of idling.
+            let spot = ddai_nav::wayblock::wayblocks().remove(0).right.spots[0];
+            let (still, wait) = run(smart_cfg(), spot);
+            assert!(still.is_some(), "the hall has its own hint");
+            assert_eq!(wait, WB_RETURN_TICKS);
+        });
+    }
+
+    /// Review F12: the walk to the WB starts at once only on the first try of a life. A walk that ends without arriving (here it is ended
+    /// by hand on every look: no route, or under `--no-selfkill` a route that needs a kill) is tried again after [`WB_RETURN_TICKS`], not
+    /// on every look.
+    #[test]
+    fn the_immediate_walk_is_for_the_first_try_of_a_life_only() {
+        on_big_stack(|| {
+            if clb_map().is_none() {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            }
+            let tries = |cfg: NavConfig, ticks: i32, respawn_at: Option<i32>| {
+                let mut f = CoreFx::with(cfg, clb_map().unwrap(), "Copy Love Box", &Relations::new());
+                f.core.wb.chooser.adopt(ddai_nav::wayblock::WbSide::Right);
+                f.core.no_selfkill = true;
+                f.env.tees.set_for_test(tee_at(0, 131, 35)); // the ledge of the right tube: outside the hall
+                let own = *f.env.tees.get(0).unwrap();
+                let world = f.env.pw.inner().clone();
+                let mut first = None;
+                for tick in (1000..1000 + ticks).step_by(2) {
+                    if respawn_at == Some(tick) {
+                        f.core.fresh_life = true; // `Navigator::respawned`
+                    }
+                    let ctx = f.env.ctx(&own, tick, &world);
+                    f.core.sync(&ctx);
+                    f.core.steer(&ctx, -1);
+                    if f.core.nav.is_some() {
+                        first.get_or_insert(tick);
+                        f.core.end_nav(); // the walk ended without arriving
+                    }
+                }
+                (f.core.wb_walk_tries, first)
+            };
+            let (smart, first) = tries(smart_cfg(), 200, None);
+            assert!(
+                first.is_some_and(|t| t <= 1004),
+                "the first walk of the life starts at once: {first:?}"
+            );
+            assert!(
+                smart <= 4,
+                "then one per second at most: {smart} walks in 200 ticks (it was 100)"
+            );
+            let (_, _) = (smart, first);
+            // A respawn starts a new life: the walk is at once again.
+            let (with_respawn, _) = tries(smart_cfg(), 200, Some(1030));
+            assert!(
+                with_respawn == smart + 1,
+                "one more try after the respawn: {with_respawn} against {smart}"
+            );
+            // Not on: the second of idling first, as before.
+            let (default, first) = tries(no_memory(), 200, None);
+            assert!(
+                default <= 4 && first.is_some_and(|t| t >= 1000 + WB_RETURN_TICKS as i32),
+                "default: {default}, first {first:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn an_idle_tee_is_in_the_way_in_the_held_hall_and_not_in_the_other_one_or_when_the_option_is_off() {
+        on_big_stack(|| {
+            if clb_map().is_none() {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            }
+            let def = ddai_nav::wayblock::wayblocks().remove(0);
+            let spot = def.right.spots[0];
+            // The shelf of the live clips: the left end of the right hall's lower shelf, and the mirrored one on the left.
+            let (shelf_right, shelf_left) = ((134, 84), (234 - 134, 84));
+            let run = |cfg: NavConfig| {
+                let mut f = CoreFx::with(cfg, clb_map().unwrap(), "Copy Love Box", &Relations::new());
+                f.env.tees.set_for_test(tee_at(0, spot.0, spot.1));
+                f.env.tees.set_for_test(tee_at(1, shelf_right.0, shelf_right.1));
+                f.env.tees.set_for_test(tee_at(2, shelf_left.0, shelf_left.1));
+                f.env.tees.set_for_test(tee_at(3, 146, 56)); // in the passage of the right hall, 24 tiles above
+                age_the_clock(&mut f.env, &[1, 2, 3], 0, 600);
+                let own = *f.env.tees.get(0).unwrap();
+                let world = f.env.pw.inner().clone();
+                let ctx = f.env.ctx(&own, 602, &world);
+                f.core.poll(&ctx);
+                assert_eq!(
+                    f.core.wb.side(),
+                    Some(ddai_nav::wayblock::WbSide::Right),
+                    "we stand in the right hall"
+                );
+                for id in [1, 2, 3] {
+                    assert!(ctx.clock.away_in_game(id, 602, ctx.players), "tee {id} is idle");
+                }
+                let way = |id: i32| f.core.afk_in_the_way(&ctx, f.env.tees.get(id).unwrap(), false);
+                (way(1), way(2), way(3))
+            };
+            use super::in_the_way::Way;
+            assert_eq!(
+                run(no_memory()),
+                (None, None, None),
+                "off: nobody idle is in the way (the port's rule)"
+            );
+            assert_eq!(
+                run(smart_cfg()),
+                (Some(Way::Hall), None, None),
+                "on: the idle tee on our hall's lower shelf; not the one in the other hall, not the one far up the passage"
+            );
+        });
+    }
+
+    #[test]
+    fn an_idle_tee_next_to_us_or_on_the_route_of_the_walk_is_in_the_way_one_off_to_the_side_is_not() {
+        on_big_stack(|| {
+            use super::in_the_way::Way;
+            let mut f = CoreFx::with(smart_cfg(), room(60, 12, &[]), "test room", &Relations::new());
+            f.env.tees.set_for_test(tee_at(0, 4, 10));
+            f.env.tees.set_for_test(tee_at(1, 5, 10)); // 32 px: next to us
+            f.env.tees.set_for_test(tee_at(2, 9, 10)); // 5 tiles on, on the line to the goal
+            f.env.tees.set_for_test(tee_at(3, 9, 4)); // 5 tiles on but 6 rows off the line
+            f.env.tees.set_for_test(tee_at(4, 40, 10)); // on the line, 36 tiles away
+            age_the_clock(&mut f.env, &[1, 2, 3, 4], 0, 600);
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 602, &world);
+            f.core.poll(&ctx);
+            let way = |f: &CoreFx, id: i32| f.core.afk_in_the_way(&ctx, f.env.tees.get(id).unwrap(), false);
+            assert_eq!(way(&f, 1), Some(Way::NextTo));
+            assert_eq!(way(&f, 2), None, "no walk yet: nothing is on a route");
+            f.core.handle.goto_tile(50, 10);
+            f.core.poll(&ctx);
+            assert!(f.core.nav.is_some(), "the walk began");
+            assert_eq!(way(&f, 2), Some(Way::Route));
+            assert_eq!(way(&f, 3), None, "off to the side");
+            assert_eq!(way(&f, 4), None, "too far ahead to be in the way now");
+            // A wall across the room: the walk goes around it; the idle tee on the line to the goal is still in the way (the branch with a
+            // route runner's steps is not reached by these room walks: no runner is made, so only the goal line is tested).
+            let wall: Vec<(u32, u32, u8)> = (3..=10u32).map(|y| (20, y, SOLID)).collect();
+            let mut g = CoreFx::with(smart_cfg(), room(60, 12, &wall), "test room", &Relations::new());
+            g.env.tees.set_for_test(tee_at(0, 4, 10));
+            g.env.tees.set_for_test(tee_at(2, 9, 10));
+            g.env.tees.set_for_test(tee_at(3, 9, 4));
+            age_the_clock(&mut g.env, &[2, 3], 0, 600);
+            let own = *g.env.tees.get(0).unwrap();
+            let world = g.env.pw.inner().clone();
+            let ctx = g.env.ctx(&own, 602, &world);
+            g.core.poll(&ctx);
+            g.core.handle.goto_tile(50, 10);
+            g.core.poll(&ctx);
+            for _ in 0..40 {
+                g.core.drive(&ctx);
+            }
+            let way = |id: i32| g.core.afk_in_the_way(&ctx, g.env.tees.get(id).unwrap(), false);
+            assert_eq!(way(2), Some(Way::Route), "on the line to the goal");
+            assert_eq!(way(3), None, "6 rows off it");
+            assert!(
+                !g.core.afk_blocks_the_walk(&ctx),
+                "on the route is not at our feet: the walk is not cut for him"
+            );
+            let off = CoreFx::with(no_memory(), room(60, 12, &[]), "test room", &Relations::new());
+            assert!(!off.core.afk_blocks_the_walk(&ctx), "off: never");
+        });
+    }
+
+    #[test]
+    fn blockable_targets_count_the_active_around_a_hall_and_the_idle_only_inside_it_not_friends_parked_or_spectators() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let def = ddai_nav::wayblock::wayblocks().remove(0);
+            let mut rel = Relations::new();
+            rel.add(crate::relations::ListKind::Friend, "pal");
+            let mut f = CoreFx::with(smart_cfg(), map, "Copy Love Box", &rel);
+            let spawn = ddai_nav::route::spawn_tiles(&f.env.map)[0];
+            f.env
+                .tees
+                .set_for_test(tee_at(0, (spawn.0 / 32.0) as i32, (spawn.1 / 32.0) as i32));
+            // Right hall: an active tee in the zone, an idle one on the lower shelf, a friend (never), a parked frozen one (never).
+            let z = def.right.zone[0];
+            f.env.tees.set_for_test(tee_at(1, z.x0 + 3, z.y0 + 2));
+            f.env.tees.set_for_test(tee_at(2, 134, 84)); // "pal": a friend
+            f.env.tees.set_for_test(tee_at(3, 140, 84)); // idle on the shelf
+            let mut parked = tee_at(4, 142, 84);
+            parked.frozen = true;
+            parked.deep_frozen = true;
+            f.env.tees.set_for_test(parked);
+            // Left hall: an idle tee in the approach (the passage), not in the hall: not counted; an active one there: counted.
+            let a = def.left.approach[0];
+            f.env.tees.set_for_test(tee_at(5, a.x0 + 2, a.y0 + 2));
+            age_the_clock(&mut f.env, &[3, 5], 0, 600);
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 602, &world);
+            assert_eq!(
+                f.core.wb_blockable_counts(&ctx),
+                (0, 2),
+                "right: the active one and the idle one on the shelf"
+            );
+            // The active one in the left approach joins the left.
+            let mut t5 = *f.env.tees.get(5).unwrap();
+            t5.angle = 12345;
+            f.env.tees.set_for_test(t5);
+            f.env.clock.update(604, &f.env.tees, &f.env.players, 0);
+            t5.angle = 54321;
+            f.env.tees.set_for_test(t5);
+            f.env.clock.update(606, &f.env.tees, &f.env.players, 0);
+            let ctx = f.env.ctx(&own, 606, &world);
+            assert_eq!(f.core.wb_blockable_counts(&ctx), (1, 2));
+            // A spectator or a paused player is no target.
+            let views = [
+                player(0, "bot", "", true, 0, None),
+                player(1, "foe", "", false, 0, None),
+                player(2, "pal", "", false, 0, None),
+                player(3, "p3", "", false, 0, Some(-1)),
+                player(4, "p4", "", false, 0, None),
+                player(5, "p5", "", false, 0, None),
+            ];
+            f.env.players.update(&views, &rel);
+            let ctx = f.env.ctx(&own, 606, &world);
+            assert_eq!(
+                f.core.wb_blockable_counts(&ctx),
+                (1, 1),
+                "the spectator on the shelf is out"
+            );
+        });
+    }
+
+    #[test]
+    fn the_smart_side_follows_the_blockable_targets_and_the_default_goes_to_the_emptier_hall() {
+        on_big_stack(|| {
+            if clb_map().is_none() {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            }
+            let def = ddai_nav::wayblock::wayblocks().remove(0);
+            let side_of = |cfg: NavConfig| {
+                let mut f = CoreFx::with(cfg, clb_map().unwrap(), "Copy Love Box", &Relations::new());
+                let spawn = ddai_nav::route::spawn_tiles(&f.env.map)[0];
+                f.env
+                    .tees
+                    .set_for_test(tee_at(0, (spawn.0 / 32.0) as i32, (spawn.1 / 32.0) as i32));
+                // Three players on the left, one on the right, all playing.
+                let l = def.left.zone[0];
+                let r = def.right.zone[0];
+                f.env.tees.set_for_test(tee_at(1, l.x0 + 3, l.y0 + 2));
+                f.env.tees.set_for_test(tee_at(2, l.x0 + 5, l.y0 + 2));
+                f.env.tees.set_for_test(tee_at(3, l.x0 + 7, l.y0 + 2));
+                f.env.tees.set_for_test(tee_at(4, r.x0 + 3, r.y0 + 2));
+                age_the_clock(&mut f.env, &[], 0, 100);
+                let own = *f.env.tees.get(0).unwrap();
+                let world = f.env.pw.inner().clone();
+                let ctx = f.env.ctx(&own, 102, &world);
+                f.core.poll(&ctx);
+                f.core.wb.side().expect("a side")
+            };
+            use ddai_nav::wayblock::WbSide;
+            assert_eq!(side_of(no_memory()), WbSide::Right, "the port's rule: the emptier hall");
+            assert_eq!(
+                side_of(smart_cfg()),
+                WbSide::Left,
+                "--wb-smart: the hall with more targets"
+            );
+        });
+    }
+
+    #[test]
+    fn a_cross_fail_note_names_the_tube_of_its_side() {
+        let def = ddai_nav::wayblock::wayblocks().remove(0);
+        let n = "the right freeze tube: lies frozen at (159,102); trying again from the spawn";
+        assert!(n.starts_with(&def.right.crossing.label) && !n.starts_with(&def.left.crossing.label));
+        let n = "the left freeze tube: no swing through from where it got to; trying again from the spawn";
+        assert!(n.starts_with(&def.left.crossing.label) && !n.starts_with(&def.right.crossing.label));
+    }
+    #[test]
+    fn a_walk_is_cut_only_for_an_idle_tee_at_our_feet_and_he_stays_the_target_after_the_cut() {
+        use super::in_the_way::{AFK_KEEP_PX, AFK_NEXT_TO_PX, Way};
+        on_big_stack(|| {
+            let mut f = CoreFx::with(smart_cfg(), room(60, 12, &[]), "test room", &Relations::new());
+            f.env.tees.set_for_test(tee_at(0, 4, 10));
+            f.env.tees.set_for_test(tee_at(2, 9, 10)); // idle, on the route, 5 tiles on
+            age_the_clock(&mut f.env, &[2], 0, 600);
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 602, &world);
+            f.core.poll(&ctx);
+            f.core.handle.goto_tile(50, 10);
+            f.core.poll(&ctx);
+            assert_eq!(
+                f.core.afk_in_the_way(&ctx, f.env.tees.get(2).unwrap(), false),
+                Some(Way::Route)
+            );
+            assert!(
+                !f.core.afk_blocks_the_walk(&ctx),
+                "on the route is not at our feet: the walk goes on"
+            );
+            // He steps up to us: the walk is cut for him, and once it is gone he is still in the way (he is next to us).
+            f.env.tees.set_for_test(tee_at(2, 5, 10));
+            age_the_clock(&mut f.env, &[2], 604, 1300);
+            let ctx = f.env.ctx(&own, 1302, &world);
+            assert!(f.core.afk_blocks_the_walk(&ctx));
+            f.core.nav = None;
+            assert_eq!(
+                f.core.afk_in_the_way(&ctx, f.env.tees.get(2).unwrap(), false),
+                Some(Way::NextTo),
+                "no walk, no route, still in the way: no cut-and-retry loop"
+            );
+            // Hysteresis: 80 px away he is not in the way, unless he is our target now; 100 px: neither.
+            const { assert!(80.0 > AFK_NEXT_TO_PX && 80.0 < AFK_KEEP_PX) };
+            let mut far = tee_at(2, 4, 10);
+            far.pos.x += 80.0;
+            f.env.tees.set_for_test(far);
+            let ctx = f.env.ctx(&own, 1302, &world);
+            assert_eq!(f.core.afk_in_the_way(&ctx, f.env.tees.get(2).unwrap(), false), None);
+            assert_eq!(
+                f.core.afk_in_the_way(&ctx, f.env.tees.get(2).unwrap(), true),
+                Some(Way::NextTo)
+            );
+            far.pos.x += 20.0;
+            f.env.tees.set_for_test(far);
+            let ctx = f.env.ctx(&own, 1302, &world);
+            assert_eq!(f.core.afk_in_the_way(&ctx, f.env.tees.get(2).unwrap(), true), None);
+        });
+    }
+
+    #[test]
+    fn a_fight_where_we_stand_is_a_hook_either_way_our_target_close_by_or_somebody_who_attacked_us() {
+        on_big_stack(|| {
+            let mut rel = Relations::new();
+            rel.add(crate::relations::ListKind::Friend, "pal");
+            let mut f = CoreFx::with(smart_cfg(), room(60, 12, &[]), "test room", &rel);
+            f.env.tees.set_for_test(tee_at(0, 4, 10));
+            f.env.tees.set_for_test(tee_at(2, 6, 10)); // the friend, close
+            f.env.tees.set_for_test(tee_at(3, 7, 10)); // idle, close
+            age_the_clock(&mut f.env, &[3], 0, 600);
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 602, &world);
+            assert!(!f.core.fighting_here(&ctx), "a friend and a sleeper are no fight");
+            // Review F8: a free awake foe that merely stands within 420 px is no fight (it used to hold a switch for good).
+            let mut foe = tee_at(1, 8, 10);
+            foe.angle = 99;
+            f.env.tees.set_for_test(foe);
+            let ctx = f.env.ctx(&own, 602, &world);
+            assert!(
+                !f.core.fighting_here(&ctx),
+                "an awake foe standing near is not an engagement"
+            );
+            // He is the player we are fighting now (the steering saw him as the target), within four tiles ...
+            f.core.target_seen = (1, 600);
+            let ctx = f.env.ctx(&own, 602, &world);
+            assert!(f.core.fighting_here(&ctx), "our target within four tiles");
+            // ... but not when he is farther, or when the target is old news.
+            f.env.tees.set_for_test(tee_at(1, 12, 10)); // 8 tiles
+            let ctx = f.env.ctx(&own, 602, &world);
+            assert!(!f.core.fighting_here(&ctx), "our target 8 tiles away");
+            f.env.tees.set_for_test(tee_at(1, 8, 10));
+            let ctx = f.env.ctx(&own, 700, &world);
+            assert!(!f.core.fighting_here(&ctx), "a target the steering saw 100 ticks ago");
+            f.core.target_seen = (-1, i32::MIN / 2);
+            // He hooks us from afar.
+            let mut far = tee_at(1, 40, 10);
+            far.hooked_player = 0;
+            f.env.tees.set_for_test(far);
+            let ctx = f.env.ctx(&own, 602, &world);
+            assert!(f.core.fighting_here(&ctx), "he hooks us from afar");
+            // Somebody swung at us a moment ago and is gone.
+            let mut f2 = CoreFx::with(smart_cfg(), room(60, 12, &[]), "test room", &Relations::new());
+            f2.env.tees.set_for_test(tee_at(0, 4, 10));
+            f2.env.tees.set_for_test(tee_at(1, 6, 10));
+            f2.env.clock.update(600, &f2.env.tees, &f2.env.players, 0);
+            let mut swinger = tee_at(1, 6, 10);
+            swinger.attack_tick = 601;
+            f2.env.tees.set_for_test(swinger);
+            f2.env.clock.update(602, &f2.env.tees, &f2.env.players, 0);
+            f2.env.tees.set_for_test(tee_at(1, 30, 10));
+            let own = *f2.env.tees.get(0).unwrap();
+            let world = f2.env.pw.inner().clone();
+            let ctx = f2.env.ctx(&own, 610, &world);
+            assert!(f2.core.fighting_here(&ctx), "he swung at us 8 ticks ago");
+            let ctx = f2.env.ctx(&own, 610 + AGGRESSOR_MEMORY_TICKS, &world);
+            assert!(!f2.core.fighting_here(&ctx), "and not 150 ticks later");
         });
     }
 }

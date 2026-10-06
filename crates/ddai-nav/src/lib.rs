@@ -6,6 +6,7 @@
 //! `ts-parity`) it is proven decision-for-decision against the real TS sources; on
 //! `ddai_physics::World<f32>` it plays live.
 
+pub mod crossbench;
 pub mod crossing;
 pub mod follow;
 pub mod grid;
