@@ -91,6 +91,9 @@ browser with software WebGL at once, so under that load the wall-clock p99 goes 
 - Navigation and the **wayblock** on Copy Love Box (the hall is found from the map's tiles), freeze memory keyed by the map's hash.
 - Clips of the last 30 seconds and a bit-exact offline replay that names the first divergence (`ddnet-ai clip`).
 - A 5 ms decision ceiling (D-042); the search can use several threads (`--search-threads`).
+- **Finishing a block** (`--finish off|target|full`, D-097): with `target` the bot keeps a frozen victim as its target until the block is
+  held, the victim is sealed or dead; a tee attacking the bot itself outranks the victim. Off by default, switched on from the site.
+- Server pause: on `/spec` or `/pause` the bot stands still (no input, no `/kill`) and resumes after the repeated command.
 
 **Brains** (`--brain`)
 - `hybrid`: the live one. The fly proposes, exact search verifies, the "mirror" opponent model (`--hybrid-mirror on|off`).
@@ -98,15 +101,20 @@ browser with software WebGL at once, so under that load the wall-clock p99 goes 
   `random-scripted`: auxiliary.
 
 **The site** (`ddnet-ai web`)
-- Tabs Status, Game, Bot, Fly, Training; dark theme, phone and desktop.
-- Starting and stopping the bot from the site (local server, sparring 0–3) while the site itself gets no privileges (D-089).
-- Owner chat: a line typed on the site goes into the game chat (D-094); nothing automatic.
+- Tabs Status, Game, Bot, Fly, Training, Servers; dark theme, phone and desktop.
+- Starting and stopping the bot from the site: the local server (sparring 0–3) or a favourite server, the brain, the duration, finishing.
+  The site itself gets no privileges: a separate root helper validates everything (D-089).
+- **Server browser** (D-099): the DDNet master list with search and filters, favourites, the owner's own proxies (write-only password),
+  and "direct / via proxy" per server.
+- Owner chat: a line typed on the site goes into the game chat, "/" commands included (D-094); nothing automatic.
 
 **Measurement and training**
 - **The arena** (`ddnet-ai arena`): offline N-player matches on the same physics, Wilson confidence intervals, paired seeds, the "credited wins"
-  criterion (a win by the player's own block, D-059).
+  criterion (a win by the player's own block, D-059) and the **held block**: play goes on for 250 ticks after the freeze, and a block counts
+  only if the victim did not get away (D-097).
 - **Training** (`ddnet-ai train`): behaviour cloning and DAgger for the fly and for MLP/GRU controls with the same parameter count;
-  a hand-written backward pass, deterministic results at any thread count.
+  a hand-written backward pass, deterministic results at any thread count. A bank of "the opponent was just frozen" starts, a held-block
+  reward and evolution strategies (`train es`, D-098).
 - **Human data**: a DDNet demo reader (`ddnet-ai demo`), an observer recorder (`ddnet-ai record`), a dataset tool (`ddnet-ai dataset`).
 
 ## How it works
@@ -187,6 +195,10 @@ with an extension to 15 ms when danger is confirmed); without the fly (`--brain 
 opponent's reply: "it holds its input" is wrong. Now a small search from the victim's seat (12 samples) predicts its next inputs and puts them into the
 rollouts. The "duel only" rule turns the model off when another opponent is nearby, and "passive victim" turns it off when the opponent stands still.
 
+**The held block (D-097, E-021).** A freeze is not yet a block: DDNet unfreezes after 3 s unless the victim lies on a freeze tile. The live
+sessions showed the bot switching to another target within a second in 63% of its blocks. The arena now measures holding (250 ticks after the
+freeze), and the target rule `--finish target` keeps a frozen victim until the block is held.
+
 **Parity with the old TypeScript.** The Rust ports of the world, the planner and the navigation make the same decisions as Wranked1's original: the reference dumps
 are made by the `tools/ts-trace` generators over the frozen sources in [`tools/ts-reference`](tools/ts-reference/README.md). This is what lets us compare "new" with "old" honestly.
 
@@ -208,6 +220,10 @@ Wilson interval is in brackets.
 | Regressions: scripted and standing opponents (1,200 games); crowds and 1vN (800 games) | 95.0% → 95.7% (p = 0.29); 94.0% → 94.2% (p = 0.77) | E-017, §4 |
 | Search work per decision, p99 (tee-ticks × 1.25 µs): 2 tees with the opponent model | 4.01 ms; 4.30 ms with the cost of the S fly; 4.91 ms with 4 tees (no model in a crowd) | E-017, §5 |
 | Wayblock: a 468×255 copy of the Copy Love Box map on a private server (before the port the bot never entered the hall) | in the hall for 230 of 230 snapshots after entering | E-018, §2 |
+| The hybrid against the competitor's planner `af49dfb` (v2), 1,200 games | 56.6% of decided games (p = 10⁻⁵); credited 53.5% [50.7; 56.3] | [E-020](docs/EXPERIMENTS.md), §4 |
+| Against its "strong" 40×3 search (`v2-strong`), 1,650 games | 54.0% of decided [51.6; 56.5] (p = 0.0016); credited 51.2% [48.7; 53.6]: significant on decided games, not by the D-059 bar | E-020, §5 |
+| Against its real live configuration (`v2live`): three samples (1,200, 1,200 and 330 games) | 56.1% / 53.3% / 49.0% of decided; credited 51.2% / 49.0% / 45.8%: by the D-059 bar we **do not win** | E-019, E-020 §5 |
+| Held block in crowds (clb-left 1v3 / 1v5 / 8 players, 600 games): the target rule `hold_target` | held 259 → **342** (p < 10⁻⁴), credited first freezes 580 → 579 | [E-021](docs/EXPERIMENTS.md) |
 
 | Parity and accuracy | Result | Where |
 |---|---|---|
@@ -226,6 +242,10 @@ Wilson interval is in brackets.
   planner in the table comes from the opponent model, not from the fly.
 - The 5 ms p99 budget is measured on the work clock (tee-ticks), not on the wall clock of a quiet machine; the live bot's wall-clock p99 is not confirmed (3.7a, PARTIAL).
 - The opponent model was tested against the planner and the scripted bot, not against humans.
+- Against the competitor's real live configuration (`v2live`) we do not win on credited wins; a clear edge exists only over its plain configuration.
+- Finishing (`--finish target`) is measured in the arena; its effect against people is not measured.
+- After freezing an opponent the fly holds the block poorly: on starts where the victim can get away, 0–3% against the planner's 84%; the ES pilot
+  brought no gain (E-022). Reinforcement learning (PPO) is in progress.
 
 ## Quick start
 
@@ -331,15 +351,18 @@ These rules are written down as decisions ([docs/DECISIONS.md](docs/DECISIONS.md
   protocol's own `Cl_ShowDistance` message. There are exactly two exceptions, both decided by the owner:
   - the fallback `/kill` (D-078) is the only text the bot may send on its own (a type with a single value, a byte-exact allow-list,
     only when the server silently dropped our `Cl_Kill`, at most once per 10 s);
-  - a line the owner typed on the authenticated site (D-094): the right to speak is a capability handed out once per process, plus a census test of call sites;
-    at most one line per 3 s and ten per minute, a queue of at most three; the switch `--no-owner-chat`.
+  - a line the owner typed on the authenticated site, "/" commands included (D-094): the right to speak is a capability handed out once per process, plus a
+    census test of call sites; at most one line per 3 s and ten per minute, a queue of at most three; DDNet's anti-bot trap line is refused; the switch
+    `--no-owner-chat`.
 - **We do not evade kicks or bans** (D-016). If kicked or banned the bot stops (exit code 3, the unit is not restarted), the case is written down and the owner decides.
-  No changing of nicknames or addresses, no VPN or proxy to get around it.
+  The server (and every port on its IP) stays closed until the owner presses «Открыть снова» himself (D-099). No changing of nicknames or addresses,
+  no VPN or proxy to get around it.
 - **One bot per server**, at most 5 connections per 20 s to one server, at most two join attempts before entering the game (D-037, D-050, D-058).
-- **A server allow-list.** Before every connection the client checks the address: apart from the local one, a connection is possible only to an entry of
-  `live-servers.toml` with `ready = true`; `--server auto` never picks a public server. By default the bot unit lets no traffic out beyond loopback at all.
-- **Proxies only when the server's admin sanctions them.** SOCKS5 with UDP (D-088) is bound to a server's allow-list entry and is never a way around a
-  ban (D-053). Game packets go only to the proxy's own address.
+- **The owner chooses the servers.** Before every connection the client checks the address: apart from the local one, a connection is possible only to a
+  server in the owner's favourites (marked as "the admin allows the bot") or to an entry of `live-servers.toml` with `ready = true` (D-099); `--server auto`
+  never picks a public server. By default the bot unit lets no traffic out beyond loopback at all.
+- **Only the owner's own proxies, assigned by him to a specific server.** SOCKS5 with UDP (D-088) is never a way around a ban: after a ban the server is
+  closed, and the bot cannot switch proxies by itself (D-053, D-099). Game packets go only to the proxy's address.
 - **Privacy.** Other players are called salted tags in logs and reports; real nicknames appear only on the password-protected site (`--web-names`),
   in memory. The repository contains no other people's nicknames, demos, maps or weights.
 - **The site.** Loopback only plus Caddy, argon2id password, server-side sessions, CSRF and Origin checks, login rate limits. Starting the bot is validated by a separate
