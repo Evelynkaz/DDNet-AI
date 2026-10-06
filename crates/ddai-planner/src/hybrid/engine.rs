@@ -181,9 +181,15 @@ pub struct EvalResult {
 pub struct EvalOut {
     pub res: Option<EvalResult>,
     pub ticks: u32,
+    /// Task 3.9: extra work the tick counter does not see, in tee-ticks (the v2 hook gate's projections of a moving victim, one each).
+    pub units: u32,
 }
 
-const NO_OUT: EvalOut = EvalOut { res: None, ticks: 0 };
+const NO_OUT: EvalOut = EvalOut {
+    res: None,
+    ticks: 0,
+    units: 0,
+};
 
 /// A private planner + world pair that scores candidates.
 pub struct Worker {
@@ -230,6 +236,8 @@ impl Worker {
             m.new_epoch();
         }
         self.world.restore_state(&ctx.saved);
+        // Task 3.9: `rope_ceiling_cost` needs the map's ceiling field (cached by the map; nothing when the cost is off).
+        self.planner.prepare_ceiling(self.world.collision());
         match &mut self.planner.saved {
             Some(s) => s.assign_from(&ctx.saved),
             None => self.planner.saved = Some((*ctx.saved).clone()),
@@ -333,6 +341,7 @@ impl Worker {
             t.react_mask = combo >> 1;
         }
         let before = self.planner.eval_ticks;
+        let projections = self.planner.intercept_count();
         let res = self.planner.evaluate_impl(
             &mut self.world,
             self.self_id,
@@ -346,6 +355,7 @@ impl Worker {
         );
         self.planner.react_this_pass = false;
         let ticks = (self.planner.eval_ticks - before) as u32;
+        let units = (self.planner.intercept_count() - projections) as u32;
         EvalOut {
             res: res.map(|score| EvalResult {
                 score,
@@ -354,6 +364,7 @@ impl Worker {
                 enemy_sealed: self.planner.rollout_enemy_sealed,
             }),
             ticks,
+            units,
         }
     }
 }
@@ -803,6 +814,7 @@ impl Engine {
             };
             if let Some(m) = &self.meter {
                 m.add(u64::from(o.ticks));
+                m.add_units(u64::from(o.units));
             }
             out.push(o);
         }
@@ -1181,6 +1193,7 @@ mod pool_tests {
                 enemy_sealed: false,
             }),
             ticks: 9,
+            units: 0,
         };
         shared.complete(old, held.idx, bogus);
         {

@@ -1,0 +1,84 @@
+# work-clock: default-rate
+# Task 3.9 (D-096, E-020): SCREENING, round 2 -- the same games as `e020-screen.toml` (seeds 5001..5200 per hall, vs `normal-v2`), so the arm "main" of round 1
+# is the baseline. Round 1 showed that the `polish` arm was identical to main (the first version polished only while stage 1 had time left, which a deadline
+# search never does; fixed since), so `polish` runs again; the others are combinations of the switches that moved in the right direction
+# (mirror on v2, rope ceiling), the mirror on the competitor's live planner, and everything on.
+#   ddnet-ai arena run --config configs/arena/e020-screen2.toml --out ~/aiddnet/data/runs/E-020/screen2 --threads 3
+name = "E-020: screening round 2 of the v2 switches in the hybrid vs v2, seeds 5001.."
+base_seed = 5001
+games = 200
+
+[[condition]]
+name = "clb-left: polish vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: polish vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: polish vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: mirrorlive vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "live-v2" } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: mirrorlive vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "live-v2" } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: mirrorlive vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "live-v2" } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: mirror+ceiling vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: mirror+ceiling vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: mirror+ceiling vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: mirror+ceiling+polish vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0, polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: mirror+ceiling+polish vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0, polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: mirror+ceiling+polish vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0, polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: all vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { v2 = true, polish = true, wall_throws = true, mirror_preset = "normal-v2", launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: all vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { v2 = true, polish = true, wall_throws = true, mirror_preset = "normal-v2", launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: all vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { v2 = true, polish = true, wall_throws = true, mirror_preset = "normal-v2", launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]

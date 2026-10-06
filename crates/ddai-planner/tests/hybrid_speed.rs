@@ -236,8 +236,9 @@ fn run_scenes(
                     let t = hybrid.last_decision().expect("telemetry");
                     row.wall.push(wall);
                     row.ticks.push(t.work.total_ticks() as f64);
+                    // `units`: the v2 gate's projections, priced in tee-ticks (task 3.9; zero with the switches off).
                     row.tee_ticks
-                        .push((t.work.total_ticks() * u64::from(t.sim_tees.max(1))) as f64);
+                        .push((t.work.total_ticks() * u64::from(t.sim_tees.max(1)) + t.work.units) as f64);
                     row.cands.push(f64::from(t.evaluated.iter().sum::<u32>()));
                     row.fly_ms.push(t.proposal_ms);
                     row.search_ms.push(t.search_ms);
@@ -725,5 +726,118 @@ fn finish_work_report() {
     assert!(
         worst <= 5.0,
         "work p99 at 2 tees in the finishing phase is {worst:.2} ms, above the 5 ms of D-042"
+    );
+}
+
+/// Task 3.9 (D-096, D-042): what the competitor's v2 switches inside the hybrid cost. Per variant, at 2 tees with the opponent
+/// model on: the work (tee-ticks x 1.25 us, as D-042 counts it) p50 / p90 / p99 with no proposer and with a proposer the cost of the S fly
+/// (500 tee-ticks) inside the cap, and the wall microseconds per tee-tick (the best of `DDAI_V2_REPS` runs of the same decisions): a
+/// variant whose price per tee-tick is above the baseline's does work the tick counter does not see. The bound is D-042's: p99 of
+/// work <= 5 ms at 2 tees for every variant, the fly's cost priced in. The default sample is 2 400 decisions per variant
+/// (`DDAI_SPEED_DECISIONS`): the p99 of a small sample is noisy (800 decisions put `mirror on v2` with the fly at 5.35 ms, 2 400 at 4.37).
+///
+/// ```text
+/// cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture v2_work_report
+/// ```
+#[test]
+#[ignore = "heavy; needs the Copy Love Box map"]
+fn v2_work_report() {
+    use ddai_planner::config::{PlannerVersion, preset_live_v2, preset_normal_v2};
+    let Some(map) = clb() else {
+        eprintln!("no Copy Love Box map; skipping");
+        return;
+    };
+    let n: usize = std::env::var("DDAI_SPEED_DECISIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2400);
+    let reps: usize = std::env::var("DDAI_V2_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    type Tweak = fn(&mut HybridConfig);
+    let variants: [(&str, Tweak); 9] = [
+        ("main (all off)", |_| ()),
+        ("hook gate + aim snap", |c| {
+            c.planner.hook_exact_gate = true;
+            c.planner.hook_snap_aim = true;
+        }),
+        ("rope ceiling", |c| c.planner.rope_ceiling_cost = 1.0),
+        ("polish (+ keep flying)", |c| {
+            c.polish = true;
+            c.planner.hook_keep_flying = true;
+        }),
+        ("wall throws + air chains", |c| {
+            c.wall_throws = true;
+            c.planner.air_chain = true;
+        }),
+        ("mirror on v2", |c| c.mirror_planner = Some(preset_normal_v2())),
+        ("live scoring values", |c| {
+            c.planner.launch_exposure = preset_live_v2().launch_exposure;
+            c.planner.jumpless_hazard_cost = preset_live_v2().jumpless_hazard_cost;
+        }),
+        ("v2 planner switches (4)", |c| {
+            c.planner = c.planner.with_version(PlannerVersion::Upstream20261002);
+        }),
+        ("all", |c| {
+            c.planner = c.planner.with_version(PlannerVersion::Upstream20261002);
+            c.planner.air_chain = true;
+            c.polish = true;
+            c.wall_throws = true;
+            c.mirror_planner = Some(preset_normal_v2());
+            c.planner.launch_exposure = preset_live_v2().launch_exposure;
+            c.planner.jumpless_hazard_cost = preset_live_v2().jumpless_hazard_cost;
+        }),
+    ];
+    println!(
+        "\n| variant | proposer | work ms p50 / p90 / p99 / max | decisions over 5 ms | wall us per tee-tick (best of {reps}) | candidates p50 |\n|---|---|---|---|---|---|"
+    );
+    let mut worst = 0.0f64;
+    // `DDAI_V2_VARIANTS=<substring>` runs only the variants whose name contains it.
+    let only = std::env::var("DDAI_V2_VARIANTS").unwrap_or_default();
+    for (name, tweak) in variants {
+        if !name.contains(&only) {
+            continue;
+        }
+        for (pname, units) in [("none", 0u64), ("fly-cost 500", 500)] {
+            let mut cfg = deadline(4.0, 1, true, if units > 0 { 3 } else { 0 });
+            cfg.work_clock_us_per_tick = Some(WORK_US_PER_TEE_TICK);
+            cfg.mirror = true;
+            tweak(&mut cfg);
+            let (mut best_us, mut keep) = (f64::INFINITY, None);
+            for _ in 0..reps {
+                let proposer: Box<dyn Proposer> = if units > 0 {
+                    Box::new(Costly { units })
+                } else {
+                    Box::new(NoProposer)
+                };
+                let r = run(&map, &cfg, proposer, 2, n);
+                let us = r.wall.iter().sum::<f64>() * 1000.0 / r.tee_ticks.iter().sum::<f64>().max(1.0);
+                if us < best_us {
+                    best_us = us;
+                }
+                keep = Some(r);
+            }
+            let mut r = keep.expect("a run");
+            let extra = units as f64;
+            let mut w: Vec<f64> = r.tee_ticks.iter().map(|t| t + extra).collect();
+            let ms = |v: &mut Vec<f64>, p: f64| pct(v, p) * WORK_US_PER_TEE_TICK / 1000.0;
+            let p99 = ms(&mut w, 99.0);
+            worst = worst.max(p99);
+            let over =
+                100.0 * w.iter().filter(|&&t| t * WORK_US_PER_TEE_TICK / 1000.0 > 5.0).count() as f64 / w.len() as f64;
+            println!(
+                "| {name} | {pname} | {:.2} / {:.2} / {:.2} / {:.2} | {over:.2}% | {best_us:.3} | {:.0} |",
+                ms(&mut w, 50.0),
+                ms(&mut w, 90.0),
+                p99,
+                ms(&mut w, 100.0),
+                pct(&mut r.cands, 50.0)
+            );
+        }
+    }
+    assert!(
+        worst <= 5.0,
+        "work p99 at 2 tees is {worst:.2} ms for some variant, above the 5 ms of D-042"
     );
 }

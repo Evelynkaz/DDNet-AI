@@ -1,0 +1,36 @@
+# work-clock: default-rate
+# Task 3.9 (D-096, E-020): determinism with EVERY v2 switch on -- the same games with one search thread and with four (`e020-golden-v2.toml` and
+# `e020-golden-v2-workers.toml` differ only in `workers`): per-game decision hashes, end ticks and work counters must be equal (D-042, work clock).
+#   ddnet-ai arena run --config configs/arena/e020-golden-v2.toml --out <dir-1> --threads 2
+#   ddnet-ai arena run --config configs/arena/e020-golden-v2-workers.toml --out <dir-4> --threads 2
+#   python3 docs/research/e020/same_games.py <dir-1> <dir-4>
+name = "E-020 golden v2"  # same name on purpose: the summary files compare line by line
+base_seed = 7001
+games = 6
+
+[[condition]]
+name = "clb-left: hybrid all v2 switches vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { v2 = true, polish = true, wall_throws = true, air_chain = true, mirror_preset = "normal-v2", launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: hybrid all v2 switches vs v2live"
+arena = "clb-right"
+games = 4
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { v2 = true, polish = true, wall_throws = true, air_chain = true, mirror_preset = "normal-v2", launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "chillblock5-ruler: hybrid all v2 switches vs v2-strong"
+arena = "chillblock5-ruler"
+games = 4
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { v2 = true, polish = true, wall_throws = true, air_chain = true, mirror_preset = "normal-v2", launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "v2-strong" }]
+
+[[condition]]
+name = "clb-left: hybrid all v2 switches vs scripted"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { v2 = true, polish = true, wall_throws = true, air_chain = true, mirror_preset = "normal-v2", launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "scripted" }]
+
+[[condition]]
+name = "1v3 hybrid all v2 switches"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { v2 = true, polish = true, wall_throws = true, air_chain = true, mirror_preset = "normal-v2", launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "scripted", count = 3 }]

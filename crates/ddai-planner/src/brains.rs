@@ -283,6 +283,20 @@ pub enum PlannerPreset {
     Strong,
     NormalV2,
     LiveV2,
+    /// Task 3.9: the competitor's strong mode on its current planner, applied everywhere (the competitor applies `!strong on` on the
+    /// wayblock only): `NormalV2` with `STRONG_WB`'s search of `population 40`, `iterations 3` (three times the default 20 x 2).
+    V2Strong,
+    /// Task 3.9: `V2Strong` as the competitor really plays it in a wayblock hall -- on top of `WB_PLAN_OVERRIDES` of af49dfb
+    /// ([`preset_strong_wb_v2`]).
+    V2StrongWb,
+    /// Task 3.9 (review F3, F6): a **hypothetical upper bound**, not a version the competitor plays: its `LIVE_PLANNER_CFG`
+    /// (`launchExposure 1.5`, `jumplessHazardCost 0.4`, [`PlannerPreset::LiveV2`]) with `STRONG_WB`'s 40 x 3 search everywhere and no
+    /// wall-clock budget. In af49dfb `STRONG_WB` applies only inside a held wayblock hall, on top of `WB_PLAN_OVERRIDES` (which resets both
+    /// weights to 1.0 / 0.15); outside it the competitor plays `LiveV2` (20 x 2).
+    LiveV2Strong,
+    /// Task 3.9 (review F5): [`PlannerPreset::Strong`] (`STRONG_WB` over `WB_PLAN_OVERRIDES` of c3c619d) without its 30 / 36 ms wall-clock
+    /// budget, for the arena: fixed iterations, reproducible. (`Strong` itself depends on the machine's load there.)
+    StrongFixed,
 }
 
 impl PlannerPreset {
@@ -293,6 +307,32 @@ impl PlannerPreset {
             PlannerPreset::Strong => preset_strong_wb(preset_normal()),
             PlannerPreset::NormalV2 => preset_normal_v2(),
             PlannerPreset::LiveV2 => preset_live_v2(),
+            // `STRONG_WB`'s search size without its wall-clock budget (30 / 36 ms): the arena plays fixed iterations, a pure function of
+            // the state (a deadline would make the opponent weaker on a loaded machine and the games irreproducible, task 3.9).
+            PlannerPreset::V2Strong => PlannerConfig {
+                population: 40,
+                iterations: 3,
+                budget_ms: 0.0,
+                hard_ms: 0.0,
+                ..preset_normal_v2()
+            },
+            PlannerPreset::LiveV2Strong => PlannerConfig {
+                population: 40,
+                iterations: 3,
+                budget_ms: 0.0,
+                hard_ms: 0.0,
+                ..preset_live_v2()
+            },
+            PlannerPreset::StrongFixed => PlannerConfig {
+                budget_ms: 0.0,
+                hard_ms: 0.0,
+                ..preset_strong_wb(preset_normal())
+            },
+            PlannerPreset::V2StrongWb => PlannerConfig {
+                budget_ms: 0.0,
+                hard_ms: 0.0,
+                ..preset_strong_wb_v2(preset_normal_v2())
+            },
         }
     }
 
@@ -303,18 +343,26 @@ impl PlannerPreset {
             PlannerPreset::Strong => "strong",
             PlannerPreset::NormalV2 => "normal-v2",
             PlannerPreset::LiveV2 => "live-v2",
+            PlannerPreset::V2Strong => "v2-strong",
+            PlannerPreset::V2StrongWb => "v2-strong-wb",
+            PlannerPreset::LiveV2Strong => "live-v2-strong",
+            PlannerPreset::StrongFixed => "strong-fixed",
         }
     }
 
     /// The planner version this preset reproduces.
     pub fn version(self) -> PlannerVersion {
         match self {
-            PlannerPreset::NormalV2 | PlannerPreset::LiveV2 => PlannerVersion::Upstream20261002,
+            PlannerPreset::NormalV2
+            | PlannerPreset::LiveV2
+            | PlannerPreset::V2Strong
+            | PlannerPreset::V2StrongWb
+            | PlannerPreset::LiveV2Strong => PlannerVersion::Upstream20261002,
             _ => PlannerVersion::Classic,
         }
     }
 
-    /// Parses a preset name (`normal`, `low`, `strong`, `normal-v2`, `live-v2`).
+    /// Parses a preset name (`normal`, `low`, `strong`, `normal-v2`, `live-v2`, `v2-strong`, `v2-strong-wb`, `live-v2-strong`, `strong-fixed`).
     pub fn parse(name: &str) -> Option<PlannerPreset> {
         Some(match name {
             "normal" => PlannerPreset::Normal,
@@ -322,6 +370,10 @@ impl PlannerPreset {
             "strong" => PlannerPreset::Strong,
             "normal-v2" => PlannerPreset::NormalV2,
             "live-v2" => PlannerPreset::LiveV2,
+            "v2-strong" => PlannerPreset::V2Strong,
+            "v2-strong-wb" => PlannerPreset::V2StrongWb,
+            "live-v2-strong" => PlannerPreset::LiveV2Strong,
+            "strong-fixed" => PlannerPreset::StrongFixed,
             _ => return None,
         })
     }

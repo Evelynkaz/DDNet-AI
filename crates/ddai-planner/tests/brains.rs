@@ -365,6 +365,56 @@ fn v2_presets_select_the_af49dfb_planner() {
     );
 }
 
+/// Task 3.9: the competitor's strong mode as an arena opponent is `normal-v2` with the 40 x 3 search of `STRONG_WB` and **no wall-clock
+/// budget** (a deadline would make a fixed-iteration game depend on the machine's load).
+#[test]
+fn the_v2_strong_presets_are_a_bigger_search_without_a_deadline() {
+    use ddai_planner::config::PlannerVersion;
+    let base = PlannerPreset::NormalV2.config();
+    for (name, preset) in [
+        ("v2-strong", PlannerPreset::V2Strong),
+        ("v2-strong-wb", PlannerPreset::V2StrongWb),
+    ] {
+        assert_eq!(PlannerPreset::parse(name), Some(preset));
+        assert_eq!(preset.label(), name);
+        let c = preset.config();
+        assert_eq!(c.version(), PlannerVersion::Upstream20261002);
+        assert_eq!((c.population, c.iterations), (40, 3), "{name}");
+        assert_eq!(
+            (c.budget_ms, c.hard_ms),
+            (0.0, 0.0),
+            "{name}: fixed iterations, no deadline"
+        );
+        assert_eq!((base.population, base.iterations), (20, 2));
+    }
+    // The live variant is the live config with the big search; the old `strong` without its deadline is that preset otherwise.
+    assert_eq!(
+        PlannerPreset::LiveV2Strong.config(),
+        ddai_planner::config::PlannerConfig {
+            population: 40,
+            iterations: 3,
+            ..PlannerPreset::LiveV2.config()
+        }
+    );
+    assert_eq!(PlannerPreset::parse("strong-fixed"), Some(PlannerPreset::StrongFixed));
+    assert_eq!(
+        PlannerPreset::StrongFixed.config(),
+        ddai_planner::config::PlannerConfig {
+            budget_ms: 0.0,
+            hard_ms: 0.0,
+            ..PlannerPreset::Strong.config()
+        }
+    );
+    assert_eq!(
+        PlannerPreset::V2Strong.config(),
+        ddai_planner::config::PlannerConfig {
+            population: 40,
+            iterations: 3,
+            ..base
+        }
+    );
+}
+
 /// Both versions play a fixed-iteration duel (same scene, same seed) and decide; with a duel in reach of a hook they may differ.
 #[test]
 fn a_v2_planner_brain_decides_like_any_other() {

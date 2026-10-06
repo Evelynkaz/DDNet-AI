@@ -52,6 +52,9 @@ pub struct Totals {
     pub techniques: BTreeMap<&'static str, u64>,
     /// Decisions with at least one modelled threat besides the victim.
     pub with_threats: u64,
+    /// Task 3.9 fire counters (see `DecisionTelemetry::polished`).
+    pub polished: u64,
+    pub wall_cands: u64,
 }
 
 impl Totals {
@@ -68,6 +71,8 @@ impl Totals {
         self.unsafe_choices += u64::from(t.unsafe_choice);
         self.with_threats += u64::from(!t.threat_ids.is_empty());
         self.work.add(&t.work);
+        self.polished += u64::from(t.polished);
+        self.wall_cands += u64::from(t.wall_cands);
         for k in 0..SOURCE_KINDS {
             self.generated[k] += u64::from(t.generated[k]);
             self.evaluated[k] += u64::from(t.evaluated[k]);
@@ -93,10 +98,17 @@ impl Totals {
             .map(|(k, v)| format!("\"{k}\":{v}"))
             .collect::<Vec<_>>()
             .join(",");
+        let mut fired = String::new();
+        if self.polished > 0 {
+            fired.push_str(&format!(",\"polish\":{}", self.polished));
+        }
+        if self.wall_cands > 0 {
+            fired.push_str(&format!(",\"wall\":{}", self.wall_cands));
+        }
         let w = &self.work;
         format!(
             "{{\"decisions\":{},\"extended\":{},\"danger_flagged\":{},\"shielded\":{},\"shield_incomplete\":{},\"shield_ran\":{},\"shield_plan_ok\":{},\"shield_skipped\":{},\
-\"out_of_time\":{},\"unsafe_choices\":{},\"with_threats\":{},\"generated\":{{{}}},\"evaluated\":{{{}}},\"chosen\":{{{}}},\
+\"out_of_time\":{},\"unsafe_choices\":{},\"with_threats\":{},\"generated\":{{{}{}}},\"evaluated\":{{{}}},\"chosen\":{{{}}},\
 \"techniques\":{{{}}},\"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"proposal_units\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{},\
 \"rollouts_stage1\":{},\"rollouts_stage2\":{},\"rollouts_extension\":{}{}}}}}",
             self.decisions,
@@ -111,6 +123,7 @@ impl Totals {
             self.unsafe_choices,
             self.with_threats,
             per(&self.generated),
+            fired,
             per(&self.evaluated),
             per(&self.chosen),
             techs,
@@ -126,10 +139,16 @@ impl Totals {
             w.rollouts_stage1,
             w.rollouts_stage2,
             w.rollouts_extension,
-            if w.mirror > 0 {
-                format!(",\"mirror\":{}", w.mirror)
-            } else {
-                String::new()
+            // The optional counters, only when non-zero (a hybrid without the v2 switches prints what it always did).
+            {
+                let mut tail = String::new();
+                if w.mirror > 0 {
+                    tail.push_str(&format!(",\"mirror\":{}", w.mirror));
+                }
+                if w.units > 0 {
+                    tail.push_str(&format!(",\"units\":{}", w.units));
+                }
+                tail
             },
         )
     }

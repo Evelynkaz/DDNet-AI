@@ -102,6 +102,20 @@ fn worker_scoring_is_allocation_free_in_steady_state() {
     scoring_is_allocation_free(cfg, false);
 }
 
+/// Task 3.9: the v2 hook gate, aim snap and rope-ceiling cost add no allocation to a rollout either.
+#[test]
+fn worker_scoring_with_the_v2_switches_is_allocation_free_in_steady_state() {
+    let cfg = {
+        let mut c = HybridConfig::fixed();
+        c.workers = 1;
+        c.planner = c
+            .planner
+            .with_version(ddai_planner::config::PlannerVersion::Upstream20261002);
+        c
+    };
+    scoring_is_allocation_free(cfg, false);
+}
+
 /// Task 3.10: the same with the finishing terms on (the frozen-victim drag shaping and the exact passive forecast at the end of every
 /// rollout of a frozen victim) and the victim frozen on open ground, so the forecast runs in every rollout.
 #[test]

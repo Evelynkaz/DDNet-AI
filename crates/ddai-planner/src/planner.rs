@@ -636,6 +636,9 @@ pub struct Planner<W: PlanWorld> {
     /// collision identity like the hazard fields.
     ceiling: Option<Arc<CeilingField>>,
     ceiling_cache: Option<(u64, Arc<CeilingField>)>,
+    /// Task 3.9: how many times `rope_intercept` projected a *moving* victim (the one piece of the v2 hook gate and aim snap that costs
+    /// about a physics tick: ~0.9 us); the hybrid's work clock prices each as one tee-tick. Never read by the planner itself.
+    intercepts: std::cell::Cell<u64>,
 
     /// Review round 1, F4: when `Some`, every `evaluate_impl` call (in call order -- book seeds,
     /// `landed_throws`, the CEM population loop, `notNow`, `polishRope`, `escapeBias`, `explain`,
@@ -712,6 +715,7 @@ impl<W: PlanWorld> Planner<W> {
             field_cache: None,
             ceiling: None,
             ceiling_cache: None,
+            intercepts: std::cell::Cell::new(0),
             candidate_log: None,
         }
     }
@@ -904,6 +908,12 @@ impl<W: PlanWorld> Planner<W> {
             self.ceiling_cache = Some((id, Arc::new(fields::ceiling_field(col))));
         }
         self.ceiling = self.ceiling_cache.as_ref().map(|(_, f)| Arc::clone(f));
+    }
+
+    /// Task 3.9 (hybrid only): makes this planner's rollouts see the ceiling field of `col`'s map when `rope_ceiling_cost` is on (what
+    /// `decide_once` does at its start); cached by the map's identity, so it costs a comparison after the first call.
+    pub(crate) fn prepare_ceiling(&mut self, col: &W::Collision) {
+        self.refresh_ceiling(col);
     }
 
     /// `decide(world, selfId, enemyId, prev, enemyInput)` (`planner.ts:1021-1036`).
@@ -2099,17 +2109,46 @@ impl<W: PlanWorld> Planner<W> {
         best: &[PlanStep],
         best_score: f64,
     ) -> Option<(Vec<PlanStep>, f64)> {
-        let me = world.get_tee(self_id)?;
-        let en = world.get_tee(enemy_id)?;
-        if !me.alive || !en.alive || me.frozen || en.frozen {
+        let mut variants: Vec<Vec<PlanStep>> = Vec::with_capacity(3);
+        if !self.polish_variants(world, self_id, enemy_id, prev, best, &mut variants) {
             return None;
+        }
+        let mut out: Option<(Vec<PlanStep>, f64)> = None;
+        for plan in variants {
+            let score = self.evaluate(world, self_id, enemy_id, prev, &plan, enemy_input, field, unfreeze);
+            if score >= best_score && out.as_ref().is_none_or(|o| score > o.1) {
+                out = Some((plan, score));
+            }
+        }
+        out
+    }
+
+    /// The plans `polishRope` tries (`planner.ts:1408-1440`): `best` with the hook held (and, for a throw, aimed at the
+    /// victim) for its first `k` steps, `k` = 2, 4, all (1, 2, 3 while our hook is in flight, af49dfb `hookKeepFlying`).
+    /// Pushes them, in order, onto `out` and returns `true`; `false` (nothing pushed) when polishing does not apply: a
+    /// frozen or dead tee, a hook that is neither out nor within reach, or the hook gate refusing the throw. Split out of
+    /// `polish_rope` (task 3.9) so the hybrid search can score the same variants itself.
+    pub(crate) fn polish_variants(
+        &self,
+        world: &W,
+        self_id: i32,
+        enemy_id: i32,
+        prev: PlayerInput,
+        best: &[PlanStep],
+        out: &mut Vec<Vec<PlanStep>>,
+    ) -> bool {
+        let (Some(me), Some(en)) = (world.get_tee(self_id), world.get_tee(enemy_id)) else {
+            return false;
+        };
+        if !me.alive || !en.alive || me.frozen || en.frozen {
+            return false;
         }
         let holding = me.hooked_player == enemy_id;
         let free = me.hook_state == HOOK_IDLE;
         // af49dfb `hookKeepFlying`: a hook already in flight is polished too (the first 1-3 steps keep the rope out).
         let flying = self.cfg.hook_keep_flying && me.hook_state == HOOK_FLYING;
         if !holding && !flying && !(free && vdistance(me.pos, en.pos) < *HOOK_LENGTH) {
-            return None;
+            return false;
         }
         let bearing = js::atan2(en.pos.y - me.pos.y, en.pos.x - me.pos.x);
         let throw_aim = if self.cfg.track_aim { 0.0 } else { bearing };
@@ -2127,36 +2166,59 @@ impl<W: PlanWorld> Planner<W> {
                 }
             }
             if !self.hook_would_reach(world, self_id, enemy_id, angle, meet) {
-                return None;
+                return false;
             }
         }
-        let mut out: Option<(Vec<PlanStep>, f64)> = None;
         let n = best.len();
         for k in if flying { [1usize, 2, 3] } else { [2usize, 4, n] } {
             if k > n {
                 continue;
             }
-            let plan: Vec<PlanStep> = best
-                .iter()
-                .enumerate()
-                .map(|(i, st)| {
-                    if i < k {
-                        PlanStep {
-                            hook: 1,
-                            aim: if holding || flying { st.aim } else { throw_aim },
-                            ..*st
+            out.push(
+                best.iter()
+                    .enumerate()
+                    .map(|(i, st)| {
+                        if i < k {
+                            PlanStep {
+                                hook: 1,
+                                aim: if holding || flying { st.aim } else { throw_aim },
+                                ..*st
+                            }
+                        } else {
+                            *st
                         }
-                    } else {
-                        *st
-                    }
-                })
-                .collect();
-            let score = self.evaluate(world, self_id, enemy_id, prev, &plan, enemy_input, field, unfreeze);
-            if score >= best_score && out.as_ref().is_none_or(|o| score > o.1) {
-                out = Some((plan, score));
-            }
+                    })
+                    .collect(),
+            );
         }
-        out
+        true
+    }
+
+    /// Task 3.9 (hybrid only): the wall throws of af49dfb's wayblock guard for a frozen victim -- the air chains (while
+    /// airborne, when `air_chain`) and the wall swings toward the wall on side `wall_dir` -- without the plain frozen throw lines
+    /// ([`Planner::frozen_throw_seed_lines`] puts them in front of those). `wall_dir == 0` gives none.
+    pub(crate) fn wall_throw_lines(
+        &self,
+        world: &W,
+        me: &TeeState,
+        aim: f64,
+        wall_dir: i32,
+        air_chain: bool,
+    ) -> Vec<Vec<PlanStep>> {
+        if wall_dir == 0 {
+            return Vec::new();
+        }
+        let half = PHYSICAL_SIZE / 2.0;
+        let col = world.collision();
+        let grounded = col.is_solid(me.pos.x + half, me.pos.y + half + 5.0)
+            || col.is_solid(me.pos.x - half, me.pos.y + half + 5.0);
+        let mut lines = if grounded || !air_chain {
+            Vec::new()
+        } else {
+            air_chain_lines(self.cfg.steps, &self.step_ticks, aim, wall_dir, me.jumps_left > 0)
+        };
+        lines.extend(wall_swing_lines(self.cfg.steps, &self.step_ticks, aim, wall_dir));
+        lines
     }
 
     /// `warmShift(tick)` (`planner.ts:1442-1453`).
@@ -2611,19 +2673,6 @@ impl<W: PlanWorld> Planner<W> {
         best
     }
 
-    /// `hookAllowed` (`planner.ts:1713-1718`), without an aim snap.
-    pub(crate) fn hook_allowed(
-        &self,
-        world: &W,
-        self_id: i32,
-        enemy_id: i32,
-        step: PlanStep,
-        prev: PlayerInput,
-        aim: f64,
-    ) -> bool {
-        self.hook_allowed_snapped(world, self_id, enemy_id, step, prev, aim, false, None)
-    }
-
     /// `hookAllowed(world, selfId, enemyId, step, prev, aim, snapped, meet)` (af49dfb `planner.ts`): `snapped` says `aim` is
     /// already the angle that will be thrown (the aim snap's), so it is used as is instead of going through
     /// [`Planner::executed_aim`]; `meet` is the victim's projected position when the caller has just computed it.
@@ -2663,10 +2712,10 @@ impl<W: PlanWorld> Planner<W> {
 
     /// The hook gate with the aim snap, as `decideOnce` and `evaluate` run it for one plan step (af49dfb): the snapped
     /// angle if the snap finds one the gate lets through, else the plain aim. Returns `(hook_ok, aim, snapped)`. With
-    /// `hook_snap_aim` off this is exactly `hook_ok = !hook || already out || hook_allowed(aim)`.
+    /// `hook_snap_aim` off this is exactly `hook_ok = !hook || already out || hook_allowed_snapped(aim, false, None)` (the plain gate).
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn gate_and_snap(
+    pub(crate) fn gate_and_snap(
         &self,
         world: &W,
         self_id: i32,
@@ -2738,7 +2787,7 @@ impl<W: PlanWorld> Planner<W> {
             return (None, None);
         }
         let col = world.collision();
-        let meet = rope_intercept(col, me.pos, en.pos, en.vel);
+        let meet = self.project(col, me.pos, en);
         let lx = meet.x - me.pos.x;
         let ly = meet.y - me.pos.y;
         let dist = js::hypot2(lx, ly);
@@ -2787,6 +2836,19 @@ impl<W: PlanWorld> Planner<W> {
             return (None, Some(meet));
         }
         (Some(angle), Some(meet))
+    }
+
+    /// [`rope_intercept`] of the victim `en` from `from`, counting the projections of a moving victim ([`Planner::intercept_count`]).
+    fn project(&self, col: &W::Collision, from: Vec2, en: &TeeState) -> Vec2 {
+        if js::abs(en.vel.x) + js::abs(en.vel.y) > 0.01 {
+            self.intercepts.set(self.intercepts.get() + 1);
+        }
+        rope_intercept(col, from, en.pos, en.vel)
+    }
+
+    /// Task 3.9: the number of moving-victim projections so far (a work counter for the hybrid's work clock).
+    pub(crate) fn intercept_count(&self) -> u64 {
+        self.intercepts.get()
     }
 
     /// `rayHitsWall` (af49dfb): the hook line of length `dist` from `from` along `dir` ends at a wall before `dist`.
@@ -2845,7 +2907,7 @@ impl<W: PlanWorld> Planner<W> {
         if self.cfg.hook_exact_gate {
             // af49dfb: the rope's line (from the body's edge to the wall or full reach) must pass within a body of the
             // victim's projected position.
-            let meet = meet_known.unwrap_or_else(|| rope_intercept(world.collision(), me.pos, en.pos, en.vel));
+            let meet = meet_known.unwrap_or_else(|| self.project(world.collision(), me.pos, &en));
             let start = vec2(
                 me.pos.x + dir.x * PHYSICAL_SIZE * 1.5,
                 me.pos.y + dir.y * PHYSICAL_SIZE * 1.5,
@@ -3056,29 +3118,10 @@ impl<W: PlanWorld> Planner<W> {
         trig::atan2(probe.target_y, probe.target_x)
     }
 
-    /// `stepToInput` (`planner.ts:1917-1974`), without an aim snap.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn step_to_input(
-        &mut self,
-        world: &W,
-        step: PlanStep,
-        prev: PlayerInput,
-        enemy_dist: f64,
-        hook_ok: bool,
-        me_pos: Option<Vec2>,
-        en_pos: Option<Vec2>,
-        en_vel: Option<Vec2>,
-        aim: f64,
-    ) -> PlayerInput {
-        self.step_to_input_snapped(
-            world, step, prev, enemy_dist, hook_ok, me_pos, en_pos, en_vel, aim, false,
-        )
-    }
-
     /// `stepToInput(..., aim, snapped)` (af49dfb): with `snapped` the target is the rounded aim vector itself (`snapTarget`),
     /// not the smoothed turn [`decode_action`] limits it to.
     #[allow(clippy::too_many_arguments)]
-    fn step_to_input_snapped(
+    pub(crate) fn step_to_input_snapped(
         &mut self,
         world: &W,
         step: PlanStep,
@@ -3912,6 +3955,69 @@ mod tests {
         snap_target(&mut input, angle);
         assert_eq!(input.target_x, js::round(trig::cos(angle) * crate::action::AIM_RADIUS));
         assert_eq!(input.target_y, js::round(trig::sin(angle) * crate::action::AIM_RADIUS));
+    }
+
+    /// Task 3.9 (inventory of E-020): what the hook gate costs per hook step of a rollout -- the classic gate, the exact gate and the whole
+    /// gate-and-snap -- next to a physics tick of two tees. `cargo test -p ddai-planner --release --lib -- --ignored --nocapture v2_gate_cost`.
+    #[test]
+    #[ignore = "timing report"]
+    fn v2_gate_cost_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        fn ns(n: u32, mut f: impl FnMut()) -> f64 {
+            let t = Instant::now();
+            for _ in 0..n {
+                f();
+            }
+            t.elapsed().as_secs_f64() * 1e9 / f64::from(n)
+        }
+        for (label, vel) in [
+            ("still victim", Vec2 { x: 0.0, y: 0.0 }),
+            ("moving victim", Vec2 { x: 0.0, y: -12.0 }),
+        ] {
+            let world = duel_world(vel);
+            let me = world.get_tee(0).unwrap();
+            let en = world.get_tee(1).unwrap();
+            let mut prev = crate::types::empty_input();
+            prev.target_x = 300.0;
+            let step = PlanStep {
+                dir: 0,
+                jump: 0,
+                hook: 1,
+                fire: 0,
+                aim: 0.0,
+            };
+            let exact = v2_planner();
+            let old: Planner<PhysicsWorld> = Planner::new(crate::config::preset_normal());
+            let n = 200_000;
+            let plain_gate = ns(n, || {
+                let _ = black_box(old.hook_would_reach(&world, 0, 1, black_box(0.0), None));
+            });
+            let exact_gate = ns(n, || {
+                let _ = black_box(exact.hook_would_reach(&world, 0, 1, black_box(0.0), None));
+            });
+            let intercept = ns(n, || {
+                let _ = black_box(rope_intercept(world.collision(), me.pos, black_box(en.pos), en.vel));
+            });
+            let classic_step = ns(n, || {
+                let _ = black_box(old.gate_and_snap(&world, 0, 1, Some(&me), Some(&en), step, prev, black_box(0.0)));
+            });
+            let v2_step = ns(n, || {
+                let _ = black_box(exact.gate_and_snap(&world, 0, 1, Some(&me), Some(&en), step, prev, black_box(0.0)));
+            });
+            println!(
+                "{label}: classic gate {plain_gate:.0} ns, exact gate {exact_gate:.0} ns, rope_intercept {intercept:.0} ns; per hook step: classic gate_and_snap {classic_step:.0} ns, v2 gate_and_snap {v2_step:.0} ns"
+            );
+        }
+        let mut w = duel_world(Vec2 { x: 0.0, y: 0.0 });
+        let saved = w.save_state();
+        let tick = ns(2_000, || {
+            w.step();
+            if w.inner().tick % 27 == 0 {
+                w.restore_state(&saved);
+            }
+        });
+        println!("one physics tick of two tees: {tick:.0} ns (a rollout of 9 plan steps is 27 ticks)");
     }
 
     /// Task 3.8 (af49dfb `ceilingField`): tiles under a freeze ceiling see it; so do the columns beside, through open air.

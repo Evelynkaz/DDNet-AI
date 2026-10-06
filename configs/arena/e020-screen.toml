@@ -1,0 +1,114 @@
+# work-clock: default-rate
+# Task 3.9 (D-096, E-020): SCREENING of the competitor's v2 improvements inside the hybrid, one switch at a time, against the competitor's
+# CURRENT planner in fixed-iteration mode (`normal-v2`, upstream af49dfb). Seeds 5001..5200 per hall (never used before: E-017 used 1..400,
+# 1001..1400, 2001..2400; E-019 3001..3400), 200 games per hall and arm; every arm plays the SAME games (game g of a hall = seed 5001 + g, layout g),
+# so the arms pair for McNemar. The arm "main" has no switch (the hybrid of main).
+#   ddnet-ai arena run --config configs/arena/e020-screen.toml --out ~/aiddnet/data/runs/E-020/screen --threads 3
+name = "E-020: screening of the v2 switches in the hybrid vs v2, seeds 5001.."
+base_seed = 5001
+games = 200
+
+[[condition]]
+name = "clb-left: main vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: main vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: main vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: gate vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { hook_exact_gate = true, hook_snap_aim = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: gate vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { hook_exact_gate = true, hook_snap_aim = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: gate vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { hook_exact_gate = true, hook_snap_aim = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: ceiling vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: ceiling vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: ceiling vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: polish vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: polish vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: polish vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { polish = true, hook_keep_flying = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: wall vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { wall_throws = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: wall vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { wall_throws = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: wall vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { wall_throws = true } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: mirror vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2" } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: mirror vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2" } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: mirror vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2" } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left: live vs v2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-right: live vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "chillblock5: live vs v2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]

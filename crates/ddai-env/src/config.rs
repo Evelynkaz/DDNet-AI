@@ -167,7 +167,9 @@ pub struct PlayerSpec {
     #[serde(default)]
     pub lag: u32,
     /// Planner: `normal` (default), `low` or `strong`; `normal-v2` and `live-v2` are the competitor's current planner
-    /// (upstream af49dfb, task 3.8; the second with its `LIVE_PLANNER_CFG`). The hybrid takes the first three only.
+    /// (upstream af49dfb, task 3.8; the second with its `LIVE_PLANNER_CFG`); `v2-strong` is `normal-v2` with the competitor's strong
+    /// mode (40 x 3 search) everywhere and `v2-strong-wb` the same on its wayblock overrides, `live-v2-strong` its `LIVE_PLANNER_CFG` with the 40 x 3 search, `strong-fixed` the old `strong` without its wall-clock budget (task 3.9; all fixed iterations). The hybrid takes the
+    /// first three only (its v2 switches are `[hybrid]` knobs).
     #[serde(default)]
     pub preset: Option<String>,
     /// Planner: `fixed` (default, deterministic) or `deadline`.
@@ -398,6 +400,39 @@ pub struct HybridSpec {
     /// Cost of ending a rollout airborne with no jumps left (hybrid only; default 0).
     #[serde(default)]
     pub jumpless_air_cost: Option<f64>,
+    // --- Task 3.9 (D-096, E-020): the competitor's current planner (af49dfb, "v2") inside the hybrid. All default off.
+    /// `true`: the four v2 planner switches below on at once (`PlannerConfig::with_version(Upstream20261002)`); the single knobs that
+    /// follow then override it.
+    #[serde(default)]
+    pub v2: Option<bool>,
+    /// The hook gate asks whether the rope meets the victim's projected position (`hookExactGate`), in the rollouts and in the chosen input.
+    #[serde(default)]
+    pub hook_exact_gate: Option<bool>,
+    /// A throw's aim turns (at most 0.35 rad) to the projected victim position (`hookSnapAim`).
+    #[serde(default)]
+    pub hook_snap_aim: Option<bool>,
+    /// `polishRope` also polishes while our hook is in flight (`hookKeepFlying`); only has an effect with `polish`.
+    #[serde(default)]
+    pub hook_keep_flying: Option<bool>,
+    /// Cost per tick of being hauled by the victim's rope up into a freeze/death ceiling (`ropeCeilingCost`; v2 default 1).
+    #[serde(default)]
+    pub rope_ceiling_cost: Option<f64>,
+    /// The competitor's live scoring values (`LIVE_PLANNER_CFG` of af49dfb: 1.5 and 0.4; the hybrid's default is 1.0 and 0.15).
+    #[serde(default)]
+    pub launch_exposure: Option<f64>,
+    #[serde(default)]
+    pub jumpless_hazard_cost: Option<f64>,
+    /// `HybridConfig::polish`: after CEM, hold-the-hook variants of the best plan join the pool.
+    #[serde(default)]
+    pub polish: Option<bool>,
+    /// `HybridConfig::wall_throws`: wall swings for a frozen victim toward a wall beside us (and, with `air_chain`, air chains).
+    #[serde(default)]
+    pub wall_throws: Option<bool>,
+    #[serde(default)]
+    pub air_chain: Option<bool>,
+    /// The planner the opponent model runs in the victim's seat: `normal` (default), `normal-v2` or `live-v2`.
+    #[serde(default)]
+    pub mirror_preset: Option<String>,
 }
 
 impl HybridSpec {
@@ -619,6 +654,48 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         if let Some(v) = h.jumpless_anchor_bonus {
             cfg.planner.jumpless_anchor_bonus = v;
         }
+        if h.v2 == Some(true) {
+            cfg.planner = cfg
+                .planner
+                .with_version(ddai_planner::config::PlannerVersion::Upstream20261002);
+        }
+        if let Some(v) = h.hook_exact_gate {
+            cfg.planner.hook_exact_gate = v;
+        }
+        if let Some(v) = h.hook_snap_aim {
+            cfg.planner.hook_snap_aim = v;
+        }
+        if let Some(v) = h.hook_keep_flying {
+            cfg.planner.hook_keep_flying = v;
+        }
+        if let Some(v) = h.rope_ceiling_cost {
+            cfg.planner.rope_ceiling_cost = v;
+        }
+        if let Some(v) = h.launch_exposure {
+            cfg.planner.launch_exposure = v;
+        }
+        if let Some(v) = h.jumpless_hazard_cost {
+            cfg.planner.jumpless_hazard_cost = v;
+        }
+        if let Some(v) = h.air_chain {
+            cfg.planner.air_chain = v;
+        }
+        if let Some(v) = h.polish {
+            cfg.polish = v;
+        }
+        if let Some(v) = h.wall_throws {
+            cfg.wall_throws = v;
+        }
+        cfg.mirror_planner = match h.mirror_preset.as_deref() {
+            None | Some("normal") => None,
+            Some("normal-v2") => Some(ddai_planner::config::preset_normal_v2()),
+            Some("live-v2") => Some(ddai_planner::config::preset_live_v2()),
+            Some(other) => {
+                return Err(EnvError::new(format!(
+                    "hybrid: unknown mirror_preset {other:?} (normal, normal-v2, live-v2)"
+                )));
+            }
+        };
     } else {
         cfg.proposals = 0;
     }
@@ -746,7 +823,7 @@ pub fn builtin_brain(spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
         "planner" => {
             let preset = PlannerPreset::parse(spec.preset.as_deref().unwrap_or("normal")).ok_or_else(|| {
                 EnvError::new(format!(
-                    "planner: unknown preset {:?} (normal, low, strong, normal-v2, live-v2)",
+                    "planner: unknown preset {:?} (normal, low, strong, normal-v2, live-v2, v2-strong, v2-strong-wb, live-v2-strong, strong-fixed)",
                     spec.preset.as_deref().unwrap_or("normal")
                 ))
             })?;
@@ -882,6 +959,78 @@ players = [
                 }
             }
         }
+    }
+
+    /// Task 3.9 (D-096): the v2 switches of the hybrid are `[hybrid]` knobs, all off unless named; `v2 = true` is the four planner
+    /// switches of af49dfb, and a single knob after it overrides; an unknown mirror preset is refused.
+    #[test]
+    fn the_hybrid_v2_knobs_map_onto_the_config_and_default_to_off() {
+        use ddai_planner::config::PlannerVersion;
+        let cfg_of = |hybrid: &str| {
+            let text = format!(
+                "name = \"t\"\n[[condition]]\nname = \"c\"\narena = \"a\"\nplayers = [{{ brain = \"hybrid\", clock = \"work\", hybrid = {{ {hybrid} }} }}, {{ brain = \"scripted\" }}]\n"
+            );
+            let spec = RunConfig::parse(&text).unwrap().condition[0].players[0].clone();
+            hybrid_config(&spec).map(|(c, _)| c)
+        };
+        let base = cfg_of("workers = 1").unwrap();
+        assert_eq!(
+            base,
+            HybridConfig {
+                work_clock_us_per_tick: base.work_clock_us_per_tick,
+                proposals: 0, // no proposer in the arena unless named
+                ..HybridConfig::default()
+            }
+        );
+        assert_eq!(base.planner.version(), PlannerVersion::Classic);
+        let all = cfg_of("v2 = true, polish = true, wall_throws = true, air_chain = true, mirror_preset = \"live-v2\"")
+            .unwrap();
+        assert_eq!(all.planner.version(), PlannerVersion::Upstream20261002);
+        assert!(all.polish && all.wall_throws && all.planner.air_chain);
+        assert_eq!(all.mirror_planner, Some(ddai_planner::config::preset_live_v2()));
+        let one = cfg_of("v2 = true, hook_snap_aim = false, rope_ceiling_cost = 0.5, launch_exposure = 1.5, jumpless_hazard_cost = 0.4").unwrap();
+        assert!(one.planner.hook_exact_gate && !one.planner.hook_snap_aim && one.planner.hook_keep_flying);
+        assert_eq!(
+            (
+                one.planner.rope_ceiling_cost,
+                one.planner.launch_exposure,
+                one.planner.jumpless_hazard_cost
+            ),
+            (0.5, 1.5, 0.4)
+        );
+        assert!(cfg_of("mirror_preset = \"strong\"").is_err());
+    }
+
+    /// Every E-020 config parses and builds valid hybrid and planner players (the presets `v2-strong` and `v2-strong-wb` included).
+    #[test]
+    fn the_e020_configs_parse_and_build_their_players() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/arena");
+        let mut n = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !(name.starts_with("e020-") && name.ends_with(".toml")) {
+                continue;
+            }
+            n += 1;
+            let cfg =
+                RunConfig::parse(&std::fs::read_to_string(&path).unwrap()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert!(!cfg.condition.is_empty());
+            for cond in &cfg.condition {
+                for p in &cond.players {
+                    if p.brain == "hybrid" {
+                        hybrid_config(p)
+                            .unwrap_or_else(|e| panic!("{name}: {e:?}"))
+                            .0
+                            .validate()
+                            .unwrap();
+                    } else {
+                        builtin_brain(p).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                    }
+                }
+            }
+        }
+        assert!(n >= 3, "found {n} E-020 configs");
     }
 
     /// Every arena config that runs a `clock = "work"` player must say which work-clock rate it means: either

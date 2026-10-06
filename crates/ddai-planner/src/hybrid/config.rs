@@ -248,7 +248,28 @@ pub struct HybridConfig {
     /// Diagnostics (task 3.7b, `crate::diag`): keep the whole pool of every decision, plans and scores, in the
     /// telemetry (`DecisionTelemetry::pool`). Off by default: it allocates and changes nothing else.
     pub debug_pool: bool,
+    // --- Task 3.9 (D-096, E-020): the competitor's current planner (upstream af49dfb, "v2") inside the hybrid. Every switch below is
+    // OFF by default, so the default hybrid is bit-identical to the one of task 3.7b. The four v2 planner switches
+    // (`planner.hook_exact_gate`, `hook_snap_aim`, `hook_keep_flying`, `rope_ceiling_cost`) and its live scoring values
+    // (`planner.launch_exposure`, `jumpless_hazard_cost`) are fields of [`HybridConfig::planner`] itself: the rollouts, the final
+    // hook gate and the opponent model read them from there (see `PlannerConfig::with_version`).
+    /// Task 3.9: after CEM, the best candidate is "polished" the way `polishRope` does it -- variants of it that hold the hook (and
+    /// aim the throw) for its first 2, 4 or all steps (1, 2, 3 while our hook is in flight, with `planner.hook_keep_flying`) join
+    /// the pool and are scored like any other candidate. At most three more rollouts, only while a hook is out or the victim is in reach.
+    pub polish: bool,
+    /// Task 3.9: against a frozen victim (the case of `frozen_throw_lines`), also offer the wayblock guard's wall swings (and,
+    /// with `planner.air_chain`, the air chains while airborne) toward a solid wall within [`WALL_REACH_TILES`] tiles at our
+    /// height (the nearer side; none without a wall). Unlike the competitor's `wallDir` (a hall's side, set by role) the side
+    /// is found per decision.
+    pub wall_throws: bool,
+    /// Task 3.9: the planner the opponent model ("mirror") runs in the victim's seat; `None` = [`preset_normal`] (the old planner,
+    /// what the model has always been). `Some(preset_normal_v2())` models the competitor's current planner. Its steps layout is
+    /// always the hybrid's own.
+    pub mirror_planner: Option<PlannerConfig>,
 }
+
+/// How far (tiles) a wall may be for `wall_throws` to offer the wall swings.
+pub const WALL_REACH_TILES: i32 = 5;
 
 /// A finite number above zero (a NaN or an infinity from a config file is refused).
 fn positive(x: f64) -> bool {
@@ -294,6 +315,9 @@ impl Default for HybridConfig {
             debug_pool: false,
             mirror: true,
             mirror_samples: 12,
+            polish: false,
+            wall_throws: false,
+            mirror_planner: None,
         }
     }
 }

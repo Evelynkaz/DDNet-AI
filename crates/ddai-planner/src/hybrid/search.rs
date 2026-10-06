@@ -177,6 +177,9 @@ pub struct WorkCounters {
     pub shield: u64,
     /// Hook-anchor ray casts.
     pub rays: u64,
+    /// Task 3.9: work the tick counter does not see, in tee-ticks, already charged to the work clock: the v2 hook gate's projections of a
+    /// moving victim (one tee-tick each, measured 0.9 us), in the search's rollouts and the opponent model's. Zero with the v2 switches off.
+    pub units: u64,
     pub rollouts_stage1: u32,
     pub rollouts_stage2: u32,
     pub rollouts_extension: u32,
@@ -198,6 +201,7 @@ impl WorkCounters {
         self.extension += o.extension;
         self.shield += o.shield;
         self.rays += o.rays;
+        self.units += o.units;
         self.rollouts_stage1 += o.rollouts_stage1;
         self.rollouts_stage2 += o.rollouts_stage2;
         self.rollouts_extension += o.rollouts_extension;
@@ -267,6 +271,10 @@ pub struct DecisionTelemetry {
     /// Time the opponent model took (ms on the decision's clock; 0 when it did not run) and whether its deadline cut it short.
     pub mirror_ms: f64,
     pub mirror_cut: bool,
+    /// Task 3.9 fire counters of the opt-in switches (so an inert one is visible): polish variants and wall-throw candidates put in
+    /// the pool (they are counted under `generated` as `cem` / `throw`, too). JSON: `generated.polish` / `generated.wall`, only when non-zero.
+    pub polished: u32,
+    pub wall_cands: u32,
     pub pick: Option<usize>,
     pub top: Vec<usize>,
     pub weights: Vec<f64>,
@@ -349,9 +357,24 @@ impl DecisionTelemetry {
                 .join(",");
             format!(",\"dump\":[{items}]")
         };
+        // The optional counters of the work object, present only when they are non-zero (so a hybrid without the v2 switches prints what it always did).
+        let mut generated_tail = String::new();
+        if self.polished > 0 {
+            generated_tail.push_str(&format!(",\"polish\":{}", self.polished));
+        }
+        if self.wall_cands > 0 {
+            generated_tail.push_str(&format!(",\"wall\":{}", self.wall_cands));
+        }
+        let mut work_tail = String::new();
+        if w.mirror > 0 {
+            work_tail.push_str(&format!(",\"mirror\":{}", w.mirror));
+        }
+        if w.units > 0 {
+            work_tail.push_str(&format!(",\"units\":{}", w.units));
+        }
         format!(
             "{{\"chosen\":\"{}\",\"plan\":[{}],\"victim\":{},\"threats\":[{}],\"danger\":\"{}\",\"combos\":{},\
-\"generated\":{{{}}},\"evaluated\":{{{}}},\"budget_ms\":{},\"search_ms\":{:.3},\"proposal_ms\":{:.3},\"mirror_ms\":{:.3},\"rollout_ms\":{:.3},\"shield_ms\":{:.3},\
+\"generated\":{{{}{}}},\"evaluated\":{{{}}},\"budget_ms\":{},\"search_ms\":{:.3},\"proposal_ms\":{:.3},\"mirror_ms\":{:.3},\"rollout_ms\":{:.3},\"shield_ms\":{:.3},\
 \"extended\":{},\"shielded\":{},\"shield_incomplete\":{},\"shield_plan_ok\":{},\"sim_tees\":{},\"dropped_tees\":{},\"pruned\":{},\"out_of_time\":{},\"unsafe\":{},\"best_score\":{:.4},\"robust\":{:.4},\"react_belief\":{:.3},\
 \"work\":{{\"ticks\":{},\"lag\":{},\"proposal\":{},\"proposal_units\":{},\"stage1\":{},\"stage2\":{},\"extension\":{},\"shield\":{},\"rays\":{}{}}}{}}}",
             self.chosen.map_or("none", Source::label),
@@ -361,6 +384,7 @@ impl DecisionTelemetry {
             self.danger.reasons(),
             self.combos,
             src(&self.generated),
+            generated_tail,
             src(&self.evaluated),
             self.budget_ms,
             self.search_ms,
@@ -389,11 +413,7 @@ impl DecisionTelemetry {
             w.extension,
             w.shield,
             w.rays,
-            if w.mirror > 0 {
-                format!(",\"mirror\":{}", w.mirror)
-            } else {
-                String::new()
-            },
+            work_tail,
             if self.mirror_cut {
                 format!("{dump},\"mirror_cut\":true")
             } else {
@@ -518,6 +538,8 @@ pub struct HybridSearch {
     last_lambda: f64,
     /// Task 3.7b (`HybridConfig::mirror`): the planner that plays the victim's seat and what it last chose.
     mirror: Option<Box<MirrorState>>,
+    /// Task 3.9: the decision's priced extra work so far (`WorkCounters::units`).
+    dec_units: u64,
     /// The victim's predicted inputs of the current decision, one per plan step (empty = the victim holds its input).
     mirror_inputs: Vec<PlayerInput>,
     /// The victim that has kept its direction neutral and its hook in for `.1` decisions in a row (an idle or camping opponent,
@@ -602,6 +624,7 @@ impl HybridSearch {
             diag_ready: false,
             last_lambda: 0.0,
             mirror: None,
+            dec_units: 0,
             mirror_inputs: Vec::new(),
             passive: (-1, 0),
             last_proposal_ms: 0.0,
@@ -732,6 +755,7 @@ impl HybridSearch {
         for (k, &(ci, combo)) in jobs.iter().enumerate() {
             let o = self.outs[k];
             *ticks += u64::from(o.ticks);
+            self.dec_units += u64::from(o.units);
             match o.res {
                 Some(r) => {
                     if self.lens == Lens::Reduced {
@@ -809,15 +833,18 @@ impl HybridSearch {
     ) -> (u64, bool) {
         let samples = self.cfg.mirror_samples;
         let m = self.mirror.get_or_insert_with(|| {
-            // The live `preset_normal` search, on the step layout of the hybrid's own plans (`predicted[s]` is indexed by step).
+            // The live `preset_normal` search (task 3.9: or the planner `mirror_planner` names), on the step layout of the hybrid's own
+            // plans (`predicted[s]` is indexed by step).
             let own = self.cfg.planner;
-            Box::new(MirrorState::new(crate::config::PlannerConfig {
+            let mut state = MirrorState::new(crate::config::PlannerConfig {
                 steps: own.steps,
                 plan_step: own.plan_step,
                 front_steps: own.front_steps,
                 front_step: own.front_step,
-                ..crate::config::preset_normal()
-            }))
+                ..self.cfg.mirror_planner.unwrap_or_else(crate::config::preset_normal)
+            });
+            state.planner.prepare_ceiling(self.world.collision());
+            Box::new(state)
         });
         let MirrorState {
             planner,
@@ -875,6 +902,7 @@ impl HybridSearch {
         }
         let mut scores: Vec<f64> = Vec::with_capacity(plans.len());
         let mut charged = before;
+        let mut priced = planner.intercept_count();
         let mut cut = false;
         for plan in plans.iter() {
             if !scores.is_empty() && deadline_ms.is_some_and(|d| clock.now_ms() >= d) {
@@ -896,6 +924,12 @@ impl HybridSearch {
                 m.add_units(2 * (planner.eval_ticks - charged));
             }
             charged = planner.eval_ticks;
+            let projections = planner.intercept_count();
+            self.dec_units += projections - priced;
+            if let Some(m) = &self.meter {
+                m.add_units(projections - priced);
+            }
+            priced = projections;
             match r {
                 Some(score) => scores.push(score),
                 None => {
@@ -956,6 +990,11 @@ impl HybridSearch {
             *warm = Some(plans[bi].clone());
             if let Some(m) = &self.meter {
                 m.add_units(2 * (planner.eval_ticks - charged));
+            }
+            let projections = planner.intercept_count();
+            self.dec_units += projections - priced;
+            if let Some(m) = &self.meter {
+                m.add_units(projections - priced);
             }
         }
         if !others.is_empty() {
@@ -1068,12 +1107,17 @@ impl HybridSearch {
             self.planner.swing_target_frozen = en_now.is_some_and(|e| e.frozen);
             self.planner.swing_rope_on = me_now.is_some_and(|m| m.hooked_player == victim_id);
             self.planner.swing_target = en_now;
-            let hook_ok = st.hook == 0
-                || self.planner.hook_already_out(&*self.world, self_id)
-                || self
-                    .planner
-                    .hook_allowed(&*self.world, self_id, victim_id, *st, input, aim);
-            input = self.planner.step_to_input(
+            let (hook_ok, aim, snapped) = self.planner.gate_and_snap(
+                &*self.world,
+                self_id,
+                victim_id,
+                me_now.as_ref(),
+                en_now.as_ref(),
+                *st,
+                input,
+                aim,
+            );
+            input = self.planner.step_to_input_snapped(
                 &*self.world,
                 *st,
                 input,
@@ -1083,6 +1127,7 @@ impl HybridSearch {
                 en_now.map(|e| e.pos),
                 en_now.map(|e| e.vel),
                 aim,
+                snapped,
             );
             if let Some(v) = inputs_out.as_deref_mut() {
                 v.push(input);
@@ -1184,6 +1229,7 @@ impl HybridSearch {
         }
         for (k, &ci) in idx.iter().enumerate() {
             *ticks += u64::from(self.outs[k].ticks);
+            self.dec_units += u64::from(self.outs[k].units);
             cands[ci].pre = self.outs[k].res.map(|r| r.score);
         }
     }
@@ -1194,6 +1240,7 @@ impl HybridSearch {
         let timed = matches!(self.cfg.mode, HybridMode::Deadline { .. });
         self.timed = timed;
         self.rollout_ms = 0.0;
+        self.dec_units = 0;
         self.diag_ready = false;
         let now = |c: &dyn Clock| if timed { c.now_ms() } else { 0.0 };
         let mut tel = DecisionTelemetry {
@@ -1611,6 +1658,7 @@ impl HybridSearch {
         }
 
         let mut throw_c: Vec<Cand> = Vec::new();
+        let mut wall_c: Vec<Cand> = Vec::new();
         {
             let at = if track_aim { 0.0 } else { aim_at };
             let sit = ThrowSituation {
@@ -1620,16 +1668,28 @@ impl HybridSearch {
                 enemy_frozen: victim.frozen,
                 enemy_alive: victim.alive,
             };
-            let lines =
-                if cfg.planner.frozen_throw > 0 && frozen_throw_worth_trying(&sit) && victim.freeze_ticks_left >= 30 {
-                    frozen_throw_lines(cfg.planner.steps, at)
-                } else if cfg.planner.freeze_throw > 0 && throw_worth_trying(&sit) {
-                    throw_lines(cfg.planner.steps, at)
-                } else {
-                    Vec::new()
-                };
+            let frozen_case =
+                cfg.planner.frozen_throw > 0 && frozen_throw_worth_trying(&sit) && victim.freeze_ticks_left >= 30;
+            let lines = if frozen_case {
+                frozen_throw_lines(cfg.planner.steps, at)
+            } else if cfg.planner.freeze_throw > 0 && throw_worth_trying(&sit) {
+                throw_lines(cfg.planner.steps, at)
+            } else {
+                Vec::new()
+            };
             for p in lines.into_iter().take(cfg.throw_cap) {
                 push(&mut throw_c, &mut tel, p, Source::Throw);
+            }
+            // Task 3.9: the wayblock guard's wall swings / air chains toward a wall beside us, for a frozen victim.
+            if cfg.wall_throws && frozen_case {
+                let wall_dir = wall_side(self.world.collision(), me.pos);
+                for p in self
+                    .planner
+                    .wall_throw_lines(&*self.world, &me, at, wall_dir, cfg.planner.air_chain)
+                {
+                    push(&mut wall_c, &mut tel, p, Source::Throw);
+                }
+                tel.wall_cands = wall_c.len() as u32;
             }
         }
 
@@ -1816,6 +1876,7 @@ impl HybridSearch {
         order.extend(book_c);
         order.extend(off_c);
         order.extend(throw_c);
+        order.extend(wall_c);
         order.extend(def_rest);
         let first_pool = cands.len();
         cands.extend(order);
@@ -1992,6 +2053,46 @@ impl HybridSearch {
             }
         } else {
             out_of_time = true;
+        }
+
+        // ---- polish (task 3.9, `polishRope`): hold-the-hook variants of the best plan so far ----------
+        // Not bounded by the end of stage 1: CEM keeps going until it, so on a deadline the polish (three rollouts at most) would
+        // never run (found by the screening of E-020: not one game differed). It takes its few rollouts from stage 2's share and
+        // stops at the end of the search budget.
+        if cfg.polish && !me.frozen && !(timed && now(clock) >= search_end) {
+            let mut best_i: Option<usize> = None;
+            for (i, c) in cands.iter().enumerate() {
+                if let Some(score) = c.cheap()
+                    && best_i.is_none_or(|b| score > cands[b].cheap().unwrap_or(f64::NEG_INFINITY))
+                {
+                    best_i = Some(i);
+                }
+            }
+            let mut variants: Vec<Vec<PlanStep>> = Vec::new();
+            if let Some(bi) = best_i
+                && self
+                    .planner
+                    .polish_variants(&*self.world, self_id, victim_id, prev, &cands[bi].plan, &mut variants)
+            {
+                let base = cands.len();
+                for plan in variants {
+                    if seen.insert(signature(&plan)) {
+                        tel.generated[Source::Cem.kind()] += 1;
+                        tel.polished += 1;
+                        cands.push(Cand::new(plan, Source::Cem));
+                    }
+                }
+                let jobs: Vec<(usize, u32)> = (base..cands.len()).map(|i| (i, 0)).collect();
+                let cut = self.run_jobs(
+                    clock,
+                    &mut cands,
+                    &jobs,
+                    timed.then_some(search_end),
+                    &mut ticks1,
+                    &mut roll1,
+                );
+                out_of_time |= cut;
+            }
         }
         tel.work.stage1 = ticks1;
         tel.work.rollouts_stage1 = roll1;
@@ -2214,6 +2315,7 @@ impl HybridSearch {
 
         // ---- the chosen plan -> input ---------------------------------------------------------
         let Some(pick) = pick else {
+            tel.work.units = self.dec_units;
             return (prev, tel);
         };
         let chosen_cand = cands[pick].clone();
@@ -2234,15 +2336,21 @@ impl HybridSearch {
         } else {
             resolve_aim(best[0].aim, aim_base)
         };
-        let hook_ok = best[0].hook == 0
-            || self.planner.hook_already_out(&*self.world, self_id)
-            || self
-                .planner
-                .hook_allowed(&*self.world, self_id, victim_id, best[0], prev, aim0);
+        // The same hook gate (and, with `hook_snap_aim`, aim snap) the rollouts applied to this step (task 3.9).
+        let (hook_ok, aim0, snapped) = self.planner.gate_and_snap(
+            &*self.world,
+            self_id,
+            victim_id,
+            Some(&me),
+            Some(&victim),
+            best[0],
+            prev,
+            aim0,
+        );
         self.planner.swing_target_frozen = victim.frozen;
         self.planner.swing_rope_on = me.hooked_player == victim_id;
         self.planner.swing_target = Some(victim);
-        let mut chosen = self.planner.step_to_input(
+        let mut chosen = self.planner.step_to_input_snapped(
             &*self.world,
             best[0],
             prev,
@@ -2252,6 +2360,7 @@ impl HybridSearch {
             Some(victim.pos),
             Some(victim.vel),
             aim0,
+            snapped,
         );
 
         // ---- shield ---------------------------------------------------------------------------
@@ -2439,6 +2548,7 @@ impl HybridSearch {
             }
         }
         tel.shield_ms = now(clock) - t_shield;
+        tel.work.units = self.dec_units;
 
         // Predictions for the next decision's belief update.
         self.prev_predictions.clear();
@@ -2492,6 +2602,29 @@ impl HybridSearch {
             top.push(stay);
         }
         top
+    }
+}
+
+/// Task 3.9 (`HybridConfig::wall_throws`): the side (`-1` left, `1` right) of the nearer solid wall within
+/// [`crate::hybrid::config::WALL_REACH_TILES`] tiles of `pos` at its height; `0` when there is none or both sides are equally far.
+fn wall_side(col: &impl crate::plan_world::PlanCollision, pos: crate::vmath::Vec2) -> i32 {
+    let reach = f64::from(crate::hybrid::config::WALL_REACH_TILES) * 32.0;
+    let first = |dir: f64| {
+        let mut d = 16.0;
+        while d <= reach {
+            if col.is_solid(pos.x + dir * d, pos.y) {
+                return Some(d);
+            }
+            d += 16.0;
+        }
+        None
+    };
+    match (first(-1.0), first(1.0)) {
+        (Some(l), Some(r)) if l < r => -1,
+        (Some(l), Some(r)) if r < l => 1,
+        (Some(_), None) => -1,
+        (None, Some(_)) => 1,
+        _ => 0,
     }
 }
 

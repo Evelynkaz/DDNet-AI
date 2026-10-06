@@ -1,0 +1,29 @@
+# work-clock: default-rate
+# Task 3.9 (D-096, E-020, review F3/F6): a HYPOTHETICAL UPPER BOUND -- the hybrid of main against live weights plus 3x search everywhere: `LIVE_PLANNER_CFG` of
+# af49dfb (`launchExposure 1.5`, `jumplessHazardCost 0.4`) with `STRONG_WB`'s 40 x 3 search, fixed iterations (no wall-clock budget, so the games are
+# reproducible and the opponent is never short of CPU). The competitor does NOT play this: `STRONG_WB` applies only inside a held wayblock hall, on top of
+# `WB_PLAN_OVERRIDES` (which resets both weights to 1.0 / 0.15); in the D-059 halls it plays `v2live` (20 x 2, the live weights). Fresh seeds 8001..8300 per hall (3 halls x 300 = 900 games; never used before:
+# E-017 1..400, 1001..1400, 2001..2400; E-019 3001..3400; E-020 5001..5200 and 6001..6400); `after_ticks = 250` for the `held` share.
+#   ddnet-ai arena run --config configs/arena/e020-fresh-v2livestrong.toml --out ~/aiddnet/data/runs/E-020/fresh-v2livestrong --threads 3
+#   python3 docs/research/e020/compare.py main=~/aiddnet/data/runs/E-020/fresh-v2livestrong
+name = "E-020: fresh seeds, hybrid of main vs live-v2-strong"
+base_seed = 8001
+games = 300
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-left: main vs live-v2-strong"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2-strong" }]
+
+[[condition]]
+name = "clb-right: main vs live-v2-strong"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2-strong" }]
+
+[[condition]]
+name = "chillblock5: main vs live-v2-strong"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2-strong" }]

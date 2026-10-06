@@ -1,0 +1,44 @@
+# work-clock: default-rate
+# Task 3.9 (D-096, E-020): the CONFIRMATION on a FRESH seed set -- seeds 6001..6400 per hall (3 halls x 400 = 1 200 games per arm; never used before: E-017 1..400,
+# 1001..1400, 2001..2400; E-019 3001..3400; E-020 screening 5001..5200). Two arms play the same games (game g of a hall = seed 6001 + g, layout g) against
+# the opponent "v2-strong": "main" = the hybrid of main (no switch) and "cand" = the best screening candidate (the opponent model on the competitor's planner
+# `normal-v2` plus the rope-ceiling cost: `mirror_preset = "normal-v2", rope_ceiling_cost = 1.0`). `after_ticks = 250` (5 s) so that the `held` share (the
+# block still holds 5 s after the freeze) is measured as well; it changes nothing else of a game.
+#   ddnet-ai arena run --config configs/arena/e020-fresh-v2strong.toml --out ~/aiddnet/data/runs/E-020/fresh-v2strong --threads 3
+#   python3 docs/research/e020/compare.py --base ~/aiddnet/data/runs/E-020/fresh-v2strong@main cand=~/aiddnet/data/runs/E-020/fresh-v2strong@cand
+name = "E-020: fresh seeds, main vs candidate hybrid vs v2-strong"
+base_seed = 6001
+games = 400
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-left: main vs v2-strong"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "v2-strong" }]
+
+[[condition]]
+name = "clb-right: main vs v2-strong"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "v2-strong" }]
+
+[[condition]]
+name = "chillblock5: main vs v2-strong"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "v2-strong" }]
+
+[[condition]]
+name = "clb-left: cand vs v2-strong"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "v2-strong" }]
+
+[[condition]]
+name = "clb-right: cand vs v2-strong"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "v2-strong" }]
+
+[[condition]]
+name = "chillblock5: cand vs v2-strong"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "normal-v2", rope_ceiling_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "v2-strong" }]
