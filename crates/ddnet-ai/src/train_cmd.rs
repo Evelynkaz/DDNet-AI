@@ -132,6 +132,21 @@ pub enum TrainCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// OpenAI-ES on the outcome of the held block, and its tools (task 8.5a): `bank`, `run`, `eval`, `compare`, `scan`.
+    Es(crate::es_cmd::EsArgs),
+    /// Writes a copy of a fly checkpoint whose encoder also reads the target opponent's state (frozen, freeze time left,
+    /// velocity, hook), with ZERO weights for it: the copy plays bit for bit like the original (task 8.5a).
+    UpgradeBundle {
+        #[arg(long)]
+        bundle: PathBuf,
+        /// A TOML file with an `[opponent_state]` section (`configs/fly/S-opponent-state.toml`).
+        #[arg(long)]
+        opponent_state: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        flyg: Option<PathBuf>,
+    },
     /// Prints what a fly checkpoint learned: calibration, decoder weights, encoder gains.
     Inspect {
         #[arg(long)]
@@ -236,6 +251,13 @@ pub fn run(args: TrainArgs) -> ExitCode {
             flyg,
             threads,
         ),
+        TrainCommand::Es(a) => crate::es_cmd::run(a),
+        TrainCommand::UpgradeBundle {
+            bundle,
+            opponent_state,
+            out,
+            flyg,
+        } => upgrade_bundle_cmd(&bundle, &opponent_state, &out, flyg.as_deref()),
         TrainCommand::Stats { dir } => stats_cmd(&dir),
         TrainCommand::Inspect { bundle, flyg } => inspect_cmd(&bundle, flyg.as_deref()),
         TrainCommand::Info { dir, verify } => info_cmd(&dir, verify),
@@ -247,6 +269,36 @@ pub fn run(args: TrainArgs) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn upgrade_bundle_cmd(
+    bundle: &std::path::Path,
+    opponent_state: &std::path::Path,
+    out: &std::path::Path,
+    flyg: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let b = ddai_fly::bundle::load_bundle(bundle).map_err(|e| e.to_string())?;
+    let flyg_path = flyg.map_or_else(|| PathBuf::from(&b.flyg_path_hint), PathBuf::from);
+    let sha = ddai_fly::bundle::sha256_hex_of_file(&flyg_path).map_err(|e| e.to_string())?;
+    if sha != b.flyg_sha256 {
+        return Err(format!(
+            "{}: not the graph {} was built for",
+            flyg_path.display(),
+            bundle.display()
+        ));
+    }
+    let g = ddai_flyg::load(&flyg_path).map_err(|e| format!("{}: {e}", flyg_path.display()))?;
+    let text = std::fs::read_to_string(opponent_state).map_err(|e| format!("{}: {e}", opponent_state.display()))?;
+    let up = ddai_fly::bundle::upgrade_with_opponent_state(&b, g, &text).map_err(|e| e.to_string())?;
+    ddai_fly::bundle::save_bundle(out, &up).map_err(|e| e.to_string())?;
+    eprintln!(
+        "{}: encoder parameters {} -> {} (the new ones are zero), same decisions as {}",
+        out.display(),
+        b.encoder_params.g.len(),
+        up.encoder_params.g.len(),
+        bundle.display()
+    );
+    Ok(())
 }
 
 fn set_thresholds_cmd(

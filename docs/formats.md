@@ -6100,3 +6100,29 @@ JSON: `{"v":1, "skipped":n, "game":{"w","h"}|null, "images":[…], "env":[…], 
 ### 36.8 Юниты (`deploy/systemd/`, ставит `deploy/install-launcher.sh`)
 
 `ddnet-ai-servers.{path,service}` (§36.2; `User=ubuntu`, `ProtectHome=tmpfs` + `BindPaths=data/servers`, без capability, `IPAddressDeny` на частные сети), `ddnet-ai-proxycheck.{path,service}` (§36.5; `User=ubuntu`, `BindReadOnlyPaths=data/secrets`, `BindPaths=data/launch`, те же ограничения). `ddnet-ai-web.service` и `ddnet-ai-bot.service` не меняются: у веба по-прежнему только loopback и `IPAddressDeny=any`.
+
+## 37. Дообучение мухи на результат (задача 8.5a, D-098, `ddai-train::{bank, bank_collect, heldblock, es}`, `ddai-fly::encoder`)
+
+### 37.1 Секция `[opponent_state]` конфига мозга и чекпоинт
+
+Конфиг мозга (`configs/fly/*-brain.toml`, встроенный в чекпоинт текстом) получил необязательную секцию `[opponent_state]` с пятью списками имён типов входа
+(`frozen`, `freeze_left`, `velocity_x`, `velocity_y`, `hook_state`); без секции всё как раньше. Параметры `g`/`c` (и `bin_gain`) пар `(тип, канал)` этих каналов нумеруются **после**
+всех прежних. Версия формата чекпоинта прежняя (3): форму энкодера определяет встроенный текст; чекпоинт с секцией старый бинарь отвергнет проверкой формы параметров.
+`ddnet-ai train upgrade-bundle` дописывает секцию и нули. Значения каналов: `frozen` 0/1 (`is_frozen` или `freeze_ticks_remaining > 0`), `freeze_left` = тики/300 ∈ [0, 1], `velocity_x/y` = скорость/`velocity_norm_scale` ∈ [−1, 1],
+`hook_state` 0/0,5/1; все нули, если в наблюдении нет цели (`Observation::target_or_nearest`).
+
+### 37.2 Банк стартов (`train es bank`, `retag`)
+
+Один файл: `[sha256 payload (32)] ++ zstd(payload)` (как чекпоинты, запись атомарна); payload — postcard, первое поле `version`. **Версия 2:** `BankFile { version = 2, rules_json (текст JSON правила игры, поля, которых не было при записи, берут умолчание), window_ticks, opponent = "scripted", notes, starts }`,
+`BankStart { arena, split, seed, swap, reverse_order, end_tick, blocker, actions: [LoggedAction { tick, direction, jump, hook, fire, target[2], weapon }], idle_held, scripted_held, victim_escapes_under_idle: Option<bool>, idle_blocker_out: Option<bool>, phi }` — раскладка зафиксирована тестом с жёсткими байтами
+(`bank::tests`), смена раскладки требует новой версии и читателя старой. **Версия 1** (банк пилота E-022: `Rules` позиционно, старты без двух последних меток) читается и переводится; метки `None` до `train es retag`. Запись — рецепт, а не снимок: партия `(арена, сид, раскладка)` с журналом решений слота 0 до тика `end_tick` включительно воспроизводит игру тик в тик против детерминированного scripted.
+Обучающая и проверочная части — по сиду (1 из 4 проверочная). Метки по игре с момента фриза: `idle_held` — блок держится при блокирующем `idle` (жертва вне весь срок **и** блокирующий не вне), `scripted_held` — то же при scripted, `victim_escapes_under_idle` — жертва при `idle` выходит из заморозки (отслеживается и после падения блокирующего),
+`idle_blocker_out` — `idle` сам вне. Классы: V = `victim_escapes_under_idle`, B = не V и не `idle_held`, H = `idle_held`.
+
+### 37.3 Прогон ES (`train es run`)
+
+Каталог запуска как у BC (§29): `config.toml` (+ `config-before-N.toml`), `metrics.jsonl`, `status.json`, `state.bin` = `zstd(postcard(EsState { generation, theta, adam, best_score, best_generation }))` с sha256,
+`checkpoints/{last,selected,final,step-NNNNN}.bundle`. Строки метрик (вкладка «Обучение» читает `train` и `arena` без правок, остальные она пропускает): `train` (`phase = "es"`, `step` = поколение, `loss.total` = минус средняя отдача,
+`grad_norm`), `es` (на поколение: разброс отдачи, доля удержаний, свои фризы, засчитанный первый фриз, таймауты, `step_norm`, `theta_dist`, `gen_s`), `es_eval` (точка кривой: `spec` — на чём считано, удержание и свои фризы по проверочным стартам обучающих залов и holdout, `held_victim_escapable` при перетегированном банке,
+исходы и первый фриз по полным играм; без поштучных исходов), `arena` (`phase = "es"`, `arena` = `train-halls` / имя holdout-зала, `credited_win_rate [p, lo, hi]`, `held_credited_win_rate`), `selection`.
+Поштучные исходы (для парного McNemar) — в файлах `train es eval --out`: `held_items`, `self_freeze_items`, `escapable_items`, `credited_items`, `credited_held_items`.

@@ -8,7 +8,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::decoder::DecoderConfig;
-use crate::encoder::{ProprioceptionConfig, RayGridConfig};
+use crate::encoder::{OpponentStateConfig, ProprioceptionConfig, RayGridConfig};
 use crate::world_model::WorldModelConfig;
 
 #[derive(Debug, Deserialize)]
@@ -17,6 +17,9 @@ struct BrainConfigFile {
     decoder: DecoderConfig,
     world_model: WorldModelConfig,
     proprioception: ProprioceptionConfig,
+    /// Task 8.5a; absent in every config written before it.
+    #[serde(default)]
+    opponent_state: OpponentStateConfig,
 }
 
 /// Everything a `configs/fly/{S,M}-brain.toml` file carries, already parsed.
@@ -26,6 +29,22 @@ pub struct BrainConfig {
     pub decoder: DecoderConfig,
     pub world_model: WorldModelConfig,
     pub proprioception: ProprioceptionConfig,
+    pub opponent_state: OpponentStateConfig,
+}
+
+impl BrainConfig {
+    /// The encoder this config describes over `model` (the ray grid, the proprioception and the opponent-state channels).
+    pub fn encoder_model(
+        &self,
+        model: &crate::model::FlyModel,
+    ) -> Result<crate::encoder::EncoderModel, crate::encoder::EncoderError> {
+        crate::encoder::EncoderModel::with_opponent_state(
+            model,
+            self.ray_grid,
+            &self.proprioception,
+            &self.opponent_state,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -59,6 +78,7 @@ pub fn parse_brain_config(text: &str) -> Result<BrainConfig, BrainConfigError> {
         decoder: file.decoder,
         world_model: file.world_model,
         proprioception: file.proprioception,
+        opponent_state: file.opponent_state,
     })
 }
 

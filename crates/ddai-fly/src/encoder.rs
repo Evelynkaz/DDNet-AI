@@ -169,12 +169,90 @@ impl ProprioceptionChannel {
     }
 }
 
+/// One input channel about the **target opponent's own state** (task 8.5a): the observation always carried it
+/// (`CharacterObservation::{is_frozen, freeze_ticks_remaining, vel, hook_state}`) but the fly was never shown it, so it
+/// could not tell a frozen opponent from a free one. All five are scalars (no ray grid): mirror-symmetric ones feed the
+/// neurons of a type as they are, the signed velocity ones are weighted by each neuron's own direction factor like the
+/// own-velocity channels. They are wired by [`OpponentStateConfig`] (the `[opponent_state]` section of a brain config),
+/// not by the `.flyg`, with parameters appended **after** every existing `(type, channel)` pair and zero-initialised by
+/// the bundle upgrade, so a bundle trained without them plays bit for bit the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpponentChannel {
+    Frozen,
+    FreezeLeft,
+    VelocityX,
+    VelocityY,
+    HookState,
+}
+
+pub const OPPONENT_CHANNELS: [OpponentChannel; 5] = [
+    OpponentChannel::Frozen,
+    OpponentChannel::FreezeLeft,
+    OpponentChannel::VelocityX,
+    OpponentChannel::VelocityY,
+    OpponentChannel::HookState,
+];
+
+impl OpponentChannel {
+    pub fn name(self) -> &'static str {
+        match self {
+            OpponentChannel::Frozen => "opponent_frozen",
+            OpponentChannel::FreezeLeft => "opponent_freeze_left",
+            OpponentChannel::VelocityX => "opponent_velocity_x",
+            OpponentChannel::VelocityY => "opponent_velocity_y",
+            OpponentChannel::HookState => "opponent_hook_state",
+        }
+    }
+
+    fn slot(self) -> usize {
+        self as usize
+    }
+
+    /// The signed channels need a neuron's direction factor, which only visual neurons have.
+    fn needs_visual(self) -> bool {
+        matches!(self, OpponentChannel::VelocityX | OpponentChannel::VelocityY)
+    }
+}
+
+/// `[opponent_state]` of a brain config: per channel, the names of the input types (visual or ascending) it feeds.
+/// Empty everywhere (the default, and every config written before task 8.5a) = no such channels.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpponentStateConfig {
+    #[serde(default)]
+    pub frozen: Vec<String>,
+    #[serde(default)]
+    pub freeze_left: Vec<String>,
+    #[serde(default)]
+    pub velocity_x: Vec<String>,
+    #[serde(default)]
+    pub velocity_y: Vec<String>,
+    #[serde(default)]
+    pub hook_state: Vec<String>,
+}
+
+impl OpponentStateConfig {
+    fn types_for(&self, channel: OpponentChannel) -> &[String] {
+        match channel {
+            OpponentChannel::Frozen => &self.frozen,
+            OpponentChannel::FreezeLeft => &self.freeze_left,
+            OpponentChannel::VelocityX => &self.velocity_x,
+            OpponentChannel::VelocityY => &self.velocity_y,
+            OpponentChannel::HookState => &self.hook_state,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        OPPONENT_CHANNELS.iter().all(|&c| self.types_for(c).is_empty())
+    }
+}
+
 /// A visual or proprioceptive input channel, unified for [`EncoderModel`]'s single flat parameter
 /// table (one shared `(type, channel)` -> `param_id` numbering across VPN and AN alike).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InputChannel {
     Visual(Channel),
     Ascending(ProprioceptionChannel),
+    Opponent(OpponentChannel),
 }
 
 impl InputChannel {
@@ -182,6 +260,7 @@ impl InputChannel {
         match self {
             InputChannel::Visual(c) => c.name(),
             InputChannel::Ascending(c) => c.name(),
+            InputChannel::Opponent(c) => c.name(),
         }
     }
 }
@@ -451,6 +530,8 @@ pub struct RayGridFeatures {
     grids: Vec<Vec<f32>>,
     /// One scalar per own-motion channel, indexed via [`RayGridFeatures::scalar`].
     scalars: [f32; 3],
+    /// One scalar per [`OpponentChannel`] (task 8.5a), indexed via [`RayGridFeatures::opponent`].
+    opponent: [f32; OPPONENT_CHANNELS.len()],
 }
 
 /// The spatial channels, in the fixed order [`RayGridFeatures::grids`] stores them.
@@ -489,6 +570,7 @@ impl RayGridFeatures {
                 .map(|_| vec![0.0f32; cfg.num_directions * cfg.num_distance_bins])
                 .collect(),
             scalars: [0.0; 3],
+            opponent: [0.0; OPPONENT_CHANNELS.len()],
         }
     }
 
@@ -503,6 +585,11 @@ impl RayGridFeatures {
 
     pub fn scalar(&self, channel: Channel) -> f32 {
         self.scalars[scalar_slot(channel)]
+    }
+
+    /// The target opponent's state channel (all zero when there is no opponent in the observation).
+    pub fn opponent(&self, channel: OpponentChannel) -> f32 {
+        self.opponent[channel.slot()]
     }
 
     pub fn num_directions(&self) -> usize {
@@ -522,6 +609,7 @@ impl RayGridFeatures {
             g.fill(0.0);
         }
         self.scalars = [0.0; 3];
+        self.opponent = [0.0; OPPONENT_CHANNELS.len()];
     }
 
     /// Places a Gaussian-angle x Gaussian-bin bump for one point object (an opponent, another
@@ -666,6 +754,24 @@ impl RayGridFeatures {
         let target = obs.target_or_nearest();
         if let Some(opp) = target {
             self.place_opponent_features(&obs.self_state, opp, cfg);
+            // Deep freeze does not tick down: the live world reports it with no freeze time at all, the arena's physics re-freezes the
+            // tee every tick. Either way the opponent is out and stays out, so it reads as frozen with a full timer. Live freeze is
+            // **not** the same: that tee can still hook and is not "out" (`observe::is_out` is `freeze_time > 0`), so it reads as before.
+            let held_frozen = opp.is_deep_frozen;
+            self.opponent[OpponentChannel::Frozen.slot()] =
+                f32::from(opp.is_frozen || held_frozen || opp.freeze_ticks_remaining > 0);
+            self.opponent[OpponentChannel::FreezeLeft.slot()] = if held_frozen {
+                1.0
+            } else {
+                (opp.freeze_ticks_remaining as f32 / FREEZE_TIMER_NORMALIZATION_TICKS).clamp(0.0, 1.0)
+            };
+            self.opponent[OpponentChannel::VelocityX.slot()] = (opp.vel.x / cfg.velocity_norm_scale).clamp(-1.0, 1.0);
+            self.opponent[OpponentChannel::VelocityY.slot()] = (opp.vel.y / cfg.velocity_norm_scale).clamp(-1.0, 1.0);
+            self.opponent[OpponentChannel::HookState.slot()] = match opp.hook_state {
+                HOOK_FLYING => 0.5,
+                HOOK_GRABBED => 1.0,
+                _ => 0.0,
+            };
         }
         let target_id = target.map(|opp| opp.id);
         for other in obs.others.iter().filter(|o| Some(o.id) != target_id) {
@@ -968,6 +1074,19 @@ impl EncoderModel {
         ray_cfg: RayGridConfig,
         proprio_cfg: &ProprioceptionConfig,
     ) -> Result<Self, EncoderError> {
+        Self::with_opponent_state(model, ray_cfg, proprio_cfg, &OpponentStateConfig::default())
+    }
+
+    /// [`EncoderModel::new`] plus the target-opponent state channels of `opp_cfg` (task 8.5a). Their `(type, channel)`
+    /// parameters are numbered **after** every parameter [`EncoderModel::new`] would have made, so the first
+    /// `new(..).num_params()` entries of `g`/`c`/`bin_gain` keep their meaning and a bundle can be upgraded by
+    /// appending to them (see [`crate::bundle::upgrade_with_opponent_state`]).
+    pub fn with_opponent_state(
+        model: &FlyModel,
+        ray_cfg: RayGridConfig,
+        proprio_cfg: &ProprioceptionConfig,
+        opp_cfg: &OpponentStateConfig,
+    ) -> Result<Self, EncoderError> {
         ray_cfg.validate()?;
         let flyg = model.flyg();
 
@@ -1102,6 +1221,48 @@ impl EncoderModel {
             per_input.push(info);
         }
 
+        // Target-opponent state channels: a second pass, so that their parameters come after all the others.
+        let mut opp_by_type: Vec<(u32, OpponentChannel)> = Vec::new();
+        for channel in OPPONENT_CHANNELS {
+            for name in opp_cfg.types_for(channel) {
+                let type_index = *an_type_index_of
+                    .get(name.as_str())
+                    .ok_or_else(|| EncoderError::UnknownAnType(name.clone()))?;
+                let role = role_of_type[type_index as usize];
+                let ok = match role {
+                    Some(NeuronRole::InputVisual) => true,
+                    Some(NeuronRole::InputAscending) => !channel.needs_visual(),
+                    _ => false,
+                };
+                if !ok {
+                    return Err(EncoderError::UnknownAnType(format!(
+                        "{name} cannot carry '{}' (an input type is needed{})",
+                        channel.name(),
+                        if channel.needs_visual() {
+                            ", a visual one for a velocity"
+                        } else {
+                            ""
+                        }
+                    )));
+                }
+                if opp_by_type.contains(&(type_index, channel)) {
+                    return Err(EncoderError::UnknownAnType(format!(
+                        "{name} is listed twice for '{}' in [opponent_state]",
+                        channel.name()
+                    )));
+                }
+                opp_by_type.push((type_index, channel));
+            }
+        }
+        for (k, &dense) in model.input_neuron_indices().iter().enumerate() {
+            let type_index = flyg.neurons[dense as usize].type_index;
+            for &(_, channel) in opp_by_type.iter().filter(|(t, _)| *t == type_index) {
+                let ch = InputChannel::Opponent(channel);
+                let param_id = lookup(type_index, ch, &mut assignments);
+                per_input[k].terms.push(Term { channel: ch, param_id });
+            }
+        }
+
         Ok(EncoderModel {
             ray_cfg,
             per_input,
@@ -1212,6 +1373,14 @@ impl EncoderModel {
         match term.channel {
             InputChannel::Visual(ch) => self.visual_term_contribution(info, ch, features),
             InputChannel::Ascending(ch) => an_values.get(ch),
+            InputChannel::Opponent(ch) => {
+                let v = features.opponent(ch);
+                match ch {
+                    OpponentChannel::VelocityX => v * info.vx_dir_factor,
+                    OpponentChannel::VelocityY => v * info.vy_dir_factor,
+                    _ => v,
+                }
+            }
         }
     }
 
@@ -1367,7 +1536,11 @@ pub fn compute_proprioception_values(me: &CharacterObservation, cfg: &RayGridCon
         airborne: f32::from(!me.grounded),
         own_hook,
         jumps_left: (me.jumps_left as f32 / MAX_JUMPS_FOR_NORMALIZATION).clamp(0.0, 1.0),
-        freeze_timer: (me.freeze_ticks_remaining as f32 / FREEZE_TIMER_NORMALIZATION_TICKS).clamp(0.0, 1.0),
+        freeze_timer: if me.is_deep_frozen {
+            1.0
+        } else {
+            (me.freeze_ticks_remaining as f32 / FREEZE_TIMER_NORMALIZATION_TICKS).clamp(0.0, 1.0)
+        },
         speed,
     }
 }

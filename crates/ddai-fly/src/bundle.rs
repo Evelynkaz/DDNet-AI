@@ -252,6 +252,74 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
     }
 }
 
+/// A copy of `bundle` whose encoder also reads the target opponent's state (task 8.5a): the `[opponent_state]` section
+/// given as TOML text (only that section is read) is appended to the embedded brain config, and the encoder
+/// parameters of the new `(type, channel)` pairs are **zero** (`g = 0`, `c = 0`), so the upgraded fly plays bit for bit
+/// like `bundle` until training moves them. Needs the graph the bundle was built for. The format version is unchanged:
+/// the encoder's shape follows from the embedded config, which an old bundle simply does not have a section in.
+pub fn upgrade_with_opponent_state(
+    bundle: &FlyBundle,
+    flyg: ddai_flyg::Flyg,
+    opponent_state_toml: &str,
+) -> Result<FlyBundle, BundleError> {
+    #[derive(Deserialize)]
+    struct Section {
+        opponent_state: crate::encoder::OpponentStateConfig,
+    }
+    #[derive(Serialize)]
+    struct SectionOut<'a> {
+        opponent_state: &'a crate::encoder::OpponentStateConfig,
+    }
+    let section: Section = toml::from_str(opponent_state_toml).map_err(err("the [opponent_state] section"))?;
+    if section.opponent_state.is_empty() {
+        return Err(BundleError("the [opponent_state] section names no input type".into()));
+    }
+    let old_cfg = parse_brain_config(&bundle.brain_config_toml).map_err(err("embedded brain config"))?;
+    if !old_cfg.opponent_state.is_empty() {
+        return Err(BundleError("the bundle already has opponent-state channels".into()));
+    }
+    let new_toml = format!(
+        "{}\n\n# Task 8.5a: the target opponent's state (frozen, freeze time left, velocity, hook), zero-initialised.\n{}",
+        bundle.brain_config_toml.trim_end(),
+        toml::to_string(&SectionOut {
+            opponent_state: &section.opponent_state
+        })
+        .map_err(err("encoding the section"))?
+    );
+    let new_cfg = parse_brain_config(&new_toml).map_err(err("the upgraded brain config"))?;
+    let model = FlyModel::new(flyg, bundle.fly_config, bundle.fly_params.clone()).map_err(err("fly model"))?;
+    let old_enc = old_cfg.encoder_model(&model).map_err(err("encoder"))?;
+    let new_enc = new_cfg.encoder_model(&model).map_err(err("upgraded encoder"))?;
+    let n_old = old_enc.num_params();
+    if new_enc.assignments().len() < n_old
+        || new_enc.assignments()[..n_old]
+            .iter()
+            .zip(old_enc.assignments())
+            .any(|(a, b)| a.type_index != b.type_index || a.channel != b.channel)
+    {
+        return Err(BundleError(
+            "the upgraded encoder does not keep the old parameters in place".into(),
+        ));
+    }
+    bundle
+        .encoder_params
+        .validate_shape(n_old, old_enc.ray_grid_config().num_distance_bins)
+        .map_err(err("the bundle's encoder params"))?;
+    let extra = new_enc.num_params() - n_old;
+    let nb = new_enc.ray_grid_config().num_distance_bins;
+    let mut out = bundle.clone();
+    out.brain_config_toml = new_toml;
+    out.encoder_params.g.extend(std::iter::repeat_n(0.0, extra));
+    out.encoder_params.c.extend(std::iter::repeat_n(0.0, extra));
+    if !out.encoder_params.bin_gain.is_empty() {
+        out.encoder_params.bin_gain.extend(std::iter::repeat_n(1.0, extra * nb));
+    }
+    out.encoder_params
+        .validate_shape(new_enc.num_params(), nb)
+        .map_err(err("the upgraded encoder params"))?;
+    Ok(out)
+}
+
 /// Everything shared by the brains built from one bundle: the models and parameters, immutable.
 /// `Sync`, so an arena batch shares one template across its worker threads.
 pub struct FlyBrainTemplate {
@@ -301,8 +369,7 @@ impl FlyBrainTemplate {
         }
         let brain_config = parse_brain_config(&bundle.brain_config_toml).map_err(err("embedded brain config"))?;
         let model = FlyModel::new(flyg, bundle.fly_config, bundle.fly_params).map_err(err("fly model"))?;
-        let encoder =
-            EncoderModel::new(&model, brain_config.ray_grid, &brain_config.proprioception).map_err(err("encoder"))?;
+        let encoder = brain_config.encoder_model(&model).map_err(err("encoder"))?;
         let decoder = DecoderModel::new(&model, brain_config.decoder.clone()).map_err(err("decoder"))?;
         bundle
             .encoder_params

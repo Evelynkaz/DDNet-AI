@@ -17,7 +17,7 @@ use ddai_planner::planner::PlanStep;
 use crate::brain::{FlyBrain, FlyBrainConfig};
 use crate::brain_config::load_brain_config;
 use crate::decoder::DecoderModel;
-use crate::encoder::{EncoderModel, EncoderParams};
+use crate::encoder::EncoderParams;
 use crate::rng::SplitMix64;
 use crate::{FlyConfig, FlyModel, FlyParams};
 
@@ -180,8 +180,7 @@ pub fn untrained_fly_brain(flyg_path: &Path, brain_config_path: &Path, seed: u64
     let config = FlyConfig::default();
     let params = FlyParams::init_default(&flyg, &config, seed);
     let model = FlyModel::new(flyg, config, params).map_err(|e| format!("fly model: {e}"))?;
-    let encoder = EncoderModel::new(&model, brain_cfg.ray_grid, &brain_cfg.proprioception)
-        .map_err(|e| format!("encoder: {e}"))?;
+    let encoder = brain_cfg.encoder_model(&model).map_err(|e| format!("encoder: {e}"))?;
     let encoder_params = EncoderParams::init_default(encoder.num_params());
     let decoder = DecoderModel::new(&model, brain_cfg.decoder).map_err(|e| format!("decoder: {e}"))?;
     let decoder_params = decoder.init_default_params();

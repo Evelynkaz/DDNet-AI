@@ -1,0 +1,19 @@
+# Task 8.5a: the target opponent's own state as input of the fly (FLY.md §5, label П/С). Only this section is read by
+# `ddnet-ai train upgrade-bundle --opponent-state configs/fly/S-opponent-state.toml`, which appends it to the brain config
+# embedded in a bundle and adds ZERO-initialised encoder parameters for it, so the upgraded fly plays bit for bit like the
+# bundle it came from until training moves them.
+#
+# Channels (all scalars, see `ddai_fly::encoder::OpponentChannel`): `frozen` 0/1; `freeze_left` = freeze ticks left / 300;
+# `velocity_x`, `velocity_y` = the opponent's velocity / `velocity_norm_scale`, clamped to [-1, 1] (each neuron weights them with
+# its own direction factor, like the own-velocity channels); `hook_state` = 0 / 0.5 (hook flying) / 1 (hook grabbed).
+#
+# Wiring (S graph): "frozen / dead" goes where FLY.md §5 puts freeze and death (LC16) plus LC9, a visual type that carries no
+# channel at all in the S graph; the opponent's velocity goes where its closing speed already goes (LC4, LPLC2); its hook, which
+# had no neuron in S (`opponent_hook`), goes to LC9 and LC11 (other players). Arbitrary where the connectome says nothing (П);
+# the weights start at zero and are learned, so the choice only decides which downstream paths they can reach.
+[opponent_state]
+frozen = ["LC16", "LC9"]
+freeze_left = ["LC16", "LC9"]
+velocity_x = ["LC4", "LPLC2"]
+velocity_y = ["LC4", "LPLC2"]
+hook_state = ["LC9", "LC11"]

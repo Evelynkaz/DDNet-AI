@@ -1,0 +1,24 @@
+# E-022 (task 8.5a): the identity check of the opponent-state channels. 24 games of the focal fly (the E-008 selected
+# bundle, `--brain fly:<bundle>`) against the scripted bot: 8 games on each of three halls, so every one of the four
+# game layouts (sides swapped / spawn order reversed) is played twice per hall. The decision hashes of these games must be
+# bit-identical before and after the encoder grew its opponent channels, and again with the bundle upgraded with zero
+# weights for them (`ddnet-ai train upgrade-bundle`). Golden hashes: `crates/ddai-train/tests/opp_identity.rs`.
+#   ddnet-ai arena run --config configs/arena/e022-identity.toml --brain fly:<bundle> --out <dir> --threads 3
+name = "E-022 identity"
+base_seed = 1
+games = 8
+
+[[condition]]
+name = "clb-left vs scripted"
+arena = "clb-left"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "pit vs scripted"
+arena = "pit"
+players = [{ brain = "scripted" }, { brain = "scripted" }]
+
+[[condition]]
+name = "chillblock5-ruler vs scripted"
+arena = "chillblock5-ruler"
+players = [{ brain = "scripted" }, { brain = "scripted" }]

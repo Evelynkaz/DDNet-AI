@@ -9,6 +9,7 @@ mod bot_cmd;
 mod clip_cmd;
 mod dataset_cmd;
 mod demo_cmd;
+mod es_cmd;
 mod fly_cmd;
 mod fly_watch;
 mod launch_cmd;

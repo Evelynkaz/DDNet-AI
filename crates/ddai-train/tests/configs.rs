@@ -192,3 +192,26 @@ fn the_batched_m_smoke_config_parses_and_the_e005_configs_keep_the_per_sequence_
         assert_eq!(experiment(name).fly.backend, TrainBackend::PerSequence, "{name}");
     }
 }
+
+#[test]
+fn the_e022_configs_parse_and_the_two_es_arms_differ_only_in_their_start_seed_and_wall_time() {
+    let es = |n: &str| {
+        let text = std::fs::read_to_string(dir().join(format!("{n}.toml"))).unwrap();
+        ddai_train::es::EsConfig::parse(&text).unwrap_or_else(|e| panic!("{n}: {e}"))
+    };
+    let (a, b) = (es("e022-es-s2"), es("e022-es-s1"));
+    let norm = |c: &ddai_train::es::EsConfig| {
+        let mut c = c.clone();
+        c.name = String::new();
+        c.init_bundle = String::new();
+        c.run_dir = String::new();
+        c.seed = 0;
+        c.max_hours = 0.0; // the control got less wall time (1.2 h against 1.8 h)
+        c
+    };
+    assert_eq!(norm(&a), norm(&b));
+    assert_ne!(a.seed, b.seed);
+    assert!(a.escapable_only && a.threads <= 3);
+    let bc = experiment("e022-bc-postfreeze");
+    assert!(bc.init_bundle.is_some() && bc.dagger.betas.is_empty() && bc.train.threads <= 3);
+}

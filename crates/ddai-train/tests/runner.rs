@@ -95,6 +95,7 @@ fn tiny_experiment(tmp: &std::path::Path, dagger_jobs: Vec<JobConfig>) -> Experi
             select_arenas: Vec::new(),
             retrain_lr_scale: 0.5,
         },
+        init_bundle: None,
     }
 }
 

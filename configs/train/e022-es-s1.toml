@@ -1,0 +1,46 @@
+# E-022 (task 8.5a): the control of `e022-es-s2.toml`: the same ES from the other E-008 checkpoint (d2-maskhook, seed 1, the weaker one:
+# 21.9% credited on clb-left against 57.2%), with its own ES seed. See the main config for what the run does.
+#
+#
+#   ddnet-ai train es run --config configs/train/e022-es-s1.toml
+name = "e022-es-s1"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s1-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+run_dir = "~/aiddnet/data/runs/E-022/e022-es-s1"
+bank = "~/aiddnet/data/runs/E-022/banks/bank-v1.bank"
+seed = 2
+pairs = 16
+generations = 400
+lr_rel = 0.15
+l2_anchor = 0.1
+post_weight = 1.0
+game_weight = 1.0
+max_hours = 1.2
+post_episodes = 8
+normal_games = 4
+train_arenas = ["clb-left", "pit", "platform"]
+escapable_only = true
+threads = 3
+
+[reward]
+credited = 0.5
+
+[model]
+kind = "fly"
+
+# sigma: the smallest scale of the `es scan` (a quarter of the first guess): the perturbations of the larger ones broke the fly (E-022).
+[space]
+sigma_a = 0.005
+sigma_b = 0.005
+sigma_theta = 0.0125
+sigma_enc = 0.0125
+sigma_dec = 0.0125
+
+[eval]
+every = 30
+starts = 400
+games = 400
+holdout_arenas = ["chillblock5-ruler"]
+seed_base = 9100000000

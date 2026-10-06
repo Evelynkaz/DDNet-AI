@@ -3,8 +3,12 @@
 //! * [`types`], [`store`]: the teacher dataset (chunked postcard + zstd + manifest);
 //! * (more modules are added as the crate grows; see `README.md`).
 
+pub mod bank;
+pub mod bank_collect;
 pub mod collect;
+pub mod es;
 pub mod experiment;
+pub mod heldblock;
 pub mod hook_study;
 pub mod human;
 pub mod learner;

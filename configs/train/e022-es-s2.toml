@@ -1,0 +1,46 @@
+# E-022 (task 8.5a): OpenAI-ES on the outcome of the held block, from the E-008 best fly (d2-maskhook, seed 2) upgraded with the
+# opponent-state channels (zero weights: `ddnet-ai train upgrade-bundle`). Post-freeze starts from the bank (training halls only, those
+# where an idle blocker would not hold) plus full games against the scripted bot; evaluated on fixed seeds on the training halls and the
+# holdout hall (ChillBlock5). The seed-1 control is `e022-es-s1.toml` (same, other checkpoint).
+#   ddnet-ai train es run --config configs/train/e022-es-s2.toml
+name = "e022-es-s2"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+run_dir = "~/aiddnet/data/runs/E-022/e022-es-s2"
+bank = "~/aiddnet/data/runs/E-022/banks/bank-v1.bank"
+seed = 1
+pairs = 16
+generations = 400
+lr_rel = 0.15
+l2_anchor = 0.1
+post_weight = 1.0
+game_weight = 1.0
+max_hours = 1.8
+post_episodes = 8
+normal_games = 4
+train_arenas = ["clb-left", "pit", "platform"]
+escapable_only = true
+threads = 3
+
+[reward]
+credited = 0.5
+
+[model]
+kind = "fly"
+
+# sigma: the smallest scale of the `es scan` (a quarter of the first guess): the perturbations of the larger ones broke the fly (E-022).
+[space]
+sigma_a = 0.005
+sigma_b = 0.005
+sigma_theta = 0.0125
+sigma_enc = 0.0125
+sigma_dec = 0.0125
+
+[eval]
+every = 30
+starts = 400
+games = 400
+holdout_arenas = ["chillblock5-ruler"]
+seed_base = 9100000000

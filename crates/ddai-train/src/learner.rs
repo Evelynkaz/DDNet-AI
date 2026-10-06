@@ -190,13 +190,13 @@ impl Default for FlyTrainConfig {
 }
 
 /// Parameter groups of the fly's flat vector, in order.
-struct Layout {
-    a: usize,
-    b: usize,
-    theta: usize,
-    g: usize,
-    c: usize,
-    bin: usize,
+pub(crate) struct Layout {
+    pub(crate) a: usize,
+    pub(crate) b: usize,
+    pub(crate) theta: usize,
+    pub(crate) g: usize,
+    pub(crate) c: usize,
+    pub(crate) bin: usize,
     dir_lr_w: usize,
     stop_w: usize,
     jump_w: usize,
@@ -207,7 +207,7 @@ struct Layout {
 }
 
 impl Layout {
-    fn of(fly: &FlyParams, enc: &EncoderParams, dec: &DecoderParams) -> Layout {
+    pub(crate) fn of(fly: &FlyParams, enc: &EncoderParams, dec: &DecoderParams) -> Layout {
         Layout {
             a: fly.a.len(),
             b: fly.b.len(),
@@ -225,7 +225,7 @@ impl Layout {
         }
     }
 
-    fn total(&self) -> usize {
+    pub(crate) fn total(&self) -> usize {
         self.a
             + self.b
             + self.theta
@@ -247,12 +247,12 @@ impl Layout {
     }
 
     /// Start offsets of `(a, b, theta, g, c, decoder...)`.
-    fn decoder_start(&self) -> usize {
+    pub(crate) fn decoder_start(&self) -> usize {
         self.a + self.b + self.theta + self.g + self.c + self.bin
     }
 }
 
-fn push_decoder(out: &mut Vec<f32>, d: &DecoderParams) {
+pub(crate) fn push_decoder(out: &mut Vec<f32>, d: &DecoderParams) {
     out.extend_from_slice(&d.direction_lr_w);
     out.push(d.direction_lr_b);
     out.extend_from_slice(&d.direction_stop_w);
@@ -267,14 +267,14 @@ fn push_decoder(out: &mut Vec<f32>, d: &DecoderParams) {
     out.extend_from_slice(&d.aim_unpaired_theta);
 }
 
-fn take<'a>(flat: &'a [f32], at: &mut usize, n: usize) -> &'a [f32] {
+pub(crate) fn take<'a>(flat: &'a [f32], at: &mut usize, n: usize) -> &'a [f32] {
     let s = &flat[*at..*at + n];
     *at += n;
     s
 }
 
 /// A decoder's parameters from a flat slice laid out by [`push_decoder`].
-fn decoder_from_flat(flat: &[f32], l: &Layout) -> DecoderParams {
+pub(crate) fn decoder_from_flat(flat: &[f32], l: &Layout) -> DecoderParams {
     let mut at = 0;
     let dir_lr_w = take(flat, &mut at, l.dir_lr_w).to_vec();
     let dir_lr_b = take(flat, &mut at, 1)[0];
@@ -431,7 +431,8 @@ impl FlyLearner {
         let brain_config = parse_brain_config(&brain_config_toml).map_err(|e| format!("brain config: {e}"))?;
         let model = FlyModel::new(flyg, fly_config, fly_params.clone()).map_err(|e| format!("fly model: {e}"))?;
         let index = BackwardIndex::build(&model);
-        let encoder = EncoderModel::new(&model, brain_config.ray_grid, &brain_config.proprioception)
+        let encoder = brain_config
+            .encoder_model(&model)
             .map_err(|e| format!("encoder: {e}"))?;
         let decoder = DecoderModel::new(&model, brain_config.decoder.clone()).map_err(|e| format!("decoder: {e}"))?;
         let enc_params = enc_params.unwrap_or_else(|| encoder.init_params());

@@ -1,0 +1,57 @@
+# E-022 (task 8.5a), the imitation arm: BC fine-tuning of the E-008 seed-2 fly (upgraded with the opponent channels) on post-freeze
+# states labelled by the planner (the teacher holds 86-90% of them), mixed with the E-008 teacher data so that normal play is kept.
+# Data: `ddnet-ai train es collect` (round 7: the teacher plays after the freeze, round 8: the fly plays and the teacher labels what it visits).
+#   ddnet-ai train es collect --bank <bank> --out ~/aiddnet/data/datasets/teacher/e022-postfreeze --actor teacher --round 7 --escapable-only
+#   ddnet-ai train es collect --bank <bank> --out ~/aiddnet/data/datasets/teacher/e022-postfreeze --actor fly:<b> --round 8 --escapable-only
+#   ddnet-ai train run --config configs/train/e022-bc-postfreeze.toml
+name = "e022-bc-postfreeze"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+brain_config = "configs/fly/S-brain-dg.toml"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+scenarios_dir = "configs/scenarios"
+run_dir = "~/aiddnet/data/runs/E-022/e022-bc-postfreeze"
+teacher_base = [
+    "~/aiddnet/data/datasets/teacher/round0-v1",
+    "~/aiddnet/data/datasets/teacher/round1-v2",
+    "~/aiddnet/data/datasets/teacher/e022-postfreeze",
+]
+teacher_dagger = "~/aiddnet/data/datasets/teacher/e022-bc-postfreeze-dagger"
+bc_steps = 800
+eval_every = 0
+
+[model]
+kind = "fly"
+
+[fly]
+lr_a = 1e-3
+lr_b = 2e-3
+lr_theta = 2e-3
+lr_encoder = 1e-2
+lr_decoder = 1e-2
+l2_a = 1e-4
+alpha_init = 4.0
+calibration_windows = 300
+
+[train]
+seed = 2
+batch_windows = 24
+window_len = 32
+burn_in = 6
+warmup_steps = 50
+lr_final_frac = 0.1
+threads = 3
+log_every = 50
+eval_windows = 600
+
+[train.loss]
+pos_weight = [3.0, 1.0, 6.0]
+
+[train.own_hook]
+mode = "mask_hook_head"
+
+[teacher_data]
+val_mod = 10
+round_weights = [[7, 6.0], [8, 6.0]]
+scenario_weight = 2.0

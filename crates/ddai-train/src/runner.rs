@@ -127,6 +127,10 @@ pub struct ExperimentConfig {
     pub eval_every: u64,
     #[serde(default)]
     pub dagger: DaggerConfig,
+    /// Task 8.5a: start from this checkpoint instead of a fresh model (fine-tuning on new data). A resumed run continues from its own
+    /// `last.bundle` and `state.bin` as always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_bundle: Option<String>,
 }
 
 /// Everything loaded once: corpora and the held-out sets.
@@ -903,6 +907,8 @@ pub fn run_experiment_with(
     let last_bundle = run.checkpoint("last.bundle");
     let learner = if last_bundle.exists() && run.path("state.bin").exists() {
         learner_from_bundle(cfg, &last_bundle)?
+    } else if let Some(init) = &cfg.init_bundle {
+        learner_from_bundle(cfg, &expand_home(init))?
     } else {
         make_learner(cfg, &teacher_corpus)?
     };
@@ -1224,6 +1230,7 @@ mod tests {
                 betas: vec![0.5, 0.25],
                 ..DaggerConfig::default()
             },
+            init_bundle: None,
         }
     }
 
