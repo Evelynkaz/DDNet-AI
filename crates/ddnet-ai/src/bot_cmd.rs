@@ -171,6 +171,11 @@ pub struct BotOpts {
     /// website (`say`) while the rest of the control channel works. With it the bot cannot be made to say anything but the typed `/kill`.
     #[arg(long)]
     pub no_owner_chat: bool,
+    /// Duel switch (task 4.11, D-102): the bot never kills itself (no unstick `Cl_Kill`, no `/kill` fallback, no route or trek with a
+    /// respawn step; in F-DDrace `/1vs1` any death of ours is a point for the opponent). The owner's own `!kill` and website lines
+    /// stay. The marker file `<data-dir>/bot/selfkill.off` does the same and is re-read once a second, so it can be toggled live.
+    #[arg(long)]
+    pub no_selfkill: bool,
     /// Task 4.10 (D-100): do not send the DDNet timeout code `/timeout <code>` after joining (no seed file is read or made). With it the bot's
     /// only chat is the typed `/kill` and the owner's lines.
     #[arg(long)]
@@ -509,6 +514,8 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         low,
         strong,
         console_names: o.console_names,
+        no_selfkill: o.no_selfkill,
+        selfkill_marker: Some(data_dir.join("bot").join(ddai_bot::selfkill::SELFKILL_OFF_MARKER)),
         kind_estimate: live_timing.kind,
         ..BotConfig::default()
     };
@@ -931,6 +938,18 @@ mod search_threads_tests {
             get(&["--no-owner-chat", "--no-control"]).unwrap(),
             "it does not conflict with --no-control"
         );
+    }
+
+    /// Task 4.11 (D-102): the duel switch is a flag, off by default.
+    #[test]
+    fn the_no_selfkill_switch_is_a_flag_and_off_by_default() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.no_selfkill)
+        };
+        assert!(!get(&[]).unwrap());
+        assert!(get(&["--no-selfkill"]).unwrap());
     }
 
     /// Task 4.10 (D-100): the timeout code is on by default and `--no-timeout-code` switches it off.

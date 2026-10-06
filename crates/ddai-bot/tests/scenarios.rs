@@ -456,6 +456,15 @@ fn frozen_in_a_freeze_tile_asks_for_a_kill_after_200_ticks_and_respects_the_cool
 
 /// A bot frozen in a freeze tile that the scenario never respawns (the server drops its `Cl_Kill`, like kill protection does).
 fn frozen_bot_forever(notice_after_first_kill: bool) -> (Vec<(i32, bool, bool)>, Vec<BotEvent>) {
+    let (log, events, _) = frozen_bot_forever_with(notice_after_first_kill, false);
+    (log, events)
+}
+
+/// [`frozen_bot_forever`]; `no_selfkill`: the duel switch (D-102) is on. Also returns the bot's `self_kills`.
+fn frozen_bot_forever_with(
+    notice_after_first_kill: bool,
+    no_selfkill: bool,
+) -> (Vec<(i32, bool, bool)>, Vec<BotEvent>, u64) {
     let (mut bot, mut sc, _) = setup_on(
         room(&[(35, 38, FREEZE), (35, 37, FREEZE)]),
         vec![tee(0, 35 * 32 + 16), tee(1, 2000)],
@@ -463,6 +472,7 @@ fn frozen_bot_forever(notice_after_first_kill: bool) -> (Vec<(i32, bool, bool)>,
         BrainKind::Planner,
     );
     sc.tee_mut(0).y = 37 * 32 + 16;
+    bot.set_no_selfkill(no_selfkill);
     run_active(&mut bot, &mut sc, &[1], 3);
     let mut log = Vec::new();
     let mut noticed = false;
@@ -479,7 +489,8 @@ fn frozen_bot_forever(notice_after_first_kill: bool) -> (Vec<(i32, bool, bool)>,
             bot.on_kill_protection_notice();
         }
     }
-    (log, bot.drain_events().collect())
+    let self_kills = bot.stats().self_kills;
+    (log, bot.drain_events().collect(), self_kills)
 }
 
 #[test]
@@ -2281,5 +2292,168 @@ fn the_navigators_mode_requests_are_applied_before_the_unstick_and_the_pipeline(
             0,
             "no brain decision in the snapshot that said hold: {out:?}"
         );
+    });
+}
+
+// --- D-102: the duel switch (`--no-selfkill`) -------------------------------------------------------------------------
+
+#[test]
+fn with_the_duel_switch_a_long_frozen_bot_never_kills_and_never_sends_slash_kill() {
+    support::big_stack(|| {
+        for notice in [false, true] {
+            let (log, events, self_kills) = frozen_bot_forever_with(notice, true);
+            assert!(log.is_empty(), "no Cl_Kill and no /kill (notice {notice}): {log:?}");
+            assert_eq!(self_kills, 0);
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, BotEvent::Killed { .. } | BotEvent::KillFallback { .. })),
+                "{events:?}"
+            );
+        }
+        // Control: the same scenario with the switch off kills (and is unchanged).
+        let (log, _, self_kills) = frozen_bot_forever_with(false, false);
+        assert!(log.iter().any(|e| e.1) && self_kills > 0, "{log:?}");
+    });
+}
+
+#[test]
+fn the_duel_switch_can_be_toggled_while_the_bot_runs() {
+    support::big_stack(|| {
+        let (mut bot, mut sc, _) = setup_on(
+            room(&[(35, 38, FREEZE), (35, 37, FREEZE)]),
+            vec![tee(0, 35 * 32 + 16), tee(1, 2000)],
+            Relations::new(),
+            BrainKind::Planner,
+        );
+        sc.tee_mut(0).y = 37 * 32 + 16;
+        run_active(&mut bot, &mut sc, &[1], 3);
+        let mut kills_by_phase = [0usize; 3];
+        for (phase, off) in [(0, true), (1, false), (2, true)] {
+            bot.set_no_selfkill(off);
+            assert_eq!(bot.no_selfkill(), off);
+            for _ in 0..700 {
+                sc.tee_mut(0).frozen = true;
+                wiggle(&mut sc, 1);
+                let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+                assert!(!(off && (out.kill || out.kill_command)), "phase {phase}: {out:?}");
+                kills_by_phase[phase] += usize::from(out.kill);
+            }
+        }
+        assert_eq!(kills_by_phase[0], 0);
+        assert!(
+            kills_by_phase[1] >= 1,
+            "{kills_by_phase:?}: the switch off again kills again"
+        );
+        assert_eq!(kills_by_phase[2], 0);
+    });
+}
+
+#[test]
+fn the_owners_console_kill_stays_allowed_under_the_duel_switch_and_keeps_its_slash_kill_fallback() {
+    support::big_stack(|| {
+        let (mut bot, mut sc, _) = setup(vec![tee(0, 1000), tee(1, 1300)], Relations::new());
+        bot.set_no_selfkill(true);
+        run_active(&mut bot, &mut sc, &[1], 3);
+        assert!(
+            bot.command(ddai_bot::BotCommand::Kill).ok,
+            "the owner's !kill is accepted"
+        );
+        // The scenario never respawns the tee: the server dropped the `Cl_Kill` (kill protection), so the fallback follows once.
+        let (mut kills, mut commands) = (Vec::new(), Vec::new());
+        for _ in 0..400 {
+            wiggle(&mut sc, 1);
+            let t = sc.tick;
+            let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+            if out.kill {
+                kills.push(t);
+            }
+            if out.kill_command {
+                commands.push(t);
+            }
+        }
+        assert_eq!(kills.len(), 1, "the owner's console kill went out: {kills:?}");
+        assert_eq!(commands.len(), 1, "and its /kill fallback: {commands:?}");
+        assert!(
+            commands[0] - kills[0] >= 50 && commands[0] - kills[0] <= 54,
+            "{kills:?} {commands:?}"
+        );
+        // Control: a bot-initiated kill that the switch suppressed never gets a fallback (covered by the frozen-bot test above).
+    });
+}
+
+/// A navigator that wants a route's respawn at every snapshot, and a trek that wants one too.
+struct AlwaysKill {
+    kill_sent: std::rc::Rc<std::cell::Cell<u32>>,
+    off: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl ddai_bot::hooks::Navigator for AlwaysKill {
+    fn drive(&mut self, _ctx: &ddai_bot::hooks::HookContext<'_>) -> Option<ddai_bot::hooks::NavStep> {
+        Some(ddai_bot::hooks::NavStep::Kill {
+            action: Action::neutral(),
+        })
+    }
+    fn kill_sent(&mut self, _tick: i32, _by_route: bool) {
+        self.kill_sent.set(self.kill_sent.get() + 1);
+    }
+    fn set_no_selfkill(&mut self, off: bool) {
+        self.off.set(off);
+    }
+}
+
+struct TrekKills;
+
+impl ddai_bot::hooks::Trek for TrekKills {
+    fn take_kill(&mut self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn with_the_duel_switch_a_navigation_or_trek_respawn_step_is_not_sent() {
+    support::big_stack(|| {
+        for (nav_kills, trek_kills) in [(true, false), (false, true)] {
+            let mut results = Vec::new();
+            for off in [true, false] {
+                let kill_sent = std::rc::Rc::new(std::cell::Cell::new(0));
+                let flag = std::rc::Rc::new(std::cell::Cell::new(false));
+                let mut hooks = Hooks::default();
+                if nav_kills {
+                    hooks.navigator = Box::new(AlwaysKill {
+                        kill_sent: std::rc::Rc::clone(&kill_sent),
+                        off: std::rc::Rc::clone(&flag),
+                    });
+                }
+                if trek_kills {
+                    hooks.trek = Box::new(TrekKills);
+                }
+                let (probe, _, _, _) = Probe::new(neutral());
+                let map = room(&[]);
+                let mut bot = ddai_bot::Bot::new(cfg(BrainKind::Planner), Box::new(probe), hooks, Relations::new());
+                bot.on_map_loaded(std::sync::Arc::clone(&map));
+                let mut sc = Scenario::new(map, vec![tee(0, 1000), tee(1, 1300)]);
+                bot.set_no_selfkill(off);
+                if nav_kills {
+                    assert_eq!(flag.get(), off, "the navigator is told");
+                }
+                let mut kills = 0;
+                for _ in 0..700 {
+                    wiggle(&mut sc, 1);
+                    let out = run(&mut bot, &mut sc, 1).pop().unwrap();
+                    kills += usize::from(out.kill);
+                }
+                results.push((kills, kill_sent.get(), bot.stats().self_kills));
+            }
+            assert_eq!(
+                results[0],
+                (0, 0, 0),
+                "nav {nav_kills} trek {trek_kills}: nothing sent, nothing recorded"
+            );
+            assert!(
+                results[1].0 >= 1 && results[1].2 >= 1,
+                "control (switch off) kills: {results:?}"
+            );
+        }
     });
 }

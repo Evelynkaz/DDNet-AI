@@ -145,13 +145,26 @@ impl Trek {
         avoid: &HashSet<i32>,
         tick: i64,
     ) -> Result<Trek, String> {
+        Self::start_with(router, col, from, to, avoid, tick, true)
+    }
+
+    /// [`Trek::start`]; `allow_kill` false: no route with a respawn step (D-102, `--no-selfkill`).
+    pub fn start_with(
+        router: &mut Router,
+        col: &impl PlanCollision,
+        from: Vec2,
+        to: (f64, f64),
+        avoid: &HashSet<i32>,
+        tick: i64,
+        allow_kill: bool,
+    ) -> Result<Trek, String> {
         let mut route = router.find_route(
             (from.x, from.y),
             to,
             &RouteOpts {
                 near_tiles: 3,
                 partial: true,
-                allow_kill: true,
+                allow_kill,
                 through_freeze: false,
                 avoid: Some(avoid),
                 ..RouteOpts::default()

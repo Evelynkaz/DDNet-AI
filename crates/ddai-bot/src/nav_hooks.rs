@@ -261,6 +261,8 @@ struct Core {
     travel_since: i64,
     dull_since: i64,
     kill_wanted: bool,
+    /// `--no-selfkill` (D-102): no route or trek with a respawn (kill) step, no kill asked for.
+    no_selfkill: bool,
     /// The last `crossing()` / `planned_freeze()` of the running walk, for the clip frame.
     clip_crossing: bool,
     clip_planned: bool,
@@ -311,6 +313,7 @@ impl Core {
             travel_since: i64::MIN / 2,
             dull_since: -1,
             kill_wanted: false,
+            no_selfkill: false,
             clip_crossing: false,
             clip_planned: false,
             cross_fail: None,
@@ -542,7 +545,9 @@ impl Core {
         } else {
             String::new()
         };
-        self.nav = Some(TsNav::new(goals, opts));
+        let mut nav = TsNav::new(goals, opts);
+        nav.set_allow_kill(!self.no_selfkill);
+        self.nav = Some(nav);
         self.set_mode(Mode::Goto);
         self.touch_status();
         format!("goto: {first}{rest}")
@@ -1173,7 +1178,9 @@ impl Core {
             FollowVerdict::Wait => FollowStep::Wait,
             FollowVerdict::Reroute(g) => {
                 let opts = self.nav_opts(true, None);
-                self.nav = Some(TsNav::new(vec![Self::follow_goal(g.0, g.1, &format!("c{id}"))], opts));
+                let mut nav = TsNav::new(vec![Self::follow_goal(g.0, g.1, &format!("c{id}"))], opts);
+                nav.set_allow_kill(!self.no_selfkill);
+                self.nav = Some(nav);
                 if self.nav.as_ref().is_some_and(|n| n.done()) {
                     FollowStep::Wait
                 } else {
@@ -1193,6 +1200,7 @@ impl Core {
     // ---- trek, seek, home, back to the WB spot ---------------------------------------------------------
 
     fn start_trek(&mut self, ctx: &HookContext<'_>, to: (f64, f64)) -> String {
+        let allow_kill = !self.no_selfkill;
         let Some(ms) = &mut self.ms else {
             return "no map".to_string();
         };
@@ -1200,13 +1208,14 @@ impl Core {
             x: f64::from(ctx.own.pos.x),
             y: f64::from(ctx.own.pos.y),
         };
-        match TsTrek::start(
+        match TsTrek::start_with(
             &mut ms.router,
             ms.world.collision(),
             from,
             to,
             &self.trek_avoid,
             i64::from(ctx.tick),
+            allow_kill,
         ) {
             Ok(t) => {
                 let line = t.describe();
@@ -1306,6 +1315,7 @@ impl Core {
         let Some(spot) = self.game_spot(ctx) else { return };
         self.travel_since = tick;
         let (tx, ty) = ((spot.x / 32.0).trunc() as i32, (spot.y / 32.0).trunc() as i32);
+        let allow_kill = !self.no_selfkill;
         let Some(ms) = &mut self.ms else { return };
         let way = ms.router.find_route(
             (f64::from(ctx.own.pos.x), f64::from(ctx.own.pos.y)),
@@ -1313,7 +1323,7 @@ impl Core {
             &RouteOpts {
                 near_tiles: 3,
                 partial: false,
-                allow_kill: true,
+                allow_kill,
                 through_freeze: false,
                 max_nodes: REACH_MAX_NODES,
                 ..RouteOpts::default()
@@ -1410,7 +1420,7 @@ impl Core {
             x: f64::from(ctx.own.pos.x),
             y: f64::from(ctx.own.pos.y),
         };
-        let kill_ready = ctx.tick - self.last_kill_tick >= KILL_COOLDOWN_TICKS;
+        let kill_ready = !self.no_selfkill && ctx.tick - self.last_kill_tick >= KILL_COOLDOWN_TICKS;
         if let Some(trek) = &mut self.trek {
             let step = trek.goal(me, tick, kill_ready, &mut self.trek_avoid);
             if step.kill {
@@ -1562,6 +1572,13 @@ struct TrekHook(Shared2);
 struct RouteHook(Shared2);
 
 impl Navigator for NavHook {
+    fn set_no_selfkill(&mut self, off: bool) {
+        let mut c = self.0.borrow_mut();
+        c.no_selfkill = off;
+        if let Some(n) = &mut c.nav {
+            n.set_allow_kill(!off);
+        }
+    }
     fn on_map(&mut self, map: &Arc<MapData>, ident: &MapIdent) {
         self.0.borrow_mut().on_map(map, ident);
     }

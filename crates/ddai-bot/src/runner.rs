@@ -45,6 +45,7 @@ use crate::latency::{LatencyStats, Summary};
 use crate::nav_hooks::{NavConfig, NavHandle, nav_hooks};
 use crate::ownerchat::{self, OwnerChat, OwnerChatStats};
 use crate::relations::Relations;
+use crate::selfkill::SelfKillSwitch;
 use crate::trace::InputTrace;
 
 /// Process exit codes (`ddnet-ai record` uses the same).
@@ -225,6 +226,12 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     );
     bot.set_nav_handle(cfg.nav_handle.clone());
     bot.set_brain_options(cfg.brain.clone());
+    // D-102: the duel switch (`--no-selfkill` or the marker file `bot/selfkill.off`), re-read once a second in the loop below.
+    let mut selfkill = SelfKillSwitch::new(cfg.bot.no_selfkill, cfg.bot.selfkill_marker.clone(), Instant::now());
+    bot.set_no_selfkill(selfkill.state().is_some());
+    if let Some(why) = selfkill.state() {
+        tracing::info!("self-kill: off ({})", why.name());
+    }
     tracing::info!(
         server = %cfg.server,
         brain = bot.brain_name(),
@@ -281,6 +288,13 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
 
     let time_up = |started: Instant| cfg.duration.is_some_and(|d| started.elapsed() >= d);
     while !ended && !stop_now && !time_up(started) && !cfg.shutdown.load(Ordering::SeqCst) {
+        if let Some(now_off) = selfkill.poll(Instant::now()) {
+            bot.set_no_selfkill(now_off.is_some());
+            match now_off {
+                Some(why) => tracing::info!("self-kill: off ({})", why.name()),
+                None => tracing::info!("self-kill: on (the marker is gone)"),
+            }
+        }
         let first = client.recv_event(Duration::from_millis(20));
         let mut batch: Vec<ClientEvent> = Vec::new();
         batch.extend(first);
@@ -767,6 +781,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         kill_cooldown_ticks: bot.kill_cooldown_ticks(),
         paused: bot.paused(),
         finish: finish_label(cfg.bot.finish, cfg.brain.hybrid_finish).to_string(),
+        selfkill: if bot.no_selfkill() { "off" } else { "on" }.to_string(),
     }
 }
 

@@ -89,6 +89,9 @@ pub struct Poll {
 
 /// Goto / seek / home navigation (task 4.2).
 pub trait Navigator {
+    /// `--no-selfkill` (D-102): from now on no route or trek may contain a respawn (kill) step and the navigation never asks for a kill.
+    /// Called at the start and whenever the switch changes.
+    fn set_no_selfkill(&mut self, _off: bool) {}
     /// A new map was loaded.
     fn on_map(&mut self, _map: &Arc<MapData>, _ident: &MapIdent) {}
     /// The map is being replaced: forget what only made sense on it (a goto, a trek, the home), save.

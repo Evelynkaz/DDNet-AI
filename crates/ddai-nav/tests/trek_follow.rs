@@ -358,3 +358,108 @@ fn follow_reroutes_after_arriving_short_when_they_moved_or_jumped() {
         FollowVerdict::Reroute((62, 3))
     );
 }
+
+// --- D-102: `--no-selfkill` plans no route with a respawn step ------------------------------------------------------
+
+/// A wall across the whole room: only a respawn at the spawn on the far side gets the tee to the goal.
+fn walled_room_with_spawn() -> (PhysicsWorld, Vec<(f64, f64)>) {
+    let wall: Vec<(u32, u32, u8)> = (1..11).map(|y| (20, y, TILE_SOLID)).collect();
+    (
+        world(room(40, 12, &wall)),
+        vec![(30.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0)],
+    )
+}
+
+#[test]
+fn routes_and_treks_needing_a_respawn_are_unavailable_without_allow_kill() {
+    use ddai_nav::route::{MoveKind, RouteOpts};
+    let (w, spawns) = walled_room_with_spawn();
+    let from = (5.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0);
+    let to = (35.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0);
+    let mut router = Router::new(w.collision(), &spawns);
+    let with_kill = router
+        .find_route(
+            from,
+            to,
+            &RouteOpts {
+                near_tiles: 2,
+                allow_kill: true,
+                ..RouteOpts::default()
+            },
+        )
+        .expect("the respawn gets there");
+    assert!(
+        with_kill.steps.iter().any(|s| s.kind == MoveKind::Kill),
+        "control: the route kills"
+    );
+    let without = router.find_route(
+        from,
+        to,
+        &RouteOpts {
+            near_tiles: 2,
+            allow_kill: false,
+            ..RouteOpts::default()
+        },
+    );
+    assert!(without.is_none_or(|r| r.steps.iter().all(|s| s.kind != MoveKind::Kill)));
+    // The trek: the default start may use the respawn, `start_with(.., false)` never has a kill step.
+    let avoid = HashSet::new();
+    let start = Vec2 { x: from.0, y: from.1 };
+    let on = Trek::start(&mut router, w.collision(), start, to, &avoid, 0).expect("trek with a respawn");
+    assert!(on.steps.iter().any(|s| s.kind == MoveKind::Kill));
+    let off = Trek::start_with(&mut router, w.collision(), start, to, &avoid, 0, false);
+    if let Ok(t) = off {
+        assert!(
+            t.steps.iter().all(|s| s.kind != MoveKind::Kill),
+            "no respawn step without allow_kill"
+        );
+    }
+}
+
+#[test]
+fn a_navigator_without_allow_kill_never_asks_for_a_respawn() {
+    use ddai_nav::navigator::{NavCtx, NavOpts, Navigator, tile_goal};
+    let run = |allow_kill: bool| -> (bool, Vec<String>) {
+        let (mut w, spawns) = walled_room_with_spawn();
+        let mut router = Router::new(w.collision(), &spawns);
+        w.add_tee(
+            0,
+            Vec2 {
+                x: 5.0 * 32.0 + 16.0,
+                y: 10.0 * 32.0 + 16.0,
+            },
+        );
+        let goal = tile_goal(w.collision(), 35, 10);
+        let mut nav: Navigator<PhysicsWorld> = Navigator::new(vec![goal], NavOpts::default());
+        nav.set_allow_kill(allow_kill);
+        let template = w.new_scratch();
+        let mut make = move || template.new_scratch();
+        let (mut asked, mut notes) = (false, Vec::new());
+        for t in 0..3000i64 {
+            let Some(me) = w.get_tee(0) else { break };
+            let inp = {
+                let mut ctx = NavCtx {
+                    col: w.collision(),
+                    router: &mut router,
+                    make_sim: &mut make,
+                };
+                nav.step(&mut ctx, &me, 1000 + t, &[], 0)
+            };
+            notes.extend(nav.take_notes());
+            if nav.take_kill() {
+                asked = true;
+                break;
+            }
+            if nav.done() {
+                break;
+            }
+            w.set_input(0, inp);
+            let _ = w.step();
+        }
+        (asked, notes)
+    };
+    let (asked_on, _) = run(true);
+    assert!(asked_on, "control: with allow_kill the navigator asks for the respawn");
+    let (asked_off, notes) = run(false);
+    assert!(!asked_off, "no respawn asked for: {notes:?}");
+}

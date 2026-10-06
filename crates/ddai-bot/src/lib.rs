@@ -40,6 +40,7 @@ pub mod players;
 pub mod reach;
 pub mod runner;
 pub mod seal_worker;
+pub mod selfkill;
 pub mod sent;
 pub mod settings;
 pub mod target;

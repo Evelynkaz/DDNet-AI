@@ -271,6 +271,9 @@ pub struct StatusMessage {
     /// or `full`. `full`'s drag shaping only acts while the brain is the hybrid; the target rule acts with every brain. The site's
     /// «Бот» card shows it, so a launch that did not take (an old unit without `--finish`) is visible.
     pub finish: String,
+    /// Additive since task 4.11 (D-102): `"off"` while the duel switch is on (`--no-selfkill` or the marker `bot/selfkill.off`: the bot
+    /// never kills itself), else `"on"` (the default: the unstick and the other self-kills work).
+    pub selfkill: String,
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -808,6 +811,7 @@ mod tests {
             kill_cooldown_ticks: 120,
             paused: false,
             finish: "target".into(),
+            selfkill: "off".into(),
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
@@ -817,6 +821,7 @@ mod tests {
         assert_eq!(v["target_tag"], "c3-deadbeef");
         assert_eq!(v["kill_cooldown_ticks"], 120);
         assert_eq!(v["finish"], "target");
+        assert_eq!(v["selfkill"], "off");
     }
 
     #[test]

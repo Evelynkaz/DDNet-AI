@@ -161,6 +161,11 @@ pub struct BotConfig {
     /// Task 3.10 (`--finish target`, opt-in): finish blocks -- the target selection keeps a frozen current target until it is held
     /// ([`crate::target::TargetPicker::set_finish`]).
     pub finish: bool,
+    /// `--no-selfkill` (D-102): the bot never kills itself ([`Bot::set_no_selfkill`]); the owner's `!kill` stays. The runner also
+    /// re-reads [`BotConfig::selfkill_marker`] once a second ([`crate::selfkill`]).
+    pub no_selfkill: bool,
+    /// The marker file `<data-dir>/bot/selfkill.off` (D-102): while it exists the switch is on. `None`: no marker.
+    pub selfkill_marker: Option<PathBuf>,
     /// Task 3.11 (diagnosis, off by default): write the per-input trace of [`crate::trace`] here (`DDAI_INPUT_TRACE` is the
     /// same for a process that has one bot).
     pub input_trace: Option<PathBuf>,
@@ -198,6 +203,8 @@ impl Default for BotConfig {
             strong: false,
             console_names: false,
             finish: false,
+            no_selfkill: false,
+            selfkill_marker: None,
             input_trace: None,
             kind_estimate: false,
             driver_pickup: DRIVER_PICKUP,
@@ -421,6 +428,8 @@ pub struct Bot {
     pending_kill: bool,
     /// The `/kill` fallback after a `Cl_Kill` that had no effect (task 4.6, D-078).
     killfb: crate::killfallback::KillFallback,
+    /// `--no-selfkill` (D-102): no bot-initiated `Cl_Kill` or `/kill`.
+    no_selfkill: bool,
     /// `lives` as the fallback last saw it (a change is a new life).
     fb_lives: u64,
     quit: bool,
@@ -506,6 +515,7 @@ impl Bot {
             pending_team: None,
             pending_kill: false,
             killfb: crate::killfallback::KillFallback::new(),
+            no_selfkill: false,
             fb_lives: 0,
             connected: false,
             quit: false,
@@ -813,6 +823,24 @@ impl Bot {
         self.connected
     }
 
+    /// Switches the duel mode "never kill ourselves" (D-102) on or off. On: the unstick, the wayblock rule, the navigation's and the
+    /// trek's respawn steps and the `/kill` fallback of those kills decide nothing (and routes needing a respawn are not planned). The owner's own
+    /// `!kill` (console) and typed chat lines are not the bot's and stay; the console `!kill` also keeps its `/kill` fallback.
+    pub fn set_no_selfkill(&mut self, off: bool) {
+        self.no_selfkill = off;
+        if off {
+            // A `Cl_Kill` the bot sent before the switch went on is no longer awaited (no `/kill` for it).
+            self.killfb.cancel_pending();
+        }
+        self.unstick.set_no_kill(off);
+        self.hooks.navigator.set_no_selfkill(off);
+    }
+
+    /// Whether [`Bot::set_no_selfkill`] is on.
+    pub fn no_selfkill(&self) -> bool {
+        self.no_selfkill
+    }
+
     /// Ticks until `Cl_Kill` is allowed again (0: now, also before any snapshot).
     pub fn kill_cooldown_ticks(&self) -> i32 {
         if self.last_tick < 0 {
@@ -856,7 +884,9 @@ impl Bot {
         } else if !self.was_alive {
             self.killfb.on_dead(tick);
         }
-        if out.kill {
+        // D-102: under the duel switch only the owner's console `!kill` can be an awaited kill (every kill the bot decides itself is
+        // suppressed); the life tracking above always runs.
+        if out.kill && (!self.no_selfkill || matches!(self.kill_why, Some(KillWhy::Console))) {
             self.killfb.on_protocol_kill(tick);
         }
         let was_giving_up = self.killfb.gave_up();
@@ -1156,6 +1186,7 @@ impl Bot {
             wants_spectate,
             join_grace_until,
             paused,
+            no_selfkill,
             ..
         } = self;
         let (Some(live), Some(plan), Some(obs), Some(grid)) =
@@ -1377,7 +1408,7 @@ impl Bot {
         let mut nav_guard = false;
         match nav {
             Some(NavStep::Kill { action }) => {
-                if !out.kill && unstick.cooldown_ready(tick) {
+                if !*no_selfkill && !out.kill && unstick.cooldown_ready(tick) {
                     unstick.note_external_kill(tick);
                     hooks.navigator.kill_sent(tick, true);
                     stats.self_kills += 1;
@@ -1572,7 +1603,8 @@ impl Bot {
                 Some(tt) => hooks.trek.goal(&hook_ctx!(), tt),
                 None => None,
             };
-            if hooks.trek.take_kill() && !out.kill && unstick.cooldown_ready(tick) {
+            let trek_kill = hooks.trek.take_kill();
+            if trek_kill && !*no_selfkill && !out.kill && unstick.cooldown_ready(tick) {
                 // `trekGoal`: a respawn step on the way there.
                 unstick.note_external_kill(tick);
                 hooks.navigator.kill_sent(tick, false);

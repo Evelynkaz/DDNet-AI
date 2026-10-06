@@ -72,6 +72,8 @@ pub struct Unstick {
     anchor: Option<Anchor>,
     last_kill_tick: i32,
     kills: u32,
+    /// `--no-selfkill` (D-102): no kill verdict is ever returned and nothing is recorded as fired (the cooldown is not started).
+    no_kill: bool,
 }
 
 impl Default for Unstick {
@@ -87,7 +89,15 @@ impl Unstick {
             anchor: None,
             last_kill_tick: NEVER,
             kills: 0,
+            no_kill: false,
         }
+    }
+
+    /// `--no-selfkill` (D-102): never return [`Verdict::Kill`]. Only the three `fire()` / `Verdict::Kill` returns are gated: the frozen
+    /// clock and the anchor keep running, so lifting the switch finds them current (no kill on a stale anchor), and the kill cooldown
+    /// is not started, so the owner's `!kill` is not held up by a kill that was never sent.
+    pub fn set_no_kill(&mut self, off: bool) {
+        self.no_kill = off;
     }
 
     /// Kills requested so far (`stats.selfKills`).
@@ -167,11 +177,11 @@ impl Unstick {
             || (trapped && frozen_for >= TRAPPED_TICKS))
             && (!helped || frozen_for >= HELPED_LIMIT_TICKS);
 
-        if c.wayblock_wants_kill && tick - self.last_kill_tick >= WB_KILL_COOLDOWN_TICKS {
+        if c.wayblock_wants_kill && !self.no_kill && tick - self.last_kill_tick >= WB_KILL_COOLDOWN_TICKS {
             self.fire(tick, true);
             return Verdict::Kill(KillReason::WayBlockLying);
         }
-        if overdue && self.cooldown_ready(tick) {
+        if overdue && !self.no_kill && self.cooldown_ready(tick) {
             self.fire(tick, true);
             return Verdict::Kill(KillReason::Overdue);
         }
@@ -215,7 +225,7 @@ impl Unstick {
         {
             return Verdict::None;
         }
-        if !self.cooldown_ready(tick) {
+        if self.no_kill || !self.cooldown_ready(tick) {
             return Verdict::None;
         }
         self.fire(tick, false);
@@ -518,5 +528,56 @@ mod tests {
         assert!(!f.u.cooldown_ready(599));
         assert!(f.u.cooldown_ready(600));
         assert_eq!(f.u.kills(), 1);
+    }
+
+    /// D-102: with the duel switch on, no kill verdict (wayblock lying, overdue frozen, stuck) and no cooldown is started.
+    #[test]
+    fn the_duel_switch_returns_no_kill_and_starts_no_cooldown() {
+        let mut f = F::new();
+        f.u.set_no_kill(true);
+        assert_eq!(f.step_with(10, 1, true, false, true), Verdict::None, "wayblock lying");
+        f.set_frozen(true);
+        for tick in (0..2000).step_by(2) {
+            assert_eq!(f.step(tick, 1), Verdict::None, "frozen at {tick}");
+        }
+        assert_eq!(f.u.kills(), 0);
+        assert!(f.u.cooldown_ready(2000), "nothing was fired, so no cooldown runs");
+    }
+
+    /// D-102 review F1: the anchor keeps running while the switch is on, so lifting it does not fire a `Stuck` kill on an anchor
+    /// from before (the bot was back at the old spot only 10 ticks earlier). It kills exactly when it would have without the switch.
+    #[test]
+    fn lifting_the_duel_switch_does_not_fire_on_a_stale_anchor() {
+        let run = |toggle: bool| -> Option<i32> {
+            let mut f = F::new();
+            let a = (100.0, 100.0);
+            f.put(0, a.0, a.1, false);
+            for t in (0..=10).step_by(2) {
+                assert!(matches!(f.step(t, 1), Verdict::None));
+            }
+            if toggle {
+                f.u.set_no_kill(true);
+            }
+            for (i, t) in (12..=1000).step_by(2).enumerate() {
+                f.put(0, if i % 2 == 0 { 250.0 } else { 320.0 }, 100.0, false);
+                assert!(matches!(f.step(t, 1), Verdict::None), "moving: no kill at {t}");
+            }
+            f.put(0, a.0, a.1, false);
+            for t in (1002..=1010).step_by(2) {
+                let _ = f.step(t, 1);
+            }
+            if toggle {
+                f.u.set_no_kill(false);
+            }
+            for t in (1012..=1300).step_by(2) {
+                if let Verdict::Kill(_) = f.step(t, 1) {
+                    return Some(t);
+                }
+            }
+            None
+        };
+        let without = run(false);
+        assert!(without.is_some_and(|t| t >= 1202), "control: {without:?}");
+        assert_eq!(run(true), without);
     }
 }

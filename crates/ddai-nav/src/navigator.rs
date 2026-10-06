@@ -269,6 +269,8 @@ pub struct Navigator<W: PlanWorld> {
     alternatives: i32,
     walk_routed: bool,
     kill_wanted: bool,
+    /// Whether a planned route may use a respawn (kill) step; off, a route that needs one is unavailable ([`Navigator::set_allow_kill`]).
+    allow_kill: bool,
     crossings: Vec<Crossing>,
     /// Wall-clock budget of the crossing search per step in ms (`crossBudgetMs`; 0 = none).
     pub cross_budget_ms: f64,
@@ -316,6 +318,7 @@ impl<W: PlanWorld> Navigator<W> {
             alternatives: 0,
             walk_routed: false,
             kill_wanted: false,
+            allow_kill: true,
             crossings: if through_freeze { opts.crossings } else { Vec::new() },
             cross_budget_ms: 0.0,
             wall_route: false,
@@ -352,6 +355,11 @@ impl<W: PlanWorld> Navigator<W> {
     }
     pub fn take_kill(&mut self) -> bool {
         std::mem::take(&mut self.kill_wanted)
+    }
+    /// Allow (the default) or forbid routes with a respawn step. Forbidden: the planner never picks a route through a spawn (D-102,
+    /// `--no-selfkill`); a route already running keeps its steps (the bot does not send the kill, the runner then replans).
+    pub fn set_allow_kill(&mut self, allow: bool) {
+        self.allow_kill = allow;
     }
     pub fn vetoed(&mut self) {
         if let Some(r) = &mut self.runner {
@@ -565,7 +573,7 @@ impl<W: PlanWorld> Navigator<W> {
                     (centre_of(goal.tx), centre_of(goal.ty)),
                     &RouteOpts {
                         near_tiles: 2,
-                        allow_kill: true,
+                        allow_kill: self.allow_kill,
                         through_freeze: self.through_freeze,
                         avoid: Some(&self.avoid),
                         ..RouteOpts::default()
@@ -710,7 +718,7 @@ impl<W: PlanWorld> Navigator<W> {
                     (centre_of(goal.tx), centre_of(goal.ty)),
                     &RouteOpts {
                         near_tiles: 2,
-                        allow_kill: true,
+                        allow_kill: self.allow_kill,
                         through_freeze: self.through_freeze,
                         avoid: Some(&self.avoid),
                         ..RouteOpts::default()
@@ -1031,7 +1039,7 @@ impl<W: PlanWorld> Navigator<W> {
                 (centre_of(c.start.0), centre_of(c.start.1)),
                 &RouteOpts {
                     near_tiles: 1,
-                    allow_kill: true,
+                    allow_kill: self.allow_kill,
                     through_freeze: self.through_freeze,
                     avoid: Some(&self.avoid),
                     ..RouteOpts::default()
