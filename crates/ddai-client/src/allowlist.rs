@@ -24,6 +24,7 @@ use ddai_net::message::Registry;
 use ddai_net::owner_chat::{OwnerPayload, OwnerSay};
 use ddai_net::packer::Unpacker;
 use ddai_net::server_command::ServerCommand;
+use ddai_net::timeout_code::{TimeoutCommand, TimeoutPayload};
 use ddai_net::uuid::{MsgId, unpack_msg_id};
 
 /// Numbered (non-UUID) game message ids this session is allowed to ever send —
@@ -62,7 +63,7 @@ pub enum GuardError {
     #[error("refused a system message on the game guard path (should never happen: sys messages bypass this guard)")]
     UnexpectedSystemMessage,
     #[error(
-        "outgoing numbered game message id {0} is not on the allow-list (D-007: the bot never sends chat; D-078: only `/kill`, byte for byte; D-094: a Cl_Say only against a one-shot authorisation for an owner's website line)"
+        "outgoing numbered game message id {0} is not on the allow-list (D-007: the bot never sends chat; D-078: only `/kill`, byte for byte; D-094: a Cl_Say only against a one-shot authorisation for an owner's website line; D-100: and the one `/timeout <code>` of the join, against its own authorisation)"
     )]
     NumberedIdNotAllowed(i32),
     #[error("outgoing ex game message '{0}' is not on the allow-list (D-007: the bot never sends chat)")]
@@ -122,6 +123,54 @@ impl OwnerSayAuth {
     }
 }
 
+/// The one-shot authorisation of the bot's own `/timeout <code>` (task 4.10, D-100): the exact payload bytes the session built from its
+/// [`TimeoutCommand`] and is about to send. Like [`OwnerSayAuth`], and separate from it: a `Cl_Say` is let through as a timeout command
+/// only against **this** authorisation (never against an owner line's), and only when the bytes are also structurally `/timeout ` plus a
+/// 16-character code ([`TimeoutCommand::is_canonical`]). There is no way to make an entry from raw bytes: [`TimeoutAuth::grant`] takes a
+/// [`TimeoutPayload`], which only [`TimeoutCommand::payload`] builds. It holds at most one entry, and [`check_with`] consumes it.
+#[derive(Default)]
+pub struct TimeoutAuth {
+    granted: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for TimeoutAuth {
+    /// Whether one is pending, never the bytes (they hold the code).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TimeoutAuth({} pending)", self.pending())
+    }
+}
+
+impl TimeoutAuth {
+    pub fn new() -> TimeoutAuth {
+        TimeoutAuth::default()
+    }
+
+    /// Records an authorisation for exactly these bytes, good for one `Cl_Say` (replacing an unused one).
+    pub fn grant(&mut self, payload: &TimeoutPayload) {
+        self.granted = Some(payload.as_bytes().to_vec());
+    }
+
+    /// Drops the authorisation if it was not used.
+    pub fn revoke_all(&mut self) {
+        self.granted = None;
+    }
+
+    /// How many authorisations are waiting (0 or 1).
+    pub fn pending(&self) -> usize {
+        usize::from(self.granted.is_some())
+    }
+
+    /// Removes and reports the authorisation for these exact bytes.
+    fn take(&mut self, payload: &[u8]) -> bool {
+        if self.granted.as_deref() == Some(payload) {
+            self.granted = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Peeks the leading `(id<<1)|sys` varint (and UUID, if extended) of `payload` — the exact same
 /// bytes about to be handed to [`ddai_net::conn::Connection::send_chunk`] — and refuses it unless
 /// it is a **non-system** (`sys == false`) message whose id/name is on this module's allow-list.
@@ -146,6 +195,19 @@ pub fn check(payload: &[u8], registry: &Registry) -> Result<(), GuardError> {
 /// trimmed, no control or invisible character, at most 255 bytes, team 0 or 1; a leading `/` is allowed since 4.9b, the owner's
 /// decision of 2026-10-05). The authorisation is consumed either way, also when the bytes are the typed `/kill` of D-078.
 pub fn check_authorised(payload: &[u8], registry: &Registry, auth: &mut OwnerSayAuth) -> Result<(), GuardError> {
+    check_with(payload, registry, auth, &mut TimeoutAuth::new())
+}
+
+/// [`check_authorised`] with the session's authorisation for its own `/timeout <code>` as well (task 4.10, D-100): a `Cl_Say` also passes
+/// when `timeout_auth` holds an authorisation for exactly these bytes **and** the bytes are structurally a timeout command
+/// ([`TimeoutCommand::is_canonical`]: team 0, `/timeout ` and 16 characters of the code alphabet). Both authorisations are consumed by any
+/// `Cl_Say` that matches them, also when the check then refuses, so neither can be used for another message later.
+pub fn check_with(
+    payload: &[u8],
+    registry: &Registry,
+    auth: &mut OwnerSayAuth,
+    timeout_auth: &mut TimeoutAuth,
+) -> Result<(), GuardError> {
     let mut unpacker = Unpacker::new(payload);
     let (id, sys) = unpack_msg_id(&mut unpacker, registry.uuids()).map_err(|_| GuardError::Undecodable)?;
     if sys {
@@ -160,10 +222,13 @@ pub fn check_authorised(payload: &[u8], registry: &Registry, auth: &mut OwnerSay
                 // `take` first, so the authorisation is spent even when the structural check then refuses, and also when these are
                 // the bytes of the typed `/kill` (the owner's own `/kill`, 4.9b, has the same bytes and must not leave one behind).
                 let authorised = auth.take(payload);
+                let timeout_authorised = timeout_auth.take(payload);
                 if ServerCommand::recognise(payload) == Some(ServerCommand::Kill) {
                     return Ok(());
                 }
-                return if authorised && OwnerSay::is_canonical(payload) {
+                return if (authorised && OwnerSay::is_canonical(payload))
+                    || (timeout_authorised && TimeoutCommand::is_canonical(payload))
+                {
                     Ok(())
                 } else {
                     Err(GuardError::NumberedIdNotAllowed(numbered))
@@ -470,6 +535,166 @@ mod tests {
             check_authorised(&vote, &registry, &mut auth).is_err(),
             "Cl_Vote is still not"
         );
+        assert_eq!(auth.pending(), 1, "none of that touched the authorisation");
+    }
+
+    fn timeout_command(server: &str) -> TimeoutCommand {
+        let seed = ddai_net::timeout_code::TimeoutSeed::parse("ABCDEFGHKLMNPRST").unwrap();
+        TimeoutCommand::new(ddai_net::timeout_code::TimeoutCode::derive(
+            &seed,
+            server.parse().unwrap(),
+        ))
+    }
+
+    /// Task 4.10 (D-100): the bot's own `/timeout <code>` passes once against its own authorisation, and a hand-built copy, a replay, or
+    /// the same bytes without the authorisation are refused.
+    #[test]
+    fn the_timeout_command_passes_once_against_its_authorisation_and_never_without_it() {
+        let registry = Registry::new();
+        let payload = timeout_command("127.0.0.1:8443").payload();
+        let mut owner = OwnerSayAuth::new();
+        let mut auth = TimeoutAuth::new();
+        // no authorisation: the very same bytes are a hand-built Cl_Say as far as the guard knows
+        assert_eq!(
+            check_with(payload.as_bytes(), &registry, &mut owner, &mut auth).unwrap_err(),
+            GuardError::NumberedIdNotAllowed(msgs::id::NETMSGTYPE_CL_SAY)
+        );
+        assert!(
+            check(payload.as_bytes(), &registry).is_err(),
+            "the plain check has none"
+        );
+        assert!(check_authorised(payload.as_bytes(), &registry, &mut owner).is_err());
+        auth.grant(&payload);
+        assert_eq!(auth.pending(), 1);
+        assert!(check_with(payload.as_bytes(), &registry, &mut owner, &mut auth).is_ok());
+        assert_eq!(auth.pending(), 0, "consumed");
+        assert!(
+            check_with(payload.as_bytes(), &registry, &mut owner, &mut auth).is_err(),
+            "a replay is refused"
+        );
+        // revocable
+        auth.grant(&payload);
+        auth.revoke_all();
+        assert!(check_with(payload.as_bytes(), &registry, &mut owner, &mut auth).is_err());
+    }
+
+    /// The authorisation is for exact bytes: another code, another case, the other team flag, a trailing byte are not covered, and those
+    /// refusals leave it alone.
+    #[test]
+    fn a_timeout_authorisation_covers_only_its_exact_bytes() {
+        let registry = Registry::new();
+        let mut owner = OwnerSayAuth::new();
+        let mut auth = TimeoutAuth::new();
+        auth.grant(&timeout_command("127.0.0.1:8443").payload());
+        let other_code = timeout_command("127.0.0.1:8444").payload();
+        assert_ne!(
+            other_code.as_bytes(),
+            timeout_command("127.0.0.1:8443").payload().as_bytes()
+        );
+        assert!(check_with(other_code.as_bytes(), &registry, &mut owner, &mut auth).is_err());
+        for (team, text) in [
+            (0, "/timeout"),
+            (0, "/timeout KbCS2mj3DjD2YRE2 "),
+            (0, "/Timeout KbCS2mj3DjD2YRE2"),
+            (0, "/timeout KbCS2mj3DjD2YRE2;kill"),
+            (1, "/timeout KbCS2mj3DjD2YRE2"),
+            (0, "/kill "),
+            (0, "hello"),
+        ] {
+            assert!(
+                check_with(&hand_built_say(team, text), &registry, &mut owner, &mut auth).is_err(),
+                "team {team} text {text:?}"
+            );
+        }
+        let mut longer = timeout_command("127.0.0.1:8443").payload().into_bytes();
+        longer.push(b'x');
+        assert!(check_with(&longer, &registry, &mut owner, &mut auth).is_err());
+        assert_eq!(
+            auth.pending(),
+            1,
+            "refusals of other bytes leave the authorisation alone"
+        );
+        assert!(
+            check_with(
+                timeout_command("127.0.0.1:8443").payload().as_bytes(),
+                &registry,
+                &mut owner,
+                &mut auth
+            )
+            .is_ok()
+        );
+        assert_eq!(auth.pending(), 0);
+    }
+
+    /// Defence in depth: an authorisation entry for bytes that are not a timeout command (a test builds it by hand; it cannot be made
+    /// from outside this module) does not let them through, and is spent.
+    #[test]
+    fn an_authorised_payload_must_still_be_a_canonical_timeout_command() {
+        let registry = Registry::new();
+        for bytes in [
+            hand_built_say(0, "/timeout"),
+            hand_built_say(0, "/timeout x"),
+            hand_built_say(0, "/timeout KbCS2mj3DjD2YRE2;kill"),
+            hand_built_say(1, "/timeout KbCS2mj3DjD2YRE2"),
+            hand_built_say(0, "hello"),
+            hand_built_say(0, "/kill "),
+        ] {
+            let mut auth = TimeoutAuth {
+                granted: Some(bytes.clone()),
+            };
+            assert!(
+                check_with(&bytes, &registry, &mut OwnerSayAuth::new(), &mut auth).is_err(),
+                "{bytes:?}"
+            );
+            assert_eq!(auth.pending(), 0, "spent even though refused");
+        }
+    }
+
+    /// The two capabilities do not stand in for each other: an owner authorisation for `/timeout`-shaped bytes (hand-made here; the owner
+    /// chat refuses to make one) does not pass as a timeout command, and a timeout authorisation does not pass an owner line.
+    #[test]
+    fn the_owner_authorisation_and_the_timeout_authorisation_are_separate() {
+        let registry = Registry::new();
+        let timeout = timeout_command("127.0.0.1:8443").payload();
+        let mut owner = OwnerSayAuth {
+            granted: vec![timeout.as_bytes().to_vec()],
+        };
+        assert!(
+            check_with(timeout.as_bytes(), &registry, &mut owner, &mut TimeoutAuth::new()).is_err(),
+            "an owner authorisation never lets a /timeout through (it is not an owner line)"
+        );
+        let say = owner_say(false, "hello").payload();
+        let mut auth = TimeoutAuth::new();
+        auth.grant(&timeout);
+        assert!(check_with(say.as_bytes(), &registry, &mut OwnerSayAuth::new(), &mut auth).is_err());
+        assert_eq!(
+            auth.pending(),
+            1,
+            "an owner line's refusal does not touch the timeout authorisation"
+        );
+        // both pending: each line passes against its own
+        let mut owner = OwnerSayAuth::new();
+        owner.grant(&say);
+        assert!(check_with(say.as_bytes(), &registry, &mut owner, &mut auth).is_ok());
+        assert!(check_with(timeout.as_bytes(), &registry, &mut owner, &mut auth).is_ok());
+        assert_eq!((owner.pending(), auth.pending()), (0, 0));
+    }
+
+    /// A timeout authorisation does not widen anything but `Cl_Say`: other ids and the system bit are decided as before.
+    #[test]
+    fn a_timeout_authorisation_does_not_widen_anything_but_cl_say() {
+        let registry = Registry::new();
+        let payload = timeout_command("127.0.0.1:8443").payload();
+        let mut auth = TimeoutAuth::new();
+        auth.grant(&payload);
+        let mut sys = payload.as_bytes().to_vec();
+        sys[0] |= 1;
+        assert_eq!(
+            check_with(&sys, &registry, &mut OwnerSayAuth::new(), &mut auth).unwrap_err(),
+            GuardError::UnexpectedSystemMessage
+        );
+        let vote = numbered_payload(false, msgs::id::NETMSGTYPE_CL_VOTE, |_| {});
+        assert!(check_with(&vote, &registry, &mut OwnerSayAuth::new(), &mut auth).is_err());
         assert_eq!(auth.pending(), 1, "none of that touched the authorisation");
     }
 

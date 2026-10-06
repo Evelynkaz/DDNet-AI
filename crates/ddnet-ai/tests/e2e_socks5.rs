@@ -24,7 +24,8 @@
 //! 3. the proxy drops its TCP control connection: the association dies, the bot reconnects through a **new** one;
 //! 4. the server restarts (`systemctl restart`, a graceful `Server shutdown` close): the bot reconnects through
 //!    the proxy again;
-//! 5. stops on SIGTERM with exit 0, no give-up, and the audit shows **0 chat** (no `Cl_Say`, not even `/kill`).
+//! 5. stops on SIGTERM with exit 0, no give-up, and the audit shows **no chat but the timeout code** (task 4.10, D-100: the join's
+//!    `/timeout <code>`, `Cl_Say(/timeout)`, none refused; no other `Cl_Say`, not even `/kill`).
 //!
 //! Phase 2: `--brain circle` through the relay moves right then left (`tools/e2e/analyze_positions.py`).
 //!
@@ -383,18 +384,19 @@ fn e2e_bot_through_a_loopback_socks5_relay() {
         report["stats"]
     );
 
-    // The audit: 0 chat. Every outgoing message is a join/protocol one, none is `Cl_Say`, not even `/kill`.
+    // The audit: no chat but the timeout code (task 4.10, D-100). Every outgoing message is a join/protocol one, none is `Cl_Say`, not even
+    // `/kill`, except the `/timeout <code>` each join sends.
     let outgoing = report["outgoing_game_messages"].as_object().expect("audit present");
     assert!(!outgoing.is_empty(), "the audit saw nothing: it was not on");
     for (label, v) in outgoing {
         assert!(
-            !label.contains("Say") && !label.contains("Chat"),
+            label == ddai_client::session::TIMEOUT_CODE_LABEL || (!label.contains("Say") && !label.contains("Chat")),
             "chat on the wire: {label} {v}"
         );
         assert_eq!(v["refused"], 0, "the allow-list refused {label}");
     }
     eprintln!(
-        "audit: {} outgoing message kinds, 0 chat: {:?}",
+        "audit: {} outgoing message kinds, no chat but the timeout code: {:?}",
         outgoing.len(),
         outgoing.keys().collect::<Vec<_>>()
     );

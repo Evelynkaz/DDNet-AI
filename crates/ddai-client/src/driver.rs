@@ -86,6 +86,12 @@ const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// comes round, so the old value added up to 10 ms between "decided" and "sent" (measured: wire
 /// latency p50 24 ms -> see `docs/formats.md` §21.6) and let `advance()` fire up to 10 ms late.
 const POLL_TIMEOUT: Duration = Duration::from_millis(2);
+/// Task 3.11 ([`ClientConfig::precise_wakeups`]): with a non-blocking socket the loop sleeps on the input channel (a futex wait
+/// with a precise timeout, the caller's hand-over wakes it at once) for at most this long before it looks at the socket again.
+/// It bounds how long a datagram can sit unseen (0.25 ms on average).
+pub const PRECISE_POLL: Duration = Duration::from_micros(500);
+/// The shortest wait of the precise loop (an input due in less than this is waited for this long: the wake-up costs about that).
+const PRECISE_MIN_WAIT: Duration = Duration::from_micros(40);
 /// Receive buffer size — comfortably above `ddai_net::packet::MAX_PACKET_SIZE` (1400).
 const RECV_BUF_SIZE: usize = 2048;
 
@@ -341,6 +347,11 @@ pub enum ClientEvent {
         since_snapshot: Duration,
         /// The caller's [`InputTag`] of that decision, if it gave one.
         tag: Option<InputTag>,
+        /// Task 3.11: snapshot arrival -> the caller handed the decision over (the bot's own time: queue hop, decision, overhead).
+        handed_after: Duration,
+        /// Task 3.11: the caller handing the decision over -> the driver loop taking it from the channel (the loop's wake-up lag;
+        /// the hold until the intended tick comes after this and is deliberate).
+        pickup: Duration,
     },
 }
 
@@ -882,6 +893,9 @@ pub struct InputTag {
     pub first_slot: i32,
     /// The tick the caller predicted this decision would go out for.
     pub expected_tick: i32,
+    /// Task 3.11: the decision ran the brain (its input matters for the tick it is aimed at); the cheap wandering and idle decisions
+    /// carry a tag too, and the statistics of the slots are kept apart for the two kinds.
+    pub brain: bool,
 }
 
 /// What [`Client::set_input`] hands the driver thread: the input and, when the caller says so, the
@@ -890,6 +904,8 @@ pub struct InputTag {
 struct InputUpdate {
     input: PlayerInput,
     decided_from: Option<(Instant, Option<InputTag>)>,
+    /// Task 3.11: when the caller handed this update over (`Client::set_input*`).
+    handed: Instant,
 }
 
 /// Task 4.1b: a tagged decision waiting for its intended tick.
@@ -898,6 +914,8 @@ struct PendingInput {
     input: PlayerInput,
     arrived: Instant,
     tag: InputTag,
+    handed: Instant,
+    seen: Instant,
 }
 
 /// A decision is never held more than this many ticks past the next send (a tag from a stale or
@@ -939,6 +957,8 @@ pub fn next_fire_counter(prev: i32, action_fire: bool) -> i32 {
 pub struct InputState {
     input: PlayerInput,
     decided_from: Option<(Instant, Option<InputTag>)>,
+    /// Task 3.11: `(handed, seen by the driver loop)` of the decision in `decided_from`.
+    decided_times: Option<(Instant, Instant)>,
     pending: Option<PendingInput>,
     /// Tagged decisions replaced by a newer one before their tick came: they never went out.
     superseded: u64,
@@ -962,6 +982,7 @@ impl InputState {
         InputState {
             input: default_player_input(),
             decided_from: None,
+            decided_times: None,
             pending: None,
             superseded: 0,
             late_presses_dropped: 0,
@@ -988,6 +1009,7 @@ impl InputState {
         self.receive(InputUpdate {
             input,
             decided_from: Some((arrived, tag)),
+            handed: Instant::now(),
         });
     }
 
@@ -1018,6 +1040,8 @@ impl InputState {
                     input: update.input,
                     arrived,
                     tag,
+                    handed: update.handed,
+                    seen: Instant::now(),
                 });
             }
             Some((arrived, None)) => {
@@ -1026,6 +1050,7 @@ impl InputState {
                 }
                 self.set_current(update.input, true, true);
                 self.decided_from = Some((arrived, None));
+                self.decided_times = Some((update.handed, Instant::now()));
             }
             None => {
                 self.pending = None;
@@ -1049,6 +1074,7 @@ impl InputState {
             }
             self.set_current(p.input, true, !late);
             self.decided_from = Some((p.arrived, Some(p.tag)));
+            self.decided_times = Some((p.handed, p.seen));
             self.pending = None;
         }
     }
@@ -1096,6 +1122,7 @@ impl Client {
         let _ = self.input_tx.send(InputUpdate {
             input,
             decided_from: None,
+            handed: Instant::now(),
         });
     }
 
@@ -1107,6 +1134,7 @@ impl Client {
         let _ = self.input_tx.send(InputUpdate {
             input,
             decided_from: Some((snapshot_arrived, tag)),
+            handed: Instant::now(),
         });
     }
 
@@ -1236,14 +1264,15 @@ fn handle_session_event(
     config: &ClientConfig,
     now: Duration,
     events_tx: &event_channel::Sender,
+    snapshot_arrived: Instant,
 ) -> Option<ConnectionOutcome> {
     // Acted on (and, where it produces a *derived* event, queued into `synthesized`) before the
     // triggering event itself is forwarded below — so a listener always sees e.g. `MapChanging`
     // before the `MapLoaded` it caused, not the other way around.
     let mut synthesized: Vec<ClientEvent> = Vec::new();
-    // Task 4.1: the moment this driver thread got hold of the snapshot — zero point of the bot's
-    // "snapshot arrival -> input sent" measurement ([`LiveWorldSnapshot::arrived`]).
-    let snapshot_arrived = Instant::now();
+    // Task 4.1: `snapshot_arrived` is the moment this driver thread got hold of the datagram (task 3.11: stamped right after
+    // `recv`, before the session parsed it) — zero point of the bot's "snapshot arrival -> input sent" measurement
+    // ([`LiveWorldSnapshot::arrived`]).
 
     if let SessionEvent::MapChanging {
         name,
@@ -1348,6 +1377,44 @@ fn run_one_connection(
     input_rx: &Receiver<InputUpdate>,
     control_rx: &Receiver<Control>,
     latest_input: &mut InputState,
+    reached_in_game: &mut bool,
+    handshake_deadline: &mut Instant,
+    hard_deadline: Instant,
+) -> ConnectionOutcome {
+    // Task 3.11: the non-blocking loop, when asked for and the transport can do it.
+    let precise = config.precise_wakeups && transport.set_nonblocking(true).is_ok();
+    let outcome = drive_connection(
+        transport,
+        session,
+        config,
+        start,
+        events_tx,
+        input_rx,
+        control_rx,
+        latest_input,
+        reached_in_game,
+        handshake_deadline,
+        hard_deadline,
+        precise,
+    );
+    if precise {
+        let _ = transport.set_nonblocking(false);
+    }
+    outcome
+}
+
+/// The body of [`run_one_connection`]: with `precise` the socket is non-blocking and the loop sleeps on the input channel
+/// (task 3.11, [`ClientConfig::precise_wakeups`]); without it the loop blocks in `recv` for `POLL_TIMEOUT`, as before.
+#[allow(clippy::too_many_arguments)]
+fn drive_connection(
+    transport: &mut dyn Transport,
+    session: &mut Session,
+    config: &ClientConfig,
+    start: Instant,
+    events_tx: &event_channel::Sender,
+    input_rx: &Receiver<InputUpdate>,
+    control_rx: &Receiver<Control>,
+    latest_input: &mut InputState,
     // Review finding F7: set to `true` the moment this connection attempt ever reaches
     // [`SessionEvent::InGame`] — `run`'s caller uses this to decide whether a later
     // `LostConnection` should reset the backoff/attempt-count state.
@@ -1358,6 +1425,7 @@ fn run_one_connection(
     // (never past `hard_deadline`) while map bytes keep arriving.
     handshake_deadline: &mut Instant,
     hard_deadline: Instant,
+    precise: bool,
 ) -> ConnectionOutcome {
     let mut buf = [0u8; RECV_BUF_SIZE];
     // Task 2.3b: while the join has not completed, say once per second (info level) which step it
@@ -1471,9 +1539,12 @@ fn run_one_connection(
         latest_input.adopt_if_due(next_send_tick);
         session.set_input(latest_input.input);
 
+        let mut got_datagram = false;
         match transport.recv(&mut buf) {
             Ok(n) => {
                 let now = Instant::now().duration_since(start);
+                got_datagram = true;
+                let arrived = Instant::now();
                 for ev in session.feed(&buf[..n], now) {
                     if matches!(ev, SessionEvent::InGame) {
                         *reached_in_game = true;
@@ -1484,7 +1555,7 @@ fn run_one_connection(
                     {
                         return outcome;
                     }
-                    if let Some(outcome) = handle_session_event(ev, session, config, now, events_tx) {
+                    if let Some(outcome) = handle_session_event(ev, session, config, now, events_tx, arrived) {
                         // Review finding F4: flush before returning — a terminal event (e.g. the
                         // `CLOSE` `Session::disconnect()` above just queued, or an in-flight
                         // `ACCEPT`/ack the join sequence needs to complete) must actually reach
@@ -1530,10 +1601,18 @@ fn run_one_connection(
             if let SessionEvent::InputSent { tick, .. } = &ev
                 && let Some((arrived, tag)) = latest_input.decided_from.take()
             {
+                let (handed_after, pickup) = latest_input
+                    .decided_times
+                    .take()
+                    .map_or((Duration::ZERO, Duration::ZERO), |(h, s)| {
+                        (h.saturating_duration_since(arrived), s.saturating_duration_since(h))
+                    });
                 events_tx.send(ClientEvent::InputLatency {
                     tick: *tick,
                     since_snapshot: arrived.elapsed(),
                     tag,
+                    handed_after,
+                    pickup,
                 });
             }
             // Belt-and-suspenders, same as the identical check above: `Connection::take_events`'s
@@ -1545,10 +1624,24 @@ fn run_one_connection(
             {
                 return outcome;
             }
-            if let Some(outcome) = handle_session_event(ev, session, config, now, events_tx) {
+            if let Some(outcome) = handle_session_event(ev, session, config, now, events_tx, Instant::now()) {
                 // See the comment on the identical pattern above.
                 send_all(transport, session.flush(now));
                 return outcome;
+            }
+        }
+        // Task 3.11: nothing arrived this round (the socket is non-blocking): sleep on the input channel until the next input
+        // is due, a decision is handed over, or the socket is due for another look.
+        if precise && !got_datagram {
+            let now = Instant::now().duration_since(start);
+            let wait = session
+                .next_input_in(now)
+                .map_or(PRECISE_POLL, |d| d.clamp(PRECISE_MIN_WAIT, PRECISE_POLL));
+            match input_rx.recv_timeout(wait) {
+                Ok(update) => latest_input.receive(update),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // The `Client` is gone: the control channel says so at the top of the loop; do not spin until it does.
+                Err(mpsc::RecvTimeoutError::Disconnected) => thread::sleep(wait),
             }
         }
     }
@@ -1705,13 +1798,7 @@ fn run(
     // `MAX_SERVER_RECONNECTS_BEFORE_IN_GAME`.
     let mut server_reconnects_pending: u32 = 0;
     let mut backoff = MIN_BACKOFF;
-    let mut latest_input = InputState {
-        input: default_player_input(),
-        decided_from: None,
-        pending: None,
-        superseded: 0,
-        late_presses_dropped: 0,
-    };
+    let mut latest_input = InputState::new();
     let mut reconnect_attempt: u32 = 0;
     // Task 2.3b acceptance criterion 4: "a per-session counter of connection attempts ... logged"
     // — every time this loop is about to start a new connection, for *any* reason (the very first
@@ -1819,6 +1906,9 @@ fn run(
 
         let start = Instant::now();
         let mut session = Session::new(config.clone());
+        // Task 4.10 (D-100): the timeout code of this attempt, from the seed and the *game server's* address (`target`, never the
+        // proxy's relay; a redirect changes it, as `CClient::Connect` regenerates it). Nothing without `ClientConfig::timeout_seed`.
+        session.arm_timeout_code(target);
         session.connect(Duration::ZERO);
 
         let mut reached_in_game = false;
@@ -2142,7 +2232,14 @@ mod command_replies_are_chat_not_a_kick_tests {
                 client_id,
                 message: message.to_string(),
             }));
-            let outcome = handle_session_event(ev, &mut session, &ClientConfig::default(), Duration::ZERO, &events_tx);
+            let outcome = handle_session_event(
+                ev,
+                &mut session,
+                &ClientConfig::default(),
+                Duration::ZERO,
+                &events_tx,
+                Instant::now(),
+            );
             assert!(
                 outcome.is_none(),
                 "chat {message:?} must not end the connection: {outcome:?}"
@@ -2217,6 +2314,7 @@ mod give_up_message_tests {
 
     fn tag(expected: i32) -> InputTag {
         InputTag {
+            brain: false,
             first_slot: 101,
             expected_tick: expected,
         }
@@ -2226,6 +2324,7 @@ mod give_up_message_tests {
         InputUpdate {
             input: fire_input(fire),
             decided_from: Some((Instant::now(), Some(tag(expected)))),
+            handed: Instant::now(),
         }
     }
 
@@ -2264,6 +2363,7 @@ mod give_up_message_tests {
         st.receive(InputUpdate {
             input: fire_input(1),
             decided_from: Some((Instant::now(), None)),
+            handed: Instant::now(),
         });
         assert_eq!(st.input.fire, 1);
         // Plain `set_input` (recorders, demos): the counter is theirs and goes out untouched.
@@ -2271,6 +2371,7 @@ mod give_up_message_tests {
         st.receive(InputUpdate {
             input: fire_input(3),
             decided_from: None,
+            handed: Instant::now(),
         });
         assert_eq!(st.input.fire, 3);
     }
@@ -2309,6 +2410,7 @@ mod give_up_message_tests {
         st.receive(InputUpdate {
             input: fire_input(1),
             decided_from: Some((Instant::now(), None)),
+            handed: Instant::now(),
         });
         assert_eq!(st.superseded, 2);
     }

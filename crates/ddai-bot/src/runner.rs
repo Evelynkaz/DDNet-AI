@@ -45,6 +45,7 @@ use crate::latency::{LatencyStats, Summary};
 use crate::nav_hooks::{NavConfig, NavHandle, nav_hooks};
 use crate::ownerchat::{self, OwnerChat, OwnerChatStats};
 use crate::relations::Relations;
+use crate::trace::InputTrace;
 
 /// Process exit codes (`ddnet-ai record` uses the same).
 pub const EXIT_OK: u8 = 0;
@@ -212,6 +213,10 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
 
     let mut bot_cfg = cfg.bot.clone();
     bot_cfg.async_seal = true; // the decision path must stay cheap (D-042)
+    if cfg.client.precise_wakeups && bot_cfg.driver_pickup == crate::bot::DRIVER_PICKUP {
+        // The driver wakes on the hand-over instead of at its next poll (task 3.11).
+        bot_cfg.driver_pickup = crate::bot::DRIVER_PICKUP_PRECISE;
+    }
     let mut bot = Bot::new(
         bot_cfg,
         brain,
@@ -258,6 +263,11 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     let diag_block_clips = std::env::var_os("DDAI_DIAG_BLOCK_CLIPS").is_some();
     let mut diag_clips_left = DIAG_BLOCK_CLIPS;
     let mut budget = ReconnectBudget::default();
+    // Task 3.11: the opt-in per-input trace for timing experiments (`DDAI_INPUT_TRACE`).
+    let mut trace = match &cfg.bot.input_trace {
+        Some(path) => InputTrace::create(path).ok(),
+        None => InputTrace::from_env(),
+    };
     let mut next_status = Instant::now();
     let mut next_log = Instant::now() + LOG_EVERY;
     let mut frame_chars: Vec<FrameChar> = Vec::with_capacity(128);
@@ -287,6 +297,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
                 &mut budget,
                 &cache_dir,
                 &cfg,
+                &mut trace,
             );
         }
         if let Some(snap) = pending.take() {
@@ -432,6 +443,9 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         client.disconnect();
     }
     client.join();
+    if let Some(t) = trace.as_mut() {
+        t.flush();
+    }
     for ev in client.events() {
         if let ClientEvent::MarginSummary(m) = ev {
             report.margin = Some(m);
@@ -500,6 +514,7 @@ fn handle_event(
     budget: &mut ReconnectBudget,
     cache_dir: &std::path::Path,
     cfg: &RunnerConfig,
+    trace: &mut Option<InputTrace>,
 ) {
     match ev {
         ClientEvent::LiveWorldSnapshot(snap) => {
@@ -512,10 +527,27 @@ fn handle_event(
             tick,
             since_snapshot,
             tag,
-        } => bot.note_wire_latency(since_snapshot, tick, tag),
+            handed_after,
+            pickup,
+        } => {
+            if let Some(t) = trace {
+                t.decision(tick, tag, since_snapshot, handed_after, pickup);
+            }
+            bot.note_wire_latency(since_snapshot, tick, tag, handed_after, pickup)
+        }
         ClientEvent::Session(s) => match *s {
-            SessionEvent::InputSent { tick, input } => bot.on_input_sent(tick, &input),
-            SessionEvent::InputTiming { tick, time_left } => bot.on_input_timing(tick, time_left),
+            SessionEvent::InputSent { tick, input } => {
+                if let Some(t) = trace {
+                    t.sent(tick, &input);
+                }
+                bot.on_input_sent(tick, &input)
+            }
+            SessionEvent::InputTiming { tick, time_left } => {
+                if let Some(t) = trace {
+                    t.timing(tick, time_left);
+                }
+                bot.on_input_timing(tick, time_left)
+            }
             SessionEvent::MapChanging { name, .. } => {
                 tracing::info!(map = %name, "map changing");
                 bot.on_map_changing();

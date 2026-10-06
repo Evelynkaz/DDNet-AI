@@ -168,7 +168,8 @@ pub fn start_private_server(
         ),
     )
     .unwrap();
-    let log = scratch.join("server.log");
+    // `logfile` takes at most 127 characters (`config_variables.h`): a long scratch path (a `TMPDIR` deep in a home directory) silently
+    // loses the log, so the name is relative to the server's working directory, which is the scratch directory.
     let child = Command::new(&binary)
         .current_dir(scratch)
         .arg("-f")
@@ -177,7 +178,7 @@ pub fn start_private_server(
         .arg(&secrets)
         .arg("bindaddr 127.0.0.1")
         .arg("sv_register 0")
-        .arg(format!("logfile {}", log.display()))
+        .arg("logfile server.log")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

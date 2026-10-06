@@ -6126,3 +6126,96 @@ JSON: `{"v":1, "skipped":n, "game":{"w","h"}|null, "images":[…], "env":[…], 
 `grad_norm`), `es` (на поколение: разброс отдачи, доля удержаний, свои фризы, засчитанный первый фриз, таймауты, `step_norm`, `theta_dist`, `gen_s`), `es_eval` (точка кривой: `spec` — на чём считано, удержание и свои фризы по проверочным стартам обучающих залов и holdout, `held_victim_escapable` при перетегированном банке,
 исходы и первый фриз по полным играм; без поштучных исходов), `arena` (`phase = "es"`, `arena` = `train-halls` / имя holdout-зала, `credited_win_rate [p, lo, hi]`, `held_credited_win_rate`), `selection`.
 Поштучные исходы (для парного McNemar) — в файлах `train es eval --out`: `held_items`, `self_freeze_items`, `escapable_items`, `credited_items`, `credited_held_items`.
+
+## 38. Тайминг ввода: фазы решения, трасса вводов, стенд, `--live-timing` (задача 3.11, E-024, D-101, `ddai-bot::{latency, trace}`, `ddai-client::{driver, timing}`)
+
+
+### 38.1 Отчёт бота (`ddnet-ai bot --report`), добавлено аддитивно
+
+- `latency_detail_us` — каждый ряд `{n, p50, p90, p95, p99, max}` (мкс; ряды `candidates` и `horizon_ticks` считают штуки): `total`, `brain`,
+  `overhead`, `pick`, `queue`, `wire`, `brain_made`, фазы `update`, `nav`, `predict`, `post`, `finish`, `clip` (части `total`: считаются только
+  решения, прошедшие фазу), `handed` (снапшот пришёл в драйвер -> бот отдал решение; `wire - handed` — доля драйвера: подхват, удержание,
+  ожидание слота), `pickup` (бот отдал -> цикл драйвера взял из канала), `proposal`, `search`, `candidates`, `horizon_ticks`; `slots` — те же счётчики,
+  что в `latency_us.slots`, плюс `brain_decisions`, `brain_missed_first_slot`, `brain_as_predicted`, `brain_later_than_predicted` (только решения,
+  прошедшие через мозг; остальные — блуждание, покой — разбавляют общие доли).
+- `send_lag_us` — `{n, p50, p90, p99, max}`: на сколько позже срока (момент, когда предсказанные часы дошли до тика) драйвер отправил каждый
+  `NETMSG_INPUT`; окно последних 8192 вводов (`MarginSummary::send_lag_us`). `null`, пока не отправлен ни один ввод.
+- В журнале `bot status` строки новых рядов — `phase update|nav|predict|post|finish|clip`, `horizon (ticks)`, `handed (…)`, `pickup (…)`; их формат тот же
+  (`name: n=… p50=…us p90=…us p99=…us max=…us`), читатель soak их пропускает (регулярное выражение называет старые ряды).
+
+### 38.2 Трасса вводов (`BotConfig::input_trace`, `DDAI_INPUT_TRACE=<файл>`; выключена по умолчанию)
+
+JSON-строка на событие, в порядке событий: `{"k":"s","tick":T,"in":[direction,target_x,target_y,jump,fire,hook,flags,weapon,next,prev]}` —
+`NETMSG_INPUT` с `IntendedTick = T` ушёл в сокет; `{"k":"t","tick":T,"left":MS}` — `INPUTTIMING` сервера (`left < 0`: ввод опоздал, сервер сдвинул его);
+`{"k":"d","tick":T,"first":F,"exp":E,"brain":0|1,"wire_us":…,"handed_us":…,"pickup_us":…}` — решение, первый ввод которого — `T` (`first` — ближайший слот
+после снапшота, `exp` — тик, на который решение целилось). `tools/e2e/live_timing_analyze.py TRACE TEEHISTORIAN…` сводит её с `sv_tee_historian 1`
+сервера (записи `INPUT_NEW/INPUT_DIFF` — изменения применяемого ввода по тикам): выход `applied_minus_intended`, `applied_minus_expected`,
+`brain_applied_minus_expected` (0 = на нужном тике, 1 = на тик позже, …) и доли. Смещение записи калибруется по вводам с `INPUTTIMING >= 0`.
+
+### 38.3 Стенд (`crates/ddai-bot/tests/e2e_live_timing.rs`, `tools/e2e/live_timing.sh`, `live_timing_table.py`)
+
+`#[ignore]`-тест `live_timing_run` (`DDAI_E2E=1`): только петлевой приватный сервер (`DDAI_T_SERVER`, по умолчанию `127.0.0.1:8453`; порт 8303 отвергается), бот идёт
+через реле с задержкой `DDAI_T_DELAY_US` в каждую сторону (12 500) ± `DDAI_T_JITTER_US` (2 500). Прочее: `DDAI_T_LABEL`, `DDAI_T_SECS` (90), `DDAI_T_OPPONENTS` (1 скриптовый),
+`DDAI_T_BRAIN` (hybrid), `DDAI_T_BURN=N` (N занятых потоков), `DDAI_T_WB=auto`, `DDAI_T_PROD=1` (клипы, память навигации, мост, как в юните),
+`DDAI_T_DUTY=F,P` (F с боя, P с покоя), `DDAI_T_FIX=precise,kind` (опции этого раздела), `DDAI_T_OUT`. Выход: `<label>.json` (отчёт + `thread_cpu_s` по именам потоков),
+`<label>.trace.jsonl`. Скрипт `live_timing.sh` перезагружает карту через econ (`reload`) до и после прогона (сервер закрывает teehistorian прогона) и вызывает анализатор.
+
+### 38.4 Ключ `--live-timing` (`ddnet-ai bot`/`play --bot`)
+
+Список через запятую: `precise` (`ClientConfig::precise_wakeups`), `kind` (`BotConfig::kind_estimate`); `off` — ни того, ни другого. Умолчание — см. D-101.
+
+## 39. Код защиты от таймаута `/timeout <код>`: порт 20.1, файл семени, байты на проводе (задача 4.10, D-100, `ddai-net::timeout_code`, `ddai-client::{allowlist, session, timeout_seed, socks5}`)
+
+
+### 39.1 Алгоритм (порт `engine/client/client.cpp` 20.1)
+
+`CClient::Connect` зовёт `GenerateTimeoutCodes`; `GenerateTimeoutCode(.., Dummy = false)`:
+
+```
+digest = MD5( "normal\0"  ++  seed ++ "\0"  ++  байты NETADDR адреса игрового сервера )      // md5_update по str_length+1
+random[8] = digest[0..16] как восемь u16 (порядок хоста, little-endian)
+code[2*i]   = VALUES[(random[i] % 2048) / 46]
+code[2*i+1] = VALUES[(random[i] % 2048) % 46]            // VALUES = "ABCDEFGHKLMNPRSTUVWXYZabcdefghjkmnopqt23456789", 46 знаков
+```
+
+- `NETADDR` — 24 байта «как в памяти»: `type: u32` (1 = IPv4, 2 = IPv6; в `ddai-net` IPv4-отображённый IPv6 — это IPv4), `ip: [u8; 16]` (IPv4 — в первых четырёх байтах, остальное нули), `port: u16` (порядок хоста), два байта выравнивания. В C++ выравнивание не определено; у нас нули (`CClient::Connect` обнуляет массив `mem_zero`). Серверу код нужен только как непрозрачная строка, поэтому значение выравнивания ни на что не влияет.
+- **Адрес — игрового сервера**, не ретранслятора прокси. Редирект (`redirect@ddnet.org`) меняет порт, и код пересчитывается, как в оригинале (драйвер вызывает `Session::arm_timeout_code(target)` перед каждой попыткой).
+- Семя — `cl_timeout_seed`: `secure_random_password(.., 16)` = 16 байт случайности через `generate_password` -> 16 знаков из `VALUES` (`TimeoutSeed::from_random`).
+- Эталон: `tools/ddnet-vectors/timeout_code.cpp` — алгоритм 20.1 дословно (MD5 DDNet, настоящий `NETADDR`), печатает векторы; в `timeout_code::tests::CPP_VECTORS` пять значений (IPv4 и IPv6, три сида). Например, сид `ABCDEFGHKLMNPRST`, сервер `127.0.0.1:8443` -> `KbCS2mj3DjD2YRE2`.
+
+### 39.2 Когда уходит и что уходит
+
+`CClient::OnPostConnect`: после `EnterGame`, когда принято **больше** `GameTickSpeed()` (50) снимков (`m_aReceivedSnapshots > 50`) и сервер объявил возможность `CHATTIMEOUTCODE` (`capabilities@ddnet.tw`, `ServerCapabilities::chat_timeout_code`). Счётчик снимков и признак «уже отправлено» сбрасываются при каждом `Sv_ReadyToEnter`/`EnterGame` — значит, **раз за вход в игру, и ещё раз после смены карты на том же соединении** (как делает оригинал; код при смене карты у сервера теряется вместе с игроком). Без `;emote` и `cl_run_on_join` (у бота их нет).
+
+Байты полезной нагрузки `Cl_Say` (`Connection::send_chunk`): `varint(NETMSGTYPE_CL_SAY << 1) = 0x22`, `team = 0x00`, текст `/timeout ` + 16 знаков кода, `0x00`. Пример (`ABCDEFGHKLMNPRST`, `127.0.0.1:8443`):
+
+```
+22 00 2f 74 69 6d 65 6f 75 74 20 4b 62 43 53 32 6d 6a 33 44 6a 44 32 59 52 45 32 00
+   ^team  / t i m e o u t ' ' K b C S 2 m j 3 D j D 2 Y R E 2 NUL
+```
+
+Метка аудита — `Cl_Say(/timeout)` (`session::TIMEOUT_CODE_LABEL`), считается отдельно от `Cl_Say(/kill)` и `Cl_Say(owner)`. В журнале одна строка: `timeout code sent (len 16)`; кода нет ни в журнале, ни в аудите, ни в `Debug` (`TimeoutSeed`/`TimeoutCode`/`TimeoutCommand`/`TimeoutPayload` показывают длину или ничего).
+
+### 39.2a Повтор, пока рядом призрак (решение владельца 2026-10-06)
+
+Те же байты (§39.2), тот же код, team 0, тот же `TimeoutAuth` (одно разрешение на каждую отправку), та же метка `Cl_Say(/timeout)`. Условие: уже было отправлено при входе, сервер объявил `CHATTIMEOUTCODE`, и в текущем снимке есть **призрак** — игрок, который не мы (`PlayerInfo::local != 1`) и чьё имя (`ClientInfo::name`, сравнение байтов) равно `ClientConfig::name`. Темп (`GhostResends`): не раньше 30 с (`TIMEOUT_RESEND_INTERVAL`) после последней отправки, при входе тоже; не более 35 (`TIMEOUT_MAX_RESENDS`) на призрака; призрак пропал — счётчик в ноль; `EnterGame` — всё в ноль. Нет призрака — нет повторов. Журнал: `timeout code re-sent while a same-name player is present (len N, resend k of 35)`. Захват происходит на первом повторе, когда сервер уже считает старое соединение мёртвым (§39.7); тогда наш слот становится старым, другого игрока с этим именем нет, повторы кончаются. `soak_analyze.py`: на проводе ≤ строк «in game» + строк «re-sent»; «re-sent» ≤ 35 на вход; отказов 0.
+
+### 39.3 Список разрешённых и перепись
+
+`allowlist::TimeoutAuth` — одноразовое разрешение на **ровно эти байты** (`grant` принимает только `TimeoutPayload`, а он строится только в `TimeoutCommand::payload`; `TimeoutCommand` — только из `TimeoutCode`, а тот — только `TimeoutCode::derive(seed, addr)`). `check_with(payload, registry, owner_auth, timeout_auth)`: `Cl_Say` проходит как таймаут-команда, только если есть разрешение на эти байты **и** байты структурно `TimeoutCommand::is_canonical` (team 0, `/timeout `, ровно 16 знаков из `VALUES`, повторная запись даёт те же байты: другой регистр, пробел, `;`, командный чат, хвост — отказ). Разрешение снимается любым совпавшим `Cl_Say` (и при отказе). Разрешения владельца и таймаут-команды отдельные и друг друга не заменяют. `ddai-bot/tests/owner_chat_census.rs`: `TimeoutCommand::new(`, `TimeoutCode::derive(` и `maybe_send_timeout_code(` — только `session.rs`; `TimeoutSeed::from_random(` — только `timeout_seed.rs`; `.timeout_seed = ` — только `ddnet-ai/src/bot_cmd.rs`; `.arm_timeout_code(` — только `driver.rs`; псевдонимы типов — нигде.
+
+### 39.4 Чат владельца и `/timeout`
+
+`OwnerText::new`/`check` (D-094/4.9b) отказывают (`OwnerTextError::Reserved`, у сайта `invalid_text` / `reserved`) **всякую строку, начинающуюся с `/` и содержащую `timeout` в любом регистре**, а не только точную: (1) `/timeout` без аргумента сравнивает пустой код со всеми «в таймауте» игроками без кода и может отдать чужого; (2) `ExecuteLine` сервера режет строку по `;`, поэтому `/spec;timeout x` — тоже `/timeout`. Слово `timeout` в обычной строке без `/` разрешено. Владелец не может отправить `/timeout` ни с другим кодом, ни без кода.
+
+### 39.5 Файл семени
+
+`<data-dir>/bot/timeout-seed`: 16 знаков из `VALUES` и перевод строки (17 байт), режим **0600**. Создаёт `ddnet-ai play` при первом запуске (`timeout_seed::load_or_create`: `/dev/urandom`, `O_EXCL` — не через символическую ссылку; другой процесс создал раньше — берёт его), читает без перехода по ссылкам (`safe_file::read_regular_nofollow`, ≤ 256 байт); файл с правами для группы/всех сужается до 0600. Битый файл (не 16 знаков алфавита) — ошибка, файл **не перезаписывается**, бот играет без `/timeout` (строка в stderr `timeout code: off (...)`). Выключатель: `ddnet-ai play --no-timeout-code` (файл не читается и не создаётся). Семя не коммитится (каталог данных вне репозитория), не логируется. `ddnet-ai record` и тесты семени не имеют (`ClientConfig::timeout_seed = None`) и ничего не шлют.
+
+### 39.6 Keepalive на управляющем TCP SOCKS5
+
+`socks5::set_control_keepalive` (через `socket2`, без `unsafe`): `SO_KEEPALIVE`, простой 30 с, интервал 15 с, 5 проб -> мёртвый прокси обнаруживается за ~105 с, не раньше 100-секундного молчания сессии (иначе короткий сбой превращается в переподключение и призрака) (раньше keepalive не было: только молчание сессии), а простаивающее TCP-соединение провайдер прокси не считает бездействующим. Сбой опции — предупреждение в журнал, соединение остаётся как было. Трафик проб — 2 пакета по ~40 байт раз в 15 с.
+
+### 39.7 Что делает сервер (20.1, `ConTimeout` / `CServer::SetTimedOut`) и чего это не позволяет
+
+`/timeout <код>` ищет **другого** игрока с тем же кодом, у которого соединение уже **в состоянии таймаута** (`HasErrored`: сервер не слышал его `conn_timeout` секунд, по умолчанию **100**). Нашёл — новое соединение занимает слот старого (`ResumeOldConnection`, `DelClientCallback(новый, "Timeout Protection used")`): остаётся **старый игрок со своим именем** (новый, `(1)Name`, удаляется; имя из нового `Cl_StartInfo` не применяется), персонаж, состояние. Не нашёл (старое ещё «живо» для сервера) — ничего не забирается, новое соединение лишь помечается защищённым с этим кодом, а **старое, помеченное защищённым ещё при его входе, не отбрасывается по таймауту, а держится до `conn_timeout_protection` (1000 с)**. Следствия и повтор — D-100, «Граница» и «Повтор»; e2e `crates/ddnet-ai/tests/e2e_timeout_takeover.rs` показывает оба случая на частном сервере с `conn_timeout 5`.

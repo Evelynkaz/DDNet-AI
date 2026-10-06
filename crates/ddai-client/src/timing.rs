@@ -378,6 +378,19 @@ pub struct MarginSummary {
     /// Task 4.1b (driver): decisions adopted more than 2 ticks after their tick whose fire press was
     /// dropped (the hammer veto only covers the intended tick plus 2).
     pub late_presses_dropped: u64,
+    /// Task 3.11: how late the driver actually sent each `NETMSG_INPUT` after the predicted clock made it due, microseconds
+    /// (`count`, then percentiles over the recent window): the loop's wake-up granularity. `None` until an input was sent.
+    pub send_lag_us: Option<SendLagSummary>,
+}
+
+/// Task 3.11: the distribution of [`MarginSummary::send_lag_us`] (send time minus due time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendLagSummary {
+    pub count: u64,
+    pub p50_us: u32,
+    pub p90_us: u32,
+    pub p99_us: u32,
+    pub max_us: u32,
 }
 
 /// Running/windowed statistics over every `time_left_ms` this session has observed via
@@ -451,6 +464,7 @@ impl MarginStats {
             time_at_margin_ms: controller.map_or_else(Vec::new, |c| c.time_at_margin_ms().to_vec()),
             superseded_decisions: 0,
             late_presses_dropped: 0,
+            send_lag_us: None,
         }
     }
 }
@@ -482,6 +496,10 @@ pub struct InputTiming {
     stale_through_tick: i32,
     /// Task 4.1b round 2 (F7): warns about a link whose stalls stay above the threshold.
     stall_watch: StallWatch,
+    /// Task 3.11: how late (us) each input was sent after it became due (the recent window), and how many were counted.
+    send_lag: VecDeque<u32>,
+    send_lag_count: u64,
+    send_lag_max_us: u32,
 }
 
 impl InputTiming {
@@ -514,6 +532,9 @@ impl InputTiming {
             pred_tick: 0,
             history: VecDeque::with_capacity(INPUT_HISTORY_LEN),
             margin_stats: MarginStats::default(),
+            send_lag: VecDeque::new(),
+            send_lag_count: 0,
+            send_lag_max_us: 0,
         }
     }
 
@@ -553,8 +574,22 @@ impl InputTiming {
     }
 
     pub fn margin_summary(&self) -> MarginSummary {
-        self.margin_stats
-            .summary_with(self.controller.as_ref(), self.prediction_margin_ms)
+        let mut s = self
+            .margin_stats
+            .summary_with(self.controller.as_ref(), self.prediction_margin_ms);
+        if !self.send_lag.is_empty() {
+            let mut v: Vec<u32> = self.send_lag.iter().copied().collect();
+            v.sort_unstable();
+            let at = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize];
+            s.send_lag_us = Some(SendLagSummary {
+                count: self.send_lag_count,
+                p50_us: at(0.50),
+                p90_us: at(0.90),
+                p99_us: at(0.99),
+                max_us: self.send_lag_max_us,
+            });
+        }
+        s
     }
 
     /// Task 4.1: how long until [`InputTiming::advance`] next fires (the next `NETMSG_INPUT` goes
@@ -637,6 +672,19 @@ impl InputTiming {
 
         let new_pred_tick = i32::try_from(candidate).unwrap_or(self.pred_tick);
         if new_pred_tick > self.pred_tick {
+            // Task 3.11: the input became due when the predicted clock reached the previous predicted tick's end
+            // (`next_input_in_ns`); how long after that it is actually being sent is the loop's wake-up lag.
+            if self.pred_tick > 0 {
+                let tick_ns = crate::smooth_time::TIME_FREQ / i64::from(GAME_TICK_SPEED);
+                let lag_us =
+                    u32::try_from(((pred_now - i64::from(self.pred_tick) * tick_ns).max(0)) / 1000).unwrap_or(u32::MAX);
+                if self.send_lag.len() == MARGIN_SAMPLE_WINDOW {
+                    self.send_lag.pop_front();
+                }
+                self.send_lag.push_back(lag_us);
+                self.send_lag_count += 1;
+                self.send_lag_max_us = self.send_lag_max_us.max(lag_us);
+            }
             self.pred_tick = new_pred_tick;
             let recorded_predicted_time = self.predicted_time.as_ref().expect("still Some").get(now_ns);
             if self.history.len() == INPUT_HISTORY_LEN {
@@ -769,6 +817,33 @@ mod tests {
         let now = wait + 1_000_000;
         let again = timing.next_input_in_ns(now).unwrap();
         assert!(again <= tick_ns, "{again}");
+    }
+
+    /// Task 3.11: how late each input is sent after it became due is recorded per `advance` that fires.
+    #[test]
+    fn the_send_lag_is_the_time_between_an_input_becoming_due_and_being_sent() {
+        let mut timing = InputTiming::new(DEFAULT_PREDICTION_MARGIN_MS);
+        timing.on_snapshot(100, 0);
+        timing.on_snapshot(101, 0);
+        timing.advance(0).expect("bootstrap tick");
+        assert!(
+            timing.margin_summary().send_lag_us.is_none(),
+            "the bootstrap input has no due time to be late for"
+        );
+        let wait = timing.next_input_in_ns(0).unwrap();
+        let tick_ns = TIME_FREQ / i64::from(GAME_TICK_SPEED);
+        // 3 ms late, then exactly on time, then 7.5 ms late.
+        let t1 = wait + 3_000_000;
+        assert!(timing.advance(t1).is_some());
+        let t2 = wait + tick_ns;
+        assert!(timing.advance(t2).is_some());
+        let t3 = t2 + tick_ns + 7_500_000;
+        assert!(timing.advance(t3).is_some());
+        let lag = timing.margin_summary().send_lag_us.expect("three samples");
+        assert_eq!(lag.count, 3);
+        assert!((2_900..=3_100).contains(&lag.p50_us), "{lag:?}");
+        assert!((7_400..=7_600).contains(&lag.p99_us), "{lag:?}");
+        assert!((7_400..=7_600).contains(&lag.max_us), "{lag:?}");
     }
 
     #[test]

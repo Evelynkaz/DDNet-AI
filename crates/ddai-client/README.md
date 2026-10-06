@@ -20,6 +20,7 @@
 | `allowlist` | Список разрешённых исходящих игровых сообщений (защита от `Cl_Say`, D-007) — единственная функция-охрана `check` (+ `check_authorised`, 4.9), работает на сырых байтах, не на типе Rust; `Cl_Say` проходит только как побайтно тот же `ServerCommand::Kill` (`/kill`, D-078, задача 4.6) или по одноразовому разрешению сессии на ровно эти байты строки владельца (`OwnerSayAuth`, D-094, задача 4.9) |
 | `map_cache` | Путь/чтение/запись кэша карт (`<cache_dir>/<имя>_<sha256-hex>.map`), валидация имени карты (`str_valid_filename`) |
 | `live_servers` | Задача 8.4a, D-027/D-038: `~/aiddnet/data/live-servers.toml` (вне git) — предохранитель «живая игра и запись разрешены только на этих не-loopback серверах, под этим ником»; loopback разрешён всегда без записи в файле. Задача 2.6: поле записи `proxy = "<имя>"` и `proxy_binding` — какой прокси положен соединению |
+| `timeout_seed` | Задача 4.10, D-100: файл семени кода защиты от таймаута `<data-dir>/bot/timeout-seed` (0600, создаётся ботом, не логируется, без символических ссылок); `load_or_create` |
 | `transport` | Задача 2.6: трейт `Transport` — путь датаграмм между драйвером и игровым сервером (`begin_attempt`, `reset_after_loss`, `send`, `recv`). `DirectUdp` — прежний путь без изменений поведения (один сокет на весь `Client::connect`, `connect` на цель попытки, сброс устаревших датаграмм) |
 | `socks5` | Задача 2.6: SOCKS5 (RFC 1928) с логином/паролем (RFC 1929) и `UDP ASSOCIATE`: разбор и сборка заголовка UDP (`parse_udp`, `encode_udp_into`, не паникует на любых байтах), рукопожатие по TCP с таймаутами на каждом шаге (`associate`, `check`), типизированные ошибки (`Socks5Error`, в том числе `UdpNotSupported` на ответ `0x07`), `Socks5UdpTransport` |
 | `proxy` | Задача 2.6: `Secret` (в `Debug`/`Display` всегда `<redacted>`), `ProxyConfig` (в `Debug` только имя), чтение `<secrets>/<имя>-proxy.toml` с проверкой прав 0600 (`load_proxy`), `resolve_for_server` — прокси берётся только по записи сервера |
@@ -77,11 +78,43 @@
 - `POLL_TIMEOUT` драйвера 10 мс -> 2 мс: решение бота подхватывалось не чаще раза за `recv`, и `advance()` срабатывал
   до 10 мс позже. Замер — `docs/formats.md` §21.6.
 
+## Дополнения задачи 3.11 (тайминг ввода в живой игре, E-024, D-101; `docs/research/live-timing.md`)
+
+- **`ClientConfig::precise_wakeups`** (умолчание библиотеки `false`; `ddnet-ai bot`/`play` включают по умолчанию через `--live-timing precise,kind`, возврат — `--live-timing off` или `DDAI_LIVE_TIMING=off`). Цикл драйвера блокировался в `recv`
+  до `POLL_TIMEOUT` = 2 мс (ядро округляет таймаут сокета до 1 мс тика: 2-3 мс), поэтому решение бота подхватывалось в среднем
+  через 1-1,7 мс (p99 3-5 мс), а ввод уходил после своего срока в среднем на 1,7 мс (p99 4-5 мс). В точном режиме сокет
+  неблокирующий (`Transport::set_nonblocking`: `DirectUdp` и `Socks5UdpTransport`; иначе тихо остаётся прежний цикл), а ждёт цикл на
+  `input_rx.recv_timeout(min(до срока ввода, PRECISE_POLL = 0,5 мс))` — futex с точным таймаутом, решение будит поток сразу.
+  Подхват p50 0,02 мс (p99 0,5), отправка после срока p50 0,09 мс. Цена — до ~2 000 пробуждений в секунду (CPU: `docs/research/live-timing.md` §6).
+  Перед возвратом из соединения сокет возвращается в блокирующий режим (прощальный `CLOSE`, переподключение).
+- Метка прихода снапшота (`LiveWorldSnapshot::arrived`) ставится сразу после `recv`, до разбора сессией (раньше после: терялись сотни мкс).
+- `ClientEvent::InputLatency` получил `handed_after` (снапшот -> бот отдал решение) и `pickup` (отдал -> цикл драйвера взял); `InputTag::brain`
+  (решение прошло через мозг); `MarginSummary::send_lag_us` (на сколько позже срока ушёл каждый ввод: счёт и p50/p90/p99/max по окну
+  8192 вводов).
+
 ## Дополнения задачи 4.9 (чат владельца, D-094)
 
 - `allowlist::OwnerSayAuth` — одноразовые разрешения на **ровно эти байты** `Cl_Say`; `grant` принимает только `ddai_net::owner_chat::OwnerPayload` (а `OwnerText` для него строится лишь с `OwnerChannel`: один раз на процесс, у диспетчера бота) (его строит только `OwnerSay::payload` из проверенного `OwnerText`), `allowlist::check_authorised(payload, registry, &mut auth)` снимает разрешение при проверке (повтор и подделка — отказ) и требует, чтобы байты были канонической записью `OwnerSay`. `check` без разрешений не менялся: тесты 4.6 целы, `Cl_Say` как был закрыт, так и закрыт (кроме `/kill` байт в байт).
 - `Session::request_owner_say(&OwnerSay, now) -> Result<(), OwnerSayError>` (`NotInGame` / `Refused`): записывает разрешение, отдаёт байты в единственный путь `send_game_chunk` (теперь возвращает `bool`), стирает остаток; вне игры ничего не ставится и не пишется. Метка аудита `Cl_Say(owner)` (`OWNER_SAY_LABEL`), в журнал — только «owner chat sent (len N)». `Client::owner_say(OwnerSay)` — то же через поток драйвера (между соединениями строка отбрасывается).
 - Тесты: `allowlist::tests::an_owner_line_*`, `an_authorisation_*`, `an_authorised_payload_must_still_be_a_canonical_owner_line`, `session::tests` (на «проводе» фейкового сервера: строка доходит с флагом команды и обрезанным текстом, повтор руками — отказ, вне игры — ничего). Темп и очередь — в `ddai-bot::ownerchat`, не здесь (крейт не знает ни часов, ни политики).
+
+## Дополнения задачи 4.10 (`/timeout <код>` и keepalive прокси, D-100)
+
+Подробности — `docs/formats.md` §39 и D-100. Коротко:
+
+- `ClientConfig::timeout_seed: Option<TimeoutSeed>` (по умолчанию `None`: ничего не шлём; `ddnet-ai play` кладёт семя из файла `<data-dir>/bot/timeout-seed`).
+  Драйвер перед **каждой** попыткой зовёт `Session::arm_timeout_code(адрес игрового сервера)` (не ретранслятора прокси); сессия, как `CClient::OnPostConnect`, шлёт
+  `Cl_Say{0, "/timeout <код>"}` **раз за вход в игру** (после 50 снимков, если сервер объявил `CHATTIMEOUTCODE`; ещё раз после смены карты, как в оригинале). Метка аудита
+  `Cl_Say(/timeout)` (`session::TIMEOUT_CODE_LABEL`), в журнале «timeout code sent (len N)», кода нигде нет.
+- Повтор (решение владельца 2026-10-06): пока в снимке есть игрок с нашим именем, который не мы (призрак после быстрого входа заново), та же `/timeout <код>` уходит каждые 30 с, не более 35 раз на призрака (`GhostResends`, `ghost_present`, `Session::maybe_resend_timeout_code`); тот же `TimeoutAuth`, та же метка. Нет призрака — нет повторов.
+- `allowlist::TimeoutAuth` + `check_with(...)`: одноразовое разрешение на ровно эти байты и структурная проверка `TimeoutCommand::is_canonical`; разрешения владельца и таймаут-команды отдельные.
+  `check_authorised` прежняя (с пустым `TimeoutAuth`).
+- `socks5::set_control_keepalive`: на управляющем TCP-соединении `SO_KEEPALIVE`, простой 30 с, интервал 15 с, 5 проб (`socket2`, без `unsafe`); тест читает опции сокета назад.
+- Потеря ассоциации и быстрый вход заново (backoff 1 с, тот же ник, те же лимиты D-050) — прежнее поведение; забрать **старого** тию новое соединение может, только если сервер уже посчитал старое
+  мёртвым (`conn_timeout`, по умолчанию 100 с): подробно D-100, «Граница».
+- Тесты: `allowlist::tests::*timeout*`, `session::tests::*timeout*` (на «проводе» фейкового сервера: 50 снимков — ничего, 51-й — одна строка, без возможности/семени/взвода — ничего, после нового `EnterGame` — ещё раз),
+  `timeout_seed::tests` (0600, то же семя после перезапуска, битый файл не трогается, ссылки не читаются), `socks5::tests::the_control_connection_has_tcp_keepalive_with_short_timers`;
+  e2e `ddnet-ai/tests/e2e_timeout_takeover.rs` (частный сервер 127.0.0.1:8443/8444).
 
 ## Дополнения задачи 2.6 (SOCKS5 с UDP, D-088)
 

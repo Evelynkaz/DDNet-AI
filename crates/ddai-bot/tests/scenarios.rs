@@ -916,6 +916,48 @@ fn the_slot_choice_does_not_depend_on_how_long_the_host_takes_to_decide() {
     });
 }
 
+/// Task 3.11: the estimate that aims a decision at an input slot is a quantile over **every** decision, and wandering ones take a
+/// fraction of a millisecond: after 64 of them the p90 is the cheap mode, and the first brain decision of an engagement is aimed one
+/// slot too early (it goes out a tick after the world it was decided on assumed). `kind_estimate` aims by the brain decisions' own time.
+#[test]
+fn the_first_brain_decision_after_a_wander_phase_is_aimed_by_the_brain_decisions_own_time() {
+    support::big_stack(|| {
+        let ahead_of_snapshot = |kind_estimate: bool| {
+            let (probe, log, ..) = Probe::new(neutral());
+            let mut c = cfg(BrainKind::Planner);
+            c.decision_time_override = None;
+            // Deterministic: the estimators are fed 0.3 ms for a wandering decision and 20 ms for a brain decision, whatever the
+            // host's clock says (a loaded host once stretched a real 20 ms sleep to 35+ ms and flipped the slot).
+            c.decision_time_feed = Some((
+                std::time::Duration::from_micros(300),
+                std::time::Duration::from_millis(20),
+            ));
+            c.kind_estimate = kind_estimate;
+            let mut bot = bot_with(Box::new(probe), c, Relations::new());
+            let map = room(&[]);
+            bot.on_map_loaded(map.clone());
+            let mut sc = Scenario::new(map, vec![tee(0, 1000), tee(1, 1100)]);
+            sc.pred_ahead = 4;
+            sc.next_input_in = Some(std::time::Duration::from_millis(15));
+            // A fight: brain decisions teach both estimates (20 ms) ...
+            run_active(&mut bot, &mut sc, &[1], 6);
+            // ... then a long wander phase of cheap decisions fills the window of the mixed one.
+            bot.set_mode(Mode::Passive);
+            run(&mut bot, &mut sc, 80);
+            let brain_calls = log.borrow().len();
+            bot.set_mode(Mode::Fight);
+            run_active(&mut bot, &mut sc, &[1], 1);
+            assert_eq!(log.borrow().len(), brain_calls + 1, "the brain decided again");
+            log.borrow().last().unwrap().obs_tick - (sc.tick - 2)
+        };
+        // Mixed estimate (production default): ~0 ms, the first slot (15 ms away) looks reachable: predicted to the last sent tick.
+        assert_eq!(ahead_of_snapshot(false), 4);
+        // The brain's own estimate (20 ms + pickup 2 ms > the 15 ms to the first input): one input goes out first, the world is predicted
+        // a tick further.
+        assert_eq!(ahead_of_snapshot(true), 5);
+    });
+}
+
 #[test]
 fn before_the_timing_bootstrap_a_two_tick_guess_is_used_and_the_horizon_is_capped() {
     support::big_stack(|| {

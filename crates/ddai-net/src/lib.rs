@@ -35,6 +35,7 @@ pub mod server_command;
 pub mod serverinfo;
 pub mod snapshot;
 pub mod sysmsg;
+pub mod timeout_code;
 pub mod tuning;
 pub mod view;
 

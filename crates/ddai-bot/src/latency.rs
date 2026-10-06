@@ -194,6 +194,28 @@ impl Series {
         }
     }
 
+    /// The exact `p` quantile (0..=1) of the samples in the ring, microseconds (sorts a copy: for the final report).
+    pub fn quantile_us(&self, p: f64) -> u32 {
+        if self.samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = self.samples.clone();
+        sorted.sort_unstable();
+        sorted[((sorted.len() - 1) as f64 * p.clamp(0.0, 1.0)).round() as usize]
+    }
+
+    /// `{n, p50, p90, p95, p99, max}` (microseconds; exact: sorts a copy) for the JSON reports.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "n": self.count,
+            "p50": self.quantile_us(0.50),
+            "p90": self.quantile_us(0.90),
+            "p95": self.quantile_us(0.95),
+            "p99": self.quantile_us(0.99),
+            "max": self.max_us,
+        })
+    }
+
     pub fn summary(&self) -> Summary {
         if self.samples.is_empty() {
             return Summary::default();
@@ -228,10 +250,16 @@ pub struct SlotStats {
     pub later_than_predicted: u64,
     /// ... earlier than predicted.
     pub earlier_than_predicted: u64,
+    /// Task 3.11: the same for the decisions that ran the brain only (the ones whose input matters for the tick it is aimed
+    /// at; the wandering and idle decisions of the other kind dilute the totals above).
+    pub brain_decisions: u64,
+    pub brain_missed_first_slot: u64,
+    pub brain_as_predicted: u64,
+    pub brain_later_than_predicted: u64,
 }
 
 impl SlotStats {
-    pub fn note(&mut self, tick: i32, first_slot: i32, expected: i32) {
+    pub fn note(&mut self, tick: i32, first_slot: i32, expected: i32, brain: bool) {
         self.decisions += 1;
         if tick <= first_slot {
             self.in_first_slot += 1;
@@ -242,6 +270,12 @@ impl SlotStats {
             std::cmp::Ordering::Equal => self.as_predicted += 1,
             std::cmp::Ordering::Greater => self.later_than_predicted += 1,
             std::cmp::Ordering::Less => self.earlier_than_predicted += 1,
+        }
+        if brain {
+            self.brain_decisions += 1;
+            self.brain_missed_first_slot += u64::from(tick > first_slot);
+            self.brain_as_predicted += u64::from(tick == expected);
+            self.brain_later_than_predicted += u64::from(tick > expected);
         }
     }
 }
@@ -265,6 +299,24 @@ pub struct LatencyStats {
     /// `brain` restricted to the decisions the brain made (the calls with a target in reach: the ones that search); the
     /// all-calls `brain` series is diluted by the cheap ones.
     pub brain_made: Series,
+    /// Task 3.11: the decision's phases, each part of `total` (only the decisions that pass the phase are counted): the world
+    /// update (LiveWorld, players, tees, block clock), the navigation housekeeping up to the target pick, the prediction to
+    /// the decision's tick (the brain's inputs), the post-filters and encoding, what follows the decision in `on_snapshot`
+    /// (pending commands, the kill fallback), and the clip ring's frame.
+    pub update: Series,
+    pub nav: Series,
+    pub predict: Series,
+    pub post: Series,
+    pub finish: Series,
+    pub clip: Series,
+    /// Task 3.11: from the caller handing a decision over to the driver loop taking it (the loop's wake-up lag).
+    pub pickup: Series,
+    /// Task 3.11: snapshot arrival at the driver -> the bot handed the decision over (queue hop + `total` + the runner's own
+    /// work between them); `wire` minus this is the driver's side (pickup, hold, the wait for the slot).
+    pub handed: Series,
+    /// Task 3.11: the ticks the brain's world was predicted past the snapshot (the horizon; the "microseconds" of this series
+    /// are a count of ticks, like `candidates`), brain decisions only.
+    pub horizon: Series,
     pub slots: SlotStats,
 }
 
@@ -297,6 +349,29 @@ impl LatencyStats {
         )
     }
 
+    /// Every series and the slot statistics as JSON (microseconds; the series named `candidates` and `horizon` count things
+    /// instead). The reports of the harness of task 3.11 and `ddnet-ai bot --report` (`latency_detail`) carry it.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "total": self.total.json(), "brain": self.brain.json(), "overhead": self.overhead.json(), "pick": self.pick.json(),
+            "queue": self.queue.json(), "wire": self.wire.json(), "brain_made": self.brain_made.json(),
+            "update": self.update.json(), "nav": self.nav.json(), "predict": self.predict.json(), "post": self.post.json(),
+            "finish": self.finish.json(), "clip": self.clip.json(), "handed": self.handed.json(), "pickup": self.pickup.json(),
+            "proposal": self.proposal.json(), "search": self.search.json(),
+            "candidates": self.candidates.json(), "horizon_ticks": self.horizon.json(),
+            "slots": {
+                "decisions": self.slots.decisions, "first_slot": self.slots.in_first_slot,
+                "missed_first_slot": self.slots.missed_first_slot, "as_predicted": self.slots.as_predicted,
+                "later_than_predicted": self.slots.later_than_predicted,
+                "earlier_than_predicted": self.slots.earlier_than_predicted,
+                "brain_decisions": self.slots.brain_decisions,
+                "brain_missed_first_slot": self.slots.brain_missed_first_slot,
+                "brain_as_predicted": self.slots.brain_as_predicted,
+                "brain_later_than_predicted": self.slots.brain_later_than_predicted,
+            },
+        })
+    }
+
     /// `key=value` lines for the log, from the histograms (within 0.4% of the exact percentiles).
     pub fn report(&self) -> String {
         let line = |name: &str, s: Summary| {
@@ -316,6 +391,15 @@ impl LatencyStats {
             line("proposal", self.proposal.quick_summary()),
             line("search", self.search.quick_summary()),
             line("brain (decisions made)", self.brain_made.quick_summary()),
+            line("horizon (ticks)", self.horizon.quick_summary()),
+            line("phase update", self.update.quick_summary()),
+            line("phase nav", self.nav.quick_summary()),
+            line("phase predict", self.predict.quick_summary()),
+            line("phase post", self.post.quick_summary()),
+            line("phase finish", self.finish.quick_summary()),
+            line("phase clip", self.clip.quick_summary()),
+            line("handed (arrival -> handed over)", self.handed.quick_summary()),
+            line("pickup (handed over -> driver loop)", self.pickup.quick_summary()),
             format!(
                 "slots: decisions={} first_slot={} missed_first_slot={} as_predicted={} later_than_predicted={} earlier_than_predicted={}",
                 self.slots.decisions,

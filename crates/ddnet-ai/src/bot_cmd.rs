@@ -70,6 +70,14 @@ pub struct BotOpts {
     /// people do against it.
     #[arg(long, default_value = "off", value_parser = parse_finish, action = clap::ArgAction::Set)]
     pub finish: FinishMode,
+    /// Live input timing (task 3.11, E-024, D-101; **on** by default, `off` is the way back): a comma-separated list of
+    /// `precise` (the driver sleeps on its input channel with a precise timeout instead of blocking in `recv` for up to 2 ms:
+    /// a decision is picked up and an input sent when due, not ~1.5 ms later on average, ~4-8 ms at the tail; costs about 2 000
+    /// wake-ups a second) and `kind` (a decision that runs the brain is aimed at the input slot by the brain decisions' own
+    /// rolling p90, not the p90 over every decision, which is the cheap mode while the bot wanders). `off` = neither, as before 3.11.
+    /// Without the flag the environment variable `DDAI_LIVE_TIMING` (same values) is read: the way back for the systemd unit.
+    #[arg(long, default_value = "precise,kind", value_parser = parse_live_timing, action = clap::ArgAction::Set)]
+    pub live_timing: LiveTiming,
     /// `--brain fly`: the compiled graph.
     #[arg(long)]
     pub fly_flyg: Option<PathBuf>,
@@ -163,6 +171,10 @@ pub struct BotOpts {
     /// website (`say`) while the rest of the control channel works. With it the bot cannot be made to say anything but the typed `/kill`.
     #[arg(long)]
     pub no_owner_chat: bool,
+    /// Task 4.10 (D-100): do not send the DDNet timeout code `/timeout <code>` after joining (no seed file is read or made). With it the bot's
+    /// only chat is the typed `/kill` and the owner's lines.
+    #[arg(long)]
+    pub no_timeout_code: bool,
     /// The control channel's audit log (command tags, session tags, outcomes; no nicknames). Default
     /// `<data-dir>/logs/bot/control-audit.log`.
     #[arg(long)]
@@ -218,6 +230,32 @@ impl FinishMode {
             FinishMode::Full => "full",
         }
     }
+}
+
+/// `--live-timing`: which of the task-3.11 timing switches are on (the flag's default is both; `Default` is neither).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LiveTiming {
+    /// `ClientConfig::precise_wakeups`.
+    pub precise: bool,
+    /// `BotConfig::kind_estimate`.
+    pub kind: bool,
+}
+
+fn parse_live_timing(s: &str) -> Result<LiveTiming, String> {
+    let mut t = LiveTiming::default();
+    for part in s
+        .split(',')
+        .map(|p| p.trim().to_ascii_lowercase())
+        .filter(|p| !p.is_empty())
+    {
+        match part.as_str() {
+            "off" => {}
+            "precise" => t.precise = true,
+            "kind" => t.kind = true,
+            other => return Err(format!("expected `off` or a list of `precise`, `kind`, got {other:?}")),
+        }
+    }
+    Ok(t)
 }
 
 fn parse_finish(s: &str) -> Result<FinishMode, String> {
@@ -365,10 +403,38 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         eprintln!("refusing to connect: {e}");
         return ExitCode::from(e.exit);
     }
+    // Task 4.10 (D-100): the persistent seed of the timeout code the session sends once after joining (`/timeout <code>`, as the official
+    // client does), so a reconnect from a new address takes the old tee back. A seed that cannot be had is not fatal: no timeout code then.
+    if o.no_timeout_code {
+        eprintln!("timeout code: off (--no-timeout-code)");
+    } else {
+        match ddai_client::timeout_seed::load_or_create(&ddai_client::timeout_seed::path_in(data_dir)) {
+            Ok(seed) => client.timeout_seed = Some(seed),
+            Err(e) => eprintln!("timeout code: off ({e})"),
+        }
+    }
     match o.prediction_margin_ms {
         Some(m) => client.prediction_margin_ms = m,
         None => client.adaptive_margin = true,
     }
+    // `--live-timing` wins; without it `DDAI_LIVE_TIMING` (a systemd drop-in `Environment=DDAI_LIVE_TIMING=off` is the way back for
+    // the unit, whose `ExecStart` cannot be overridden); without both, the flag's default.
+    let live_timing = match std::env::var("DDAI_LIVE_TIMING") {
+        Ok(v) if !flag_given("--live-timing") => match parse_live_timing(&v) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("refusing to start: DDAI_LIVE_TIMING: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => o.live_timing,
+    };
+    client.precise_wakeups = live_timing.precise;
+    eprintln!(
+        "live timing: precise wake-ups {}, brain-decision estimate {} (--live-timing / DDAI_LIVE_TIMING; task 3.11)",
+        if live_timing.precise { "on" } else { "off" },
+        if live_timing.kind { "on" } else { "off" }
+    );
     if let Some(sd) = o.show_distance {
         client.show_distance = sd;
     }
@@ -443,6 +509,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         low,
         strong,
         console_names: o.console_names,
+        kind_estimate: live_timing.kind,
         ..BotConfig::default()
     };
     let wb_text = if flag_given("--wb") {
@@ -721,6 +788,9 @@ pub fn report_json(r: &RunReport) -> serde_json::Value {
             "wire": sum_json(r.latency.wire.summary()),
             "slots": {"decisions": r.latency.slots.decisions, "first_slot": r.latency.slots.in_first_slot, "missed_first_slot": r.latency.slots.missed_first_slot, "as_predicted": r.latency.slots.as_predicted, "later_than_predicted": r.latency.slots.later_than_predicted, "earlier_than_predicted": r.latency.slots.earlier_than_predicted},
         },
+        // Task 3.11: every series (phases of the decision, the driver's hand-over lag, the horizon) with p95, and the driver's send lag.
+        "latency_detail_us": r.latency.json(),
+        "send_lag_us": r.margin.as_ref().and_then(|m| m.send_lag_us).map(|v| serde_json::json!({"n": v.count, "p50": v.p50_us, "p90": v.p90_us, "p99": v.p99_us, "max": v.max_us})),
         "brain_detail": {
             "candidates": sum_json(r.latency.candidates.summary()),
             "proposal_us": sum_json(r.latency.proposal.summary()),
@@ -822,6 +892,31 @@ mod search_threads_tests {
         }
     }
 
+    /// Task 3.11: the live-timing switches are on by default; `off` and any list narrow them.
+    #[test]
+    fn live_timing_is_on_by_default_and_off_turns_it_off() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.live_timing)
+        };
+        let both = LiveTiming {
+            precise: true,
+            kind: true,
+        };
+        assert_eq!(get(&[]).unwrap(), both, "on by default");
+        assert_eq!(get(&["--live-timing", "off"]).unwrap(), LiveTiming::default());
+        assert_eq!(
+            get(&["--live-timing", "precise"]).unwrap(),
+            LiveTiming {
+                precise: true,
+                kind: false
+            }
+        );
+        assert_eq!(get(&["--live-timing", "kind, PRECISE"]).unwrap(), both);
+        assert!(get(&["--live-timing", "fast"]).is_err());
+    }
+
     /// F4 (task 4.9): the chat-only emergency switch is a flag, off by default.
     #[test]
     fn the_owner_chat_switch_is_a_flag_and_off_by_default() {
@@ -836,6 +931,18 @@ mod search_threads_tests {
             get(&["--no-owner-chat", "--no-control"]).unwrap(),
             "it does not conflict with --no-control"
         );
+    }
+
+    /// Task 4.10 (D-100): the timeout code is on by default and `--no-timeout-code` switches it off.
+    #[test]
+    fn the_timeout_code_switch_is_a_flag_and_off_by_default() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.no_timeout_code)
+        };
+        assert!(!get(&[]).unwrap());
+        assert!(get(&["--no-timeout-code"]).unwrap());
     }
 
     #[test]

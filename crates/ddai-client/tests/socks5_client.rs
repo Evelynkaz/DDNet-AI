@@ -236,6 +236,29 @@ fn the_session_goes_through_the_relay_and_never_directly() {
     assert_eq!(proxy.tcp_accepts(), 1);
 }
 
+/// Task 3.11: the precise (non-blocking) driver loop over the SOCKS5 transport: joins through the relay, and the graceful `CLOSE`
+/// still goes through it (the association's socket is back in blocking mode when the connection ends).
+#[test]
+fn the_precise_loop_works_through_the_relay_too() {
+    let proxy = TestSocks5Server::start(Config::default());
+    let game = GameDouble::start(false);
+    let mut cfg = config(
+        entry(game.addr, Some(PROXY)),
+        Some(proxy_cfg(&proxy, None).with_for_server(game.addr.to_string())),
+    );
+    cfg.precise_wakeups = true;
+    let mut client = Client::connect(game.addr, cfg);
+    let events = collect(&mut client, Duration::from_secs(5), |e| connected_count(e) >= 1);
+    assert_eq!(connected_count(&events), 1, "{events:?}");
+    client.disconnect();
+    client.join();
+    thread::sleep(Duration::from_millis(100));
+    let seen = game.seen.lock().unwrap();
+    assert!(seen.senders.iter().all(|s| *s == proxy.relay_addr()));
+    assert_eq!(seen.closes, 1);
+    assert_eq!(proxy.tcp_accepts(), 1);
+}
+
 #[test]
 fn a_server_requested_reconnect_keeps_the_association() {
     let proxy = TestSocks5Server::start(Config::default());

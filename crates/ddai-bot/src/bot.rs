@@ -142,6 +142,11 @@ pub struct BotConfig {
     /// happened to take (a ~10 ms pause on a loaded CI machine flips it). `None` (the default and every
     /// production path) measures as before. The latency statistics still record the real times.
     pub decision_time_override: Option<Duration>,
+    /// **Tests only.** `Some((other, brain))`: what the two rolling estimates are fed instead of the measured duration of
+    /// each decision, `brain` for a decision that ran the brain and `other` for the rest (and the queue delay counts as zero), so
+    /// that a test of the slot choice can give the estimators exactly the distribution it wants without a real wall clock.
+    /// `None` (the default and every production path) feeds the measured time.
+    pub decision_time_feed: Option<(Duration, Duration)>,
     /// The clip recorder: where clips go, the autoclip (task 4.3).
     pub clips: ClipConfig,
     /// Where the console commands save the lists (`None`: they change only the running bot).
@@ -156,6 +161,18 @@ pub struct BotConfig {
     /// Task 3.10 (`--finish target`, opt-in): finish blocks -- the target selection keeps a frozen current target until it is held
     /// ([`crate::target::TargetPicker::set_finish`]).
     pub finish: bool,
+    /// Task 3.11 (diagnosis, off by default): write the per-input trace of [`crate::trace`] here (`DDAI_INPUT_TRACE` is the
+    /// same for a process that has one bot).
+    pub input_trace: Option<PathBuf>,
+    /// Task 3.11 (opt-in): aim a decision that is about to run the brain at the input slot the **brain decisions'** own rolling
+    /// quantile says, instead of the quantile over every decision. The mixed estimate is bimodal (wandering decisions take
+    /// ~0.3 ms, the brain ~5 ms): while less than a tenth of the last 64 decisions ran the brain, its p90 is the cheap mode and
+    /// the first brain decisions of an engagement (the hook, the jump) are aimed one slot too early and go out a tick later than
+    /// the world they were decided on assumed.
+    pub kind_estimate: bool,
+    /// What the driver adds between handing a decision over and it being on the wire when the slot is otherwise open
+    /// ([`DRIVER_PICKUP`]; the runner lowers it to [`DRIVER_PICKUP_PRECISE`] with `ClientConfig::precise_wakeups`).
+    pub driver_pickup: Duration,
 }
 
 impl Default for BotConfig {
@@ -173,6 +190,7 @@ impl Default for BotConfig {
             async_seal: false,
             estimate_quantile: DEFAULT_ESTIMATE_QUANTILE,
             decision_time_override: None,
+            decision_time_feed: None,
             clips: ClipConfig::default(),
             relations_path: None,
             settings_path: None,
@@ -180,6 +198,9 @@ impl Default for BotConfig {
             strong: false,
             console_names: false,
             finish: false,
+            input_trace: None,
+            kind_estimate: false,
+            driver_pickup: DRIVER_PICKUP,
         }
     }
 }
@@ -434,6 +455,9 @@ pub struct Bot {
     /// which input slot this snapshot's decision is aimed at (see `prediction_target`).
     est_decision: Duration,
     estimator: DecisionEstimator,
+    /// Task 3.11: the same estimate over the decisions that ran the brain only (`BotConfig::kind_estimate`).
+    est_brain: Duration,
+    estimator_brain: DecisionEstimator,
 
     // scratch (capacities fixed up front)
     in_flight: Vec<(i32, PhysInput)>,
@@ -505,6 +529,8 @@ impl Bot {
             queue_delay: Duration::ZERO,
             est_decision: cfg.decision_time_override.unwrap_or(Duration::from_millis(1)),
             estimator: DecisionEstimator::new(cfg.estimate_quantile, Duration::from_millis(1)),
+            est_brain: cfg.decision_time_override.unwrap_or(BRAIN_ESTIMATE_INITIAL),
+            estimator_brain: DecisionEstimator::new(cfg.estimate_quantile, BRAIN_ESTIMATE_INITIAL),
             in_flight: Vec::with_capacity(64),
             keep: Box::new([false; MAX_CLIENTS]),
             spares: Vec::with_capacity(MAX_CLIENTS),
@@ -889,10 +915,19 @@ impl Bot {
     }
 
     /// The driver's report of one decision reaching the wire.
-    pub fn note_wire_latency(&mut self, d: Duration, tick: i32, tag: Option<ddai_client::InputTag>) {
+    pub fn note_wire_latency(
+        &mut self,
+        d: Duration,
+        tick: i32,
+        tag: Option<ddai_client::InputTag>,
+        handed_after: Duration,
+        pickup: Duration,
+    ) {
         self.latency.wire.push(d);
+        self.latency.handed.push(handed_after);
+        self.latency.pickup.push(pickup);
         if let Some(t) = tag {
-            self.latency.slots.note(tick, t.first_slot, t.expected_tick);
+            self.latency.slots.note(tick, t.first_slot, t.expected_tick, t.brain);
         }
     }
 
@@ -903,7 +938,7 @@ impl Bot {
         let started = Instant::now();
         let real_queue_delay = started.saturating_duration_since(snap.arrived);
         self.latency.queue.push(real_queue_delay);
-        self.queue_delay = if self.cfg.decision_time_override.is_some() {
+        self.queue_delay = if self.cfg.decision_time_override.is_some() || self.cfg.decision_time_feed.is_some() {
             Duration::ZERO
         } else {
             real_queue_delay
@@ -912,6 +947,7 @@ impl Bot {
         let mut brain_time = Duration::ZERO;
         let before = self.stats;
         let mut out = self.decide(snap, &mut brain_time);
+        let t_finish = Instant::now();
         self.viz_fresh = self.stats.brain_decisions > before.brain_decisions;
         self.apply_pending(snap, &mut out);
         self.kill_fallback_step(snap.tick, &mut out);
@@ -920,7 +956,10 @@ impl Bot {
             self.clipper.push_event(ClipEvent::KillSent { why: why as u8 });
         }
         self.kill_why = None;
+        let t_clip = Instant::now();
+        self.latency.finish.push(t_clip.saturating_duration_since(t_finish));
         self.record_clip(snap, &out, &before, started.elapsed(), brain_time);
+        self.latency.clip.push(t_clip.elapsed());
         if out.input.is_some() {
             self.stats.decisions += 1;
             let total = started.elapsed();
@@ -932,11 +971,29 @@ impl Bot {
             }
             // A rolling high quantile, not a mean (task 4.1b): the driver holds the decision until
             // the tick it was aimed at, so a conservative estimate only costs latency.
-            self.estimator.push(total);
+            let brain_decided = self.stats.brain_decisions > before.brain_decisions;
+            let fed = match self.cfg.decision_time_feed {
+                Some((other, brain)) => {
+                    if brain_decided {
+                        brain
+                    } else {
+                        other
+                    }
+                }
+                None => total,
+            };
+            self.estimator.push(fed);
             self.est_decision = self
                 .cfg
                 .decision_time_override
                 .unwrap_or_else(|| self.estimator.estimate());
+            if brain_decided {
+                self.estimator_brain.push(fed);
+                self.est_brain = self
+                    .cfg
+                    .decision_time_override
+                    .unwrap_or_else(|| self.estimator_brain.estimate());
+            }
         }
         out
     }
@@ -1041,6 +1098,7 @@ impl Bot {
     }
 
     fn decide(&mut self, snap: &LiveWorldSnapshot, brain_time: &mut Duration) -> Output {
+        let t_decide = Instant::now();
         let mut out = Output::default();
         let (Some(map), Some(own_id)) = (self.map.clone(), snap.own_id) else {
             return out;
@@ -1085,6 +1143,7 @@ impl Bot {
             last_sent,
             queue_delay,
             est_decision,
+            est_brain,
             in_flight,
             keep,
             spares,
@@ -1201,6 +1260,8 @@ impl Bot {
         }
 
         // 5. dead / absent / spectating.
+        let t_nav = Instant::now();
+        self.latency.update.push(t_nav.saturating_duration_since(t_decide));
         let Some(own) = tees.get(own_id).copied() else {
             if *was_alive {
                 stats.deaths += 1;
@@ -1333,6 +1394,7 @@ impl Bot {
         }
         let previous_target = picker.target();
         let t_pick = Instant::now();
+        self.latency.nav.push(t_pick.saturating_duration_since(t_nav));
         // The foe of the wayblock walk (a player at the tube who acts against us, or one who froze us on the way)
         // is the target until the walk is back on.
         let foe = if navigated.is_none() && *mode == Mode::Fight && picker.fixed().is_none() {
@@ -1388,7 +1450,7 @@ impl Bot {
                 let prev_planner = from_ddnet_input(last_sent);
                 // As the TS `guard` and the brain path do: on the world our input will act in (our own
                 // in-flight inputs applied up to the tick it takes effect), not the snapshot's.
-                let ready_in = *queue_delay + *est_decision + DRIVER_PICKUP;
+                let ready_in = *queue_delay + *est_decision + cfg.driver_pickup;
                 let predicted = predict_own(live, snap, cfg, ready_in, sent, in_flight, keep, own_id, tick);
                 let g = plan.guard(predicted, own_id, action, &prev_planner);
                 if g != action {
@@ -1421,7 +1483,7 @@ impl Bot {
                 // The guard only runs near freeze or death; there it checks the world the input will act
                 // in (own in-flight inputs applied), like the brain path; elsewhere nothing is predicted.
                 let guard_world = if grid.hazard_within(own.pos.x, own.pos.y, GUARD_HAZARD_TILES) {
-                    let ready_in = *queue_delay + *est_decision + DRIVER_PICKUP;
+                    let ready_in = *queue_delay + *est_decision + cfg.driver_pickup;
                     predict_own(live, snap, cfg, ready_in, sent, in_flight, keep, own_id, tick)
                 } else {
                     live.base_world()
@@ -1458,14 +1520,18 @@ impl Bot {
                 stats.wander_decisions += 1;
             }
         } else {
+            let t_predict = Instant::now();
             let target_tee = tees.get(target).copied();
             compute_keep(&own, target, tees, cfg, &|t| is_spared(t, tick, players, clock), keep);
             let prediction = prediction_target(
                 snap,
                 cfg.max_predict_ticks,
-                *queue_delay + *est_decision + DRIVER_PICKUP,
+                *queue_delay + if cfg.kind_estimate { *est_brain } else { *est_decision } + cfg.driver_pickup,
             );
             let to_tick = prediction.to_tick;
+            self.latency.horizon.push(Duration::from_micros(
+                u64::try_from((to_tick - tick).max(0)).unwrap_or(0),
+            ));
             if prediction.clamped() {
                 // The horizon wanted is beyond the cap: the decision is made on a world that stops short
                 // of the tick it will take effect on (a very long RTT). Counted always, said at most
@@ -1529,8 +1595,10 @@ impl Bot {
                 in_flight: &[],
             };
             let t0 = Instant::now();
+            self.latency.predict.push(t0.saturating_duration_since(t_predict));
             action = brain.decide_in(obs, Some(&view));
             *brain_time = t0.elapsed();
+            let t_post = Instant::now();
             stats.brain_decisions += 1;
 
             // Post-filters. The guard first (brains without their own shield), then the hook veto.
@@ -1558,6 +1626,7 @@ impl Bot {
                 stats.vetoed_fires += 1;
             }
             action = filtered;
+            self.latency.post.push(t_post.elapsed());
         }
 
         // 10. encode and out.
@@ -1574,6 +1643,7 @@ impl Bot {
         out.tag = Some(ddai_client::InputTag {
             first_slot: snap.pred_tick.max(snap.tick) + 1,
             expected_tick: expected_tick.unwrap_or(snap.pred_tick.max(snap.tick) + 1),
+            brain: expected_tick.is_some(),
         });
         *status = make_status(tick, own_id, *mode, Some(&own), picker.target(), clock.stats(), *stats);
         out
@@ -1656,8 +1726,12 @@ fn join_request(
 }
 
 /// What the driver adds between `Client::set_input` and the socket when the input is otherwise ready
-/// (one poll round, `POLL_TIMEOUT`).
-const DRIVER_PICKUP: Duration = Duration::from_millis(2);
+/// (one poll round, `POLL_TIMEOUT`): the default of [`BotConfig::driver_pickup`].
+pub const DRIVER_PICKUP: Duration = Duration::from_millis(2);
+/// The same with the driver's precise wake-ups (`ClientConfig::precise_wakeups`, task 3.11): a futex wake-up and the send.
+pub const DRIVER_PICKUP_PRECISE: Duration = Duration::from_micros(300);
+/// What a brain decision is assumed to take before one has been measured (the hybrid's 5 ms cap and the work around it).
+const BRAIN_ESTIMATE_INITIAL: Duration = Duration::from_millis(6);
 /// `PredictionClamped` is reported at most this often (10 s of game ticks).
 const PREDICT_CLAMP_EVENT_EVERY_TICKS: i32 = 500;
 /// One server tick.

@@ -49,6 +49,11 @@ KILL_COMMAND_LABEL = "Cl_Say(/kill)"
 # command: /spec, /emote, /w, even /kill) is such a line too and carries this label, never the fallback's: the audit knows the path
 # that sent it, not the text, and the text is never in a report.
 OWNER_SAY_LABEL = "Cl_Say(owner)"
+# Task 4.10 (D-100): the DDNet timeout code `/timeout <code>` the bot sends once per join (`ddai_client::session::TIMEOUT_CODE_LABEL`): on the
+# wire at most once per "in game" line of the log, plus the repeats while a same-name ghost exists (owner's decision of 2026-10-06: every
+# 30 s, at most 35 per ghost, each logged as "timeout code re-sent while a same-name player is present"), never refused (see `analyze_chat`).
+TIMEOUT_MAX_RESENDS = 35
+TIMEOUT_CODE_LABEL = "Cl_Say(/timeout)"
 SLOPE_WINDOW_S = 5 * 3600.0
 SLOPE_LIMIT_MIB_WEEK = 50.0
 INGAME_RECONNECT_WINDOW_S = 600
@@ -56,6 +61,7 @@ INGAME_RECONNECT_WINDOW_S = 600
 ALLOWED_OUTGOING = {
     "Cl_Say(/kill)",  # task 4.6, D-078: the typed /kill fallback; every other Cl_Say stays a failure
     "Cl_Say(owner)",  # task 4.9, D-094: a line the owner typed on the website; judged against report["owner_chat"]
+    "Cl_Say(/timeout)",  # task 4.10, D-100: the stock timeout code, once per join; judged against the log's "in game" lines
     "Cl_StartInfo",
     "Cl_IsDDNetLegacy",
     "Cl_ShowDistance",
@@ -178,6 +184,8 @@ class BotLog:
             self.count("map_ready")
             mm = re.search(r"map=(.*?) w=(\d+) h=(\d+)", msg)
             self.events.append((epoch, "map_ready", {"map": mm.group(1) if mm else "?"}))
+        elif msg.startswith("timeout code re-sent while a same-name player is present"):
+            self.count("timeout_resent")
         elif msg.startswith("in game"):
             self.count("in_game")
             self.events.append((epoch, "in_game", {}))
@@ -658,11 +666,11 @@ def analyze_chat(res, log, report, console_text):
         res.check("0 chat in the outgoing audit", False, "no --report: the outgoing audit is missing")
         return
     labels = sorted(out)
-    chat = [k for k in labels if ("Say" in k or "Chat" in k) and k not in (KILL_COMMAND_LABEL, OWNER_SAY_LABEL)]
+    chat = [k for k in labels if ("Say" in k or "Chat" in k) and k not in (KILL_COMMAND_LABEL, OWNER_SAY_LABEL, TIMEOUT_CODE_LABEL)]
     unknown = [k for k in labels if k not in ALLOWED_OUTGOING]
     refused = {k: v["refused"] for k, v in out.items() if v["refused"]}
     res.check(
-        "0 chat in the outgoing audit except the allowlisted /kill and the owner's own lines",
+        "0 chat in the outgoing audit except the allowlisted /kill, the timeout code and the owner's own lines",
         not chat and not unknown and not refused,
         "outgoing: " + ", ".join(f"{k} x{out[k]['accepted']}" for k in labels) + f"; chat {chat}; unknown {unknown}; refused {refused}",
     )
@@ -678,6 +686,18 @@ def analyze_chat(res, log, report, console_text):
             "every Cl_Say(owner) on the wire was handed over by the owner chat (wire <= owner_chat.sent, none refused)",
             sent is not None and owner["accepted"] <= sent and owner["refused"] == 0,
             f"wire {owner['accepted']}, refused {owner['refused']}, owner_chat {counts}",
+        )
+    # The timeout code (task 4.10): one per join (and one more after a map change, as the official client does), plus the repeats while a
+    # same-name ghost exists: at most 1 + 35 per join ("in game" line), and every send beyond the joins' own has its own log line that says a
+    # same-name player was present. None refused by the allow-list.
+    timeout_code = out.get(TIMEOUT_CODE_LABEL)
+    if timeout_code is not None:
+        joins = log.counts.get("in_game", 0)
+        resent = log.counts.get("timeout_resent", 0)
+        res.check(
+            "every Cl_Say(/timeout) on the wire is a join's send or a logged repeat for a same-name ghost (wire <= joins + repeats, repeats <= 35 per join, none refused)",
+            timeout_code["accepted"] <= joins + resent and resent <= TIMEOUT_MAX_RESENDS * joins and timeout_code["refused"] == 0,
+            f"wire {timeout_code['accepted']}, refused {timeout_code['refused']}, in game lines {joins}, repeat lines {resent}",
         )
     kills_sent = out.get("Cl_Kill", {}).get("accepted", 0)
     kill_ticks = (report or {}).get("kill_ticks", [])
@@ -1027,7 +1047,7 @@ def analyze(run_dir, baseline=None):
 # ------------------------------------------------------------------------------------------------ self test
 
 
-def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99_growth=0.0, bad_kill=False, chat=False, panic=False, clips=10, drops=1, viewer=25, file_growth=0.0, swapped_growth=0.0, prod_dir_ok=True, duration=3600, leak_mib_h=0.0, real_dir=False, dead_kills=0, cmd_kills=0, dead_cmds=False, stray_cmd=False, orphan_cmd=False, owner_wire=0, owner_refused=0, owner_report=None):
+def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99_growth=0.0, bad_kill=False, chat=False, panic=False, clips=10, drops=1, viewer=25, file_growth=0.0, swapped_growth=0.0, prod_dir_ok=True, duration=3600, leak_mib_h=0.0, real_dir=False, dead_kills=0, cmd_kills=0, dead_cmds=False, stray_cmd=False, orphan_cmd=False, owner_wire=0, owner_refused=0, owner_report=None, timeout_wire=0, timeout_refused=0, timeout_resent_lines=0):
     """A fake run (60 minutes by default; `duration` for a long one) whose numbers we control, to prove that every acceptance check can fail."""
     import random
 
@@ -1133,6 +1153,8 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
     for k in range(drops):
         lines.append(f"{ts(1500 * sc + 30 * k)}  WARN ddai_bot::runner: disconnected reason=ServerShutdown by_peer=true")
         lines.append(f"{ts(1512 * sc + 30 * k)}  INFO ddai_bot::runner: in game")
+    for k in range(timeout_resent_lines):
+        lines.append(f"{ts(1600 * sc + 30 * k)}  INFO ddai_client::session: timeout code re-sent while a same-name player is present (len 16, resend {k + 1} of 35)")
     lines.append(f"{ts(2300 * sc)}  INFO ddai_bot::runner: map changing map=BlmapChill")
     lines.append(f"{ts(2300 * sc + 5)}  INFO ddai_bot::runner: map ready map=BlmapChill w=100 h=100")
     lines.append(f"{ts(2500 * sc)}  INFO ddai_bot::runner: map changing map=Copy Love Box")
@@ -1146,6 +1168,8 @@ def _synthetic_run(tmp, *, bot_base_kb=300_000, rss_growth=0.0, fd_growth=0, p99
         out["Cl_Say(/kill)"] = {"accepted": n_cmds + int(stray_cmd) + int(orphan_cmd), "refused": 0}
     if chat:
         out["Cl_Say"] = {"accepted": 1, "refused": 0}
+    if timeout_wire or timeout_refused:
+        out["Cl_Say(/timeout)"] = {"accepted": timeout_wire, "refused": timeout_refused}
     if owner_wire or owner_refused:
         out["Cl_Say(owner)"] = {"accepted": owner_wire, "refused": owner_refused}
     (run / "bot-report.json").write_text(
@@ -1190,6 +1214,13 @@ def selftest():
         ("an owner's own /kill is an owner line next to the fallback's /kill: both pass (task 4.9b)", {"owner_wire": 2, "cmd_kills": 1, "owner_report": {"accepted": 2, "sent": 2, "refused": 0, "dropped": 0}}, None),
         ("an owner's /kill counted as the fallback's (no Cl_Kill decision of the bot behind it) fails (task 4.9b)", {"owner_wire": 1, "stray_cmd": True, "owner_report": {"accepted": 1, "sent": 1, "refused": 0, "dropped": 0}}, "/kill on the wire"),
         ("another Cl_Say label beside the owner's still fails", {"owner_wire": 1, "chat": True, "owner_report": {"accepted": 1, "sent": 1, "refused": 0, "dropped": 0}}, "0 chat"),
+        ("the timeout code once per join passes (task 4.10)", {"timeout_wire": 1}, None),
+        ("more timeout codes on the wire than joins fail (task 4.10)", {"timeout_wire": 5}, "Cl_Say(/timeout)"),
+        ("repeats for a ghost, each logged, pass (owner's decision of 2026-10-06)", {"timeout_wire": 4, "timeout_resent_lines": 3}, None),
+        ("repeats on the wire that the log does not show as ghost repeats fail", {"timeout_wire": 4, "timeout_resent_lines": 1}, "Cl_Say(/timeout)"),
+        ("more than 35 logged repeats for one join fail", {"timeout_wire": 40, "timeout_resent_lines": 40}, "Cl_Say(/timeout)"),
+        ("a timeout code the allow-list refused fails (task 4.10)", {"timeout_wire": 1, "timeout_refused": 1}, "Cl_Say(/timeout)"),
+        ("the timeout code beside the owner's lines and another Cl_Say label still fails on the other label", {"timeout_wire": 1, "owner_wire": 1, "chat": True, "owner_report": {"accepted": 1, "sent": 1, "refused": 0, "dropped": 0}}, "0 chat"),
         ("panic fails", {"panic": True}, "no panic"),
         ("unbounded clips fail", {"clips": 60}, "clips bounded"),
         ("reconnect budget fails", {"drops": 4}, "reconnects within"),

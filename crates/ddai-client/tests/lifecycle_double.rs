@@ -174,6 +174,20 @@ fn client_closes_the_old_connection_before_reconnecting_over_real_udp() {
 /// [`ddai_client::Client`]'s `Drop` impl sends the same `Disconnect` signal `disconnect()` does.
 #[test]
 fn dropping_the_client_without_disconnect_still_sends_a_close() {
+    close_after_drop(ddai_client::ClientConfig::default());
+}
+
+/// Task 3.11: the same with the precise (non-blocking) driver loop: it must stop and say goodbye like the blocking one, and the
+/// socket must be back in blocking mode for the final `CLOSE` (the goodbye is a plain send; a reconnect would `recv` blocking).
+#[test]
+fn dropping_a_precise_client_without_disconnect_still_sends_a_close() {
+    close_after_drop(ddai_client::ClientConfig {
+        precise_wakeups: true,
+        ..ddai_client::ClientConfig::default()
+    });
+}
+
+fn close_after_drop(config: ddai_client::ClientConfig) {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind test double socket");
     socket
         .set_read_timeout(Some(Duration::from_millis(50)))
@@ -187,7 +201,7 @@ fn dropping_the_client_without_disconnect_still_sends_a_close() {
     let mut peer: Option<SocketAddr> = None;
 
     {
-        let client = ddai_client::Client::connect(addr, ddai_client::ClientConfig::default());
+        let client = ddai_client::Client::connect(addr, config);
 
         let online_deadline = Instant::now() + Duration::from_secs(5);
         while !connection.is_online() && Instant::now() < online_deadline {

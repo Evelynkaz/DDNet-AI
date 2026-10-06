@@ -37,6 +37,9 @@ toml = "1.1.6"
 fd-lock = "4.0.4"
 # `server_list` (task 4.3): the read-only master-list JSON parser.
 serde_json = "1"
+# Task 4.10 (D-100): TCP keepalive on the SOCKS5 control connection (`socks5::set_control_keepalive`) without `unsafe`: `SockRef` borrows
+# the std `TcpStream`. Already in the tree (tokio/hyper); only the `all` feature is new (the keepalive interval and retry count).
+socket2 = { version = "0.6", features = ["all"] }
 # Task 5.12: `safe_file` opens files the web may have written with `O_NOFOLLOW | O_NONBLOCK` (already in the tree via ddai-web).
 libc = "0.2"
 

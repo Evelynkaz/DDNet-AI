@@ -49,6 +49,7 @@ pub mod smooth_time;
 pub mod socks5;
 #[cfg(any(test, feature = "test-util"))]
 pub mod socks5_testserver;
+pub mod timeout_seed;
 pub mod timing;
 pub mod transport;
 

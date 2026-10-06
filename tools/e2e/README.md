@@ -121,3 +121,12 @@ DDAI_E2E_BASE_URL=https://89-58-7-133.sslip.io DDAI_REHEARSAL_FLY=1 DDAI_REHEARS
 `Copy Love Box` и читается обратно (`sv_map`).
 
 `launcher.spec.ts` (задача 5.9, D-089) — запуск бота с сайта на **настоящих** юнитах (`ddnet-ai-launch.path` → `ddnet-ai-launch.service` → бот и спарринг), **только локальный сервер**. Нужен тестовый веб-экземпляр на другом порту (не боевой 7788): копия веб-юнита с теми же ограничениями, рецепт — `deploy/README.md`, «Проверка на этой машине». Тест входит, на вкладке «Бот» выбирает «Гибрид + муха», 15 мин, 2 спарринга, нажимает «Запустить», ждёт «В игре», проверяет через systemd и `/proc`, что бот запущен с `--brain hybrid --fly-bundle … --duration 900`, спарринг 1 и 2 активны, а 3 нет, смотрит «Живой бот» на «Игре», нажимает «Остановить» и проверяет, что всё остановлено; телефон 360x740 без горизонтальной прокрутки. Публичный сервер он не выбирает никогда. Без переменных пропускается. Запуск: `DDAI_LAUNCH_E2E_URL=http://127.0.0.1:7789 DDAI_LAUNCH_E2E_PASSWORD_FILE=<файл с паролем тестового экземпляра> npx playwright test launcher.spec.ts`. Скриншоты — `~/aiddnet/data/screenshots/5.9-*.png`.
+
+## Тайминг ввода (задача 3.11, E-024, D-101; `docs/research/live-timing.md`)
+
+`live_timing.sh` — один прогон на **приватном** сервере (никогда не 8303): `DDAI_T_LABEL=base DDAI_T_SECS=90 tools/e2e/live_timing.sh` (нужен свой сервер с `sv_tee_historian 1`, econ на loopback; по умолчанию
+`127.0.0.1:8453`, econ 8454, пароль в `$T_ECON_PW_FILE`, каталог сервера `$T_SRV`). Тест `crates/ddai-bot/tests/e2e_live_timing.rs` ведёт бота через UDP-реле с задержкой и джиттером
+(`DDAI_T_DELAY_US`, `DDAI_T_JITTER_US`), варианты — `DDAI_T_FIX=precise,kind`, смесь боя и блуждания — `DDAI_T_DUTY=3,7`, «как в юните» — `DDAI_T_PROD=1`; скрипт перезагружает карту через econ до и после, чтобы
+сервер закрыл teehistorian прогона, и `live_timing_analyze.py` сводит его с трассой ввода бота (на каком тике сервер применил каждое изменение ввода). `live_timing_table.py DIR префикс…` — таблица медиан по прогонам
+вариантов; `test_live_timing_analyze.py` — тесты анализатора (`python3 -m unittest tools/e2e/test_live_timing_analyze.py`). `T_TEST_BIN` — сохранённый тестовый бинарник (A/B разных сборок), `T_RUN_PREFIX` — запуск как
+транзитный системный юнит (`sudo systemd-run …`: топология прода, `docs/research/live-timing.md` §7).

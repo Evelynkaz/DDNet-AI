@@ -9,6 +9,10 @@
 //! braces do not balance, or a `#[cfg(test)]` in a place this scan does not understand, **fails the census** (fail closed). To add a
 //! new route to the chat, add its file to the list here, in the open: the diff of this file is what a reviewer has to look at.
 //!
+//! Task 4.10 (D-100) adds the third chat-channel capability, the bot's own `/timeout <code>` (`ddai_net::timeout_code`), under the same
+//! rule: the types that make the command, the session's authorisation and the one place that reads the seed are held to the files below, so
+//! a new route to `/timeout` (or a way to build one from another string) cannot appear without a change to this list.
+//!
 //! The identifier `OwnerChannel` itself (a `use`, an alias, a rename) is allowed only in `control.rs` and `owner_chat.rs`, and the
 //! protocol-side `ControlCommand::Say {` / `SayText::new(` only where the web, the protocol and the dispatcher meet. `OwnerChannel::
 //! mint_for_tests` (the `test-util` feature of `ddai-net`) is held to the same rule, and the feature may only be switched on from a
@@ -19,6 +23,9 @@ use std::path::{Path, PathBuf};
 const CONTROL: &str = "crates/ddai-bot/src/control.rs";
 const OWNER_CHAT: &str = "crates/ddai-net/src/owner_chat.rs";
 const SAY_ROUTE: &str = "crates/ddai-web/src/http/say.rs";
+const TIMEOUT_CODE: &str = "crates/ddai-net/src/timeout_code.rs";
+const SESSION: &str = "crates/ddai-client/src/session.rs";
+const ALLOWLIST: &str = "crates/ddai-client/src/allowlist.rs";
 
 /// (pattern, the production files allowed to contain it).
 const RULES: &[(&str, &[&str])] = &[
@@ -62,6 +69,30 @@ const RULES: &[(&str, &[&str])] = &[
         ],
     ),
     ("SayText::new(", &[SAY_ROUTE]),
+    // Task 4.10 (D-100): the bot's own `/timeout <code>`. The command is made from a derived code by the session only, and the code is derived
+    // from the seed and the server's address there only.
+    ("TimeoutCommand::new(", &[SESSION]),
+    ("TimeoutCode::derive(", &[SESSION]),
+    // The seed: made from randomness in the one module that owns its file; the config field is set from that module's result by the bot's
+    // command only.
+    ("TimeoutSeed::from_random(", &["crates/ddai-client/src/timeout_seed.rs"]),
+    (".timeout_seed = ", &["crates/ddnet-ai/src/bot_cmd.rs"]),
+    // Arming a session with the code: the driver only. Sending it and the one-shot authorisation: the session only.
+    (".arm_timeout_code(", &["crates/ddai-client/src/driver.rs"]),
+    ("timeout_auth.grant(", &[SESSION]),
+    ("maybe_send_timeout_code(", &[SESSION]),
+    // The repeats while a same-name ghost exists (owner's decision of 2026-10-06): the same session code path, the same authorisation.
+    ("maybe_resend_timeout_code(", &[SESSION]),
+    ("send_timeout_code(", &[SESSION]),
+    ("ghost_present(", &[SESSION]),
+    // The authorisation type, and the structural check, are the allow-list's and the session's.
+    ("TimeoutAuth", &[ALLOWLIST, SESSION]),
+    ("TimeoutCommand::is_canonical(", &[ALLOWLIST, TIMEOUT_CODE]),
+    // Renaming or aliasing the types would hide the patterns above: not at all in production code.
+    ("TimeoutCommand as ", &[]),
+    ("TimeoutCode as ", &[]),
+    ("TimeoutSeed as ", &[]),
+    ("TimeoutAuth as ", &[]),
 ];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -388,6 +419,23 @@ fn the_census_catches_a_new_route_to_the_chat() {
             "crates/ddai-bot/src/web.rs",
             "let c = ControlCommand::Say { team: false, text: SayText::new(s) };\n",
         ),
+        // task 4.10: a second route to `/timeout`: another file building the command, deriving a code, arming a session, aliasing
+        src(
+            "crates/ddai-bot/src/to.rs",
+            "let c = TimeoutCommand::new(TimeoutCode::derive(&seed, addr));\nsession.arm_timeout_code(a);\nlet a = TimeoutAuth::new();\n",
+        ),
+        src(
+            "crates/ddai-bot/src/alias.rs",
+            "use ddai_net::timeout_code::TimeoutCommand as Say;\n",
+        ),
+        src(
+            "crates/ddai-bot/src/seed.rs",
+            "cfg.timeout_seed = Some(s);\nlet s = TimeoutSeed::from_random(r);\n",
+        ),
+        src(
+            "crates/ddai-client/src/session.rs",
+            "let c = TimeoutCommand::new(code);\n",
+        ),
     ];
     let found = violations(&files);
     for needle in [
@@ -400,6 +448,13 @@ fn the_census_catches_a_new_route_to_the_chat() {
         "leak.rs:1: `mint_for_tests(`",
         "web.rs:1: `ControlCommand::Say {`",
         "web.rs:1: `SayText::new(`",
+        "to.rs:1: `TimeoutCommand::new(`",
+        "to.rs:1: `TimeoutCode::derive(`",
+        "to.rs:2: `.arm_timeout_code(`",
+        "to.rs:3: `TimeoutAuth`",
+        "alias.rs:1: `TimeoutCommand as `",
+        "seed.rs:1: `.timeout_seed = `",
+        "seed.rs:2: `TimeoutSeed::from_random(`",
     ] {
         assert!(
             found.iter().any(|f| f.ends_with(needle)),
@@ -409,6 +464,10 @@ fn the_census_catches_a_new_route_to_the_chat() {
     assert!(
         !found.iter().any(|f| f.contains("runner.rs")),
         "the runner is allowed: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|f| f.contains("session.rs")),
+        "the session may build the timeout command: {found:?}"
     );
     // comments, `#[cfg(test)]` items and integration tests do not count
     let quiet = vec![

@@ -44,6 +44,7 @@ pub mod sent;
 pub mod settings;
 pub mod target;
 pub mod tees;
+pub mod trace;
 pub mod unstick;
 pub mod wander;
 pub mod wb_guard;

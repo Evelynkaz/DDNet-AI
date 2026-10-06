@@ -81,9 +81,10 @@ use ddai_net::owner_chat::OwnerSay;
 use ddai_net::packer::Packer;
 use ddai_net::server_command::ServerCommand;
 use ddai_net::sysmsg::{self, SysMsg};
+use ddai_net::timeout_code::{TimeoutCode, TimeoutCommand, TimeoutSeed};
 use ddai_net::tuning::{DEFAULT_TUNE_PARAMS, TeamsState, TuneParams};
 use ddai_net::uuid::{self, MsgId};
-use ddai_net::view::View;
+use ddai_net::view::{PlayerView, View};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -235,6 +236,18 @@ pub struct ClientConfig {
     /// direction, so a proxy is only ever used for a server whose entry names it (build it with
     /// [`crate::proxy::resolve_for_server`]). Its `Debug` shows the name only.
     pub proxy: Option<crate::proxy::ProxyConfig>,
+    /// Task 4.10 (D-100): the persistent seed of the DDNet timeout code. With a seed the driver gives every session the code derived from it
+    /// and the **game server's** address ([`Session::arm_timeout_code`]), and the session sends `/timeout <code>` once after joining,
+    /// as the official 20.1 client does, so a reconnect from a new address can take the old tee back. `None` (the default; `ddnet-ai
+    /// record` and the tests) sends nothing. The seed is a secret: its `Debug` shows nothing.
+    pub timeout_seed: Option<TimeoutSeed>,
+    /// Task 3.11 (opt-in, `false` by default): the driver loop sleeps on the input channel with a precise timeout instead of
+    /// blocking in `recv` for up to `POLL_TIMEOUT` (2 ms, rounded up to the kernel's 1 ms timer tick): a decision the caller hands
+    /// over is picked up at once and an input goes out when it is due, not up to ~3 ms later, at the price of looking at the
+    /// (non-blocking) socket every [`crate::driver::PRECISE_POLL`] (about 2 000 wake-ups a second). Needs a transport that can
+    /// receive without blocking ([`crate::transport::Transport::set_nonblocking`]); otherwise the driver silently stays with
+    /// the blocking loop.
+    pub precise_wakeups: bool,
 }
 
 /// `~/aiddnet/data/maps/cache`, per `CLAUDE.md`'s folder layout, falling back to a relative
@@ -275,6 +288,8 @@ impl Default for ClientConfig {
             margin_report_every: None,
             live_servers: default_live_servers(),
             proxy: None,
+            timeout_seed: None,
+            precise_wakeups: false,
         }
     }
 }
@@ -478,6 +493,64 @@ pub const SERVER_COMMAND_KILL_LABEL: &str = "Cl_Say(/kill)";
 /// apart from `Cl_Say(/kill)`; the text is never in the audit, only this label.
 pub const OWNER_SAY_LABEL: &str = "Cl_Say(owner)";
 
+/// The audit label of the third chat-channel message the bot may send: the stock timeout code, `/timeout <code>`, once after joining (task 4.10,
+/// D-100). Counted apart from the other two; the code is never in the audit or the log.
+pub const TIMEOUT_CODE_LABEL: &str = "Cl_Say(/timeout)";
+
+/// How many snapshots must have arrived since `EnterGame` before the official client sends the timeout code (`OnPostConnect` runs when the
+/// count is *more than* `GameTickSpeed()`, `client.cpp:2351`).
+const TIMEOUT_CODE_AFTER_SNAPSHOTS: u32 = 50;
+
+/// Task 4.10 (D-100, owner's decision of 2026-10-06): while a player with the bot's own name that is not us is in the snapshot (the ghost
+/// of a lost connection), the same `/timeout <code>` goes out again this often...
+pub const TIMEOUT_RESEND_INTERVAL: Duration = Duration::from_secs(30);
+/// ...and at most this many times per ghost (35 x 30 s = 17.5 min, above the server's 1000 s `conn_timeout_protection`).
+pub const TIMEOUT_MAX_RESENDS: u32 = 35;
+
+/// Whether the snapshot shows a ghost: a player that is not us (`PlayerInfo::local != 1`) whose name is `own_name`, the name this client
+/// asked for. After a reconnect the server lets the new client in as `(1)Name` while the old connection still holds `Name`; once the old
+/// connection is taken over (our slot becomes the old one, no other `Name`) or has left, no such player is there.
+fn ghost_present(players: &[PlayerView], own_name: &str) -> bool {
+    players
+        .iter()
+        .any(|p| p.info.local != 1 && p.client_info.as_ref().is_some_and(|c| c.name == own_name))
+}
+
+/// The cadence of the repeated `/timeout` while a ghost exists: not before [`TIMEOUT_RESEND_INTERVAL`] after the last send (the join's
+/// own send included), at most [`TIMEOUT_MAX_RESENDS`] per ghost, none without a ghost, and the count starts over when the ghost is gone.
+#[derive(Debug, Default)]
+struct GhostResends {
+    last_sent: Option<Duration>,
+    resends: u32,
+}
+
+impl GhostResends {
+    /// The code went out (the join's send or a resend) at `now`.
+    fn sent(&mut self, now: Duration) {
+        self.last_sent = Some(now);
+    }
+
+    /// A new `EnterGame`: the world is new, so is the ghost count.
+    fn reset(&mut self) {
+        *self = GhostResends::default();
+    }
+
+    /// Whether a resend is due at `now`; counts it when it is. Without a ghost nothing is due and the episode ends.
+    fn due(&mut self, ghost: bool, now: Duration) -> bool {
+        if !ghost {
+            self.resends = 0;
+            return false;
+        }
+        let Some(last) = self.last_sent else { return false };
+        if self.resends >= TIMEOUT_MAX_RESENDS || now.saturating_sub(last) < TIMEOUT_RESEND_INTERVAL {
+            return false;
+        }
+        self.resends += 1;
+        self.last_sent = Some(now);
+        true
+    }
+}
+
 /// Why [`Session::request_owner_say`] did not send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum OwnerSayError {
@@ -662,6 +735,16 @@ pub struct Session {
     /// Task 4.9 (D-094): the one-shot authorisations of the owner chat line being sent. Non-empty only inside
     /// [`Session::request_owner_say`]; the allow-list consumes them.
     owner_auth: allowlist::OwnerSayAuth,
+    /// Task 4.10 (D-100): the one-shot authorisation of the timeout command being sent; non-empty only inside [`Session::maybe_send_timeout_code`].
+    timeout_auth: allowlist::TimeoutAuth,
+    /// The `/timeout <code>` of this session, armed by [`Session::arm_timeout_code`] (`None`: nothing is ever sent).
+    timeout_command: Option<TimeoutCommand>,
+    /// Snapshots applied since the last `EnterGame` (`m_aReceivedSnapshots`, `client.cpp`).
+    snapshots_since_enter: u32,
+    /// The timeout code went out since the last `EnterGame` (`m_aDidPostConnect`).
+    timeout_code_sent: bool,
+    /// The repeats of the timeout code while a same-name ghost exists.
+    ghost_resends: GhostResends,
     /// When to next originate a `PINGEX` (`client.cpp:527,2982-3004`) — `None` until `ENTERGAME`,
     /// review finding F9.
     next_ping_ex_at_ns: Option<i64>,
@@ -714,6 +797,11 @@ impl Session {
             teams_state: None,
             outgoing_log: VecDeque::new(),
             owner_auth: allowlist::OwnerSayAuth::new(),
+            timeout_auth: allowlist::TimeoutAuth::new(),
+            timeout_command: None,
+            snapshots_since_enter: 0,
+            timeout_code_sent: false,
+            ghost_resends: GhostResends::default(),
             next_ping_ex_at_ns: None,
             pending_events: VecDeque::new(),
             config,
@@ -726,6 +814,17 @@ impl Session {
         tracing::info!("control: sending CONNECT (starting TKEN handshake)");
         self.state = JoinState::Handshaking;
         self.connection.connect(now, &self.huffman);
+    }
+
+    /// Task 4.10 (D-100): arms the timeout code for this session: derived from [`ClientConfig::timeout_seed`] and `server`, the address of
+    /// the **game server** (never a proxy's relay), as `CClient::Connect` does for every connect and redirect. Without a seed this does
+    /// nothing. The code is sent once the join is far enough, see [`Session::maybe_send_timeout_code`].
+    pub fn arm_timeout_code(&mut self, server: std::net::SocketAddr) {
+        self.timeout_command = self
+            .config
+            .timeout_seed
+            .as_ref()
+            .map(|seed| TimeoutCommand::new(TimeoutCode::derive(seed, server)));
     }
 
     /// Voluntarily ends the session (`Connection::disconnect` — queues `CLOSE`, resets to
@@ -1449,6 +1548,11 @@ impl Session {
         self.snap_assembler.reset();
         self.timing.reset();
         self.sent_post_enter_extras = false;
+        // `client.cpp:519` (`EnterGame`): `m_aDidPostConnect = false`, `OnEnterGame`: `m_aReceivedSnapshots = 0` — so the timeout code goes
+        // out once per join, and again after a map change, exactly as the official client does it.
+        self.snapshots_since_enter = 0;
+        self.timeout_code_sent = false;
+        self.ghost_resends.reset();
         self.last_snapshot_tick = None;
         self.state = JoinState::InGame;
         // `client.cpp:527`: armed unconditionally on every `EnterGame`, same as a real client
@@ -1493,6 +1597,11 @@ impl Session {
                         snapshot: snap.clone(),
                     });
                 }
+                if matches!(self.state, JoinState::InGame) {
+                    self.snapshots_since_enter = self.snapshots_since_enter.saturating_add(1);
+                    self.maybe_send_timeout_code(now);
+                    self.maybe_resend_timeout_code(&snap, now);
+                }
                 if matches!(self.state, JoinState::InGame) && !self.sent_post_enter_extras {
                     let view = View::new(&snap);
                     if view.players().iter().any(|p| p.info.local == 1) {
@@ -1522,6 +1631,61 @@ impl Session {
             }
             assembly::Event::Stale { .. } => Vec::new(),
         }
+    }
+
+    /// `CClient::OnPostConnect` (`client.cpp:530-583`): once more than 50 snapshots arrived since `EnterGame` and the server announced the
+    /// `CHATTIMEOUTCODE` capability, sends `Cl_Say{team 0, "/timeout <code>"}` (the official client adds `;emote ...` / `cl_run_on_join`
+    /// only when those are configured; here they never are). Needs an armed code ([`Session::arm_timeout_code`]). Once per `EnterGame`.
+    ///
+    /// The payload comes from the typed [`TimeoutCommand`]; this records a one-shot authorisation for exactly those bytes, hands them to the
+    /// single outgoing path, whose allow-list consumes it, and revokes what is left. The audit label is [`TIMEOUT_CODE_LABEL`]; the log
+    /// gets the length only, never the code.
+    fn maybe_send_timeout_code(&mut self, now: Duration) {
+        if self.timeout_code_sent
+            || self.snapshots_since_enter <= TIMEOUT_CODE_AFTER_SNAPSHOTS
+            || !self.server_capabilities.chat_timeout_code
+            || self.timeout_command.is_none()
+        {
+            return;
+        }
+        // Tried once per join, sent or refused: a refusal is a bug that must not turn into a retry loop.
+        self.timeout_code_sent = true;
+        self.ghost_resends.sent(now);
+        if let Some(len) = self.send_timeout_code(now) {
+            tracing::info!("timeout code sent (len {len})");
+        }
+    }
+
+    /// Task 4.10 (D-100, owner's decision of 2026-10-06): the same `/timeout <code>` again every [`TIMEOUT_RESEND_INTERVAL`] while a ghost
+    /// (a player that is not us with our own name, [`ghost_present`]) is in the snapshot, at most [`TIMEOUT_MAX_RESENDS`] times per ghost.
+    /// It is what makes a fast reconnect take the old tee back: the first send is too early (the server has not noticed the old connection
+    /// is dead), a later one takes it over, our slot becomes the old one, the ghost is gone and the repeats stop. No ghost, no repeat.
+    /// Same bytes, same one-shot authorisation, same audit label as the join's send.
+    fn maybe_resend_timeout_code(&mut self, snap: &ddai_net::snapshot::Snapshot, now: Duration) {
+        if !self.timeout_code_sent || self.timeout_command.is_none() || !self.server_capabilities.chat_timeout_code {
+            return;
+        }
+        let ghost = ghost_present(&View::new(snap).players(), &self.config.name);
+        if !self.ghost_resends.due(ghost, now) {
+            return;
+        }
+        if let Some(len) = self.send_timeout_code(now) {
+            tracing::info!(
+                "timeout code re-sent while a same-name player is present (len {len}, resend {} of {TIMEOUT_MAX_RESENDS})",
+                self.ghost_resends.resends
+            );
+        }
+    }
+
+    /// One `/timeout <code>` through the single outgoing path: records the one-shot authorisation for exactly these bytes, sends, revokes
+    /// what is left. `Some(code length)` when it went out.
+    fn send_timeout_code(&mut self, now: Duration) -> Option<usize> {
+        let command = self.timeout_command.as_ref()?;
+        let (payload, len) = (command.payload(), command.code_len());
+        self.timeout_auth.grant(&payload);
+        let sent = self.send_game_chunk(payload.into_bytes(), true, now, TIMEOUT_CODE_LABEL);
+        self.timeout_auth.revoke_all();
+        sent.then_some(len)
     }
 
     /// `gameclient.cpp:2289-2303,2392-2407` — sent once, the first time our own player is known
@@ -1668,7 +1832,7 @@ impl Session {
     ///
     /// Returns whether the message went to the connection (the guard let it through and it queued).
     fn send_game_chunk(&mut self, payload: Vec<u8>, vital: bool, now: Duration, label: &'static str) -> bool {
-        match allowlist::check_authorised(&payload, &self.registry, &mut self.owner_auth) {
+        match allowlist::check_with(&payload, &self.registry, &mut self.owner_auth, &mut self.timeout_auth) {
             Ok(()) => {
                 self.log_outgoing(label, true);
                 if let Err(e) = self.connection.send_chunk(&payload, vital, now) {
@@ -2282,6 +2446,386 @@ mod tests {
             vec![(SERVER_COMMAND_KILL_LABEL, true), ("Cl_Say(test-only)", false)]
         );
         assert_ne!(OWNER_SAY_LABEL, SERVER_COMMAND_KILL_LABEL);
+    }
+
+    /// Task 4.10 (D-100): an online (handshake only) session with the config of the caller, switched to `InGame` the way `Sv_ReadyToEnter` does,
+    /// and the server's capabilities of the caller's choice.
+    fn in_game_session(config: ClientConfig, chat_timeout_code: bool) -> (Session, FakeServer, Duration) {
+        let mut session = Session::new(config);
+        let mut server = FakeServer::new();
+        let mut now = secs(0);
+        session.connect(now);
+        server.accept(now);
+        for dg in session.flush(now) {
+            let _ = server.feed(&dg, now);
+        }
+        now += ms(5);
+        for dg in server.flush(now) {
+            let _ = session.feed(&dg, now);
+        }
+        now += ms(5);
+        for dg in session.flush(now) {
+            let _ = server.feed(&dg, now);
+        }
+        assert!(server.connection.is_online(), "test setup: handshake must complete");
+        session.server_capabilities.chat_timeout_code = chat_timeout_code;
+        session.state = JoinState::AwaitingReadyToEnter;
+        let _ = session.handle_ready_to_enter(now);
+        assert!(session.is_in_game());
+        (session, server, now)
+    }
+
+    /// Delivers `n` empty snapshots (ticks from `first`), flushes the session and returns every `Cl_Say` the server received, as
+    /// `(team, text)`.
+    fn deliver_snapshots(
+        session: &mut Session,
+        server: &mut FakeServer,
+        now: &mut Duration,
+        first: i32,
+        n: i32,
+    ) -> Vec<(i32, String)> {
+        let mut said = Vec::new();
+        for tick in first..first + n {
+            *now += ms(20);
+            server.send_sys_msg(&SysMsg::SnapEmpty { tick, delta_tick: -1 }, false, *now);
+            for dg in server.flush(*now) {
+                let _ = session.feed(&dg, *now);
+            }
+            for dg in session.flush(*now) {
+                for msg in server.feed(&dg, *now) {
+                    if let Msg::Game(msgs::GameMsg::ClSay(s)) = msg {
+                        said.push((s.team, s.message));
+                    }
+                }
+            }
+        }
+        said
+    }
+
+    fn timeout_config() -> ClientConfig {
+        ClientConfig {
+            timeout_seed: TimeoutSeed::parse("ABCDEFGHKLMNPRST"),
+            ..ClientConfig::default()
+        }
+    }
+
+    const TEST_SERVER: &str = "127.0.0.1:8443";
+    /// `GenerateTimeoutCode` of DDNet 20.1 for seed `ABCDEFGHKLMNPRST` and `127.0.0.1:8443` (`ddai_net::timeout_code`'s C++ vectors).
+    const TEST_TIMEOUT_TEXT: &str = "/timeout KbCS2mj3DjD2YRE2";
+
+    /// Task 4.10 (D-100): the official client's moment: more than 50 snapshots after `EnterGame` (not 50, not fewer), the server having announced
+    /// the capability; one `Cl_Say{0, "/timeout <code>"}`, once, audited under its own label, nothing left authorised.
+    #[test]
+    fn the_timeout_code_goes_out_once_after_more_than_fifty_snapshots() {
+        let (mut session, mut server, mut now) = in_game_session(timeout_config(), true);
+        session.arm_timeout_code(TEST_SERVER.parse().unwrap());
+        let early = deliver_snapshots(&mut session, &mut server, &mut now, 1, 50);
+        assert!(
+            early.is_empty(),
+            "50 snapshots are not yet 'more than GameTickSpeed': {early:?}"
+        );
+        assert!(session.recent_outgoing().all(|e| e.label != TIMEOUT_CODE_LABEL));
+        let at = deliver_snapshots(&mut session, &mut server, &mut now, 51, 1);
+        assert_eq!(at, vec![(0, TEST_TIMEOUT_TEXT.to_string())], "all chat, the exact text");
+        let later = deliver_snapshots(&mut session, &mut server, &mut now, 52, 120);
+        assert!(later.is_empty(), "once per join: {later:?}");
+        let labels: Vec<_> = session
+            .recent_outgoing()
+            .filter(|e| e.label.starts_with("Cl_Say"))
+            .map(|e| (e.label, e.accepted))
+            .collect();
+        assert_eq!(labels, vec![(TIMEOUT_CODE_LABEL, true)]);
+        assert_eq!(session.timeout_auth.pending(), 0);
+        assert_eq!(session.owner_auth.pending(), 0);
+        assert_ne!(TIMEOUT_CODE_LABEL, OWNER_SAY_LABEL);
+        assert_ne!(TIMEOUT_CODE_LABEL, SERVER_COMMAND_KILL_LABEL);
+        // the authorisation was one-shot: the same bytes by hand are refused
+        assert!(!session.try_send_hand_built_cl_say_text_for_testing(0, TEST_TIMEOUT_TEXT, now));
+    }
+
+    /// A map change enters the game again (`Sv_ReadyToEnter`): the official client resets `m_aDidPostConnect` and the snapshot count there, so
+    /// the code goes out once more, again after 50 snapshots.
+    #[test]
+    fn the_timeout_code_goes_out_again_after_a_new_enter_game_like_the_official_client() {
+        let (mut session, mut server, mut now) = in_game_session(timeout_config(), true);
+        session.arm_timeout_code(TEST_SERVER.parse().unwrap());
+        assert_eq!(deliver_snapshots(&mut session, &mut server, &mut now, 1, 60).len(), 1);
+        session.state = JoinState::AwaitingReadyToEnter;
+        let _ = session.handle_ready_to_enter(now);
+        assert!(deliver_snapshots(&mut session, &mut server, &mut now, 100, 50).is_empty());
+        assert_eq!(
+            deliver_snapshots(&mut session, &mut server, &mut now, 150, 5),
+            vec![(0, TEST_TIMEOUT_TEXT.to_string())]
+        );
+    }
+
+    /// Without the server's `CHATTIMEOUTCODE` capability, without a seed, or without arming the session, nothing is ever said.
+    #[test]
+    fn no_timeout_code_without_the_capability_a_seed_or_arming() {
+        let server_addr: std::net::SocketAddr = TEST_SERVER.parse().unwrap();
+        // 1. the server did not announce the capability
+        let (mut session, mut server, mut now) = in_game_session(timeout_config(), false);
+        session.arm_timeout_code(server_addr);
+        assert!(deliver_snapshots(&mut session, &mut server, &mut now, 1, 120).is_empty());
+        // 2. no seed in the config: arming does nothing
+        let (mut session, mut server, mut now) = in_game_session(ClientConfig::default(), true);
+        session.arm_timeout_code(server_addr);
+        assert!(deliver_snapshots(&mut session, &mut server, &mut now, 1, 120).is_empty());
+        // 3. a seed but never armed (the record tool: its driver arms nothing without a seed, a Session made by hand arms nothing)
+        let (mut session, mut server, mut now) = in_game_session(timeout_config(), true);
+        assert!(deliver_snapshots(&mut session, &mut server, &mut now, 1, 120).is_empty());
+        assert!(session.recent_outgoing().all(|e| !e.label.starts_with("Cl_Say")));
+    }
+
+    /// The code is the server's: another address gives another code (a redirect re-arms with its new address), and the same address the same
+    /// one on a new session (a reconnect through a new association presents the same code).
+    #[test]
+    fn the_code_follows_the_game_servers_address_not_the_session() {
+        let text_for = |addr: &str| {
+            let (mut session, mut server, mut now) = in_game_session(timeout_config(), true);
+            session.arm_timeout_code(addr.parse().unwrap());
+            deliver_snapshots(&mut session, &mut server, &mut now, 1, 60)
+        };
+        assert_eq!(text_for(TEST_SERVER), vec![(0, TEST_TIMEOUT_TEXT.to_string())]);
+        assert_eq!(
+            text_for(TEST_SERVER),
+            text_for(TEST_SERVER),
+            "a reconnect presents the same code"
+        );
+        let other = text_for("127.0.0.1:8444");
+        assert_eq!(other.len(), 1);
+        assert_ne!(other, text_for(TEST_SERVER));
+    }
+
+    fn player_view(id: i32, local: i32, name: Option<&str>) -> PlayerView {
+        PlayerView {
+            id,
+            info: objects::PlayerInfo {
+                local,
+                client_id: id,
+                team: 0,
+                score: 0,
+                latency: 0,
+            },
+            client_info: name.map(|n| objects::ClientInfo {
+                name: n.to_string(),
+                clan: String::new(),
+                country: -1,
+                skin: "default".to_string(),
+                use_custom_color: 0,
+                color_body: 0,
+                color_feet: 0,
+            }),
+            ddnet: None,
+        }
+    }
+
+    /// Task 4.10 (owner's decision of 2026-10-06): a ghost is a player that is not us with our own name, whatever its client id.
+    #[test]
+    fn a_ghost_is_another_player_with_our_name() {
+        let me = |name: &str| player_view(3, 1, Some(name));
+        // normal play: only us, named as asked: no ghost
+        assert!(!ghost_present(&[me("Muha")], "Muha"));
+        // after a reconnect: we are `(1)Muha`, the old connection holds `Muha` in another slot
+        assert!(ghost_present(&[player_view(0, 0, Some("Muha")), me("(1)Muha")], "Muha"));
+        // the ghost's slot may be higher or lower than ours
+        assert!(ghost_present(&[me("(1)Muha"), player_view(9, 0, Some("Muha"))], "Muha"));
+        // taken over: our slot is the old one and nothing else is called `Muha`
+        assert!(!ghost_present(&[me("Muha"), player_view(1, 0, Some("Other"))], "Muha"));
+        // other people's names, near misses, case, and a player whose ClientInfo is not in the snapshot are not ghosts
+        for name in [
+            Some("muha"),
+            Some("Muha "),
+            Some("(1)Muha"),
+            Some("Muh"),
+            Some(""),
+            None,
+        ] {
+            assert!(
+                !ghost_present(&[me("(1)Muha"), player_view(0, 0, name)], "Muha"),
+                "{name:?}"
+            );
+        }
+        // no `local` player at all (the snapshot has not named us yet) does not make us a ghost of ourselves via a same-name stranger
+        assert!(ghost_present(&[player_view(0, 0, Some("Muha"))], "Muha"));
+        assert!(!ghost_present(&[], "Muha"));
+    }
+
+    /// The cadence: nothing without a ghost, nothing before 30 s after the last send (the join's included), then every 30 s, at most 35 per
+    /// ghost, and a ghost that goes away ends the episode.
+    #[test]
+    fn the_resends_follow_a_thirty_second_cadence_capped_at_35_per_ghost() {
+        let mut g = GhostResends::default();
+        g.sent(secs(2)); // the join's send
+        assert!(!g.due(false, secs(100)), "no ghost, no resend");
+        assert!(!g.due(true, secs(31)), "29 s after the join's send");
+        assert!(g.due(true, secs(32)), "30 s after");
+        assert!(!g.due(true, secs(61)));
+        assert!(g.due(true, secs(62)));
+        assert!(!g.due(true, secs(62)), "never twice at one moment");
+        // the ghost leaves: the episode ends and its count starts over
+        assert!(!g.due(false, secs(70)));
+        assert_eq!(g.resends, 0);
+        assert!(!g.due(true, secs(80)), "a new ghost waits for 30 s after the last send");
+        assert!(g.due(true, secs(92)));
+        // the cap: 35 per ghost, never one more, however long it stays
+        let mut g = GhostResends::default();
+        g.sent(secs(0));
+        let mut sent = 0u32;
+        let mut t = 0u64;
+        for _ in 0..10_000 {
+            t += 30;
+            if g.due(true, secs(t)) {
+                sent += 1;
+            }
+        }
+        assert_eq!(sent, TIMEOUT_MAX_RESENDS);
+        assert!(!g.due(true, secs(t + 3_600)), "capped for the episode");
+        // a ghost that goes and a new one comes: a fresh budget
+        assert!(!g.due(false, secs(t + 3_700)));
+        assert!(g.due(true, secs(t + 3_731)));
+        // no join send yet (the code is not out): nothing is due
+        let mut fresh = GhostResends::default();
+        assert!(!fresh.due(true, secs(1_000)));
+        // every pair of resends is at least 30 s apart
+        let mut g = GhostResends::default();
+        g.sent(secs(0));
+        let mut last = 0u64;
+        for ms in (0..5_000_000u64).step_by(20) {
+            if g.due(true, Duration::from_millis(ms)) {
+                assert!(ms - last >= 30_000, "{ms} after {last}");
+                last = ms;
+            }
+        }
+    }
+
+    fn ghost_snapshot(ghost: bool) -> ddai_net::snapshot::Snapshot {
+        use ddai_net::intstr::str_to_ints;
+        use ddai_net::snapshot::SnapshotItem;
+        let info = |id: i32, name: &str| {
+            let mut d = str_to_ints(name, 4);
+            d.extend(str_to_ints("", 3));
+            d.push(-1);
+            d.extend(str_to_ints("default", 6));
+            d.extend([0, 0, 0]);
+            SnapshotItem {
+                key: (objects::ClientInfo::ID << 16) | id,
+                data: d,
+            }
+        };
+        let player = |id: i32, local: i32| SnapshotItem {
+            key: (objects::PlayerInfo::ID << 16) | id,
+            data: vec![local, id, 0, 0, 0],
+        };
+        let mut items = vec![player(1, 1), info(1, if ghost { "(1)Muha" } else { "Muha" })];
+        if ghost {
+            items.extend([player(0, 0), info(0, "Muha")]);
+        }
+        ddai_net::snapshot::Snapshot { items }
+    }
+
+    /// Sends `snap` as one full snapshot per `step`, `n` times, returning the `Cl_Say`s the server received as `(time in s, text)`.
+    fn deliver_full_snapshots(
+        session: &mut Session,
+        server: &mut FakeServer,
+        now: &mut Duration,
+        first: i32,
+        n: i32,
+        snap: &ddai_net::snapshot::Snapshot,
+    ) -> Vec<(u64, String)> {
+        let delta_ints =
+            ddai_net::delta::create_delta(&ddai_net::snapshot::Snapshot::empty(), snap, &StaticSizes::ddnet_06())
+                .unwrap();
+        let mut compressed = vec![0u8; delta_ints.len() * ddai_net::packer::MAX_BYTES_PACKED];
+        let len = ddai_net::packer::pack_ints(&mut compressed, &delta_ints).unwrap();
+        compressed.truncate(len);
+        let mut said = Vec::new();
+        for tick in first..first + n {
+            *now += ms(20);
+            server.send_sys_msg(
+                &SysMsg::SnapSingle {
+                    tick,
+                    delta_tick: -1,
+                    crc: snap.crc() as i32,
+                    data: compressed.clone(),
+                },
+                false,
+                *now,
+            );
+            for dg in server.flush(*now) {
+                let _ = session.feed(&dg, *now);
+            }
+            for dg in session.flush(*now) {
+                for msg in server.feed(&dg, *now) {
+                    if let Msg::Game(msgs::GameMsg::ClSay(s)) = msg {
+                        assert_eq!(s.team, 0);
+                        said.push((now.as_secs(), s.message));
+                    }
+                }
+            }
+        }
+        said
+    }
+
+    fn ghost_config() -> ClientConfig {
+        ClientConfig {
+            name: "Muha".to_string(),
+            ..timeout_config()
+        }
+    }
+
+    /// Task 4.10, on the wire: with a ghost in the snapshots the same `/timeout <code>` goes out at the join and again every 30 s, never
+    /// sooner; when the ghost is gone (taken over or left) the repeats stop; with no ghost there is only the join's send.
+    #[test]
+    fn the_timeout_code_repeats_every_thirty_seconds_while_a_ghost_is_there_and_stops_when_it_is_gone() {
+        let (mut session, mut server, mut now) = in_game_session(ghost_config(), true);
+        session.arm_timeout_code(TEST_SERVER.parse().unwrap());
+        let ghost = ghost_snapshot(true);
+        // 100 s of snapshots with the ghost present (50 snapshots/s would be 5000; 20 ms steps)
+        let said = deliver_full_snapshots(&mut session, &mut server, &mut now, 1, 5_000, &ghost);
+        let times: Vec<u64> = said.iter().map(|(t, _)| *t).collect();
+        assert!(
+            said.iter().all(|(_, t)| t == TEST_TIMEOUT_TEXT),
+            "always the same code: {said:?}"
+        );
+        assert_eq!(
+            said.len(),
+            4,
+            "the join's send at about 1 s, then every 30 s up to 100 s: {times:?}"
+        );
+        for w in times.windows(2) {
+            assert!(w[1] - w[0] >= 30, "never sooner than 30 s: {times:?}");
+        }
+        assert_eq!(session.timeout_auth.pending(), 0);
+        let resent = session
+            .recent_outgoing()
+            .filter(|e| e.label == TIMEOUT_CODE_LABEL && e.accepted)
+            .count();
+        assert_eq!(resent, 4);
+        // the ghost is gone (our slot is `Muha` now): nothing more, however long it goes on
+        let gone = ghost_snapshot(false);
+        let later = deliver_full_snapshots(&mut session, &mut server, &mut now, 6_000, 6_000, &gone);
+        assert!(later.is_empty(), "no ghost, no repeat: {later:?}");
+    }
+
+    #[test]
+    fn without_a_ghost_only_the_join_send_happens() {
+        let (mut session, mut server, mut now) = in_game_session(ghost_config(), true);
+        session.arm_timeout_code(TEST_SERVER.parse().unwrap());
+        let calm = ghost_snapshot(false);
+        let said = deliver_full_snapshots(&mut session, &mut server, &mut now, 1, 6_000, &calm);
+        assert_eq!(said.len(), 1, "{said:?}");
+        // and with a ghost but no armed code, nothing at all
+        let (mut session, mut server, mut now) = in_game_session(
+            ClientConfig {
+                name: "Muha".into(),
+                ..ClientConfig::default()
+            },
+            true,
+        );
+        session.arm_timeout_code(TEST_SERVER.parse().unwrap());
+        let ghost = ghost_snapshot(true);
+        assert!(deliver_full_snapshots(&mut session, &mut server, &mut now, 1, 3_000, &ghost).is_empty());
     }
 
     fn session_default_name() -> String {

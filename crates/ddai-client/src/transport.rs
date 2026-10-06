@@ -59,6 +59,13 @@ pub trait Transport {
     /// malformed is also reported that way). Any other error ends the connection attempt; ICMP-style
     /// `ConnectionRefused`/`ConnectionReset` are tolerated by the caller.
     fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+
+    /// Task 3.11: switches `recv` between blocking for the poll interval (`false`, the default state) and returning `WouldBlock`
+    /// at once when nothing is queued (`true`). A transport that cannot do the latter returns an error and stays as it was; the
+    /// driver then keeps its blocking loop ([`crate::ClientConfig::precise_wakeups`]).
+    fn set_nonblocking(&mut self, _on: bool) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// The plain UDP path: one socket for the whole [`crate::Client::connect`] call (D-050: reconnects keep the
@@ -128,5 +135,50 @@ impl Transport for DirectUdp {
 
     fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.socket.recv(buf)
+    }
+
+    fn set_nonblocking(&mut self, on: bool) -> io::Result<()> {
+        self.socket.set_nonblocking(on)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Task 3.11: in non-blocking mode `recv` returns at once when nothing is queued (the precise driver loop sleeps on its
+    /// channel instead), and blocking mode comes back with its poll interval.
+    #[test]
+    fn direct_udp_recv_does_not_block_in_nonblocking_mode_and_blocks_again_afterwards() {
+        let mut t = DirectUdp::bind(Duration::from_millis(50)).unwrap();
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        t.begin_attempt(server.local_addr().unwrap()).unwrap();
+        let mut buf = [0u8; 64];
+        t.set_nonblocking(true).unwrap();
+        let t0 = Instant::now();
+        assert_eq!(t.recv(&mut buf).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(t0.elapsed() < Duration::from_millis(20), "{:?}", t0.elapsed());
+        // A datagram that is there is received.
+        let me = t.socket.local_addr().unwrap();
+        server.send_to(b"hi", ("127.0.0.1", me.port())).unwrap();
+        let t0 = Instant::now();
+        let n = loop {
+            match t.recv(&mut buf) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock && t0.elapsed() < Duration::from_secs(2) => {}
+                Err(e) => panic!("{e}"),
+            }
+        };
+        assert_eq!(&buf[..n], b"hi");
+        t.set_nonblocking(false).unwrap();
+        let t0 = Instant::now();
+        let e = t.recv(&mut buf).unwrap_err();
+        assert!(matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut));
+        assert!(
+            t0.elapsed() >= Duration::from_millis(40),
+            "blocking again: {:?}",
+            t0.elapsed()
+        );
     }
 }

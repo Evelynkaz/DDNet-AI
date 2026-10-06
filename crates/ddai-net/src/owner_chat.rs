@@ -23,7 +23,9 @@
 //! **What [`OwnerText::new`] checks** (the same rules back [`OwnerText::check`]): the text is trimmed (Rust whitespace and DDNet's
 //! `str_utf8_isspace` set), not empty, at most [`MAX_OWNER_TEXT_BYTES`] bytes, free of control characters, line breaks, and of the
 //! invisible and direction-changing format characters (zero-width and bidi marks, the word joiner, the BOM, the Hangul fillers), and is
-//! not the one string 20.1 uses as a bot trap (`xd sure chillerbot.png is lyfe`).
+//! not the one string 20.1 uses as a bot trap (`xd sure chillerbot.png is lyfe`), and, when it starts with `/`, does not mention `timeout`
+//! in any case (task 4.10, D-100: the timeout code is the bot's own capability, [`crate::timeout_code`]; the owner cannot send `/timeout`
+//! with another code, with none, or chained behind another command with `;`).
 //!
 //! **A leading `/` is allowed (task 4.9b, the owner's decision of 2026-10-05, amending D-094).** D-094 first refused it so that no server
 //! command could come from the site; the owner now wants to use the server's commands (`/spec`, `/pause`, `/emote`, `/w`, `/team`, ...)
@@ -196,6 +198,12 @@ fn validate(raw: &str) -> Result<&str, OwnerTextError> {
         return Err(OwnerTextError::Control);
     }
     if text == SERVER_BOT_TRAP {
+        return Err(OwnerTextError::Reserved);
+    }
+    // Task 4.10 (D-100): the bot's own `/timeout <code>` is a separate capability (`crate::timeout_code`). The owner's website can send
+    // no `/timeout` at all, with another code or with none (an empty code matches any timed-out player that has none, and the server
+    // splits a command line at `;`, so `/spec;timeout x` is a `/timeout` too): every `/` line that mentions it, in any case, is refused.
+    if text.starts_with('/') && text.to_ascii_lowercase().contains("timeout") {
         return Err(OwnerTextError::Reserved);
     }
     Ok(text)
@@ -601,6 +609,45 @@ mod tests {
             "only the exact line is the trap"
         );
         assert!(new("XD sure chillerbot.png is lyfe").is_ok());
+    }
+
+    /// Task 4.10 (D-100): the owner's website cannot send `/timeout` at all: not with another code, not without one, not in another case,
+    /// not behind another command (the server splits a line at `;`), not padded. Plain words are not commands and stay fine.
+    #[test]
+    fn a_slash_line_mentioning_timeout_is_refused_but_plain_words_are_not() {
+        for s in [
+            "/timeout",
+            "/timeout ABCDEFGHKLMNPRST",
+            "/timeout KbCS2mj3DjD2YRE2",
+            "/TIMEOUT x",
+            "/Timeout x",
+            "/tImEoUt",
+            "  /timeout x  ",
+            "\u{3000}/timeout x",
+            "/spec;timeout x",
+            "/emote happy ; timeout",
+            "/mc;timeout x",
+            "/w Name timeout",
+            "/timeoutx",
+        ] {
+            assert_eq!(new(s).unwrap_err(), OwnerTextError::Reserved, "{s:?}");
+            assert_eq!(OwnerText::check(s).unwrap_err(), OwnerTextError::Reserved, "{s:?}");
+        }
+        for s in [
+            "timeout",
+            "the timeout was long",
+            "hi /timeout",
+            "!timeout x",
+            "/spec",
+            "/emote happy",
+            "/time",
+            "/out",
+        ] {
+            assert!(new(s).is_ok(), "{s:?}");
+        }
+        // and a refused line can never become a payload the allow-list would take as the owner's
+        let sneaky = say_bytes(0, "/timeout KbCS2mj3DjD2YRE2");
+        assert!(!OwnerSay::is_canonical(&sneaky));
     }
 
     #[test]

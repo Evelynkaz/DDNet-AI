@@ -470,6 +470,30 @@ enum BoundHost {
     Domain,
 }
 
+/// How long the control connection may be idle before the first TCP keepalive probe (task 4.10, D-100).
+pub const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+/// The gap between keepalive probes once they have started.
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+/// Unanswered probes before the kernel declares the connection dead: a silently dead proxy is noticed after
+/// `KEEPALIVE_IDLE + KEEPALIVE_RETRIES * KEEPALIVE_INTERVAL` = 105 s: the keepalive gives up only after the game's own 100 s silence timeout would have (review F1: a shorter bound turns a
+/// recoverable blip into a reconnect and a ghost), instead of never.
+pub const KEEPALIVE_RETRIES: u32 = 5;
+
+/// Turns on TCP keepalive for the SOCKS5 control connection (`SO_KEEPALIVE` with a short idle time, interval and probe count, through
+/// `socket2`, no `unsafe`). The association lives exactly as long as this connection (RFC 1928 §6), and the proxy provider's idle
+/// timer or a NAT in between can drop an idle TCP connection without a word: the probes keep it from looking idle and make a dead one
+/// fail (the next `read` returns an error, [`Socks5UdpTransport`] reports the loss and the driver reconnects through a new
+/// association). Best effort: a platform that refuses an option leaves the connection as it was, with a warning.
+pub fn set_control_keepalive(stream: &TcpStream) {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL)
+        .with_retries(KEEPALIVE_RETRIES);
+    if let Err(e) = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+        tracing::warn!(error = %e, "socks5: could not enable TCP keepalive on the control connection");
+    }
+}
+
 /// Opens the control connection and completes `UDP ASSOCIATE`; see the module docs. Credentials are sent only
 /// if the proxy selects username/password, and are offered only if the config has them. A `{session}` placeholder in
 /// the user name gets a fresh random token.
@@ -529,6 +553,7 @@ pub fn associate_session(
         .map(|a| a.ip())
         .map_err(|e| io_err(Step::Connect, e))?;
     let _ = stream.set_nodelay(true);
+    set_control_keepalive(&stream);
 
     // 2. Method negotiation (RFC 1928 §3).
     let auth = cfg.auth();
@@ -1181,6 +1206,13 @@ impl Transport for Socks5UdpTransport {
         buf[..packet.payload.len()].copy_from_slice(packet.payload);
         Ok(packet.payload.len())
     }
+
+    fn set_nonblocking(&mut self, on: bool) -> io::Result<()> {
+        match self.assoc.as_ref() {
+            Some(a) => a.udp.set_nonblocking(on),
+            None => Err(io::ErrorKind::NotConnected.into()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1340,6 +1372,25 @@ mod tests {
             step: Duration::from_millis(400),
             total: Duration::from_millis(900),
         }
+    }
+
+    /// Task 4.10 (D-100): the control connection carries TCP keepalive with short idle/interval/retries, so an idle-TCP drop by the
+    /// proxy provider is avoided and a silently dead connection is detected after about 105 s, never before the game's own 100 s silence timeout.
+    #[test]
+    fn the_control_connection_has_tcp_keepalive_with_short_timers() {
+        let server = TestSocks5Server::start(Default::default());
+        let est = associate(&cfg_for(&server, None), &fast()).unwrap();
+        let sock = socket2::SockRef::from(&est.control);
+        assert!(sock.keepalive().unwrap(), "SO_KEEPALIVE");
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), KEEPALIVE_IDLE);
+        assert_eq!(sock.tcp_keepalive_interval().unwrap(), KEEPALIVE_INTERVAL);
+        assert_eq!(sock.tcp_keepalive_retries().unwrap(), KEEPALIVE_RETRIES);
+        let gives_up_after = KEEPALIVE_IDLE + KEEPALIVE_INTERVAL * KEEPALIVE_RETRIES;
+        assert_eq!(gives_up_after, Duration::from_secs(105));
+        assert!(
+            gives_up_after >= ddai_net::conn::DEFAULT_TIMEOUT,
+            "the keepalive must not give up before the game's silence timeout"
+        );
     }
 
     #[test]
