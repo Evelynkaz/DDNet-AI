@@ -1,0 +1,35 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): does a more cautious (worst-case) choice help when we are the slower side (we lag 3, the competitor 2)? Same games as the lag matrix (seeds 11001..11200).
+name = "E-026: robustness knobs at lag 3/2"
+base_seed = 11001
+games = 200
+
+[[condition]]
+name = "robust lambda 0.8 lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { lambda = 0.8 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "robust lambda 1.0 lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { lambda = 1.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "belief_lambda off lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { belief_lambda = false } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "robust_mode safe lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { robust_mode = "safe" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "top_m 6 lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { top_m = 6 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "mirror off lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { mirror = false } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]

@@ -1,0 +1,11 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): the joniTee duel. Baseline: main's hybrid (4 ms WORK, the 5 ms cap, mirror on) against the competitor's live weights (preset live-v2).
+#   ddnet-ai arena run --config configs/arena/e026-duel-base.toml --out ~/aiddnet/data/runs/E-026/base --threads 3
+name = "E-026: baseline, hybrid main defaults vs live-v2 in the joni 1vs1 arena"
+base_seed = 7001
+games = 100
+
+[[condition]]
+name = "joni: hybrid 4 ms WORK vs live-v2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2" }]

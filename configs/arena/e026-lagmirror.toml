@@ -1,0 +1,25 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): lever (a), the opponent model through the input-lag window (`lag_mirror`), against the same games as the lag matrix (seeds 11001..11200, hybrid lag 3).
+name = "E-026: lag_mirror"
+base_seed = 11001
+games = 200
+
+[[condition]]
+name = "lag_mirror lag 3/3"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { lag_mirror = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "lag_mirror lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { lag_mirror = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "lag_mirror lag 3/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { lag_mirror = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "lag_mirror lag 3/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { lag_mirror = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]

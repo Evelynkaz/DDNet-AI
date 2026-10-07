@@ -61,11 +61,14 @@ use crate::mapgrid::MapGrid;
 use crate::reach::{RouteFinder, Tile};
 use crate::tees::{HOOK_FLYING, Tee, dist};
 
+mod foot;
 mod in_the_way;
 mod wb_extra;
 
 /// `TRAVEL_RETRY_TICKS` (`bot.ts:235`).
 const TRAVEL_RETRY_TICKS: i64 = 5 * 50;
+/// Task 3.14: how long (ticks, 10 s) a walk to the WB is not tried again after it was found walled off from where the bot stands.
+const WB_CLOSED_TICKS: i64 = 10 * 50;
 /// `SEEK_MARGIN`, `SEEK_PATIENCE_TICKS`, `SEEK_ARRIVED_PX` (`bot.ts:240-242`).
 const SEEK_MARGIN: i32 = 3;
 const SEEK_PATIENCE_TICKS: i64 = 4 * 50;
@@ -261,6 +264,15 @@ struct Core {
     nav: Option<TsNav>,
     follow: Option<Follow>,
     wb_walk: bool,
+    /// Task 3.14: no walk to the WB is started before this tick (it was found walled off from here, see `walk_to_wb`). A server tick, so a
+    /// map load forgets it (the server's tick restarts).
+    wb_closed_until: i64,
+    /// Task 3.14: a life has begun and its first position is not recorded yet (set by `respawned`, read by the next poll).
+    respawn_pending: bool,
+    /// Task 3.14: the tile the last life began on (`None` before the first one on this map).
+    last_respawn_tile: Option<(i32, i32)>,
+    /// Task 3.14: the map's foot-walkable components against the wayblock's tiles (built by `on_map` when the map has a hall).
+    foot: Option<foot::FootMap>,
     seeking_game: bool,
     trek: Option<TsTrek>,
     trek_avoid: HashSet<i32>,
@@ -327,6 +339,10 @@ impl Core {
             nav: None,
             follow: None,
             wb_walk: false,
+            wb_closed_until: 0,
+            respawn_pending: false,
+            last_respawn_tile: None,
+            foot: None,
             seeking_game: false,
             trek: None,
             trek_avoid: HashSet::new(),
@@ -401,6 +417,12 @@ impl Core {
             ));
         }
         self.wb.on_map_keeping(def, same);
+        // Task 3.14 (D-105): where the wayblock can be walked to, once per map and here, not on the snapshot path.
+        self.foot = self
+            .wb
+            .def
+            .as_ref()
+            .map(|d| foot::FootMap::new(&router.grid, wb_tiles(d)));
         let template = world.new_scratch();
         self.ms = Some(MapState {
             world,
@@ -430,6 +452,7 @@ impl Core {
             self.home = None;
         }
         self.map_name = ident.name.clone();
+        self.forget_walled_off();
         self.touch_status();
         self.idle_since = -1;
         self.knowledge_due = true;
@@ -876,6 +899,10 @@ impl Core {
         }
         let own = ctx.own;
         let tile = tile_of(own.pos);
+        if self.respawn_pending && own.alive {
+            self.respawn_pending = false;
+            self.last_respawn_tile = Some(tile);
+        }
         // 3. the WB: side, forgiveness, the walk that cannot climb.
         if self.wb.def.is_some() {
             let holding = self.wb_holding();
@@ -1361,7 +1388,11 @@ impl Core {
                 self.log(&format!("nobody to fight: walking home to ({hx},{hy}) -- {reply}"));
             }
             self.idle_since = tick;
-        } else if holding && self.nav.is_none() && tick - self.idle_since > self.wb_return_ticks(ctx) {
+        } else if holding
+            && self.nav.is_none()
+            && tick - self.idle_since > self.wb_return_ticks(ctx)
+            && tick >= self.wb_closed_until
+        {
             self.wb_walk_tries += 1;
             self.fresh_life = false;
             self.walk_to_wb(ctx);
@@ -1404,6 +1435,24 @@ impl Core {
         ));
     }
 
+    /// Task 3.14: forget what the walled-off guard knows about the last map (the respawn, the closing time: a server tick). The component labels are
+    /// rebuilt by `on_map` and dropped by `on_map_changing`.
+    fn forget_walled_off(&mut self) {
+        self.wb_closed_until = 0;
+        self.respawn_pending = false;
+        self.last_respawn_tile = None;
+    }
+
+    /// Task 3.14: whether `tile` and the tile of the last respawn are both open tiles cut off, on foot, from everything of the wayblock.
+    fn cut_off_after_respawn(&self, tile: (i32, i32)) -> bool {
+        let Some(respawn) = self.last_respawn_tile else {
+            return false;
+        };
+        self.foot
+            .as_ref()
+            .is_some_and(|f| f.cut_off_from_wb(tile) && f.cut_off_from_wb(respawn))
+    }
+
     /// How long the tee idles outside the spot before it walks back to it: [`WB_RETURN_TICKS`] (TS). Under `--wb-smart` a tee that is
     /// not in the hall goes at once (task 3.12b), **for the first walk of a life only** (review F12): it has just respawned, and the spawns
     /// of Copy Love Box hang over the freeze chamber or stand at the edge of its ledge. A walk that ends without arriving (no route, a
@@ -1437,13 +1486,23 @@ impl Core {
             .chain(def.side(side).spots.iter().copied())
             .collect();
         let mut spot = None;
+        let mut walled_off = false;
+        // Task 3.14 (D-105): from outside the hall the old walk goes by the route search, through the freeze and a `/kill` where it must. That is
+        // right on Copy Love Box (a kill respawns the tee at a spawn that has a way to the tube) and wrong in an F-DDrace `/1vs1` arena on a map that
+        // holds a copy of the hall: the arena is sealed and a kill respawns the tee in it again (it froze on the way every round). So the walk is closed
+        // only when the tee stands cut off from the wayblock on foot **and** its last respawn was cut off too (a kill would not help).
+        let walled = !inside && self.cut_off_after_respawn((tx, ty));
         let Some(ms) = &mut self.ms else { return };
         for p in spots {
             if on_wb_spot((tx, ty), p) {
                 return;
             }
             if !inside {
-                spot = Some(p);
+                if walled {
+                    walled_off = true;
+                } else {
+                    spot = Some(p);
+                }
                 break;
             }
             if ty - p.1 >= WB_NO_CLIMB_TILES {
@@ -1465,6 +1524,14 @@ impl Core {
                 spot = Some(p);
                 break;
             }
+        }
+        if walled_off {
+            self.wb_closed_until = i64::from(ctx.tick) + WB_CLOSED_TICKS;
+            self.log(&format!(
+                "WB {}: walled off from its crossings at ({tx},{ty}) (an arena?); the fight is here, not walking",
+                side.name()
+            ));
+            return;
         }
         let Some(spot) = spot else {
             self.log(&format!(
@@ -1644,6 +1711,19 @@ enum FollowStep {
     Over,
 }
 
+/// The tiles of a wayblock that a walk to it must be able to reach: its crossing starts and exits and its spots.
+fn wb_tiles(def: &ddai_nav::wayblock::WbDef) -> Vec<(i32, i32)> {
+    def.crossings
+        .iter()
+        .flat_map(|c| [c.start, c.exit_tile])
+        .chain(
+            [&def.left, &def.right]
+                .into_iter()
+                .flat_map(|s| s.spots.iter().copied()),
+        )
+        .collect()
+}
+
 fn tile_of(p: Vec2<f32>) -> (i32, i32) {
     ((p.x / 32.0).trunc() as i32, (p.y / 32.0).trunc() as i32)
 }
@@ -1675,7 +1755,16 @@ impl Navigator for NavHook {
         c.trek = None;
         c.ms = None;
         c.x.reset();
+        c.forget_walled_off();
+        c.foot = None;
         c.fresh_life = true;
+    }
+    fn resumed(&mut self) {
+        // Back from a server pause (`/pause`, `/spec`): the tee is where it was, not at a spawn. Where its life began is unknown now, so the old
+        // walk to the WB runs (a bot paused in a pocket of Copy Love Box must not be closed in there by the respawn the resume reports).
+        let mut c = self.0.borrow_mut();
+        c.respawn_pending = false;
+        c.last_respawn_tile = None;
     }
     fn respawned(&mut self) {
         let mut c = self.0.borrow_mut();
@@ -1686,6 +1775,7 @@ impl Navigator for NavHook {
         // A new try: route 2 is said (and the crowd judged) again.
         c.x.route2_crowd = false;
         c.x.route2_said = false;
+        c.respawn_pending = true;
     }
     fn blocked_by(&mut self, by: i32, _tick: i32) {
         let mut c = self.0.borrow_mut();
@@ -2562,6 +2652,143 @@ mod tests {
                 fixed_target: false,
             }
         }
+    }
+
+    fn joni_map() -> Option<MapData> {
+        let path = PathBuf::from(std::env::var("HOME").ok()?).join(
+            "aiddnet/data/maps/cache/Copy Love Box JoniTee_d45815470abe2f832f6eb0a94a40bd186806198adcd0087948d1b5a3ade3d1e7.map",
+        );
+        Some(ddai_map::load_map(&std::fs::read(path).ok()?).ok()?.data)
+    }
+
+    /// Polls and (when the hall is outside) walks one decision of a tee standing on tile `(tx, ty)`, after `respawn` (the tile its last life began on, if any).
+    fn walk_from(f: &mut CoreFx, (tx, ty): (i32, i32), respawn: Option<(i32, i32)>, tick: i32) {
+        if let Some(r) = respawn {
+            f.env.tees.set_for_test(tee_at(0, r.0, r.1));
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, tick - 1, &world);
+            f.core.respawn_pending = true;
+            f.core.poll(&ctx);
+            assert_eq!(
+                f.core.last_respawn_tile,
+                Some(r),
+                "the first poll of a life records where it began"
+            );
+        }
+        f.env.tees.set_for_test(tee_at(0, tx, ty));
+        let own = *f.env.tees.get(0).unwrap();
+        let world = f.env.pw.inner().clone();
+        let ctx = f.env.ctx(&own, tick, &world);
+        f.core.poll(&ctx);
+        f.core.walk_to_wb(&ctx);
+    }
+
+    /// Task 3.14 (the live joniTee duel): the map holds a copy of the Copy Love Box hall, so the WB is found, but the 1vs1 arena is walled off from it, and a kill
+    /// respawns the tee in the arena again. After a life that began in the arena the bot must not set out for the WB (it walked into the freeze and asked for a
+    /// `/kill`, every round); before any life is known on the map, the old walk is tried.
+    #[test]
+    fn no_walk_to_the_wb_from_a_walled_off_arena_after_a_respawn_in_it() {
+        on_big_stack(|| {
+            let Some(map) = joni_map() else {
+                eprintln!("skipping: the joniTee map is not present");
+                return;
+            };
+            let mut f = CoreFx::on(map, "Copy Love Box JoniTee", &Relations::new());
+            assert!(f.core.wb.def.is_some(), "the hall inside the map is found");
+            // The arena's spawn tile (170, 54), on the floor of the closed box.
+            walk_from(&mut f, (170, 54), None, 1000);
+            assert!(
+                f.core.wb_walk && f.core.nav.is_some(),
+                "no life recorded yet: the old walk runs"
+            );
+            f.core.drop_walk();
+            // The same tee after a round: it respawned in the arena.
+            walk_from(&mut f, (172, 54), Some((174, 54)), 2000);
+            assert!(
+                !f.core.wb_walk && f.core.nav.is_none(),
+                "respawned in the sealed arena: no walk"
+            );
+            assert_eq!(
+                f.core.wb_closed_until,
+                2000 + super::WB_CLOSED_TICKS,
+                "and not tried again for a while"
+            );
+        });
+    }
+
+    /// Task 3.14 (review F1): on stock Copy Love Box a tee that stands cut off from the hall on foot (the floor below it) is *not* held back, because its last
+    /// life began at a spawn that has a way to the tube: the old walk (through the freeze, by `/kill`) is what brings it home.
+    #[test]
+    fn on_copy_love_box_a_tee_on_the_floor_below_the_hall_still_walks_to_the_wb() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let mut f = CoreFx::on(map, "Copy Love Box", &Relations::new());
+            let def = f.core.wb.def.clone().expect("the hall");
+            let spawn = ddai_nav::route::spawn_tiles(&f.env.map)[0];
+            let spawn_tile = ((spawn.0 / 32.0) as i32, (spawn.1 / 32.0) as i32);
+            // A standing tile on the floor below the left hall (x 77..112, y 96..98), outside the hall.
+            let g = &f.env.grid;
+            let below = (77..113)
+                .flat_map(|x| (96..99).map(move |y| (x, y)))
+                .find(|&(x, y)| {
+                    !def.in_hall(ddai_nav::wayblock::WbSide::Left, x, y)
+                        && !g.is_solid(px(x), px(y))
+                        && !g.is_freeze(px(x), px(y))
+                        && !g.is_death(px(x), px(y))
+                        && g.is_solid(px(x), px(y + 1))
+                })
+                .expect("a standing tile below the hall");
+            // Precondition: that place really is cut off from the wayblock on foot (else this test would not tell the old guard from the new).
+            walk_from(&mut f, below, Some(spawn_tile), 3000);
+            assert!(
+                f.core.foot.as_ref().expect("built").cut_off_from_wb(below),
+                "{below:?} is cut off from the hall on foot"
+            );
+            assert!(
+                f.core.wb_walk && f.core.nav.is_some(),
+                "unfrozen below the hall, last life at a spawn: the walk starts"
+            );
+            // Had its last life begun in the pocket too, a kill would not help, and the walk would be closed.
+            f.core.drop_walk();
+            walk_from(&mut f, below, Some(below), 4000);
+            assert!(
+                !f.core.wb_walk && f.core.nav.is_none(),
+                "a life that began in the same pocket: closed"
+            );
+        });
+    }
+
+    /// Task 3.14 (review F2): the closing time is a server tick of the map it was set on; a map load forgets it (the server's tick starts over), and so
+    /// the respawn and the component labels (`on_map_changing` makes the same call).
+    #[test]
+    fn a_map_change_forgets_the_walled_off_state() {
+        on_big_stack(|| {
+            let Some(map) = joni_map() else {
+                eprintln!("skipping: the joniTee map is not present");
+                return;
+            };
+            let mut f = CoreFx::on(map.clone(), "Copy Love Box JoniTee", &Relations::new());
+            walk_from(&mut f, (172, 54), Some((174, 54)), 3_000_000);
+            assert_eq!(f.core.wb_closed_until, 3_000_000 + super::WB_CLOSED_TICKS);
+            assert!(
+                f.core.foot.is_some() && f.core.last_respawn_tile.is_some(),
+                "built at the map load, and a life recorded"
+            );
+            let ident = MapIdent {
+                name: "Copy Love Box JoniTee".to_string(),
+                sha256: [9; 32],
+            };
+            // A new map (the server's tick starts over): nothing of the old one is kept.
+            f.core.on_map(&Arc::new(map), &ident);
+            assert!(
+                f.core.foot.is_some() && f.core.last_respawn_tile.is_none() && f.core.wb_closed_until == 0,
+                "a new map: the labels are rebuilt, nothing else is kept"
+            );
+        });
     }
 
     #[test]

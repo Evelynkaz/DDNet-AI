@@ -1,0 +1,10 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): the 0/0 cell of the lag matrix on the common seed set (11001..11200), to size the ceiling of a lag-window opponent predictor (0/0 - 3/0).
+name = "E-026: lag 0/0"
+base_seed = 11001
+games = 200
+
+[[condition]]
+name = "base lag 0/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 0 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]

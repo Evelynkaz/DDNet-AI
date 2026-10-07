@@ -266,7 +266,22 @@ pub struct PlannerConfig {
     /// Task 3.10 (hybrid only, `0` = off): per-tile reward for our progress toward the *staging point* behind a frozen victim that lies off
     /// the freeze (110 px from it on the side of its nearest freeze): from there the rope hauls it back into the freeze.
     pub frozen_stage_weight: f64,
+    /// Task 3.14 (hybrid only, `0` = off; the TS-parity path never reads it): **a duel is decided by the first freeze** (F-DDrace `/1vs1`: a frozen
+    /// player standing still loses the round). Once per rollout, the first tick we are frozen or dead costs this much (`duel_loss_cost`) and the first
+    /// tick the victim is costs `duel_win_bonus`; both are discounted like the per-tick terms (a later freeze can still be avoided by the next decision).
+    /// The per-tick `frozen_weight` terms alone charge a freeze at the end of the 27-tick horizon next to nothing.
+    pub duel_loss_cost: f64,
+    pub duel_win_bonus: f64,
+    /// Task 3.14 (hybrid only, `0` = off): **the ceiling guard**. A duel's launch is a hammer or hook haul *upward* into a freeze ceiling: the exact
+    /// launch terms see it only once the opponent is within hammer reach, and `hazard_nearness` is flat in a closed arena (a freeze within 20 tiles
+    /// on every side). While a free opponent is within [`CEILING_GUARD_REACH_PX`] of us, every tick spent closer than `ceiling_guard_px` to a freeze or
+    /// death ceiling above us (the `rope_ceiling_cost` field) costs `ceiling_guard_cost` times how deep inside that gap we are (0 at the edge, 1 touching).
+    pub ceiling_guard_cost: f64,
+    pub ceiling_guard_px: f64,
 }
+
+/// The opponent distance within which the ceiling guard applies (the hook's length plus two decisions of closing speed, the hybrid's threat radius).
+pub const CEILING_GUARD_REACH_PX: f64 = 440.0;
 
 /// Which upstream planner a [`PlannerConfig`] reproduces (task 3.8, D-095).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -420,6 +435,10 @@ impl Default for PlannerConfig {
             frozen_drag_weight: 0.0,
             held_forecast_weight: 0.0,
             frozen_stage_weight: 0.0,
+            duel_loss_cost: 0.0,
+            duel_win_bonus: 0.0,
+            ceiling_guard_cost: 0.0,
+            ceiling_guard_px: 0.0,
         }
     }
 }
@@ -597,6 +616,9 @@ mod tests {
                 (c.frozen_drag_weight, c.held_forecast_weight, c.frozen_stage_weight),
                 (0.0, 0.0, 0.0)
             );
+            // Task 3.14: and so are the duel terms.
+            assert_eq!((c.duel_loss_cost, c.duel_win_bonus), (0.0, 0.0));
+            assert_eq!((c.ceiling_guard_cost, c.ceiling_guard_px), (0.0, 0.0));
         }
     }
 

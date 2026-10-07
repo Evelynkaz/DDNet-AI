@@ -359,6 +359,28 @@ fn score_tick<W: PlanWorld>(
         }
     }
     let separation = vdistance(me.pos, en.pos);
+    // Task 3.14 `ceiling_guard_cost`: near a freeze ceiling with a free opponent in reach.
+    if cfg.ceiling_guard_cost > 0.0
+        && cfg.ceiling_guard_px > 0.0
+        && let Some(ceiling) = ceiling
+        && !me.frozen
+        && me.alive
+        && !en.frozen
+        && en.alive
+        && separation < crate::config::CEILING_GUARD_REACH_PX
+    {
+        let tx = js::floor(me.pos.x / 32.0) as i32;
+        let ty = js::floor(me.pos.y / 32.0) as i32;
+        if tx >= 0 && ty >= 0 && tx < ceiling.width && ty < ceiling.height {
+            let d = ceiling.dist[(ty * ceiling.width + tx) as usize];
+            if d != CEILING_NONE {
+                let gap = js::max(0.0, me.pos.y - f64::from(ty - i32::from(d) + 1) * 32.0);
+                if gap < cfg.ceiling_guard_px {
+                    s -= cfg.ceiling_guard_cost * (1.0 - gap / cfg.ceiling_guard_px);
+                }
+            }
+        }
+    }
     let col = world.collision();
     if cfg.launch_exposure > 0.0 && !me.frozen && !en.frozen && separation < LAUNCH_REACH_PX {
         let exact = cfg.launch_exact_reach > 0.0
@@ -899,7 +921,7 @@ impl<W: PlanWorld> Planner<W> {
 
     /// `this.ceiling = cfg.ropeCeilingCost > 0 ? ceilingField(collision) : null` (af49dfb `decideOnce`).
     fn refresh_ceiling(&mut self, col: &W::Collision) {
-        if self.cfg.rope_ceiling_cost <= 0.0 {
+        if self.cfg.rope_ceiling_cost <= 0.0 && self.cfg.ceiling_guard_cost <= 0.0 {
             self.ceiling = None;
             return;
         }
@@ -3357,6 +3379,9 @@ impl<W: PlanWorld> Planner<W> {
         } else {
             0.0
         };
+        // Task 3.14: the first freeze of the rollout decides a duel (`duel_loss_cost`, `duel_win_bonus`); a tee already out at the start has had its onset.
+        let mut duel_me_out = me_at_start.is_none_or(|m| m.frozen || !m.alive);
+        let mut duel_en_out = en_at_start.is_none_or(|e| e.frozen || !e.alive);
         let mut prev_jumps_left = me_at_start.map_or(0, |me| me.jumps_left);
         let mut ground_jump_at: i64 = -1;
         let mut rollout_tick: i64 = 0;
@@ -3535,7 +3560,18 @@ impl<W: PlanWorld> Planner<W> {
                             self.launch_memo.as_deref_mut(),
                         );
                 }
-                score += tick_score * (1.0 - (s as f64) / (plan.len() as f64 * 2.0));
+                let discount = 1.0 - (s as f64) / (plan.len() as f64 * 2.0);
+                score += tick_score * discount;
+                if self.cfg.duel_loss_cost > 0.0 || self.cfg.duel_win_bonus > 0.0 {
+                    if !duel_me_out && world.get_tee(self_id).is_some_and(|m| m.frozen || !m.alive) {
+                        duel_me_out = true;
+                        score -= self.cfg.duel_loss_cost * discount;
+                    }
+                    if !duel_en_out && world.get_tee(enemy_id).is_some_and(|e| e.frozen || !e.alive) {
+                        duel_en_out = true;
+                        score += self.cfg.duel_win_bonus * discount;
+                    }
+                }
             }
             if let Some((clock, deadline_ms)) = deadline
                 && clock.now_ms() >= deadline_ms
@@ -4104,6 +4140,162 @@ mod tests {
             ..cfg
         };
         assert_eq!(hooked(Some(&ceiling), true, &no_cost), off, "switched off");
+    }
+
+    /// Task 3.14 (`ceiling_guard_cost`): a tee close under a freeze ceiling pays per tick, in proportion to how deep it is inside the guard gap, but only
+    /// while a free opponent is within reach; far from the ceiling, with the opponent out of reach or frozen, or with the cost off, nothing.
+    #[test]
+    fn ceiling_guard_costs_only_close_under_a_ceiling_with_a_foe_in_reach() {
+        let map = map_with_freeze_ceiling();
+        let world0 = PhysicsWorld::new(map.clone(), 1);
+        let ceiling = fields::ceiling_field(world0.collision());
+        let field = fields::hazard_field(world0.collision());
+        let unfreeze = fields::unfreeze_field(world0.collision());
+        // The freeze tile (5, 2) ends at y = 96 px; `y` is our height, `foe_dx` the opponent's distance, `foe_frozen` whether it is out.
+        let score = |cfg: &PlannerConfig, y: f64, foe_dx: f64, foe_frozen: bool| {
+            let mut w = PhysicsWorld::new(map.clone(), 1);
+            w.add_tee(
+                0,
+                Vec2 {
+                    x: 5.0 * 32.0 + 16.0,
+                    y,
+                },
+            );
+            w.add_tee(
+                1,
+                Vec2 {
+                    x: 5.0 * 32.0 + 16.0 + foe_dx,
+                    y: 270.0,
+                },
+            );
+            let mut foe = w.get_tee(1).unwrap();
+            foe.frozen = foe_frozen;
+            w.apply_tee_state(1, &foe);
+            let mut drag = DragTracker {
+                prev_enemy_near: 0.0,
+                start_enemy_near: 0.0,
+                started_in_dead: false,
+                prev_stage_dist: f64::NAN,
+            };
+            score_tick(
+                &w,
+                0,
+                1,
+                &[],
+                &field,
+                &unfreeze,
+                cfg,
+                &mut drag,
+                None,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                Some(&ceiling),
+            )
+        };
+        let off = PlannerConfig::default();
+        let on = PlannerConfig {
+            ceiling_guard_cost: 2.0,
+            ceiling_guard_px: 100.0,
+            ..off
+        };
+        // 20 px under the tile's bottom edge (gap 20 of 100): 80% of the cost; touching: all of it.
+        let near = score(&off, 116.0, 100.0, false) - score(&on, 116.0, 100.0, false);
+        assert!((near - 2.0 * 0.8).abs() < 1e-9, "20 of 100 px: {near}");
+        let touching = score(&off, 96.0, 100.0, false) - score(&on, 96.0, 100.0, false);
+        assert!((touching - 2.0).abs() < 1e-9, "touching: {touching}");
+        // 100 px or more below the edge, the foe out of reach (440 px), the foe frozen: no cost.
+        assert_eq!(score(&off, 200.0, 100.0, false), score(&on, 200.0, 100.0, false));
+        assert_eq!(score(&off, 116.0, 500.0, false), score(&on, 116.0, 500.0, false));
+        assert_eq!(score(&off, 116.0, 100.0, true), score(&on, 116.0, 100.0, true));
+        let no_gap = PlannerConfig {
+            ceiling_guard_px: 0.0,
+            ..on
+        };
+        assert_eq!(
+            score(&off, 116.0, 100.0, false),
+            score(&no_gap, 116.0, 100.0, false),
+            "a zero gap is off"
+        );
+    }
+
+    /// Task 3.14 (`duel_loss_cost`, `duel_win_bonus`): the first tick we are frozen in a rollout costs a flat amount (discounted by the step it
+    /// falls in), the first tick the victim is frozen is worth one, and a rollout in which nobody freezes is untouched.
+    #[test]
+    fn duel_terms_are_charged_once_at_the_first_freeze() {
+        let map = map_with_freeze_ceiling();
+        let field = fields::hazard_field(PhysicsWorld::new(map.clone(), 1).collision());
+        let unfreeze = fields::unfreeze_field(PhysicsWorld::new(map.clone(), 1).collision());
+        // The freeze tile is above column 5: the tee that `rise`s stands under it and flies up into it, the other one stands far away.
+        let score = |cfg: PlannerConfig, us_rise: bool, en_rise: bool| {
+            let mut w = PhysicsWorld::new(map.clone(), 1);
+            let x = |rise: bool, far: f64| (if rise { 5.0 } else { far }) * 32.0 + 16.0;
+            w.add_tee(
+                0,
+                Vec2 {
+                    x: x(us_rise, 9.0),
+                    y: 130.0,
+                },
+            );
+            w.add_tee(
+                1,
+                Vec2 {
+                    x: x(en_rise, 13.0),
+                    y: 130.0,
+                },
+            );
+            for (id, up) in [(0, us_rise), (1, en_rise)] {
+                let mut t = w.get_tee(id).unwrap();
+                t.vel = Vec2 {
+                    x: 0.0,
+                    y: if up { -14.0 } else { 0.0 },
+                };
+                w.apply_tee_state(id, &t);
+            }
+            let mut p: Planner<PhysicsWorld> = Planner::new(cfg);
+            p.reset();
+            p.saved = Some(w.save_state());
+            let plan = vec![
+                PlanStep {
+                    dir: 0,
+                    jump: 0,
+                    hook: 0,
+                    fire: 0,
+                    aim: 0.0
+                };
+                cfg.steps as usize
+            ];
+            let idle = crate::types::empty_input();
+            p.evaluate(&mut w, 0, 1, idle, &plan, idle, &field, &unfreeze)
+        };
+        let base = crate::config::preset_normal();
+        let with = |loss: f64, win: f64| PlannerConfig {
+            duel_loss_cost: loss,
+            duel_win_bonus: win,
+            ..base
+        };
+        // Nobody freezes: the terms change nothing.
+        assert_eq!(score(with(10.0, 5.0), false, false), score(base, false, false));
+        // We freeze: the cost is charged once, between half of it (the last step's discount) and all of it.
+        let (off, on) = (score(base, true, false), score(with(10.0, 5.0), true, false));
+        assert!(off - on > 5.0 && off - on <= 10.0, "loss charged once: {off} -> {on}");
+        let on20 = score(with(20.0, 5.0), true, false);
+        assert!(((off - on20) - 2.0 * (off - on)).abs() < 1e-9, "linear in the cost");
+        assert_eq!(
+            score(with(10.0, 99.0), true, false),
+            on,
+            "the bonus is not charged to us"
+        );
+        // The victim freezes: the bonus is paid once.
+        let (off, on) = (score(base, false, true), score(with(10.0, 5.0), false, true));
+        assert!(on - off > 2.5 && on - off <= 5.0, "win paid once: {off} -> {on}");
+        assert_eq!(
+            score(with(99.0, 5.0), false, true),
+            on,
+            "the cost is not charged for the victim's freeze"
+        );
     }
 
     /// Task 3.8: the classic configuration never reaches the v2 code -- all four switches off, the decision is the same whether

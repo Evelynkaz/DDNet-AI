@@ -1,0 +1,16 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): the 0/x cells of the lag matrix that were missing (0/2, 0/1), same games (seeds 11001..11200). A hybrid with a PERFECT forecast of the window
+# (the true state, ours and theirs, at the tick its input applies) decides exactly like a hybrid with lag 0: these cells are the full-information ceiling of a lag-window predictor.
+name = "E-026: lag 0/x"
+base_seed = 11001
+games = 200
+
+[[condition]]
+name = "base lag 0/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 0 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "base lag 0/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 0 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]

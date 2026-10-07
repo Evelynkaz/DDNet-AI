@@ -91,6 +91,8 @@ impl MirrorState {
 }
 
 /// The opponent model is skipped for a victim that has kept its direction neutral and its hook in for this many decisions in a row.
+/// How many of the opponent model's recent plans `HybridConfig::lag_mirror` keeps (a plan covers 27 ticks; decisions come every 2).
+const MIRROR_HISTORY: usize = 8;
 const PASSIVE_DECISIONS: u32 = 6;
 
 /// The opponent model's search is cut after this long at most (ms, task 3.7b review F2); the cap can shorten it.
@@ -542,6 +544,9 @@ pub struct HybridSearch {
     dec_units: u64,
     /// The victim's predicted inputs of the current decision, one per plan step (empty = the victim holds its input).
     mirror_inputs: Vec<PlayerInput>,
+    /// Task 3.14 (`HybridConfig::lag_mirror`): the opponent model's recent plans, oldest first: (victim, world tick of its step 0, the victim's
+    /// input at each plan step). The brain reads them to play the victim through the lag window of the next decisions.
+    mirror_hist: Vec<(i32, i32, Vec<PlayerInput>)>,
     /// The victim that has kept its direction neutral and its hook in for `.1` decisions in a row (an idle or camping opponent,
     /// for which "it keeps its input" is the right model and the opponent model has nothing to add).
     passive: (i32, u32),
@@ -626,6 +631,7 @@ impl HybridSearch {
             mirror: None,
             dec_units: 0,
             mirror_inputs: Vec::new(),
+            mirror_hist: Vec::new(),
             passive: (-1, 0),
             last_proposal_ms: 0.0,
             saved_red,
@@ -705,12 +711,22 @@ impl HybridSearch {
         self.engine.workers()
     }
 
+    /// Task 3.14 (`HybridConfig::lag_mirror`): what the opponent model last predicted `victim` would send at world tick `tick`: the newest recorded plan
+    /// that had begun by then, at the step that covers the tick; `None` when the switch is off, no plan covers it, or the plan is for another victim.
+    pub fn predicted_victim_input(&self, victim: i32, tick: i32) -> Option<PlayerInput> {
+        if !self.cfg.lag_mirror {
+            return None;
+        }
+        predicted_input_at(&self.mirror_hist, &self.planner.step_ticks, victim, tick)
+    }
+
     /// New episode: forgets the warm plan and hidden state, reseeds every random source.
     pub fn reset(&mut self, ctx: &ddai_brain::ResetContext) {
         self.planner.set_search_seed(ctx.seed as u32);
         self.planner.warm = None;
         self.mirror = None;
         self.passive = (-1, 0);
+        self.mirror_hist.clear();
         self.beliefs.clear();
         self.prev_predictions.clear();
         self.proposer.reset(ctx);
@@ -1584,6 +1600,13 @@ impl HybridSearch {
                 self.mirror_predict(clock, deadline, self_id, victim_id, &me, &victim, &field, &unfreeze);
             tel.work.mirror = (2 * ticks).div_ceil(u64::from(tel.sim_tees.max(1)));
             tel.mirror_cut = cut;
+            if cfg.lag_mirror && !self.mirror_inputs.is_empty() {
+                let tick = self.world.inner().tick;
+                if self.mirror_hist.len() >= MIRROR_HISTORY {
+                    self.mirror_hist.remove(0);
+                }
+                self.mirror_hist.push((victim_id, tick, self.mirror_inputs.clone()));
+            }
             if let Some(first) = self.mirror_inputs.first() {
                 tel.mirror_first = Some(*first);
                 let plan_inputs = &self.mirror_inputs;
@@ -2605,6 +2628,26 @@ impl HybridSearch {
     }
 }
 
+/// Task 3.14: the input `victim` was predicted to send at world tick `tick`, from the recorded plans `hist` (oldest first; each is `(victim, world tick of its
+/// step 0, inputs by plan step)`) on the plan's step layout `step_ticks`: the newest plan for that victim that had begun by `tick`, at the step covering it;
+/// `None` when that plan has ended or there is none.
+fn predicted_input_at(
+    hist: &[(i32, i32, Vec<PlayerInput>)],
+    step_ticks: &[i32],
+    victim: i32,
+    tick: i32,
+) -> Option<PlayerInput> {
+    let (_, start, inputs) = hist.iter().rev().find(|(v, start, _)| *v == victim && *start <= tick)?;
+    let mut off = tick - start;
+    for (i, &len) in step_ticks.iter().enumerate() {
+        if off < len {
+            return inputs.get(i).copied();
+        }
+        off -= len;
+    }
+    None
+}
+
 /// Task 3.9 (`HybridConfig::wall_throws`): the side (`-1` left, `1` right) of the nearer solid wall within
 /// [`crate::hybrid::config::WALL_REACH_TILES`] tiles of `pos` at its height; `0` when there is none or both sides are equally far.
 fn wall_side(col: &impl crate::plan_world::PlanCollision, pos: crate::vmath::Vec2) -> i32 {
@@ -2895,6 +2938,32 @@ mod tests {
             });
         }
         c
+    }
+
+    #[test]
+    fn the_opponent_model_history_answers_per_tick_from_the_newest_plan_that_covers_it() {
+        let inp = |d: i32| PlayerInput {
+            direction: d,
+            ..crate::types::empty_input()
+        };
+        let steps = [3, 3, 3];
+        // Two plans of victim 7: one that began at tick 100 (directions 1, 2, 3 by step), a newer one at tick 102 (4, 5, 6); one of victim 8.
+        let hist = vec![
+            (7, 100, vec![inp(1), inp(2), inp(3)]),
+            (8, 101, vec![inp(9), inp(9), inp(9)]),
+            (7, 102, vec![inp(4), inp(5), inp(6)]),
+        ];
+        let at = |v: i32, t: i32| predicted_input_at(&hist, &steps, v, t).map(|i| i.direction);
+        assert_eq!(at(7, 99), None, "before the first plan began");
+        assert_eq!(at(7, 100), Some(1));
+        assert_eq!(at(7, 101), Some(1), "still the old plan: the new one begins at 102");
+        assert_eq!(at(7, 102), Some(4), "the newest plan that has begun wins");
+        assert_eq!(at(7, 104), Some(4));
+        assert_eq!(at(7, 105), Some(5), "the second step of the newest plan");
+        assert_eq!(at(7, 110), Some(6));
+        assert_eq!(at(7, 111), None, "past the end of the newest plan");
+        assert_eq!(at(8, 103), Some(9), "another victim's plan is its own");
+        assert_eq!(at(9, 103), None, "no plan for a victim never modelled");
     }
 
     #[test]

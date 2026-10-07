@@ -1,0 +1,20 @@
+# The 1vs1 arena of the map "Copy Love Box JoniTee" (F-DDrace, `/1vs1` minigame), task 3.14 (E-026).
+#
+# Map: sha256 d4581547...d1e3 (600x600), the file the live bot loaded (crc -2082837876), kept in ~/aiddnet/data/maps/cache.
+# The arena is the open box x 166..190, y 43..54 (the right part drops on to y 59): a freeze ceiling on row 42 (x 166..185),
+# freeze walls (left x 163..165 below row 46, right x 191..192), a no-hook floor on row 55 (x 163..177; the floor drops to row 60 at x >= 179).
+# Nothing in it can be hooked but the tees (the walls and floor are no-hook or freeze): a duel is hook, hammer and body.
+# Both tees spawn on row 54, at x 170 and 174 (clips of the live games: the two respawn points; the sides alternate between rounds).
+name = "joni-duel"
+tag = "holdout"
+description = "Copy Love Box JoniTee 1vs1 arena, spawns (170,54) and (174,54), the live game of 2026-10-06."
+
+[map]
+kind = "file"
+file = "cache/Copy Love Box JoniTee_d45815470abe2f832f6eb0a94a40bd186806198adcd0087948d1b5a3ade3d1e7.map"
+sha256 = "d45815470abe2f832f6eb0a94a40bd186806198adcd0087948d1b5a3ade3d1e7"
+
+[spawn]
+min_tiles = 4.0
+max_tiles = 4.0
+rows = [{ y = 54, x0 = 170, x1 = 170 }, { y = 54, x0 = 174, x1 = 174 }]

@@ -433,6 +433,39 @@ pub struct HybridSpec {
     /// The planner the opponent model runs in the victim's seat: `normal` (default), `normal-v2` or `live-v2`.
     #[serde(default)]
     pub mirror_preset: Option<String>,
+    // --- Task 3.14 (E-026): duel knobs of the planner scoring (all default off = the preset's values).
+    /// `PlannerConfig::hook_release_cost` (TS `hookReleaseCost`, default 0): cost of a rollout in which our hook lets go of a free, alive victim.
+    #[serde(default)]
+    pub hook_release_cost: Option<f64>,
+    /// `PlannerConfig::self_freeze_bias` (TS `selfFreezeBias`, default 1.5; the competitor's `!try careful2` is 2.0, `bold` 1.0).
+    #[serde(default)]
+    pub self_freeze_bias: Option<f64>,
+    /// `PlannerConfig::hook_hold_weight` (default 0.08): per-tick reward of holding the victim on our hook.
+    #[serde(default)]
+    pub hook_hold_weight: Option<f64>,
+    /// `PlannerConfig::flip_cost` (default 0.4): cost of each change of walking direction inside a plan.
+    #[serde(default)]
+    pub flip_cost: Option<f64>,
+    /// `PlannerConfig::launch_exact_reach` (default 70 px) / `launch_exact_weight` (default 2): the exact ballistic launch term (a hammer hit from the victim, then the flight
+    /// into a freeze) applies within this reach and costs this per tick.
+    #[serde(default)]
+    pub launch_exact_reach: Option<f64>,
+    #[serde(default)]
+    pub launch_exact_weight: Option<f64>,
+    /// `PlannerConfig::ceiling_guard_cost` / `ceiling_guard_px` (default 0 = off): per tick closer than `ceiling_guard_px` to a freeze ceiling above us with a free opponent in reach.
+    #[serde(default)]
+    pub ceiling_guard_cost: Option<f64>,
+    #[serde(default)]
+    pub ceiling_guard_px: Option<f64>,
+    /// `HybridConfig::lag_mirror` (default off): the planning world plays the victim through the input-lag window by the opponent model's predicted plan.
+    #[serde(default)]
+    pub lag_mirror: Option<bool>,
+    /// `PlannerConfig::duel_loss_cost` (default 0): once per rollout, the first tick we are frozen or dead costs this (a duel is lost by its first freeze).
+    #[serde(default)]
+    pub duel_loss_cost: Option<f64>,
+    /// `PlannerConfig::duel_win_bonus` (default 0): once per rollout, the first tick the victim is frozen or dead is worth this.
+    #[serde(default)]
+    pub duel_win_bonus: Option<f64>,
 }
 
 impl HybridSpec {
@@ -679,6 +712,39 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         }
         if let Some(v) = h.air_chain {
             cfg.planner.air_chain = v;
+        }
+        if let Some(v) = h.hook_release_cost {
+            cfg.planner.hook_release_cost = v;
+        }
+        if let Some(v) = h.self_freeze_bias {
+            cfg.planner.self_freeze_bias = v;
+        }
+        if let Some(v) = h.hook_hold_weight {
+            cfg.planner.hook_hold_weight = v;
+        }
+        if let Some(v) = h.flip_cost {
+            cfg.planner.flip_cost = v;
+        }
+        if let Some(v) = h.launch_exact_reach {
+            cfg.planner.launch_exact_reach = v;
+        }
+        if let Some(v) = h.launch_exact_weight {
+            cfg.planner.launch_exact_weight = v;
+        }
+        if let Some(v) = h.lag_mirror {
+            cfg.lag_mirror = v;
+        }
+        if let Some(v) = h.ceiling_guard_cost {
+            cfg.planner.ceiling_guard_cost = v;
+        }
+        if let Some(v) = h.ceiling_guard_px {
+            cfg.planner.ceiling_guard_px = v;
+        }
+        if let Some(v) = h.duel_loss_cost {
+            cfg.planner.duel_loss_cost = v;
+        }
+        if let Some(v) = h.duel_win_bonus {
+            cfg.planner.duel_win_bonus = v;
         }
         if let Some(v) = h.polish {
             cfg.polish = v;

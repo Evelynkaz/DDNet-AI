@@ -1,0 +1,41 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): strength against the decision budget (work clock), hybrid main defaults otherwise, vs live-v2 (fixed 20x2), lag 3/3, joni arena, seeds 11001..11200
+# (the same games as the lag matrix, whose "base lag 3/3" arm is the 4 ms point). 1 ms of budget is 800 tee-ticks of search (~12 rollouts of the 27-tick plan with the shield).
+name = "E-026: budget curve (lag 3/3)"
+base_seed = 11001
+games = 200
+
+[[condition]]
+name = "budget 1 ms"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 1.0, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "budget 2 ms"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 2.0, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "budget 3 ms"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 3.0, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "budget 6 ms (cap 8)"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 6.0, lag = 3, hybrid = { decision_cap_ms = 8.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "budget 8 ms (cap 10) = full 20x2 pool"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 8.0, lag = 3, hybrid = { decision_cap_ms = 10.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "budget 12 ms (cap 15), CEM 30x3"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 12.0, lag = 3, hybrid = { decision_cap_ms = 15.0, cem_population = 30, cem_iterations = 3 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "budget 16 ms (cap 20), CEM 40x3"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 16.0, lag = 3, hybrid = { decision_cap_ms = 20.0, cem_population = 40, cem_iterations = 3 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]

@@ -472,9 +472,22 @@ impl HybridBrain {
         let target_input = enemy_input_from_tee(&target);
         world.set_held_input(self_id, in_flight.first().map_or(self.prev, from_ddnet_input));
         let mut roll_ticks = 0u64;
-        for wire in in_flight {
+        // Task 3.14 (`lag_mirror`): the victim through the lag window plays what the opponent model predicted for each tick, when it has a prediction.
+        let tick0 = search.world_mut().inner().tick;
+        let victim_inputs: Vec<Option<PlayerInput>> = if search.config().lag_mirror {
+            (0..in_flight.len())
+                .map(|k| search.predicted_victim_input(target_id, tick0 + k as i32))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let world = search.world_mut();
+        for (k, wire) in in_flight.iter().enumerate() {
             world.set_input(self_id, from_ddnet_input(wire));
-            world.set_input(target_id, target_input);
+            world.set_input(
+                target_id,
+                victim_inputs.get(k).copied().flatten().unwrap_or(target_input),
+            );
             world.step();
             roll_ticks += 1;
         }

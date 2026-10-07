@@ -1073,6 +1073,22 @@ load average, не больше 4, D-080). Постоянный пул (`engine`
 счётчик работы — тики одного ти, делённые на число ти мира. Правило цели арены (`rules.hold_target`) и цели живого бота (`--finish target`) используют этот
 же прогноз. Скорость: `cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture finish_work_report`.
 
+### Дуэль вблизи (задача 3.14, E-026, D-105) — все переключатели выключены по умолчанию
+
+Живой проигрыш в 1vs1 на joniTee разобран в `docs/research/duel-close-range.md`. Итог для планировщика: **ни одна ручка оценки не дала прироста, воспроизводимого на свежих парных играх** (400 игр: `v2 + polish` 54,5% засчитанных против
+53,8% у базы, p = 0,89), а в арене лаг оказывается дорогим (первый тик преимущества соперника — −17 ± 10 п.п.; живые данные согласуются, но не доказывают, что причина в нём). Что добавлено (всё по умолчанию `0`/`false`: решения `main` побитно прежние, паритет TS не затронут,
+`classic_defaults_keep_every_v2_switch_off`), чтобы эти гипотезы можно было перепроверять:
+
+| Что | Где | Умолчание | Итог в E-026 |
+|---|---|---|---|
+| `PlannerConfig::duel_loss_cost` / `duel_win_bonus` — разовый штраф за первую заморозку **нас** в роллауте и разовая награда за первую заморозку жертвы (со скидкой шага, как у слагаемых тика) | `planner.rs::evaluate_impl`; арена `duel_loss_cost`, `duel_win_bonus` | 0 / 0 | сами по себе — ничего (49% против 50%); с `v2 + polish` — +6 п.п. над `v2 + polish` на сидах отбора (66,5% против 60,5%) и 0 на 400 свежих |
+| `PlannerConfig::ceiling_guard_cost` / `ceiling_guard_px` — за тик ближе `px` к потолку из фриза/смерти над нами при свободном сопернике в 440 px | `planner.rs::score_tick` (поле потолка `ceiling_field`) | 0 / 0 | ничего (51,0% при базе 48,5%) |
+| `HybridConfig::lag_mirror` — окно лага крутится по записанным планам модели соперника («зеркала») вместо «держит ввод» | `hybrid::{search,brain}` (`predicted_victim_input`) | выкл. | ничего (p = 0,64 на 800 парных играх, лаги 3/3…3/0); потолок идеального предсказателя окна — +16…+20 п.п. (`docs/research/duel-close-range.md` §5a) |
+| ручки арены без новых полей: `hook_release_cost`, `self_freeze_bias`, `hook_hold_weight`, `flip_cost`, `launch_exact_reach`, `launch_exact_weight` | `ddai-env::config::HybridSpec` | не заданы = пресет | ни одна не лучше базы значимо |
+
+Инструменты: арена `joni-duel` (`configs/arenas/joni-duel.toml`), `cargo run --release -p ddai-env --example duel_stats -- --config <toml> [--trace] [--dump N] [--jsonl файл]` (на 30 с игры: удары молотом, захваты и удержания хука, смены
+направления, где и как случилась первая заморозка, при `--trace` — за сколько тиков до заморозки решение гибрида пометило свой план «небезопасным»), `docs/research/e026/compare.py` (парное сравнение плеч по JSONL).
+
 ### Телеметрия (`Brain::telemetry`, JSON)
 
 `{"brain","proposer","workers","totals":{решения, extended, danger_flagged, shielded, shield_incomplete, out_of_time,

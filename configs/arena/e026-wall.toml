@@ -1,0 +1,66 @@
+# Task 3.14 (E-026): wall-clock cost of a hybrid decision at 1, 2 and 3 search threads, WALL clock (not the work clock), joni arena, lag 3/3. Run it with `--threads 1`
+# on a quiet machine and read `decide_us_p50`/`decide_us_p99` of player 0 in summary.json (it includes the shield and the opponent model).
+#   ddnet-ai arena run --config configs/arena/e026-wall.toml --out ~/aiddnet/data/runs/E-026/wall --threads 1
+name = "E-026: wall-clock decisions"
+base_seed = 12001
+games = 30
+
+[[condition]]
+name = "4 ms (main default), 1 thread"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, lag = 3, hybrid = { workers = 1, decision_cap_ms = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "4 ms (main default), 2 threads"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, lag = 3, hybrid = { workers = 2, decision_cap_ms = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "4 ms (main default), 3 threads"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 4.0, lag = 3, hybrid = { workers = 3, decision_cap_ms = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "8 ms, 1 thread"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 8.0, lag = 3, hybrid = { workers = 1, decision_cap_ms = 10.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "8 ms, 2 threads"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 8.0, lag = 3, hybrid = { workers = 2, decision_cap_ms = 10.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "8 ms, 3 threads"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 8.0, lag = 3, hybrid = { workers = 3, decision_cap_ms = 10.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "12 ms, CEM 30x3, 1 thread"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 12.0, lag = 3, hybrid = { workers = 1, decision_cap_ms = 15.0, cem_population = 30, cem_iterations = 3 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "12 ms, CEM 30x3, 2 threads"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 12.0, lag = 3, hybrid = { workers = 2, decision_cap_ms = 15.0, cem_population = 30, cem_iterations = 3 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "12 ms, CEM 30x3, 3 threads"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 12.0, lag = 3, hybrid = { workers = 3, decision_cap_ms = 15.0, cem_population = 30, cem_iterations = 3 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "16 ms, CEM 40x3, 1 thread"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 16.0, lag = 3, hybrid = { workers = 1, decision_cap_ms = 20.0, cem_population = 40, cem_iterations = 3 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "16 ms, CEM 40x3, 2 threads"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 16.0, lag = 3, hybrid = { workers = 2, decision_cap_ms = 20.0, cem_population = 40, cem_iterations = 3 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "16 ms, CEM 40x3, 3 threads"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "wall", budget_ms = 16.0, lag = 3, hybrid = { workers = 3, decision_cap_ms = 20.0, cem_population = 40, cem_iterations = 3 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]

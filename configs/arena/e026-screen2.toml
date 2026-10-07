@@ -1,0 +1,40 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): screen 2, lag 4/4, hybrid arms vs live-v2 (fixed iterations) in the joni arena, seeds 8001..8200 (fresh, paired across arms).
+name = "E-026: screen 2 (lag 4/4)"
+base_seed = 8001
+games = 200
+
+[[condition]]
+name = "base"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "v2+polish"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { v2 = true, polish = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "v2+polish+live-weights"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { v2 = true, polish = true, launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "duel cost 10 / bonus 5"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { duel_loss_cost = 10.0, duel_win_bonus = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "duel cost 20 / bonus 10"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { duel_loss_cost = 20.0, duel_win_bonus = 10.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "v2+polish+duel 10/5"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { v2 = true, polish = true, duel_loss_cost = 10.0, duel_win_bonus = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "v2+polish+live-weights+hook_release 1+sfb 2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { v2 = true, polish = true, launch_exposure = 1.5, jumpless_hazard_cost = 0.4, hook_release_cost = 1.0, self_freeze_bias = 2.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]

@@ -98,6 +98,9 @@ pub trait Navigator {
     fn on_map_changing(&mut self) {}
     /// We (re)spawned (`nav.respawned()`).
     fn respawned(&mut self) {}
+    /// Back from a server pause (task 3.14, D-105): called right after [`Navigator::respawned`] on resume; the tee did not respawn, so where
+    /// its life began is unknown.
+    fn resumed(&mut self) {}
     /// `by` froze us at `tick` (`noteWbFreeze`): the walk to the wayblock counts it against him.
     fn blocked_by(&mut self, _by: i32, _tick: i32) {}
     /// First thing each snapshot while our tee lives: pending commands, the end of a walk, the freeze

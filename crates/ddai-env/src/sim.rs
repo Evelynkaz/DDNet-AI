@@ -188,6 +188,10 @@ pub struct Sim {
     hashes: Vec<Sha1>,
     /// Wall microseconds per decision, by slot.
     pub decide_us: Vec<Vec<u32>>,
+    /// Task 3.14: keep the events of the last step in [`Sim::last_events`] (diagnostics: an observer reads them). Off by default.
+    pub record_events: bool,
+    /// The events of the last [`Sim::step`], when `record_events` is on.
+    pub last_events: Vec<WorldEvent>,
 }
 
 impl Sim {
@@ -218,6 +222,8 @@ impl Sim {
             pending: vec![VecDeque::new(); n],
             hashes: (0..n).map(|_| Sha1::new()).collect(),
             decide_us: vec![Vec::new(); n],
+            record_events: false,
+            last_events: Vec::new(),
         }
     }
 
@@ -293,7 +299,11 @@ impl Sim {
             }
             self.pw.set_input(self.ids[i], from_ddnet_input(&self.current[i]));
         }
-        self.pw.step()
+        let events = self.pw.step();
+        if self.record_events {
+            self.last_events.clone_from(&events);
+        }
+        events
     }
 
     /// First 16 hex digits of the SHA-1 of slot `i`'s decision stream (`orig-run.md` §9).

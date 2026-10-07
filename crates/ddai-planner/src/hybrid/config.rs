@@ -266,6 +266,11 @@ pub struct HybridConfig {
     /// what the model has always been). `Some(preset_normal_v2())` models the competitor's current planner. Its steps layout is
     /// always the hybrid's own.
     pub mirror_planner: Option<PlannerConfig>,
+    /// Task 3.14 (E-026, opt-in): the planning world's roll through the input-lag window (the ticks between the snapshot and the first tick our decision
+    /// can act on) plays the victim by what the opponent model predicted for those ticks at the last decisions (the recorded plans of
+    /// [`HybridConfig::mirror`], newest first) instead of "it keeps the input its snapshot shows". Needs `mirror`; with no lag, or no prediction for a tick, the
+    /// victim holds its input as before.
+    pub lag_mirror: bool,
 }
 
 /// How far (tiles) a wall may be for `wall_throws` to offer the wall swings.
@@ -318,6 +323,7 @@ impl Default for HybridConfig {
             polish: false,
             wall_throws: false,
             mirror_planner: None,
+            lag_mirror: false,
         }
     }
 }

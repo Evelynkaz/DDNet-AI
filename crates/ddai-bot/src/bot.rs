@@ -1264,6 +1264,7 @@ impl Bot {
                 // kill cooldown), the walk and the target are stale, and the last input was never acted on.
                 unstick.reset_ticks();
                 hooks.navigator.respawned();
+                hooks.navigator.resumed();
                 wander.respawned();
                 picker.set_target(-1);
                 encoder.reset_edges();

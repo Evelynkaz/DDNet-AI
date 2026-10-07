@@ -1,0 +1,20 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): confirmation 1, lag 4/4, hybrid arms vs live-v2 (fixed iterations) in the joni arena, seeds 10001..10400 (fresh, never used while tuning; paired across arms).
+name = "E-026: confirmation 1 (lag 4/4)"
+base_seed = 10001
+games = 400
+
+[[condition]]
+name = "base"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "v2+polish"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { v2 = true, polish = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "v2+polish+duel 10/5"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { v2 = true, polish = true, duel_loss_cost = 10.0, duel_win_bonus = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]

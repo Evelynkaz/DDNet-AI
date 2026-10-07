@@ -1,0 +1,55 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): screen 1, lag 4/4, hybrid arms vs live-v2 (fixed iterations) in the joni arena, seeds 7001..7100.
+name = "E-026: screen 1 (lag 4/4)"
+base_seed = 7001
+games = 100
+
+[[condition]]
+name = "base"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "live weights launch 1.5 jumpless 0.4"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { launch_exposure = 1.5, jumpless_hazard_cost = 0.4 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "hook_release 1.0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { hook_release_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "hook_release 3.0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { hook_release_cost = 3.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "v2+polish"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { v2 = true, polish = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "self_freeze_bias 2.0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { self_freeze_bias = 2.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "mirror live-v2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { mirror_preset = "live-v2" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "flip_cost 1.0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4, hybrid = { flip_cost = 1.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "budget 2x (8 ms, cap 10)"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 8.0, lag = 4, hybrid = { decision_cap_ms = 10.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]
+
+[[condition]]
+name = "budget 4x (16 ms, cap 20)"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 16.0, lag = 4, hybrid = { decision_cap_ms = 20.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 4 }]

@@ -1,0 +1,45 @@
+# work-clock: default-rate
+# Task 3.14 (E-026): the candidates at the lags we are likely to play at (we 3, the competitor 2 or 1), against the same games as the lag matrix (seeds 11001..11200).
+name = "E-026: candidates at lag 3/2 and 3/1"
+base_seed = 11001
+games = 200
+
+[[condition]]
+name = "v2+polish lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { v2 = true, polish = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "v2+polish+duel 10/5 lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { v2 = true, polish = true, duel_loss_cost = 10.0, duel_win_bonus = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "ceiling guard 0.5/192px lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { ceiling_guard_cost = 0.5, ceiling_guard_px = 192.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "duel 10/5 alone lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { duel_loss_cost = 10.0, duel_win_bonus = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "v2+polish lag 3/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { v2 = true, polish = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "v2+polish+duel 10/5 lag 3/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { v2 = true, polish = true, duel_loss_cost = 10.0, duel_win_bonus = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "ceiling guard 0.5/192px lag 3/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { ceiling_guard_cost = 0.5, ceiling_guard_px = 192.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "duel 10/5 alone lag 3/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { duel_loss_cost = 10.0, duel_win_bonus = 5.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
