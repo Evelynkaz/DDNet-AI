@@ -1,0 +1,23 @@
+# Post-mortem of the 2026-10-07 test duel: the 1vs1 box of TODAY's map "Copy Love Box" (sha256 f9793b34...abcb, 425x306; crc 1966307787), the map the
+# live bot played the duel on (the 3.14 arena `joni-duel` is the 600x600 "Copy Love Box JoniTee" of 2026-10-06).
+#
+# Box: open rows 169..180, a freeze ceiling on row 168 (x 79..93, then x 95..98), a no-hook left wall (x 78, rows 167..172) over a freeze wall (x 73..78 from
+# row 173), a no-hook floor on row 181 (x 76..90; a solid tile at x 91), right of it the floor drops to row 186 (no-hook, x 91..103), a freeze right wall
+# (x 104, two solid tiles at rows 176..177). Tile for tile the playable inside equals joni-duel's box shifted by (-87, +126) (diff: only tiles above the
+# ceiling row and under the floor differ).
+# Spawns from today's clips (`Respawn` frames, both rounds that have one): our tee at px (2816, 5761), his at (2656, 5761) -- the left edges of tiles 88
+# and 83 on row 180, five tiles apart (yesterday on joni: 170 and 174, four tiles apart). The arena spawns on tile centres: tiles (83, 180) and (88, 180)
+# (both 16 px right of the live points; the distance is the same). Sides alternate by game parity like every arena.
+name = "pm1007-clb-duel"
+tag = "holdout"
+description = "Copy Love Box (f9793b34) 1vs1 box of the 2026-10-07 test duel, spawns (83,180) and (88,180)."
+
+[map]
+kind = "file"
+file = "cache/Copy Love Box_f9793b3416f04eafc1c05c1ca43f6107dff34bf9eb3d5c9ba26ad9ef6317abcb.map"
+sha256 = "f9793b3416f04eafc1c05c1ca43f6107dff34bf9eb3d5c9ba26ad9ef6317abcb"
+
+[spawn]
+min_tiles = 5.0
+max_tiles = 5.0
+rows = [{ y = 180, x0 = 83, x1 = 83 }, { y = 180, x0 = 88, x1 = 88 }]

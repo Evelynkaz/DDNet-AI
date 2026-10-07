@@ -1,0 +1,47 @@
+# work-clock: default-rate
+# Post-mortem of the 2026-10-07 test duel: the arena on TODAY's geometry (map "Copy Love Box" f9793b34..., box around tiles x 80..100, y 168..181)
+# against the 3.14 arena (`joni-duel`, map "Copy Love Box JoniTee"). Hybrid main defaults (4 ms WORK) vs live-v2, our/his lag 2/0, 2/1, 2/2, 3/1.
+#   cargo run --release -p ddai-env --example duel_stats -- --config configs/arena/pm1007-geom.toml --threads 3
+name = "pm1007: today's box vs joni-duel"
+base_seed = 17001
+games = 200
+
+[[condition]]
+name = "clb 2/0"
+arena = "pm1007-clb-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "clb 2/1"
+arena = "pm1007-clb-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "clb 2/2"
+arena = "pm1007-clb-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "clb 3/1"
+arena = "pm1007-clb-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "joni 2/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "joni 2/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "joni 2/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "joni 3/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
