@@ -24,7 +24,8 @@ use crate::decoder::{DecoderModel, DecoderParams, DnCalibration};
 use crate::encoder::{EncoderModel, EncoderParams};
 use crate::world_model::{WorldModelHead, WorldModelParams};
 
-pub const BRAIN_CHECKPOINT_FORMAT_VERSION: u32 = 2;
+/// 2: the intent hook head's release hazard (task 8.6); 3: the wide hook readout's parameters (task 8.7). No files of the earlier layouts exist on disk.
+pub const BRAIN_CHECKPOINT_FORMAT_VERSION: u32 = 3;
 
 const PAYLOAD_HASH_LEN: usize = 32;
 

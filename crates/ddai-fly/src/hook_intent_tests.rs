@@ -20,7 +20,7 @@ use crate::bundle::{
 };
 use crate::decoder::HookRelease;
 
-fn tiny_map() -> Arc<ddai_physics::map::MapData> {
+pub(crate) fn tiny_map() -> Arc<ddai_physics::map::MapData> {
     Arc::new(ddai_physics::map::MapData {
         width: 20,
         height: 20,
@@ -34,7 +34,7 @@ fn tiny_map() -> Arc<ddai_physics::map::MapData> {
     })
 }
 
-fn obs(map: &Arc<ddai_physics::map::MapData>, tick: i32, opp_x: f32, hook_state: i32) -> Observation {
+pub(crate) fn obs(map: &Arc<ddai_physics::map::MapData>, tick: i32, opp_x: f32, hook_state: i32) -> Observation {
     let mut me = CharacterObservation::at_rest(0);
     me.pos = ddai_physics::vmath::Vec2::new(300.0, 300.0);
     me.hook_state = hook_state;
@@ -50,7 +50,7 @@ fn obs(map: &Arc<ddai_physics::map::MapData>, tick: i32, opp_x: f32, hook_state:
     }
 }
 
-fn reset_ctx(map: &Arc<ddai_physics::map::MapData>) -> ResetContext {
+pub(crate) fn reset_ctx(map: &Arc<ddai_physics::map::MapData>) -> ResetContext {
     ResetContext {
         map: map.clone(),
         self_id: 0,
@@ -58,7 +58,7 @@ fn reset_ctx(map: &Arc<ddai_physics::map::MapData>) -> ResetContext {
     }
 }
 
-fn brain_config() -> FlyBrainConfig {
+pub(crate) fn brain_config() -> FlyBrainConfig {
     FlyBrainConfig {
         action_selection: ActionSelection::Argmax,
         seed: 1,
@@ -117,7 +117,7 @@ fn write_v3(path: &std::path::Path, b: &FlyBundle) {
 
 /// What a played brain does over a fixed script of observations (the opponent moves, the own hook state cycles through every state
 /// whatever the brain did): the action and the bits of every head probability of the full view.
-fn scripted_state(i: i32) -> i32 {
+pub(crate) fn scripted_state(i: i32) -> i32 {
     let states = [
         ddai_brain::HOOK_IDLE,
         ddai_brain::HOOK_FLYING,
@@ -129,7 +129,10 @@ fn scripted_state(i: i32) -> i32 {
     states[i as usize % states.len()]
 }
 
-fn play(template: &FlyBrainTemplate, map: &Arc<ddai_physics::map::MapData>) -> Vec<(ddai_brain::Action, [u32; 2])> {
+pub(crate) fn play(
+    template: &FlyBrainTemplate,
+    map: &Arc<ddai_physics::map::MapData>,
+) -> Vec<(ddai_brain::Action, [u32; 2])> {
     let mut brain = template.instantiate_played(brain_config());
     brain.reset(&reset_ctx(map));
     (0..60)
@@ -152,7 +155,7 @@ fn play(template: &FlyBrainTemplate, map: &Arc<ddai_physics::map::MapData>) -> V
         .collect()
 }
 
-fn template_of(path: &std::path::Path, flyg: &std::path::Path) -> FlyBrainTemplate {
+pub(crate) fn template_of(path: &std::path::Path, flyg: &std::path::Path) -> FlyBrainTemplate {
     FlyBrainTemplate::load(path, Some(flyg)).unwrap()
 }
 
@@ -232,15 +235,15 @@ fn a_bundle_whose_hook_kind_disagrees_with_its_parameters_is_refused() {
     let mut b = load_bundle(&path).unwrap();
     b.hook_param = HookParam::Intent; // but no release hazard
     let bad = dir.path().join("bad.bundle");
-    save_bundle(&bad, &b).unwrap();
+    write_zstd_postcard(&bad, &b, 3).unwrap(); // deliberately invalid: bypasses save_bundle's own check
     assert!(load_bundle(&bad).unwrap_err().0.contains("no release hazard"));
     let mut b = upgrade_to_intent_hook(&load_bundle(&path).unwrap());
     b.hook_param = HookParam::Legacy; // but a release hazard
-    save_bundle(&bad, &b).unwrap();
+    write_zstd_postcard(&bad, &b, 3).unwrap(); // deliberately invalid: bypasses save_bundle's own check
     assert!(load_bundle(&bad).unwrap_err().0.contains("has a release hazard"));
     let mut b = load_bundle(&path).unwrap();
     b.hook_decode = HookDecode::Latched { hi: 0.4, lo: 1.0 }; // not a probability
-    save_bundle(&bad, &b).unwrap();
+    write_zstd_postcard(&bad, &b, 3).unwrap(); // deliberately invalid: bypasses save_bundle's own check
     assert!(load_bundle(&bad).unwrap_err().0.contains("not inside"));
     let _ = flyg;
 }

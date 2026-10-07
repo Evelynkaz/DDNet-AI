@@ -554,6 +554,7 @@ pub fn write_tiny_fly_bundle_with(
         hook_view,
         hook_param: crate::bc::HookParam::Legacy,
         hook_decode: crate::bc::HookDecode::Plain,
+        hook_readout: crate::hook_wide::HookReadout::Pooled,
     };
     let bundle_path = dir.join("tiny.bundle");
     save_bundle(&bundle_path, &bundle).expect("writing the fixture bundle");

@@ -23,7 +23,9 @@ use ddai_fly::batched::{BatchedEngine, BatchedPlan, TrainBackend};
 use ddai_fly::bc::{
     HeadLogits, HeadThresholds, HookDecode, HookParam, HookView, LossConfig, StepLoss, combine_hook_view,
 };
-use ddai_fly::brain_bc::{BcSequence, BcStepConfig, BcStepOutput, BcWorkspace, brain_bc_forward, brain_bc_step};
+use ddai_fly::brain_bc::{
+    BcSequence, BcStepConfig, BcStepOutput, BcWorkspace, brain_bc_forward, brain_bc_step, brain_readout_step,
+};
 use ddai_fly::brain_bc_batched::brain_bc_batched_step;
 use ddai_fly::brain_config::{BrainConfig, parse_brain_config};
 use ddai_fly::bundle::{BUNDLE_FORMAT_VERSION, BundleMeta, FlyBundle, save_bundle, sha256_hex_of_file};
@@ -33,6 +35,7 @@ use ddai_fly::decoder::{
     DecoderGradients, DecoderModel, DecoderParams, DnCalibration, HookRelease, calibrate_from_rest,
 };
 use ddai_fly::encoder::{EncoderGradients, EncoderModel, EncoderParams, RayGridConfig, RayGridFeatures};
+use ddai_fly::hook_wide::{HookReadout, HookWide};
 use ddai_fly::model::FlyModel;
 use ddai_fly::optim::{ActivityRegularizerConfig, ParamGradients};
 use ddai_fly::params::FlyParams;
@@ -111,6 +114,14 @@ pub trait Learner: Send + Sync {
     fn hook_param(&self) -> HookParam {
         HookParam::Legacy
     }
+    /// How the hook head reads the network (task 8.7); a control has no such readout.
+    fn hook_readout(&self) -> HookReadout {
+        HookReadout::Pooled
+    }
+    /// Whether only the hook head trains with the rest of the model frozen (task 8.7): the trainer then runs just the hook head's pass.
+    fn readout_only(&self) -> bool {
+        false
+    }
 
     /// The logits the **playing** model would produce: under [`HookView::MaskedForHookHead`] the hook head
     /// comes from a second pass over the observations with the own hook state hidden.
@@ -137,6 +148,12 @@ pub struct FlyTrainConfig {
     pub lr_theta: f32,
     pub lr_encoder: f32,
     pub lr_decoder: f32,
+    /// Task 8.7: learning rate of the wide hook readout's parameters (`0` = `lr_decoder`).
+    pub lr_hook_wide: f32,
+    /// Task 8.7: train **only the hook head** (its pooled weights and the wide readout) with the whole network frozen (connectome, encoder,
+    /// the other heads, the calibration): the forward pass only, the hook head scored, every other parameter's learning rate zero. The
+    /// readout ablations of 8.7 use it; it needs the per-sequence backend.
+    pub readout_only: bool,
     /// L2 pull of `a` (the type-pair strengths) towards their initial value (FLY.md §8).
     pub l2_a: f32,
     pub activity_weight: f32,
@@ -187,6 +204,8 @@ impl Default for FlyTrainConfig {
             lr_theta: 2e-3,
             lr_encoder: 2e-2,
             lr_decoder: 2e-2,
+            lr_hook_wide: 0.0,
+            readout_only: false,
             l2_a: 1e-4,
             activity_weight: 0.0,
             activity_low: 0.02,
@@ -220,6 +239,8 @@ pub(crate) struct Layout {
     /// Task 8.6: an intent hook head appends its release hazard (`release_w`, one bias) after everything else.
     pub(crate) intent: bool,
     release_w: usize,
+    /// Task 8.7: a wide hook readout appends `(w1, b1, w2)` after the release hazard.
+    wide: Option<(usize, usize, usize)>,
 }
 
 impl Layout {
@@ -240,6 +261,7 @@ impl Layout {
             aim_unpaired: dec.aim_unpaired_theta.len(),
             intent: dec.hook_release.is_some(),
             release_w: dec.hook_release.as_ref().map_or(0, |r| r.w.len()),
+            wide: dec.hook_wide.as_ref().map(|w| (w.w1.len(), w.b1.len(), w.w2.len())),
         }
     }
 
@@ -263,6 +285,16 @@ impl Layout {
             + self.aim_pair
             + self.aim_unpaired
             + if self.intent { self.release_w + 1 } else { 0 }
+            + self.wide.map_or(0, |(a, b, c)| a + b + c)
+    }
+
+    /// The flat range of the hook head's own parameters (pooled weights and bias, then the wide readout), as `(pooled, wide)`: the
+    /// parameters a readout-only training moves.
+    fn hook_ranges(&self) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+        let base = self.decoder_start();
+        let hook_at = base + self.dir_lr_w + 1 + self.stop_w + 1 + self.jump_w + 1;
+        let wide_at = self.total() - self.wide.map_or(0, |(a, b, c)| a + b + c);
+        (hook_at..hook_at + self.hook_w + 1, wide_at..self.total())
     }
 
     /// Start offsets of `(a, b, theta, g, c, decoder...)`.
@@ -287,6 +319,11 @@ pub(crate) fn push_decoder(out: &mut Vec<f32>, d: &DecoderParams) {
     if let Some(r) = &d.hook_release {
         out.extend_from_slice(&r.w);
         out.push(r.b);
+    }
+    if let Some(w) = &d.hook_wide {
+        out.extend_from_slice(&w.w1);
+        out.extend_from_slice(&w.b1);
+        out.extend_from_slice(&w.w2);
     }
 }
 
@@ -316,6 +353,11 @@ pub(crate) fn decoder_from_flat(flat: &[f32], l: &Layout) -> DecoderParams {
         let b = take(flat, &mut at, 1)[0];
         HookRelease { w, b }
     });
+    let hook_wide = l.wide.map(|(n1, n2, n3)| HookWide {
+        w1: take(flat, &mut at, n1).to_vec(),
+        b1: take(flat, &mut at, n2).to_vec(),
+        w2: take(flat, &mut at, n3).to_vec(),
+    });
     DecoderParams {
         direction_lr_w: dir_lr_w,
         direction_lr_b: dir_lr_b,
@@ -330,6 +372,7 @@ pub(crate) fn decoder_from_flat(flat: &[f32], l: &Layout) -> DecoderParams {
         aim_pair_theta,
         aim_unpaired_theta,
         hook_release,
+        hook_wide,
     }
 }
 
@@ -389,6 +432,7 @@ impl FlyLearner {
             None,
             None,
             None,
+            HookReadout::Pooled,
             cfg,
         )?;
         learner.refresh();
@@ -438,6 +482,7 @@ impl FlyLearner {
             Some(bundle.encoder_params),
             Some(bundle.decoder_params),
             Some(bundle.calibration),
+            bundle.hook_readout,
             cfg,
         )?;
         l.thresholds = thresholds;
@@ -458,6 +503,7 @@ impl FlyLearner {
         enc_params: Option<EncoderParams>,
         dec_params: Option<DecoderParams>,
         calib: Option<DnCalibration>,
+        hook_readout: HookReadout,
         cfg: FlyTrainConfig,
     ) -> LearnerResult<Self> {
         let brain_config = parse_brain_config(&brain_config_toml).map_err(|e| format!("brain config: {e}"))?;
@@ -466,7 +512,19 @@ impl FlyLearner {
         let encoder = brain_config
             .encoder_model(&model)
             .map_err(|e| format!("encoder: {e}"))?;
-        let decoder = DecoderModel::new(&model, brain_config.decoder.clone()).map_err(|e| format!("decoder: {e}"))?;
+        let mut decoder =
+            DecoderModel::new(&model, brain_config.decoder.clone()).map_err(|e| format!("decoder: {e}"))?;
+        decoder
+            .set_hook_readout(&model, hook_readout)
+            .map_err(|e| format!("hook readout: {e}"))?;
+        if cfg.readout_only && cfg.backend == TrainBackend::Batched {
+            return Err("fly.readout_only needs the per-seq backend".to_string());
+        }
+        if decoder.reads_encoder() && (cfg.backend == TrainBackend::Batched || !cfg.readout_only) {
+            return Err(
+                "the encoder-input control readout trains with fly.readout_only on the per-seq backend".to_string(),
+            );
+        }
         let enc_params = enc_params.unwrap_or_else(|| encoder.init_params());
         let dec_params = dec_params.unwrap_or_else(|| decoder.init_default_params());
         enc_params
@@ -587,6 +645,7 @@ impl FlyLearner {
             hook_view: self.hook_view,
             hook_param: self.hook_param(),
             hook_decode: self.hook_decode,
+            hook_readout: self.decoder.hook_readout(),
         }
     }
 
@@ -640,6 +699,11 @@ impl FlyLearner {
         if l.intent {
             add(&d.hook_release_w);
             add(&[d.hook_release_b]);
+        }
+        if l.wide.is_some() {
+            add(&d.hook_wide.w1);
+            add(&d.hook_wide.b1);
+            add(&d.hook_wide.w2);
         }
         debug_assert_eq!(at, l.total());
     }
@@ -697,6 +761,19 @@ impl Learner for FlyLearner {
         lrs.extend(std::iter::repeat_n(cfg.lr_encoder, l.g + l.c + l.bin));
         let n_dec = l.total() - l.decoder_start();
         lrs.extend(std::iter::repeat_n(cfg.lr_decoder, n_dec));
+        let (pooled, wide) = l.hook_ranges();
+        if cfg.lr_hook_wide > 0.0 {
+            lrs[wide.clone()].fill(cfg.lr_hook_wide);
+        }
+        if cfg.readout_only {
+            // Everything but the hook head stands still.
+            let (pooled_lr, wide_lr) = (lrs[pooled.start], lrs.get(wide.start).copied());
+            lrs.fill(0.0);
+            lrs[pooled.clone()].fill(pooled_lr);
+            if let Some(w) = wide_lr {
+                lrs[wide.clone()].fill(w);
+            }
+        }
         lrs
     }
 
@@ -717,6 +794,31 @@ impl Learner for FlyLearner {
             loss: *loss,
             activity: self.act_config(),
         };
+        if self.cfg.readout_only {
+            let out = brain_readout_step(
+                &self.model,
+                &self.encoder,
+                &self.enc_params,
+                &self.decoder,
+                &self.dec_params,
+                &self.calib,
+                &seq,
+                &cfg,
+                ws,
+            );
+            // Only the decoder's part of the gradient exists (the rest is zero and stays out of the clip norm's way).
+            let start = self.layout.decoder_start();
+            let mut dec_grad = vec![0.0f32; self.layout.total()];
+            self.add_parts_grads(&out.fly, &out.encoder, &out.decoder, &mut dec_grad);
+            for (g, d) in grad[start..].iter_mut().zip(&dec_grad[start..]) {
+                *g += d;
+            }
+            return WindowStats {
+                loss: out.loss,
+                weight_sum: out.weight_sum,
+                activity_loss: 0.0,
+            };
+        }
         let out = brain_bc_step(
             &self.model,
             &self.index,
@@ -809,7 +911,7 @@ impl Learner for FlyLearner {
     }
 
     fn regularizer_grad(&self, grad: &mut [f32]) -> f32 {
-        if self.cfg.l2_a == 0.0 {
+        if self.cfg.l2_a == 0.0 || self.cfg.readout_only {
             return 0.0;
         }
         let mut value = 0.0f32;
@@ -861,6 +963,14 @@ impl Learner for FlyLearner {
         } else {
             HookParam::Legacy
         }
+    }
+
+    fn hook_readout(&self) -> HookReadout {
+        self.decoder.hook_readout()
+    }
+
+    fn readout_only(&self) -> bool {
+        self.cfg.readout_only
     }
 
     fn save(&self, path: &Path, meta: BundleMeta) -> LearnerResult<()> {

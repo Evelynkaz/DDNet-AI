@@ -145,7 +145,7 @@ pub fn policy_forward(
                 .map(|t| {
                     engine_ref.dn_rates(lane, t, &mut dn);
                     net.calib.z_into(&dn, clip_at, &mut z);
-                    decoder_logits(net.decoder, &z, net.decoder_params, false)
+                    decoder_logits(net.decoder, &z, &[], net.decoder_params, false)
                 })
                 .collect()
         })
@@ -238,7 +238,7 @@ pub fn policy_backward(
                 }
                 engine_ref.dn_rates(lane, t, &mut dn);
                 let (g, gdn) =
-                    decoder_logits_backward(net.decoder, &dn, net.calib, net.decoder_params, &d, &mask, false);
+                    decoder_logits_backward(net.decoder, &dn, &[], net.calib, net.decoder_params, &d, &mask, false);
                 crate::brain_bc::add_decoder_gradients(&mut grads, &g);
                 grad_dn.push(gdn);
             }

@@ -142,6 +142,12 @@ pub fn load(cfg: &PpoConfig) -> Result<Loaded, String> {
             cfg.init_bundle
         ));
     }
+    if base.hook_readout != ddai_fly::hook_wide::HookReadout::Pooled {
+        return Err(format!(
+            "{}: the PPO of 8.5b plays the pooled hook readout (a wide readout, task 8.7, is not in its policy)",
+            cfg.init_bundle
+        ));
+    }
     let flyg_sha = sha256_hex_of_file(&flyg_path).map_err(|e| e.to_string())?;
     if flyg_sha != base.flyg_sha256 {
         return Err(format!(

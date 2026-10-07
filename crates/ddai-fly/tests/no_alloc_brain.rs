@@ -375,3 +375,77 @@ fn a_two_view_fly_decide_allocates_nothing() {
     );
     assert_eq!(info.count_current, 0, "nor deallocate: {info:?}");
 }
+
+/// Task 8.7: a two-view fly whose hook head has a wide MLP readout (non-zero output weights) allocates nothing per decision either: the
+/// hidden activations live in the decoder's scratch.
+#[test]
+fn a_fly_with_a_wide_hook_readout_decide_allocates_nothing() {
+    use ddai_fly::bc::HookView;
+    use ddai_fly::bundle::{FlyBrainTemplate, load_bundle, save_bundle, upgrade_hook_readout};
+    use ddai_fly::hook_wide::HookReadout;
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, flyg) = ddai_fly::brain_fixtures::write_tiny_fly_bundle(dir.path(), HookView::MaskedForHookHead);
+    let mut b = upgrade_hook_readout(
+        &load_bundle(&bundle).unwrap(),
+        ddai_flyg::load(&flyg).unwrap(),
+        HookReadout::MlpDn { hidden: 8 },
+        3,
+    )
+    .unwrap();
+    for (i, w) in b.decoder_params.hook_wide.as_mut().unwrap().w2.iter_mut().enumerate() {
+        *w = 0.5 - 0.1 * i as f32;
+    }
+    save_bundle(&bundle, &b).unwrap();
+    let template = FlyBrainTemplate::load(&bundle, Some(&flyg)).unwrap();
+    let mut brain = template.instantiate_played(FlyBrainConfig {
+        action_selection: ActionSelection::Argmax,
+        seed: 1,
+    });
+    let observations: Vec<Observation> = (0..100).map(|i| sample_observation(300.0 + i as f32)).collect();
+    let _ = brain.decide(&observations[0]);
+    let info = measure(|| {
+        for obs in &observations {
+            std::hint::black_box(brain.decide(obs));
+        }
+    });
+    assert_eq!(
+        info.count_total, 0,
+        "decide with a wide readout must not allocate: {info:?}"
+    );
+    assert_eq!(info.count_current, 0, "nor deallocate: {info:?}");
+}
+
+/// Review F5 of 8.7: `forward_logits` (documented allocation-free) allocates nothing with a wide MLP readout either.
+#[test]
+fn forward_logits_with_a_wide_hook_readout_allocates_nothing() {
+    use ddai_fly::bc::HookView;
+    use ddai_fly::bundle::{FlyBrainTemplate, load_bundle, save_bundle, upgrade_hook_readout};
+    use ddai_fly::hook_wide::HookReadout;
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, flyg) = ddai_fly::brain_fixtures::write_tiny_fly_bundle(dir.path(), HookView::Shared);
+    let mut b = upgrade_hook_readout(
+        &load_bundle(&bundle).unwrap(),
+        ddai_flyg::load(&flyg).unwrap(),
+        HookReadout::MlpDn { hidden: 8 },
+        3,
+    )
+    .unwrap();
+    for (i, w) in b.decoder_params.hook_wide.as_mut().unwrap().w2.iter_mut().enumerate() {
+        *w = 0.5 - 0.1 * i as f32;
+    }
+    save_bundle(&bundle, &b).unwrap();
+    let mut brain = FlyBrainTemplate::load(&bundle, Some(&flyg))
+        .unwrap()
+        .instantiate(FlyBrainConfig {
+            action_selection: ActionSelection::Argmax,
+            seed: 1,
+        });
+    let observations: Vec<Observation> = (0..100).map(|i| sample_observation(300.0 + i as f32)).collect();
+    let _ = brain.forward_logits(&observations[0]);
+    let info = measure(|| {
+        for obs in &observations {
+            std::hint::black_box(brain.forward_logits(obs));
+        }
+    });
+    assert_eq!(info.count_total, 0, "forward_logits must not allocate: {info:?}");
+}

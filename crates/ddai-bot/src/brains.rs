@@ -202,6 +202,10 @@ fn load_bundle_template(opts: &BrainOptions) -> Result<ddai_fly::bundle::FlyBrai
     template
         .require_unlatched("live bot")
         .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
+    // The encoder-input control readout (task 8.7) is a measurement control, not a fly: never played live.
+    template
+        .require_fly_readout("live bot")
+        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
     Ok(template)
 }
 
@@ -277,6 +281,41 @@ mod tests {
         assert_eq!(BrainKind::parse("nope"), None);
         assert!(BrainKind::Planner.has_own_shield() && BrainKind::Hybrid.has_own_shield());
         assert!(!BrainKind::Scripted.has_own_shield() && !BrainKind::Fly.has_own_shield());
+    }
+
+    /// 8.7 review F1: the encoder-input control readout (an MLP with no connectome) is a measurement control and is never played live, in the
+    /// plain fly or in the hybrid; the DN readouts (`linear-dn`, `mlp-dn-<H>`) are fine.
+    #[test]
+    fn the_encoder_input_control_readout_is_refused_by_the_live_loader_and_the_hybrid() {
+        use ddai_fly::bc::HookView;
+        use ddai_fly::bundle::{load_bundle, save_bundle, upgrade_hook_readout};
+        use ddai_fly::hook_wide::HookReadout;
+        let dir = tempfile::tempdir().unwrap();
+        let (path, flyg) = ddai_fly::brain_fixtures::write_tiny_fly_bundle(dir.path(), HookView::Shared);
+        let base = load_bundle(&path).unwrap();
+        let opts_for = |kind: HookReadout| {
+            let b = upgrade_hook_readout(&base, ddai_flyg::load(&flyg).unwrap(), kind, 1).unwrap();
+            let p = dir.path().join(format!("{}.bundle", kind.label()));
+            save_bundle(&p, &b).unwrap();
+            BrainOptions {
+                fly_bundle: Some(p),
+                fly_flyg: flyg.clone(),
+                ..BrainOptions::default()
+            }
+        };
+        let control = opts_for(HookReadout::EncoderMlp { hidden: 3 });
+        for kind in [BrainKind::Fly, BrainKind::Hybrid] {
+            let e = make_brain(kind, &control)
+                .err()
+                .expect("the control must be refused")
+                .to_string();
+            assert!(e.contains("encoder-input control"), "{kind:?}: {e}");
+        }
+        for readout in [HookReadout::LinearDn, HookReadout::MlpDn { hidden: 3 }] {
+            let o = opts_for(readout);
+            assert!(make_brain(BrainKind::Fly, &o).is_ok(), "{readout:?} fly");
+            assert!(make_brain(BrainKind::Hybrid, &o).is_ok(), "{readout:?} hybrid");
+        }
     }
 
     /// 8.2b F1: the live bot plays a mask-hook bundle in two views, as the arena does (one code path,

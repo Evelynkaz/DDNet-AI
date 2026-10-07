@@ -437,7 +437,13 @@ impl FlyBrain {
         self.last_per_type_mean_rate.copy_from_slice(output.per_type_mean_rate);
         self.calib
             .z_into(&self.last_dn_rates, self.decoder.config().z_clip, &mut self.viz_z);
-        let logits = crate::decoder::decoder_logits(&self.decoder, &self.viz_z, &self.decoder_params, self.hook_latch);
+        let logits = crate::decoder::decoder_logits(
+            &self.decoder,
+            &self.viz_z,
+            &self.input_buf,
+            &self.decoder_params,
+            self.hook_latch,
+        );
         self.last_latency = start.elapsed();
         self.decision_count += 1;
         logits
@@ -562,6 +568,7 @@ impl ddai_brain::Brain for FlyBrain {
         let decoded = decoder_forward_into(
             &self.decoder,
             &self.last_dn_rates,
+            &self.input_buf,
             &self.calib,
             &self.decoder_params,
             &mut self.decoder_scratch,

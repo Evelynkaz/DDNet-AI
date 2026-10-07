@@ -175,7 +175,8 @@ pub fn brain_bc_batched_step(
                 let in_prefix = t < no_grad;
                 let target = if in_prefix { &unscored } else { target };
                 engine_ref.dn_rates(b, t, &mut dn);
-                let (l, dg, gdn, lg) = decoder_bc_loss_and_grad(decoder, &dn, calib, decoder_params, target, &cfg.loss);
+                let (l, dg, gdn, lg) =
+                    decoder_bc_loss_and_grad(decoder, &dn, &[], calib, decoder_params, target, &cfg.loss);
                 loss.add(&l);
                 if target.weight > 0.0 {
                     weight_sum += target.weight;

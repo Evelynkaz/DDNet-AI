@@ -516,10 +516,15 @@ impl Trainer {
                                 // Two views: everything but the hook head on the full observation, the
                                 // hook head on the masked one. One normaliser (the full pass's).
                                 let (loss_full, loss_hook) = two_view_losses(&cfg.loss);
-                                let mut stats = learner.window_grad(&window, &loss_full, ws, &mut grad);
-                                let hook = learner.window_grad(m, &loss_hook, ws, &mut grad);
-                                stats.loss.add(&hook.loss);
-                                stats
+                                if learner.readout_only() {
+                                    // Task 8.7: only the hook head trains, so the full view's pass has nothing to say.
+                                    learner.window_grad(m, &loss_hook, ws, &mut grad)
+                                } else {
+                                    let mut stats = learner.window_grad(&window, &loss_full, ws, &mut grad);
+                                    let hook = learner.window_grad(m, &loss_hook, ws, &mut grad);
+                                    stats.loss.add(&hook.loss);
+                                    stats
+                                }
                             }
                         };
                         (grad, stats, window.len())
@@ -625,6 +630,9 @@ impl Trainer {
                 ));
             }
             _ => {}
+        }
+        if self.learner.readout_only() && self.learner.uses_batched_backend() {
+            return Err(TrainError("fly.readout_only needs the per-seq backend".into()));
         }
         if self.teacher.is_empty() && self.human.is_empty() {
             return Err(TrainError("no training data".to_string()));

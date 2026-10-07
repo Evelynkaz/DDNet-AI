@@ -637,7 +637,8 @@ pub fn run_probe(
         // The probes on the fly's own network state: its DN z-scores (what the decoder reads) and its full membrane state, per state fly.
         for (k, (name, _)) in state_bundles.iter().enumerate() {
             // The decoder's own view: the 11 hook-group means of the current frame, fitted by a linear model (the 12-parameter hook head,
-            // re-fitted optimally on these decisions) and by the MLP; and a linear model on all DN z-scores of the current frame.
+            // re-fitted optimally on these decisions) and by the MLP; and a linear model and an MLP on all DN z-scores of the current frame (task 8.7:
+            // the second is the wide readout `mlp-dn` in a probe's form).
             for (kind, which, linear) in [
                 ("hook-group means, linear (the hook head's own features)", 0u8, true),
                 ("hook-group means, MLP", 0, false),

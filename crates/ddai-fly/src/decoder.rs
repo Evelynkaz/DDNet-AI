@@ -73,6 +73,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::hook_wide::{HookReadout, HookWide, HookWideGrads, HookWideModel};
 use crate::model::FlyModel;
 use crate::rng::SplitMix64;
 use crate::state::FlyState;
@@ -373,6 +374,10 @@ pub struct DecoderParams {
     /// The release hazard of an **intent** hook head (task 8.6, bundle v4): `Some` makes the hook head two hazards chosen by the
     /// latch — `hook_w`/`hook_b` become `P(press | released)` and this is `P(release | held)`. `None` is the legacy single Bernoulli.
     pub hook_release: Option<HookRelease>,
+    /// The wide readout of the hook head (task 8.7, bundle v5): a residual on the pooled hook logit, `Some` iff the model was given a
+    /// [`HookReadout`] other than `Pooled` ([`DecoderModel::set_hook_readout`]). Older layouts of this struct are read through
+    /// [`DecoderParamsV3`] / [`DecoderParamsV4`].
+    pub hook_wide: Option<HookWide>,
 }
 
 /// The release hazard's weights, the same shape as the hook head's (`hook_w`, `hook_b`): one weight per hook type group, one bias.
@@ -423,9 +428,9 @@ pub struct DecoderParamsV3 {
 }
 
 impl DecoderParams {
-    /// The version-3 layout of these parameters, or `None` for an intent head (which a version 3 reader would play wrong).
+    /// The version-3 layout of these parameters, or `None` for an intent head or a wide hook readout (which a version 3 reader would play wrong).
     pub fn to_v3(&self) -> Option<DecoderParamsV3> {
-        if self.hook_release.is_some() {
+        if self.hook_release.is_some() || self.hook_wide.is_some() {
             return None;
         }
         Some(DecoderParamsV3 {
@@ -445,6 +450,27 @@ impl DecoderParams {
     }
 }
 
+impl DecoderParams {
+    /// The version-4 layout of these parameters (the wide hook readout, if any, is dropped: the caller writes v4 only for a `Pooled` readout).
+    pub fn to_v4(&self) -> DecoderParamsV4 {
+        DecoderParamsV4 {
+            direction_lr_w: self.direction_lr_w.clone(),
+            direction_lr_b: self.direction_lr_b,
+            direction_stop_w: self.direction_stop_w.clone(),
+            direction_stop_b: self.direction_stop_b,
+            jump_w: self.jump_w.clone(),
+            jump_b: self.jump_b,
+            hook_w: self.hook_w.clone(),
+            hook_b: self.hook_b,
+            fire_w: self.fire_w.clone(),
+            fire_b: self.fire_b,
+            aim_pair_theta: self.aim_pair_theta.clone(),
+            aim_unpaired_theta: self.aim_unpaired_theta.clone(),
+            hook_release: self.hook_release.clone(),
+        }
+    }
+}
+
 impl From<DecoderParamsV3> for DecoderParams {
     fn from(v: DecoderParamsV3) -> Self {
         DecoderParams {
@@ -461,6 +487,46 @@ impl From<DecoderParamsV3> for DecoderParams {
             aim_pair_theta: v.aim_pair_theta,
             aim_unpaired_theta: v.aim_unpaired_theta,
             hook_release: None,
+            hook_wide: None,
+        }
+    }
+}
+
+/// The decoder parameters as bundle format v4 stored them: the release hazard of the intent hook head, no wide readout (task 8.7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecoderParamsV4 {
+    pub direction_lr_w: Vec<f32>,
+    pub direction_lr_b: f32,
+    pub direction_stop_w: Vec<f32>,
+    pub direction_stop_b: f32,
+    pub jump_w: Vec<f32>,
+    pub jump_b: f32,
+    pub hook_w: Vec<f32>,
+    pub hook_b: f32,
+    pub fire_w: Vec<f32>,
+    pub fire_b: f32,
+    pub aim_pair_theta: Vec<f32>,
+    pub aim_unpaired_theta: Vec<f32>,
+    pub hook_release: Option<HookRelease>,
+}
+
+impl From<DecoderParamsV4> for DecoderParams {
+    fn from(v: DecoderParamsV4) -> Self {
+        DecoderParams {
+            direction_lr_w: v.direction_lr_w,
+            direction_lr_b: v.direction_lr_b,
+            direction_stop_w: v.direction_stop_w,
+            direction_stop_b: v.direction_stop_b,
+            jump_w: v.jump_w,
+            jump_b: v.jump_b,
+            hook_w: v.hook_w,
+            hook_b: v.hook_b,
+            fire_w: v.fire_w,
+            fire_b: v.fire_b,
+            aim_pair_theta: v.aim_pair_theta,
+            aim_unpaired_theta: v.aim_unpaired_theta,
+            hook_release: v.hook_release,
+            hook_wide: None,
         }
     }
 }
@@ -483,6 +549,8 @@ pub struct DecoderGradients {
     /// Gradient of the release hazard (zero, and unused, for a legacy hook head).
     pub hook_release_w: Vec<f32>,
     pub hook_release_b: f32,
+    /// Gradient of the wide hook readout (empty vectors for a pooled hook head).
+    pub hook_wide: HookWideGrads,
 }
 
 // --- Model ----------------------------------------------------------------------------------------
@@ -656,6 +724,8 @@ pub struct DecoderModel {
     fire: Vec<TypeGroup>,
     aim_pairs: Vec<AimPair>,
     aim_unpaired: Vec<usize>,
+    /// The wide readout of the hook head (task 8.7); `None` = the pooled head only.
+    hook_wide: Option<HookWideModel>,
 }
 
 fn mean_of(z: &[f32], slots: &[usize]) -> f32 {
@@ -689,7 +759,35 @@ impl DecoderModel {
             fire,
             aim_pairs,
             aim_unpaired,
+            hook_wide: None,
         })
+    }
+
+    /// Gives the hook head a wide readout (task 8.7), resolved against `model`'s graph. `Pooled` removes it. The parameters
+    /// ([`DecoderParams::hook_wide`]) must then be set to match ([`DecoderModel::init_hook_wide`], or a loaded bundle's).
+    pub fn set_hook_readout(&mut self, model: &FlyModel, kind: HookReadout) -> Result<(), DecoderError> {
+        self.hook_wide = HookWideModel::resolve(kind, model)?;
+        Ok(())
+    }
+
+    /// How the hook head reads the network.
+    pub fn hook_readout(&self) -> HookReadout {
+        self.hook_wide.as_ref().map_or(HookReadout::Pooled, HookWideModel::kind)
+    }
+
+    /// The structure of the wide hook readout, if any.
+    pub fn hook_wide_model(&self) -> Option<&HookWideModel> {
+        self.hook_wide.as_ref()
+    }
+
+    /// Whether the hook head is the encoder-input control (callers must then pass the encoder's input vector to the decoder).
+    pub fn reads_encoder(&self) -> bool {
+        self.hook_wide.as_ref().is_some_and(HookWideModel::reads_encoder)
+    }
+
+    /// Initial wide parameters for this model's readout (zero output weights: adds nothing), `None` for a pooled head.
+    pub fn init_hook_wide(&self, seed: u64) -> Option<HookWide> {
+        self.hook_wide.as_ref().map(|m| m.init_params(seed))
     }
 
     pub fn config(&self) -> &DecoderConfig {
@@ -729,6 +827,7 @@ impl DecoderModel {
             aim_pair_theta: spaced(self.aim_pairs.len()),
             aim_unpaired_theta: spaced(self.aim_unpaired.len()),
             hook_release: None,
+            hook_wide: self.init_hook_wide(0),
         }
     }
 
@@ -748,6 +847,11 @@ impl DecoderModel {
             aim_unpaired_theta: vec![0.0; self.aim_unpaired.len()],
             hook_release_w: vec![0.0; self.hook.len()],
             hook_release_b: 0.0,
+            hook_wide: self
+                .hook_wide
+                .as_ref()
+                .map(HookWideModel::zero_grads)
+                .unwrap_or_default(),
         }
     }
 
@@ -792,6 +896,25 @@ impl DecoderModel {
                 r.w.len(),
                 self.hook.len()
             )));
+        }
+        match (&self.hook_wide, &params.hook_wide) {
+            (Some(m), Some(p)) => m.validate(p)?,
+            (None, None) => {}
+            (Some(_), None) => {
+                return Err(DecoderError::ParamShapeMismatch(
+                    "the hook readout is wide but the parameters have no hook_wide".into(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(DecoderError::ParamShapeMismatch(
+                    "the parameters have hook_wide but the hook readout is pooled".into(),
+                ));
+            }
+        }
+        if self.hook_wide.is_some() && params.hook_release.is_some() {
+            return Err(DecoderError::InvalidConfig(
+                "a wide hook readout is not combined with intent (two-hazard) hook heads".into(),
+            ));
         }
         let release_finite = params
             .hook_release
@@ -863,11 +986,45 @@ fn pooled_logit(groups: &[TypeGroup], w: &[f32], b: f32, z: &[f32]) -> f32 {
 /// The logit of the hook key **given the latch** (the fly's own previous hook command, task 8.6): the legacy head's logit for a legacy fly
 /// (the latch is ignored); for an intent fly the press hazard's logit with the key up and **minus** the release hazard's logit with the
 /// key down (`P(hold) = 1 - P(release)`). Reads only the calibrated DN `z`, like every head: the latch is a structural switch between
-/// two heads, never an input of the network.
-pub(crate) fn hook_logit(decoder: &DecoderModel, params: &DecoderParams, z: &[f32], latch: bool) -> f32 {
-    match &params.hook_release {
-        Some(r) if latch => -pooled_logit(&decoder.hook, &r.w, r.b, z),
+/// two heads, never an input of the network. A wide readout (task 8.7) adds its logit to the pooled one (`enc` is the encoder's input vector,
+/// read only by the control readout; any other caller passes `&[]`, and the control then panics rather than compute a wrong logit).
+/// Allocation-free ([`HookWideModel::logit`] needs no hidden buffer); see [`hook_logit_with`] for the form that keeps the activations.
+pub(crate) fn hook_logit(decoder: &DecoderModel, params: &DecoderParams, z: &[f32], enc: &[f32], latch: bool) -> f32 {
+    let pooled = match &params.hook_release {
+        Some(r) if latch => return -pooled_logit(&decoder.hook, &r.w, r.b, z),
         _ => pooled_logit(&decoder.hook, &params.hook_w, params.hook_b, z),
+    };
+    match (&decoder.hook_wide, &params.hook_wide) {
+        (Some(m), Some(p)) if m.reads_encoder() => params.hook_b + m.logit(p, m.input(z, enc)),
+        (Some(m), Some(p)) => pooled + m.logit(p, z),
+        (None, None) => pooled,
+        _ => panic!(
+            "the hook readout and the parameters disagree (DecoderModel::validate_params_shape checks this at load)"
+        ),
+    }
+}
+
+/// [`hook_logit`] with caller-owned scratch (`h`: the wide readout's hidden activations, sized by [`DecoderScratch::new`]).
+pub(crate) fn hook_logit_with(
+    decoder: &DecoderModel,
+    params: &DecoderParams,
+    z: &[f32],
+    enc: &[f32],
+    latch: bool,
+    h: &mut [f32],
+) -> f32 {
+    let pooled = match &params.hook_release {
+        Some(r) if latch => return -pooled_logit(&decoder.hook, &r.w, r.b, z),
+        _ => pooled_logit(&decoder.hook, &params.hook_w, params.hook_b, z),
+    };
+    match (&decoder.hook_wide, &params.hook_wide) {
+        // The control reads the encoder input and nothing of the network: its logit is the hook bias plus the MLP.
+        (Some(m), Some(p)) if m.reads_encoder() => params.hook_b + m.forward(p, m.input(z, enc), h),
+        (Some(m), Some(p)) => pooled + m.forward(p, z, h),
+        (None, None) => pooled,
+        _ => panic!(
+            "the hook readout and the parameters disagree (DecoderModel::validate_params_shape checks this at load)"
+        ),
     }
 }
 
@@ -899,12 +1056,15 @@ fn population_vector(
 #[derive(Debug, Clone)]
 pub struct DecoderScratch {
     z: Vec<f32>,
+    /// The wide hook readout's hidden activations (empty for a pooled hook head).
+    h: Vec<f32>,
 }
 
 impl DecoderScratch {
     pub fn new(decoder: &DecoderModel) -> Self {
         DecoderScratch {
             z: vec![0.0; decoder.num_outputs],
+            h: vec![0.0; decoder.hook_wide.as_ref().map_or(0, HookWideModel::hidden)],
         }
     }
 }
@@ -920,13 +1080,14 @@ pub fn decoder_forward(
     hook_latch: bool,
 ) -> DecodedAction {
     let mut scratch = DecoderScratch::new(decoder);
-    decoder_forward_into(decoder, dn_rates, calib, params, &mut scratch, hook_latch)
+    decoder_forward_into(decoder, dn_rates, &[], calib, params, &mut scratch, hook_latch)
 }
 
 /// The allocation-free path [`crate::brain::FlyBrain::decide`] actually calls.
 pub fn decoder_forward_into(
     decoder: &DecoderModel,
     dn_rates: &[f32],
+    enc: &[f32],
     calib: &DnCalibration,
     params: &DecoderParams,
     scratch: &mut DecoderScratch,
@@ -959,7 +1120,7 @@ pub fn decoder_forward_into(
     let dir_probs = softmax3([left_logit, stop_logit, right_logit]);
 
     let jump_logit = pooled_logit(&decoder.jump, &params.jump_w, params.jump_b, z);
-    let hook_logit = hook_logit(decoder, params, z, hook_latch);
+    let hook_logit = hook_logit_with(decoder, params, z, enc, hook_latch, &mut scratch.h);
     let fire_logit = pooled_logit(&decoder.fire, &params.fire_w, params.fire_b, z);
 
     let (c, s) = population_vector(

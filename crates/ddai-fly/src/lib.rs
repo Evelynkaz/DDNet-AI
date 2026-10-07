@@ -29,6 +29,7 @@ pub mod demo_brain;
 pub mod encoder;
 mod error;
 pub mod flat_adam;
+pub mod hook_wide;
 mod kernel;
 pub mod model;
 pub mod optim;
@@ -53,6 +54,8 @@ pub mod two_view;
 pub mod brain_fixtures;
 #[cfg(test)]
 mod hook_intent_tests;
+#[cfg(test)]
+mod hook_wide_tests;
 #[doc(hidden)] // test/bench support only, not covered by semver — see its own doc comment.
 pub mod test_fixtures;
 

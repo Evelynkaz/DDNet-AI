@@ -71,13 +71,15 @@ impl FlyProposer {
     /// (`HookView::MaskedForHookHead`) gets its second view for the hook probability.
     ///
     /// Refuses a checkpoint with an intent hook head or a latched decode (`FlyBrainTemplate::require_unlatched`): the proposer's latch would
-    /// follow the fly's own argmax, not the action the hybrid plays.
+    /// follow the fly's own argmax, not the action the hybrid plays. Also refuses the encoder-input control readout
+    /// (`FlyBrainTemplate::require_fly_readout`).
     pub fn from_template(
         template: &crate::bundle::FlyBrainTemplate,
         config: FlyBrainConfig,
         seed: u64,
     ) -> Result<FlyProposer, crate::bundle::BundleError> {
         template.require_unlatched("hybrid fly proposer")?;
+        template.require_fly_readout("hybrid fly proposer")?;
         let masked = template.hook_view() == crate::bc::HookView::MaskedForHookHead;
         let hook_brain = masked.then(|| template.instantiate(config.clone()));
         let p = FlyProposer::new(template.instantiate(config), seed);

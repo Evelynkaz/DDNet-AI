@@ -116,6 +116,8 @@ pub fn brain_bc_step(
     let mut features: Vec<RayGridFeatures> = Vec::with_capacity(t_decisions);
     let mut proprio = Vec::with_capacity(t_decisions);
     let mut dn_per_decision: Vec<Vec<f32>> = Vec::with_capacity(t_decisions);
+    // The encoder's input vector of each decision, kept only for the control readout (task 8.7).
+    let mut enc_per_decision: Vec<Vec<f32>> = Vec::with_capacity(if decoder.reads_encoder() { t_decisions } else { 0 });
     let mut type_means: Vec<Vec<f32>> = Vec::with_capacity(t_decisions);
     for obs in &seq.observations {
         let an = compute_proprioception_values(&obs.self_state, encoder.ray_grid_config());
@@ -124,6 +126,9 @@ pub fn brain_bc_step(
         let out = state.step_decision_recording(model, &ws.input_buf, &mut ws.recorder);
         dn_per_decision.push(out.dn_rates.to_vec());
         type_means.push(out.per_type_mean_rate.to_vec());
+        if decoder.reads_encoder() {
+            enc_per_decision.push(ws.input_buf.clone());
+        }
         features.push(ws.features.clone());
         proprio.push(an);
     }
@@ -136,8 +141,16 @@ pub fn brain_bc_step(
     let mut grad_dn: Vec<Vec<f32>> = Vec::with_capacity(t_decisions);
     let mut logits = Vec::with_capacity(t_decisions);
     for (t, target) in seq.targets.iter().enumerate() {
-        let (l, dg, gdn, lg) =
-            decoder_bc_loss_and_grad(decoder, &dn_per_decision[t], calib, decoder_params, target, &cfg.loss);
+        let enc_t: &[f32] = enc_per_decision.get(t).map_or(&[], Vec::as_slice);
+        let (l, dg, gdn, lg) = decoder_bc_loss_and_grad(
+            decoder,
+            &dn_per_decision[t],
+            enc_t,
+            calib,
+            decoder_params,
+            target,
+            &cfg.loss,
+        );
         loss.add(&l);
         if target.weight > 0.0 {
             weight_sum += target.weight;
@@ -213,6 +226,77 @@ pub fn brain_bc_step(
     }
 }
 
+/// The hook head's readout alone (task 8.7): the network is **frozen**, so the pipeline runs forward only (no recording, no backward pass)
+/// and only the hook head is scored; the output's connectome and encoder gradients are zero. Same windows, targets, loss and per-step
+/// weights as [`brain_bc_step`], so a readout trained here sees exactly the data of a full BC step.
+#[allow(clippy::too_many_arguments)]
+pub fn brain_readout_step(
+    model: &FlyModel,
+    encoder: &EncoderModel,
+    encoder_params: &EncoderParams,
+    decoder: &DecoderModel,
+    decoder_params: &DecoderParams,
+    calib: &DnCalibration,
+    seq: &BcSequence,
+    cfg: &BcStepConfig,
+    ws: &mut BcWorkspace,
+) -> BcStepOutput {
+    assert_eq!(
+        seq.targets.len(),
+        seq.observations.len(),
+        "brain_readout_step: observations/targets mismatch"
+    );
+    assert_eq!(
+        seq.v_init.len(),
+        model.num_neurons(),
+        "brain_readout_step: v_init length"
+    );
+    let mut state = FlyState::new(model);
+    state.set_v(model, &seq.v_init);
+    let mut loss = StepLoss::default();
+    let mut weight_sum = 0.0f32;
+    let mut decoder_grads = decoder.zeros_gradients();
+    let mut logits = Vec::with_capacity(seq.observations.len());
+    for (obs, target) in seq.observations.iter().zip(&seq.targets) {
+        let an = compute_proprioception_values(&obs.self_state, encoder.ray_grid_config());
+        ws.features.compute(obs, encoder.ray_grid_config());
+        encoder.forward(&ws.features, &an, encoder_params, &mut ws.input_buf);
+        let out = state.step_decision(model, &ws.input_buf);
+        let hook_only = StepTargets {
+            mask: crate::bc::HeadMask {
+                hook: target.mask.hook,
+                ..crate::bc::HeadMask::NONE
+            },
+            ..*target
+        };
+        let (l, dg, _, lg) = decoder_bc_loss_and_grad(
+            decoder,
+            out.dn_rates,
+            &ws.input_buf,
+            calib,
+            decoder_params,
+            &hook_only,
+            &cfg.loss,
+        );
+        loss.add(&l);
+        if target.weight > 0.0 {
+            weight_sum += target.weight;
+            add_decoder_gradients(&mut decoder_grads, &dg);
+        }
+        logits.push(lg);
+    }
+    BcStepOutput {
+        loss,
+        activity_loss: 0.0,
+        weight_sum,
+        encoder: encoder.zero_grads(),
+        fly: ParamGradients::zeros_like(model.params()),
+        decoder: decoder_grads,
+        final_v: state.v().to_vec(),
+        logits,
+    }
+}
+
 /// The same pipeline forward only, for evaluation: the head logits of every decision of `seq`,
 /// starting from `v_init`. `hook_latches[t]` is the fly's own previous hook command at decision `t` (what an intent hook head selects its
 /// hazard by; ignored by a legacy one); it has one entry per observation.
@@ -247,7 +331,7 @@ pub fn brain_bc_forward(
             encoder.forward(&features, &an, encoder_params, &mut input_buf);
             let out = state.step_decision(model, &input_buf);
             calib.z_into(out.dn_rates, decoder.config().z_clip, &mut z);
-            decoder_logits(decoder, &z, decoder_params, latch)
+            decoder_logits(decoder, &z, &input_buf, decoder_params, latch)
         })
         .collect()
 }
@@ -273,4 +357,5 @@ pub fn add_decoder_gradients(acc: &mut DecoderGradients, g: &DecoderGradients) {
     add(&mut acc.aim_unpaired_theta, &g.aim_unpaired_theta);
     add(&mut acc.hook_release_w, &g.hook_release_w);
     acc.hook_release_b += g.hook_release_b;
+    acc.hook_wide.add(&g.hook_wide);
 }

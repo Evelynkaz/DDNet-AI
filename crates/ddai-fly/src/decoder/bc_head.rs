@@ -17,7 +17,13 @@ use crate::bc::{HeadLogits, LossConfig, StepLoss, StepTargets, head_loss_and_gra
 /// The five heads' logits for calibrated DN z-scores `z`. `hook_latch` is the fly's own previous hook command: it selects the hazard of an
 /// intent hook head (`HeadLogits::hook` is then the logit of the hook key given the latch, see [`super::hook_logit`]) and is ignored by a
 /// legacy one.
-pub fn decoder_logits(decoder: &DecoderModel, z: &[f32], params: &DecoderParams, hook_latch: bool) -> HeadLogits {
+pub fn decoder_logits(
+    decoder: &DecoderModel,
+    z: &[f32],
+    enc: &[f32],
+    params: &DecoderParams,
+    hook_latch: bool,
+) -> HeadLogits {
     let side_logit = |left: bool| {
         decoder
             .direction_lr
@@ -43,7 +49,7 @@ pub fn decoder_logits(decoder: &DecoderModel, z: &[f32], params: &DecoderParams,
     HeadLogits {
         dir: [side_logit(true), stop, side_logit(false)],
         jump: pooled_logit(&decoder.jump, &params.jump_w, params.jump_b, z),
-        hook: hook_logit(decoder, params, z, hook_latch),
+        hook: hook_logit(decoder, params, z, enc, hook_latch),
         fire: pooled_logit(&decoder.fire, &params.fire_w, params.fire_b, z),
         aim_c: c,
         aim_s: s,
@@ -56,6 +62,7 @@ pub fn decoder_logits(decoder: &DecoderModel, z: &[f32], params: &DecoderParams,
 pub fn decoder_bc_loss_and_grad(
     decoder: &DecoderModel,
     dn_rates: &[f32],
+    enc: &[f32],
     calib: &DnCalibration,
     params: &DecoderParams,
     targets: &StepTargets,
@@ -64,7 +71,7 @@ pub fn decoder_bc_loss_and_grad(
     assert_eq!(dn_rates.len(), decoder.num_outputs);
     let clip_at = decoder.config.z_clip;
     let z = calib.z(dn_rates, clip_at);
-    let logits = decoder_logits(decoder, &z, params, targets.hook_latch);
+    let logits = decoder_logits(decoder, &z, enc, params, targets.hook_latch);
     let (loss, d) = head_loss_and_grad(&logits, targets, cfg);
     if targets.weight == 0.0 {
         return (
@@ -74,8 +81,16 @@ pub fn decoder_bc_loss_and_grad(
             logits,
         );
     }
-    let (grads, grad_dn) =
-        decoder_logits_backward(decoder, dn_rates, calib, params, &d, &targets.mask, targets.hook_latch);
+    let (grads, grad_dn) = decoder_logits_backward(
+        decoder,
+        dn_rates,
+        enc,
+        calib,
+        params,
+        &d,
+        &targets.mask,
+        targets.hook_latch,
+    );
     (loss, grads, grad_dn, logits)
 }
 
@@ -83,9 +98,15 @@ pub fn decoder_bc_loss_and_grad(
 /// `d = dL/d(head logits)` of one decision, the decoder gradients and `dL/d(dn_rates)`. Heads whose `mask` flag is off are skipped
 /// (their entries of `d` must then be zero, as `head_loss_and_grad` leaves them). `hook_latch` must be the one the logits were made with:
 /// of an intent hook head only the hazard it selected gets a gradient (the release hazard's through `hook = -z_release`).
+///
+/// A wide hook readout (task 8.7) gets its own parameter gradient, and its gradient into the network goes through `dL/d(dn_rates)` like
+/// every head's. The control readout (on the encoder input `enc`) has no gradient into the network at all, and the pooled weights get none
+/// either.
+#[allow(clippy::too_many_arguments)]
 pub fn decoder_logits_backward(
     decoder: &DecoderModel,
     dn_rates: &[f32],
+    enc: &[f32],
     calib: &DnCalibration,
     params: &DecoderParams,
     d: &HeadLogits,
@@ -154,15 +175,32 @@ pub fn decoder_logits_backward(
                 &mut grads.hook_release_b,
                 &mut grad_z,
             ),
-            _ => pooled_backward(
-                &decoder.hook,
-                &params.hook_w,
-                d.hook,
-                &z,
-                &mut grads.hook_w,
-                &mut grads.hook_b,
-                &mut grad_z,
-            ),
+            _ => match (&decoder.hook_wide, &params.hook_wide) {
+                (Some(m), Some(p)) if m.reads_encoder() => {
+                    let mut h = vec![0.0f32; m.hidden()];
+                    let x = m.input(&z, enc);
+                    let _ = m.forward(p, x, &mut h);
+                    grads.hook_b += d.hook;
+                    let mut sink = vec![0.0f32; m.n_in()];
+                    m.backward(p, x, &h, d.hook, &mut grads.hook_wide, &mut sink);
+                }
+                (wide, params_wide) => {
+                    pooled_backward(
+                        &decoder.hook,
+                        &params.hook_w,
+                        d.hook,
+                        &z,
+                        &mut grads.hook_w,
+                        &mut grads.hook_b,
+                        &mut grad_z,
+                    );
+                    if let (Some(m), Some(p)) = (wide, params_wide) {
+                        let mut h = vec![0.0f32; m.hidden()];
+                        let _ = m.forward(p, &z, &mut h);
+                        m.backward(p, &z, &h, d.hook, &mut grads.hook_wide, &mut grad_z);
+                    }
+                }
+            },
         }
     }
     if mask.fire {
@@ -227,7 +265,7 @@ mod tests {
         use crate::brain_fixtures::{FxNeuron, FxOutputGroup, FxType, build_brain_flyg};
         use ddai_flyg::{NeuronRole, Side, Sign};
         let names = [
-            "DN_LR", "DN_STOP", "DN_JUMP", "DN_HOOK", "DN_FIRE", "DN_AIM_A", "DN_AIM_B", "DN_AIM_U",
+            "DN_LR", "DN_STOP", "DN_JUMP", "DN_HOOK", "DN_FIRE", "DN_AIM_A", "DN_AIM_B", "DN_AIM_U", "VPN",
         ];
         let types: Vec<FxType> = names
             .iter()
@@ -255,6 +293,16 @@ mod tests {
             neurons.push(member(ti, Side::R));
         }
         neurons.push(member(7, Side::M));
+        // Two input neurons (after every output, so the output slots keep their order): what the encoder-input control reads.
+        for side in [Side::L, Side::R] {
+            neurons.push(FxNeuron {
+                type_index: 8,
+                role: NeuronRole::InputVisual,
+                side,
+                full_connectome_in: 1,
+                rf: (0.0, 0.0),
+            });
+        }
         let group = |action: &'static str, types: Vec<&'static str>, side: Option<Side>| FxOutputGroup {
             action,
             member_type_names: types,
@@ -309,7 +357,7 @@ mod tests {
         let (model, decoder, params, calib) = setup();
         let r = rates(model.num_outputs(), 0.4);
         let z = calib.z(&r, decoder.config().z_clip);
-        let l = decoder_logits(&decoder, &z, &params, false);
+        let l = decoder_logits(&decoder, &z, &[], &params, false);
         let orig = decoder_forward(&decoder, &r, &calib, &params, false);
         for (a, b) in l.dir_probs().iter().zip(&orig.direction_probs) {
             assert!((a - b).abs() < 1e-6);
@@ -351,7 +399,7 @@ mod tests {
             aim_kappa: decoder.config().aim_kappa,
             ..LossConfig::default()
         };
-        let (l1, g1, dn1, _) = decoder_bc_loss_and_grad(&decoder, &r, &calib, &params, &t, &cfg);
+        let (l1, g1, dn1, _) = decoder_bc_loss_and_grad(&decoder, &r, &[], &calib, &params, &t, &cfg);
         assert!((l0 - l1.total).abs() < 1e-5, "{l0} vs {}", l1.total);
         let _ = add_l1_penalty;
         assert_eq!(g0.direction_lr_w.len(), g1.direction_lr_w.len());
@@ -416,8 +464,9 @@ mod tests {
             aim_kappa: 4.0,
             soft_smoothing: 0.02,
         };
-        let (_, g, dn, _) = decoder_bc_loss_and_grad(&decoder, &r, &calib, &params, &t, &cfg);
-        let loss_at = |r: &[f32], p: &DecoderParams| decoder_bc_loss_and_grad(&decoder, r, &calib, p, &t, &cfg).0.total;
+        let (_, g, dn, _) = decoder_bc_loss_and_grad(&decoder, &r, &[], &calib, &params, &t, &cfg);
+        let loss_at =
+            |r: &[f32], p: &DecoderParams| decoder_bc_loss_and_grad(&decoder, r, &[], &calib, p, &t, &cfg).0.total;
         let eps = 1e-3f32;
         for i in (0..r.len()).step_by(7) {
             let (mut a, mut b) = (r.clone(), r.clone());
@@ -476,9 +525,9 @@ mod tests {
         for seed in [0.2f32, 1.1, 2.9] {
             let r = rates(model.num_outputs(), seed);
             let z = calib.z(&r, decoder.config().z_clip);
-            let legacy = decoder_logits(&decoder, &z, &params, false);
+            let legacy = decoder_logits(&decoder, &z, &[], &params, false);
             for latch in [false, true] {
-                let i = decoder_logits(&decoder, &z, &up, latch);
+                let i = decoder_logits(&decoder, &z, &[], &up, latch);
                 assert_eq!(i.hook.to_bits(), legacy.hook.to_bits(), "latch {latch}");
                 assert_eq!(
                     (i.dir, i.jump.to_bits(), i.fire.to_bits()),
@@ -486,7 +535,7 @@ mod tests {
                 );
             }
             // A legacy head ignores the latch.
-            assert_eq!(decoder_logits(&decoder, &z, &params, true), legacy);
+            assert_eq!(decoder_logits(&decoder, &z, &[], &params, true), legacy);
         }
     }
 
@@ -520,10 +569,13 @@ mod tests {
                     hook_scale: 1.0,
                     hook_latch: latch,
                 };
-                let (_, g, dn, logits) = decoder_bc_loss_and_grad(&decoder, &r, &calib, &params, &t, &cfg);
+                let (_, g, dn, logits) = decoder_bc_loss_and_grad(&decoder, &r, &[], &calib, &params, &t, &cfg);
                 // The hook logit given the latch: the press hazard, or minus the release hazard.
                 let z = calib.z(&r, decoder.config().z_clip);
-                assert_eq!(logits.hook, crate::decoder::hook_logit(&decoder, &params, &z, latch));
+                assert_eq!(
+                    logits.hook,
+                    crate::decoder::hook_logit(&decoder, &params, &z, &[], latch)
+                );
                 let (sel_w, other_w, other_b, sel_b) = if latch {
                     (&g.hook_release_w, &g.hook_w, g.hook_b, g.hook_release_b)
                 } else {
@@ -537,8 +589,9 @@ mod tests {
                     other_w.iter().all(|&x| x == 0.0) && other_b == 0.0,
                     "the other hazard gets nothing"
                 );
-                let loss_at =
-                    |r: &[f32], p: &DecoderParams| decoder_bc_loss_and_grad(&decoder, r, &calib, p, &t, &cfg).0.total;
+                let loss_at = |r: &[f32], p: &DecoderParams| {
+                    decoder_bc_loss_and_grad(&decoder, r, &[], &calib, p, &t, &cfg).0.total
+                };
                 let eps = 1e-3f32;
                 for i in (0..r.len()).step_by(5) {
                     let (mut a, mut b) = (r.clone(), r.clone());
@@ -579,6 +632,223 @@ mod tests {
                     "release b latch {latch}"
                 );
             }
+        }
+    }
+
+    /// The wide hook readout (task 8.7): its logit adds to the pooled one, and `dL/d(dn_rates)` plus the readout's own gradients (first
+    /// layer, bias, output weights) and the pooled hook weights match finite differences, for the linear and the MLP kind.
+    #[test]
+    fn the_wide_hook_readout_gradients_match_finite_differences() {
+        use crate::hook_wide::HookReadout;
+        for kind in [HookReadout::LinearDn, HookReadout::MlpDn { hidden: 5 }] {
+            let (model, mut decoder, mut params, calib) = setup();
+            decoder.set_hook_readout(&model, kind).unwrap();
+            let mut wide = decoder.init_hook_wide(7).unwrap();
+            for (i, w) in wide.w2.iter_mut().enumerate() {
+                *w = 0.4 - 0.13 * i as f32;
+            }
+            for (i, b) in wide.b1.iter_mut().enumerate() {
+                *b = 0.2 - 0.07 * i as f32;
+            }
+            params.hook_wide = Some(wide);
+            decoder.validate_params_shape(&params).unwrap();
+            let r = rates(model.num_outputs(), 0.6);
+            let z = calib.z(&r, decoder.config().z_clip);
+            // The wide part adds to the pooled logit (and leaves the other heads alone).
+            let with = decoder_logits(&decoder, &z, &[], &params, false);
+            let mut pooled = params.clone();
+            pooled.hook_wide = None;
+            let mut pooled_decoder = decoder.clone();
+            pooled_decoder.set_hook_readout(&model, HookReadout::Pooled).unwrap();
+            let without = decoder_logits(&pooled_decoder, &z, &[], &pooled, false);
+            assert_ne!(with.hook, without.hook);
+            assert_eq!(
+                (with.dir, with.jump, with.fire),
+                (without.dir, without.jump, without.fire)
+            );
+
+            let t = StepTargets {
+                dir: 1,
+                jump: false,
+                hook: true,
+                fire: false,
+                aim: 0.2,
+                soft: None,
+                mask: HeadMask::ALL,
+                weight: 1.0,
+                hook_scale: 1.0,
+                hook_latch: false,
+            };
+            let cfg = LossConfig {
+                soft_mix: 0.0,
+                ..LossConfig::default()
+            };
+            let (_, g, dn, _) = decoder_bc_loss_and_grad(&decoder, &r, &[], &calib, &params, &t, &cfg);
+            let loss_at =
+                |r: &[f32], p: &DecoderParams| decoder_bc_loss_and_grad(&decoder, r, &[], &calib, p, &t, &cfg).0.total;
+            let eps = 1e-3f32;
+            for i in 0..r.len() {
+                let (mut a, mut b) = (r.clone(), r.clone());
+                a[i] += eps;
+                b[i] -= eps;
+                let numeric = (loss_at(&a, &params) - loss_at(&b, &params)) / (2.0 * eps);
+                assert!(
+                    (dn[i] - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+                    "{kind:?} dn[{i}]: {} vs {numeric}",
+                    dn[i]
+                );
+            }
+            let n = g.hook_wide.w1.len() + g.hook_wide.b1.len() + g.hook_wide.w2.len();
+            assert_eq!(n, decoder.hook_wide_model().unwrap().num_params());
+            assert!(g.hook_wide.w2.iter().any(|&x| x != 0.0));
+            let bump = |k: usize, d: f32| {
+                let mut q = params.clone();
+                let w = q.hook_wide.as_mut().unwrap();
+                let (n1, n2) = (w.w1.len(), w.b1.len());
+                if k < n1 {
+                    w.w1[k] += d;
+                } else if k < n1 + n2 {
+                    w.b1[k - n1] += d;
+                } else {
+                    w.w2[k - n1 - n2] += d;
+                }
+                q
+            };
+            let analytic: Vec<f32> = g
+                .hook_wide
+                .w1
+                .iter()
+                .chain(&g.hook_wide.b1)
+                .chain(&g.hook_wide.w2)
+                .copied()
+                .collect();
+            for (k, &a) in analytic.iter().enumerate() {
+                let numeric = (loss_at(&r, &bump(k, eps)) - loss_at(&r, &bump(k, -eps))) / (2.0 * eps);
+                assert!(
+                    (a - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+                    "{kind:?} wide param {k}: {a} vs {numeric}"
+                );
+            }
+            for i in 0..params.hook_w.len() {
+                let (mut a, mut b) = (params.clone(), params.clone());
+                a.hook_w[i] += eps;
+                b.hook_w[i] -= eps;
+                let numeric = (loss_at(&r, &a) - loss_at(&r, &b)) / (2.0 * eps);
+                assert!(
+                    (g.hook_w[i] - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+                    "{kind:?} hook_w[{i}]"
+                );
+            }
+        }
+    }
+
+    /// The control readout (FLY.md section 1 point 3): the hook logit is the hook bias plus an MLP on the **encoder input**, it ignores the DN
+    /// state altogether, and its gradients (hook bias and the MLP's) match finite differences.
+    #[test]
+    fn the_encoder_control_readout_ignores_the_network_and_has_correct_gradients() {
+        use crate::hook_wide::HookReadout;
+        let (model, mut decoder, mut params, calib) = setup();
+        decoder
+            .set_hook_readout(&model, HookReadout::EncoderMlp { hidden: 4 })
+            .unwrap();
+        assert!(decoder.reads_encoder());
+        let n_in = decoder.hook_wide_model().unwrap().n_in();
+        assert_eq!(n_in, model.num_inputs());
+        let mut wide = decoder.init_hook_wide(5).unwrap();
+        for (i, w) in wide.w2.iter_mut().enumerate() {
+            *w = 0.5 - 0.2 * i as f32;
+        }
+        params.hook_wide = Some(wide);
+        decoder.validate_params_shape(&params).unwrap();
+        let enc: Vec<f32> = (0..n_in).map(|i| ((i as f32) * 0.9).cos().abs()).collect();
+        let r1 = rates(model.num_outputs(), 0.3);
+        let r2 = rates(model.num_outputs(), 1.7);
+        let z1 = calib.z(&r1, decoder.config().z_clip);
+        let z2 = calib.z(&r2, decoder.config().z_clip);
+        let a = decoder_logits(&decoder, &z1, &enc, &params, false);
+        let b = decoder_logits(&decoder, &z2, &enc, &params, false);
+        assert_eq!(
+            a.hook.to_bits(),
+            b.hook.to_bits(),
+            "the control must not read the DN state"
+        );
+        let enc2: Vec<f32> = enc.iter().map(|x| 1.0 - x).collect();
+        assert_ne!(a.hook, decoder_logits(&decoder, &z1, &enc2, &params, false).hook);
+        // Review F3: a caller with no encoder input gets a panic, not a silently wrong logit.
+        assert!(std::panic::catch_unwind(|| decoder_logits(&decoder, &z1, &[], &params, false)).is_err());
+        assert!(
+            std::panic::catch_unwind(|| decoder_logits(&decoder, &z1, &enc[..enc.len() - 1], &params, false)).is_err()
+        );
+
+        let t = StepTargets {
+            dir: 1,
+            jump: false,
+            hook: true,
+            fire: false,
+            aim: 0.2,
+            soft: None,
+            mask: HeadMask::ALL,
+            weight: 1.0,
+            hook_scale: 1.0,
+            hook_latch: false,
+        };
+        let cfg = LossConfig {
+            soft_mix: 0.0,
+            ..LossConfig::default()
+        };
+        let (_, g, _, _) = decoder_bc_loss_and_grad(&decoder, &r1, &enc, &calib, &params, &t, &cfg);
+        assert!(
+            g.hook_w.iter().all(|&x| x == 0.0),
+            "the pooled weights are out of the control's logit"
+        );
+        let loss_at = |p: &DecoderParams| {
+            decoder_bc_loss_and_grad(&decoder, &r1, &enc, &calib, p, &t, &cfg)
+                .0
+                .total
+        };
+        let eps = 1e-3f32;
+        let mut b_up = params.clone();
+        b_up.hook_b += eps;
+        let mut b_dn = params.clone();
+        b_dn.hook_b -= eps;
+        let numeric = (loss_at(&b_up) - loss_at(&b_dn)) / (2.0 * eps);
+        assert!(
+            (g.hook_b - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+            "hook_b {} vs {numeric}",
+            g.hook_b
+        );
+        let analytic: Vec<f32> = g
+            .hook_wide
+            .w1
+            .iter()
+            .chain(&g.hook_wide.b1)
+            .chain(&g.hook_wide.w2)
+            .copied()
+            .collect();
+        assert!(analytic.iter().any(|&x| x != 0.0));
+        for k in (0..analytic.len())
+            .step_by(37)
+            .chain(analytic.len() - 4..analytic.len())
+        {
+            let bump = |d: f32| {
+                let mut q = params.clone();
+                let w = q.hook_wide.as_mut().unwrap();
+                let (n1, n2) = (w.w1.len(), w.b1.len());
+                if k < n1 {
+                    w.w1[k] += d;
+                } else if k < n1 + n2 {
+                    w.b1[k - n1] += d;
+                } else {
+                    w.w2[k - n1 - n2] += d;
+                }
+                q
+            };
+            let numeric = (loss_at(&bump(eps)) - loss_at(&bump(-eps))) / (2.0 * eps);
+            assert!(
+                (analytic[k] - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+                "param {k}: {} vs {numeric}",
+                analytic[k]
+            );
         }
     }
 

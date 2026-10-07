@@ -885,6 +885,6 @@ fn decoder_forward_into_matches_decoder_forward() {
     let dn_rates: Vec<f32> = (0..model.num_outputs()).map(|i| 0.2 + 0.05 * i as f32).collect();
     let via_alloc = decoder_forward(&decoder, &dn_rates, &calib, &params, false);
     let mut scratch = DecoderScratch::new(&decoder);
-    let via_scratch = decoder_forward_into(&decoder, &dn_rates, &calib, &params, &mut scratch, false);
+    let via_scratch = decoder_forward_into(&decoder, &dn_rates, &[], &calib, &params, &mut scratch, false);
     assert_eq!(via_alloc, via_scratch);
 }

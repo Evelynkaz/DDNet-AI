@@ -126,6 +126,23 @@ pub enum TrainCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Writes a copy of a fly checkpoint whose hook head also reads the network through a wide readout (task 8.7, bundle v5): `linear-dn`
+    /// (a linear map of all DN slots) or `mlp-dn-<H>` (one hidden layer; a labelled departure from the narrow linear decoder, FLY.md section 1).
+    /// The wide part is a residual with zero output weights: the copy plays bit for bit like the original until it is trained.
+    UpgradeReadout {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// `linear-dn` or `mlp-dn-<H>`.
+        #[arg(long)]
+        readout: String,
+        /// Seed of the first layer's initialisation.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long)]
+        flyg: Option<PathBuf>,
+    },
     /// A model's hook behaviour in closed loop: start and release rates against the teacher's on the same
     /// states (JSON on stdout). The model plays alone; the planner labels every state it visits.
     HookPlay {
@@ -284,6 +301,13 @@ pub fn run(args: TrainArgs) -> ExitCode {
             plain_hook,
         } => set_thresholds_cmd(&kind, &bundle, &out, jump, hook, fire, hook_hi.zip(hook_lo), plain_hook),
         TrainCommand::UpgradeHook { bundle, out } => upgrade_hook_cmd(&bundle, &out),
+        TrainCommand::UpgradeReadout {
+            bundle,
+            out,
+            readout,
+            seed,
+            flyg,
+        } => upgrade_readout_cmd(&bundle, &out, &readout, seed, flyg.as_deref()),
         TrainCommand::ProbeHook {
             config,
             flies,
@@ -517,6 +541,44 @@ fn upgrade_hook_cmd(bundle: &std::path::Path, out: &std::path::Path) -> Result<(
         "wrote {} (intent hook head; decode {:?})",
         out.display(),
         up.hook_decode
+    );
+    Ok(())
+}
+
+fn upgrade_readout_cmd(
+    bundle: &std::path::Path,
+    out: &std::path::Path,
+    readout: &str,
+    seed: u64,
+    flyg: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let kind = ddai_fly::hook_wide::HookReadout::parse(readout)?;
+    if kind == ddai_fly::hook_wide::HookReadout::Pooled {
+        return Err("the pooled readout is the checkpoint's own; nothing to upgrade to".to_string());
+    }
+    let b = ddai_fly::bundle::load_bundle(bundle).map_err(|e| e.to_string())?;
+    let flyg_path = flyg.map_or_else(|| PathBuf::from(&b.flyg_path_hint), PathBuf::from);
+    let sha = ddai_fly::bundle::sha256_hex_of_file(&flyg_path).map_err(|e| e.to_string())?;
+    if sha != b.flyg_sha256 {
+        return Err(format!(
+            "{}: not the graph {} was built for",
+            flyg_path.display(),
+            bundle.display()
+        ));
+    }
+    let g = ddai_flyg::load(&flyg_path).map_err(|e| format!("{}: {e}", flyg_path.display()))?;
+    let up = ddai_fly::bundle::upgrade_hook_readout(&b, g, kind, seed).map_err(|e| e.to_string())?;
+    ddai_fly::bundle::save_bundle(out, &up).map_err(|e| e.to_string())?;
+    let n = up
+        .decoder_params
+        .hook_wide
+        .as_ref()
+        .map_or(0, |w| w.w1.len() + w.b1.len() + w.w2.len());
+    eprintln!(
+        "wrote {} (hook readout {}, {n} wide parameters, zero output weights: same decisions as {})",
+        out.display(),
+        kind.label(),
+        bundle.display()
     );
     Ok(())
 }
