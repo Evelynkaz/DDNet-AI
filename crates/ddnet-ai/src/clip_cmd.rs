@@ -40,6 +40,30 @@ pub enum ClipCmd {
         #[arg(long, default_value_t = usize::MAX)]
         to: usize,
     },
+    /// Task 4.12 (D-108): replays the self-kills the clips recorded under the smart policy and says which it would have skipped (and
+    /// whether the tee would have been left stuck) or sent sooner; also runs the duel detector over every clip.
+    Selfkill {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Where the maps are cached (default `<data-dir>/maps/cache`).
+        #[arg(long)]
+        map_cache: Option<PathBuf>,
+        /// Print the smart policy's call at every frame of each replayed run.
+        #[arg(long)]
+        trace: bool,
+        /// The clips are from an F-DDrace server (joniTee): the duel detector gets the F-DDrace evidence a clip (which holds no chat) lacks.
+        /// Without it a two-player team is, rightly, no duel.
+        #[arg(long)]
+        f_ddrace: bool,
+    },
+    /// Task 4.12 (D-108): how good the smart policy's thaw forecast is on the frozen runs the clips show ending by themselves.
+    Forecast {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Where the maps are cached (default `<data-dir>/maps/cache`).
+        #[arg(long)]
+        map_cache: Option<PathBuf>,
+    },
     /// Replays clips offline and reports where the physics and the recording agree.
     Replay {
         #[arg(required = true)]
@@ -74,6 +98,13 @@ pub fn run(args: ClipArgs) -> ExitCode {
         ClipCmd::Incidents { file } => incidents(&file),
         ClipCmd::Held { files, track } => held(&files, track),
         ClipCmd::Dump { file, from, to } => dump(&file, from, to),
+        ClipCmd::Forecast { files, map_cache } => forecast(&files, &map_cache.unwrap_or_else(default_cache)),
+        ClipCmd::Selfkill {
+            files,
+            map_cache,
+            trace,
+            f_ddrace,
+        } => selfkill(&files, &map_cache.unwrap_or_else(default_cache), trace, f_ddrace),
         ClipCmd::Replay {
             files,
             mode,
@@ -339,4 +370,202 @@ fn replay_files(files: &[PathBuf], mode: &str, cache: &Path, all: bool, legacy: 
     } else {
         ExitCode::from(1)
     })
+}
+
+/// `clip selfkill`: the recorded self-kills of the clips under the smart policy (task 4.12, `ddai_bot::kill_replay`).
+fn selfkill(files: &[PathBuf], cache: &Path, trace: bool, f_ddrace: bool) -> Result<ExitCode, String> {
+    use ddai_bot::kill_replay::{Fate, Outcome, analyse, scan_duel};
+    let mut cases = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for f in files {
+        let c = read(f)?;
+        let name = f
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().to_string());
+        let bytes = ddai_client::map_cache::read_cached(cache, &c.header.map_name, &c.header.map_sha256)
+            .ok_or_else(|| format!("{name}: the map {} is not in {}", c.header.map_name, cache.display()))?;
+        let map = Arc::new(
+            ddai_map::load_map(&bytes)
+                .map_err(|e| format!("{}: {e}", c.header.map_name))?
+                .data,
+        );
+        let duel = scan_duel(&c, f_ddrace);
+        println!(
+            "{name}: map {} | duel detector: {}",
+            c.header.map_name,
+            match duel.first {
+                Some((tick, why)) => format!(
+                    "ON from tick {tick} by {} ({} of {} frames); kills inside the duel {:?}, outside {:?}",
+                    why.name(),
+                    duel.frames_in_duel,
+                    duel.frames,
+                    duel.kills_in_duel,
+                    duel.kills_outside
+                ),
+                None => format!("never ({} frames)", duel.frames),
+            }
+        );
+        println!("    own DDRace team (tick, team, others in it): {:?}", duel.own_team);
+        // Clips overlap: one kill is counted once (the same map and tick).
+        for case in analyse(&c, &map, &name) {
+            if seen.insert((c.header.map_name.clone(), case.tick)) {
+                cases.push(case);
+            }
+        }
+    }
+    println!();
+    println!(
+        "{:<44} {:>9} {:>10} {:>7}  outcome under the smart policy",
+        "clip", "tick", "kind", "frozen"
+    );
+    let (mut same, mut earlier, mut skipped, mut not_judged, mut unknown) = (0, 0, 0, 0, 0);
+    let (mut thawed, mut died, mut later, mut still, mut ended) = (0, 0, 0, 0, 0);
+    let mut saved = Vec::new();
+    for c in &cases {
+        let text = match &c.verdict {
+            Outcome::NotJudged(w) => {
+                not_judged += 1;
+                format!("not judged ({w})")
+            }
+            Outcome::LegacyNotReproduced => {
+                unknown += 1;
+                "legacy timers not reproduced (the clip does not hold the whole run)".to_string()
+            }
+            Outcome::Same { why } => {
+                same += 1;
+                format!("SAME kill ({})", why.name())
+            }
+            Outcome::Earlier { ticks, why } => {
+                earlier += 1;
+                saved.push(*ticks);
+                format!("EARLIER by {ticks} ticks ({})", why.name())
+            }
+            Outcome::Skipped { why, fate } => {
+                skipped += 1;
+                let w = why.map_or("-", |w| w.name());
+                match fate {
+                    Fate::Thawed { after } => {
+                        thawed += 1;
+                        format!("SKIPPED ({w}): thawed by itself {after} ticks later")
+                    }
+                    Fate::Died { after } => {
+                        died += 1;
+                        format!("SKIPPED ({w}): died by itself {after} ticks later")
+                    }
+                    Fate::KilledLater { after, why } => {
+                        later += 1;
+                        format!("SKIPPED ({w}), then killed {after} ticks later ({})", why.name())
+                    }
+                    Fate::StillFrozen { ticks } => {
+                        still += 1;
+                        format!("SKIPPED ({w}): STILL FROZEN when the clip ends, {ticks} ticks later")
+                    }
+                    Fate::ClipEnded { ticks } => {
+                        ended += 1;
+                        format!("SKIPPED ({w}): free, clip ends {ticks} ticks later")
+                    }
+                }
+            }
+        };
+        println!(
+            "{:<44} {:>9} {:>10} {:>7}  {text}",
+            c.clip,
+            c.tick,
+            c.why_name(),
+            c.frozen_for
+        );
+        if trace {
+            for l in &c.trace {
+                println!("{l}");
+            }
+        }
+    }
+    println!();
+    println!(
+        "{} recorded kills: judged {} = same {same} + earlier {earlier} + skipped {skipped}; not judged {not_judged}; legacy not reproduced {unknown}",
+        cases.len(),
+        same + earlier + skipped
+    );
+    if !saved.is_empty() {
+        let mean = f64::from(saved.iter().sum::<i32>()) / saved.len() as f64;
+        println!(
+            "earlier: {} kills sent {mean:.0} ticks sooner on average (min {}, max {})",
+            saved.len(),
+            saved.iter().min().unwrap_or(&0),
+            saved.iter().max().unwrap_or(&0)
+        );
+    }
+    println!(
+        "skipped {skipped}: thawed by itself {thawed}, died by itself {died}, killed later {later}, STILL FROZEN at the clip's end {still}, free at the clip's end {ended}"
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `clip forecast`: the thaw forecast against what the clips show (task 4.12, `ddai_bot::kill_replay::forecast_samples`).
+fn forecast(files: &[PathBuf], cache: &Path) -> Result<ExitCode, String> {
+    use ddai_bot::kill_replay::forecast_samples;
+    const AGES: [i32; 4] = [25, 50, 75, 100];
+    let mut samples = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for f in files {
+        let c = read(f)?;
+        let name = f
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().to_string());
+        let bytes = ddai_client::map_cache::read_cached(cache, &c.header.map_name, &c.header.map_sha256)
+            .ok_or_else(|| format!("{name}: the map {} is not in {}", c.header.map_name, cache.display()))?;
+        let map = Arc::new(
+            ddai_map::load_map(&bytes)
+                .map_err(|e| format!("{}: {e}", c.header.map_name))?
+                .data,
+        );
+        for s in forecast_samples(&c, &map, &name, &AGES) {
+            // Clips overlap: one run is counted once.
+            if seen.insert((c.header.map_name.clone(), s.run_start, s.age)) {
+                samples.push(s);
+            }
+        }
+    }
+    println!(
+        "{:<44} {:>9} {:>4} {:>9} {:>7} {:>8}",
+        "clip", "run", "age", "predicted", "actual", "touched"
+    );
+    for s in &samples {
+        println!(
+            "{:<44} {:>9} {:>4} {:>9} {:>7} {:>8}",
+            s.clip,
+            s.run_start,
+            s.age,
+            if s.died {
+                "dies".to_string()
+            } else {
+                s.predicted.map_or("held".to_string(), |p| p.to_string())
+            },
+            s.actual,
+            if s.touched { "yes" } else { "no" }
+        );
+    }
+    for (label, touched) in [("untouched", false), ("touched (hooked or within 60 px)", true)] {
+        let set: Vec<_> = samples.iter().filter(|s| s.touched == touched).collect();
+        let finite: Vec<_> = set.iter().filter(|s| s.predicted.is_some() && !s.died).collect();
+        let within = finite
+            .iter()
+            .filter(|s| (s.predicted.unwrap_or(0) - s.actual).abs() <= 4)
+            .count();
+        let later = finite
+            .iter()
+            .filter(|s| s.actual > s.predicted.unwrap_or(0) + 4)
+            .count();
+        let earlier = finite
+            .iter()
+            .filter(|s| s.actual < s.predicted.unwrap_or(0) - 4)
+            .count();
+        let held = set.iter().filter(|s| s.predicted.is_none() && !s.died).count();
+        let dies = set.iter().filter(|s| s.died).count();
+        println!(
+            "{label}: {} probes of thawed runs: forecast within 4 ticks {within}, thawed later than forecast {later}, earlier {earlier}; forecast `held` (never) {held}, `dies` {dies}",
+            set.len()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }

@@ -22,7 +22,9 @@ use ddai_physics::vmath::Vec2;
 use crate::consts::*;
 use crate::mapgrid::MapGrid;
 use crate::players::PlayerTable;
+use crate::smartkill::{self, Call, FrozenFacts, SelfKillPolicy, SmartWhy, WedgedFacts};
 use crate::tees::{Tee, TeeSet, dist};
+use ddai_planner::forecast::Forecast;
 
 const NEVER: i32 = i32::MIN / 2;
 
@@ -58,6 +60,12 @@ pub struct UnstickCtx<'a> {
     pub in_dead_zone: bool,
     /// `WayBlock::wants_kill`.
     pub wayblock_wants_kill: bool,
+    /// Task 4.12 (the smart policy only): the passive forecast of our tee ([`Unstick::wants_forecast`] says when it is worth making).
+    pub forecast: Option<Forecast>,
+    /// Task 4.12: what a kill costs in ticks ([`smartkill::kill_cost_ticks`]).
+    pub cost_ticks: i32,
+    /// Task 4.12: a block of ours is being held ([`crate::activity::ActivityClock::holding_block`]).
+    pub holding_block: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +82,15 @@ pub struct Unstick {
     kills: u32,
     /// `--no-selfkill` (D-102): no kill verdict is ever returned and nothing is recorded as fired (the cooldown is not started).
     no_kill: bool,
+    /// Task 4.12 (`--selfkill-policy`).
+    policy: SelfKillPolicy,
+    /// The smart policy held back a kill the legacy timers would have sent: `(tick, why)`, taken by [`Unstick::take_skip`].
+    skip: Option<(i32, SmartWhy)>,
+    last_skip_tick: i32,
+    /// The why of the last kill verdict of the smart policy.
+    last_why: Option<SmartWhy>,
+    /// The smart policy's call at the last [`Unstick::step`] that judged a frozen tee (for the replay tool's trace).
+    last_call: Option<Call>,
 }
 
 impl Default for Unstick {
@@ -90,6 +107,57 @@ impl Unstick {
             last_kill_tick: NEVER,
             kills: 0,
             no_kill: false,
+            policy: SelfKillPolicy::Legacy,
+            skip: None,
+            last_skip_tick: NEVER,
+            last_why: None,
+            last_call: None,
+        }
+    }
+
+    /// `--selfkill-policy` (task 4.12, D-108).
+    pub fn set_policy(&mut self, policy: SelfKillPolicy) {
+        self.policy = policy;
+    }
+
+    pub fn policy(&self) -> SelfKillPolicy {
+        self.policy
+    }
+
+    /// Whether the smart policy needs the passive forecast of our tee at `tick` (it is frozen long enough for a kill to be asked for).
+    /// Not asked for when no kill could be sent anyway (the duel switch is on, or the kill cooldown still runs: 500 ticks, the wayblock
+    /// request's own 100 when `wb_request`), so a frozen bot in a duel pays nothing for the policy (review 4.12, F4).
+    pub fn wants_forecast(&self, tick: i32, own: &Tee, wb_request: bool) -> bool {
+        self.policy.is_smart()
+            && !self.no_kill
+            && (if wb_request {
+                tick - self.last_kill_tick >= WB_KILL_COOLDOWN_TICKS
+            } else {
+                self.cooldown_ready(tick)
+            })
+            && own.frozen
+            && self.frozen_for(tick, own) >= WB_LYING_TICKS
+    }
+
+    /// A kill the smart policy held back since the last call (rate limited: one per 100 ticks), for the log.
+    pub fn take_skip(&mut self) -> Option<(i32, SmartWhy)> {
+        self.skip.take()
+    }
+
+    /// The smart policy's call at the last step (`None`: not judged: not frozen, cooldown, the duel switch).
+    pub fn last_call(&self) -> Option<Call> {
+        self.last_call
+    }
+
+    /// Why the smart policy sent the last kill verdict (`None` for the legacy policy).
+    pub fn last_why(&self) -> Option<SmartWhy> {
+        self.last_why
+    }
+
+    fn note_skip(&mut self, tick: i32, why: SmartWhy) {
+        if tick - self.last_skip_tick >= 100 {
+            self.last_skip_tick = tick;
+            self.skip = Some((tick, why));
         }
     }
 
@@ -144,6 +212,8 @@ impl Unstick {
 
     pub fn step(&mut self, c: &UnstickCtx<'_>) -> Verdict {
         let (tick, me) = (c.tick, c.own);
+        self.last_why = None;
+        self.last_call = None;
         if !me.frozen {
             self.frozen_since = -1;
         } else if self.frozen_since < 0 {
@@ -172,18 +242,21 @@ impl Unstick {
         let hooked = c.tees.iter().any(|o| o.id != me.id && o.hooked_player == me.id);
         let trapped = !hooked && c.in_dead_zone;
         let helped = helper_near(me, c.tees, c.players);
-        let overdue = (frozen_for >= FROZEN_HARD_LIMIT_TICKS
+        let overdue_raw = frozen_for >= FROZEN_HARD_LIMIT_TICKS
             || (in_tiles && !hooked && frozen_for >= FROZEN_IN_TILE_TICKS)
-            || (trapped && frozen_for >= TRAPPED_TICKS))
-            && (!helped || frozen_for >= HELPED_LIMIT_TICKS);
+            || (trapped && frozen_for >= TRAPPED_TICKS);
+        let overdue = overdue_raw && (!helped || frozen_for >= HELPED_LIMIT_TICKS);
+        let smart = self.policy.is_smart();
 
-        if c.wayblock_wants_kill && !self.no_kill && tick - self.last_kill_tick >= WB_KILL_COOLDOWN_TICKS {
-            self.fire(tick, true);
-            return Verdict::Kill(KillReason::WayBlockLying);
-        }
-        if overdue && !self.no_kill && self.cooldown_ready(tick) {
-            self.fire(tick, true);
-            return Verdict::Kill(KillReason::Overdue);
+        if !smart || !me.frozen {
+            if c.wayblock_wants_kill && !self.no_kill && tick - self.last_kill_tick >= WB_KILL_COOLDOWN_TICKS {
+                self.fire(tick, true);
+                return Verdict::Kill(KillReason::WayBlockLying);
+            }
+            if overdue && !self.no_kill && self.cooldown_ready(tick) {
+                self.fire(tick, true);
+                return Verdict::Kill(KillReason::Overdue);
+            }
         }
 
         let anchor_moved = match self.anchor {
@@ -196,10 +269,17 @@ impl Unstick {
                 tick,
                 frozen: me.frozen,
             });
-            return Verdict::None;
+            if !(smart && me.frozen) {
+                return Verdict::None;
+            }
         }
         let anchor = self.anchor.expect("anchor is set: anchor_moved was false");
         let stuck_ticks = tick - anchor.tick;
+
+        if smart && me.frozen {
+            return self.smart_frozen(c, frozen_for, overdue_raw, stuck_ticks, hooked);
+        }
+
         if stuck_ticks
             < if me.frozen {
                 STUCK_FROZEN_TICKS
@@ -228,8 +308,73 @@ impl Unstick {
         if self.no_kill || !self.cooldown_ready(tick) {
             return Verdict::None;
         }
+        if smart {
+            // A free tee wedged for the legacy window: killed unless a block of ours is being held.
+            let call = smartkill::judge_wedged(&WedgedFacts {
+                holding_block: c.holding_block,
+            });
+            if !call.is_kill() {
+                self.note_skip(tick, call.why());
+                return Verdict::None;
+            }
+            self.last_why = Some(call.why());
+        }
         self.fire(tick, false);
         Verdict::Kill(KillReason::Stuck)
+    }
+
+    /// The smart policy for a frozen tee (task 4.12): the legacy timers as upper bounds, [`smartkill::judge_frozen`] in between.
+    fn smart_frozen(
+        &mut self,
+        c: &UnstickCtx<'_>,
+        frozen_for: i32,
+        overdue_raw: bool,
+        stuck_ticks: i32,
+        hooked: bool,
+    ) -> Verdict {
+        let (tick, me) = (c.tick, c.own);
+        let wb_request = c.wayblock_wants_kill;
+        let stuck_due = stuck_ticks >= STUCK_FROZEN_TICKS && !hooked && c.grid.is_freeze(me.pos.x, me.pos.y);
+        let legacy_due = wb_request || overdue_raw || stuck_due;
+        let cooldown_ok = if wb_request {
+            tick - self.last_kill_tick >= WB_KILL_COOLDOWN_TICKS
+        } else {
+            self.cooldown_ready(tick)
+        };
+        if self.no_kill || !cooldown_ok {
+            return Verdict::None;
+        }
+        let (hooked_by_helper, hooked_by_any, helper_in_reach) = rescuers(me, c.tees, c.players);
+        let call = smartkill::judge_frozen(&FrozenFacts {
+            frozen_for,
+            wb_request,
+            legacy_due,
+            hooked_by_helper,
+            hooked_by_any,
+            helper_in_reach,
+            deep_frozen: me.deep_frozen,
+            trapped: !hooked && c.in_dead_zone,
+            forecast: c.forecast,
+            cost_ticks: c.cost_ticks,
+        });
+        self.last_call = Some(call);
+        match call {
+            Call::Kill(why) => {
+                self.last_why = Some(why);
+                self.fire(tick, true);
+                Verdict::Kill(if wb_request {
+                    KillReason::WayBlockLying
+                } else {
+                    KillReason::Overdue
+                })
+            }
+            Call::Wait(why) => {
+                if legacy_due && why != SmartWhy::TooEarly {
+                    self.note_skip(tick, why);
+                }
+                Verdict::None
+            }
+        }
     }
 
     fn fire(&mut self, tick: i32, reset_frozen: bool) {
@@ -240,6 +385,26 @@ impl Unstick {
         }
         self.kills += 1;
     }
+}
+
+/// Task 4.12: who could pull a frozen tee out: `(a friend hooks us, somebody hooks us, a friend is within hook reach)`. A friend is a
+/// helper tee ([`crate::players::PlayerSlot::flags`]: friend, ignored, clan friend), alive, unfrozen and not AFK or paused.
+pub fn rescuers(me: &Tee, tees: &TeeSet, players: &PlayerTable) -> (bool, bool, bool) {
+    let (mut by_helper, mut by_any, mut near) = (false, false, false);
+    for o in tees.iter().filter(|o| o.id != me.id) {
+        let slot = players.get(o.id);
+        let helper = slot.is_some_and(|s| s.flags.helper());
+        if o.hooked_player == me.id {
+            by_any = true;
+            by_helper |= helper;
+        }
+        // A friend who is AFK or paused is no help.
+        let active = slot.is_some_and(|s| !s.server_afk() && !s.not_playing());
+        if helper && active && !o.frozen && dist(o.pos, me.pos) <= smartkill::RESCUE_REACH_PX {
+            near = true;
+        }
+    }
+    (by_helper, by_any, near)
 }
 
 /// `helperNear` (`bot.ts:4418-4432`): a friend/ignored/clan-friend tee, alive, unfrozen, within
@@ -319,10 +484,38 @@ mod tests {
                 acting,
                 in_dead_zone: dead,
                 wayblock_wants_kill: wb,
+                forecast: None,
+                cost_ticks: 100,
+                holding_block: false,
             })
         }
         fn step(&mut self, tick: i32, target: i32) -> Verdict {
             self.step_with(tick, target, true, false, false)
+        }
+        /// A smart-policy step: `forecast` is what the physics says, `dead` the dead zone, `holding` a block being held.
+        fn step_smart(
+            &mut self,
+            tick: i32,
+            target: i32,
+            forecast: Option<Forecast>,
+            dead: bool,
+            holding: bool,
+        ) -> Verdict {
+            let own = *self.tees.get(0).unwrap();
+            self.u.step(&UnstickCtx {
+                tick,
+                own: &own,
+                tees: &self.tees,
+                players: &self.players,
+                grid: &self.grid,
+                target,
+                acting: true,
+                in_dead_zone: dead,
+                wayblock_wants_kill: false,
+                forecast,
+                cost_ticks: 100,
+                holding_block: holding,
+            })
         }
     }
 
@@ -579,5 +772,275 @@ mod tests {
         let without = run(false);
         assert!(without.is_some_and(|t| t >= 1202), "control: {without:?}");
         assert_eq!(run(true), without);
+    }
+
+    // ---- task 4.12 (D-108): the smart policy -------------------------------------------------------------------------
+
+    fn held() -> Option<Forecast> {
+        Some(Forecast {
+            free_in: None,
+            died: false,
+            steps: 1,
+        })
+    }
+
+    fn thaws_in(t: i32) -> Option<Forecast> {
+        Some(Forecast {
+            free_in: Some(t),
+            died: false,
+            steps: 1,
+        })
+    }
+
+    /// First kill tick of a frozen tee sampled every 2 ticks from 0 under the smart policy.
+    fn smart_first_kill(f: &mut F, to: i32, forecast: Option<Forecast>, dead: bool) -> Option<(i32, Option<SmartWhy>)> {
+        for tick in (0..=to).step_by(2) {
+            if let Verdict::Kill(_) = f.step_smart(tick, 1, forecast, dead, false) {
+                return Some((tick, f.u.last_why()));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn smart_kills_a_tee_resting_in_the_freeze_at_50_ticks_where_legacy_waits_for_200() {
+        let mut f = F::new();
+        f.u.set_policy(SelfKillPolicy::Smart);
+        f.set_frozen(true);
+        assert_eq!(
+            smart_first_kill(&mut f, 400, held(), false),
+            Some((50, Some(SmartWhy::NoExit)))
+        );
+        // Legacy, same tee: 200 (frozen_in_the_tiles_kills_after_200_ticks_not_before).
+    }
+
+    #[test]
+    fn smart_does_not_kill_a_tee_whose_freeze_runs_out_soon_even_past_the_legacy_timer() {
+        let mut f = F::new();
+        f.u.set_policy(SelfKillPolicy::Smart);
+        f.set_frozen(true);
+        // On the freeze tile the legacy timer is due at 200; the forecast says it thaws in 60 ticks (forever, in this synthetic run):
+        // the smart policy holds back until the 400-tick upper bound and says why, once per 100 ticks.
+        let mut skips = Vec::new();
+        let mut killed = None;
+        for tick in (0..=500).step_by(2) {
+            if let Verdict::Kill(_) = f.step_smart(tick, 1, thaws_in(60), false, false) {
+                killed = Some(tick);
+                break;
+            }
+            if let Some(s) = f.u.take_skip() {
+                skips.push(s);
+            }
+        }
+        assert_eq!(killed, Some(400), "FROZEN_HARD_LIMIT_TICKS is the upper bound");
+        assert_eq!(
+            skips,
+            vec![(200, SmartWhy::ThawSoon), (300, SmartWhy::ThawSoon)],
+            "one line per 100 ticks, from the legacy 200"
+        );
+        assert_eq!(f.u.last_why(), Some(SmartWhy::UpperBound));
+    }
+
+    #[test]
+    fn smart_without_a_forecast_falls_back_to_the_legacy_timers() {
+        let mut f = F::new();
+        f.u.set_policy(SelfKillPolicy::Smart);
+        f.set_frozen(true);
+        assert_eq!(
+            smart_first_kill(&mut f, 400, None, false),
+            Some((200, Some(SmartWhy::UpperBound)))
+        );
+    }
+
+    #[test]
+    fn smart_kills_in_the_dead_zone_at_the_floor_even_if_the_tee_would_thaw() {
+        let mut f = F::new();
+        f.u.set_policy(SelfKillPolicy::Smart);
+        f.put(0, 2.0 * 32.0 + 16.0, 2.0 * 32.0 + 16.0, true);
+        assert_eq!(
+            smart_first_kill(&mut f, 400, thaws_in(20), true),
+            Some((50, Some(SmartWhy::DeadZone)))
+        );
+    }
+
+    #[test]
+    fn smart_waits_for_a_friend_within_hook_reach_and_for_a_hooking_one() {
+        let mut rel = Relations::new();
+        rel.add(ListKind::Friend, "pal");
+        for hook in [false, true] {
+            let mut f = F::new();
+            f.u.set_policy(SelfKillPolicy::Smart);
+            f.players.update(
+                &[
+                    player(0, "me", "", true, 0, Some(0)),
+                    player(1, "other", "", false, 0, Some(0)),
+                    player(2, "pal", "", false, 0, Some(0)),
+                ],
+                &rel,
+            );
+            f.set_frozen(true);
+            f.put(2, 5.0 * 32.0 + 16.0 + 300.0, 5.0 * 32.0 + 16.0, false); // beyond the legacy 140 px, within the hook's reach
+            if hook {
+                let mut p = *f.tees.get(2).unwrap();
+                p.hooked_player = 0;
+                f.tees.set_for_test(p);
+            }
+            if hook {
+                assert_eq!(smart_first_kill(&mut f, 1498, held(), false), None, "a hooking friend");
+                assert!(
+                    matches!(
+                        smart_first_kill(&mut f, 1502, held(), false),
+                        Some((1500, Some(SmartWhy::UpperBound)))
+                    ),
+                    "HELPED_LIMIT_TICKS"
+                );
+            } else {
+                // Review 4.12 F3: a friend merely in reach is a grace of FRIEND_GRACE_TICKS, then the hopeless freeze is killed.
+                assert_eq!(
+                    smart_first_kill(&mut f, 1502, held(), false),
+                    Some((200, Some(SmartWhy::NoExit))),
+                    "a friend who does not hook"
+                );
+            }
+        }
+    }
+
+    /// Review 4.12 F4: the forecast is asked for only when a kill could go out (round 2: exactly, the wayblock request has its own 100).
+    #[test]
+    fn the_forecast_is_asked_for_only_when_a_kill_could_be_sent() {
+        let mut f = F::new();
+        f.set_frozen(true);
+        f.u.set_policy(SelfKillPolicy::Smart);
+        let own = *f.tees.get(0).unwrap();
+        // Frozen 40 ticks, no forecast given: nothing fires (the floor is 50).
+        for t in (0..=40).step_by(2) {
+            assert_eq!(f.step_smart(t, 1, None, false, false), Verdict::None);
+        }
+        assert!(
+            f.u.wants_forecast(40, &own, false),
+            "frozen 40 ticks, no switch, no cooldown"
+        );
+        f.u.set_no_kill(true);
+        assert!(!f.u.wants_forecast(40, &own, false), "the duel switch is on");
+        assert!(
+            !f.u.wants_forecast(40, &own, true),
+            "the duel switch is on, wayblock request too"
+        );
+        f.u.set_no_kill(false);
+        // A kill at 50 starts the cooldown; the clock runs again from the next step.
+        assert!(matches!(f.step_smart(50, 1, held(), false, false), Verdict::Kill(_)));
+        for t in (52..=148).step_by(2) {
+            f.step_smart(t, 1, None, false, false);
+            assert!(
+                !f.u.wants_forecast(t, &own, false),
+                "tick {t}: the cooldown (500) still runs"
+            );
+            assert!(
+                !f.u.wants_forecast(t, &own, true),
+                "tick {t}: the wayblock's 100 still runs"
+            );
+        }
+        f.step_smart(150, 1, None, false, false);
+        assert!(!f.u.wants_forecast(150, &own, false), "500 not over");
+        assert!(
+            f.u.wants_forecast(150, &own, true),
+            "the wayblock request's 100 is over"
+        );
+        assert!(!f.u.wants_forecast(549, &own, false), "499 ticks since the kill");
+        assert!(f.u.wants_forecast(550, &own, false), "500 over");
+        // The legacy policy never asks.
+        let mut g = F::new();
+        g.set_frozen(true);
+        for t in (0..=60).step_by(2) {
+            g.step(t, 1);
+        }
+        let own = *g.tees.get(0).unwrap();
+        assert!(!g.u.wants_forecast(60, &own, false), "legacy policy");
+    }
+
+    #[test]
+    fn an_afk_friend_is_no_rescuer() {
+        use ddai_net::generated::enums::explayerflagflag::AFK;
+        let mut rel = Relations::new();
+        rel.add(ListKind::Friend, "pal");
+        let mut f = F::new();
+        f.u.set_policy(SelfKillPolicy::Smart);
+        f.players.update(
+            &[
+                player(0, "me", "", true, 0, Some(0)),
+                player(1, "other", "", false, 0, Some(0)),
+                player(2, "pal", "", false, 0, Some(AFK)),
+            ],
+            &rel,
+        );
+        f.set_frozen(true);
+        f.put(2, 5.0 * 32.0 + 16.0 + 300.0, 5.0 * 32.0 + 16.0, false);
+        assert_eq!(smart_first_kill(&mut f, 400, held(), false).map(|k| k.0), Some(50));
+    }
+
+    #[test]
+    fn smart_lets_a_wedged_free_tee_hold_a_block_but_kills_it_otherwise() {
+        for holding in [true, false] {
+            let mut f = F::new();
+            f.u.set_policy(SelfKillPolicy::Smart);
+            f.put(0, 2.0 * 32.0 + 16.0, 2.0 * 32.0 + 16.0, false);
+            let mut kill = None;
+            for tick in (0..=600).step_by(2) {
+                if let Verdict::Kill(KillReason::Stuck) = f.step_smart(tick, 1, None, false, holding) {
+                    kill = Some(tick);
+                    break;
+                }
+            }
+            assert_eq!(kill, if holding { None } else { Some(200) }, "holding {holding}");
+            if holding {
+                assert_eq!(f.u.take_skip().map(|s| s.1), Some(SmartWhy::HoldingBlock));
+            }
+        }
+    }
+
+    #[test]
+    fn the_duel_switch_beats_the_smart_policy_too() {
+        let mut f = F::new();
+        f.u.set_policy(SelfKillPolicy::Smart);
+        f.u.set_no_kill(true);
+        f.set_frozen(true);
+        for tick in (0..2000).step_by(2) {
+            assert_eq!(f.step_smart(tick, 1, held(), true, false), Verdict::None, "tick {tick}");
+        }
+        assert_eq!(f.u.kills(), 0);
+        assert!(f.u.cooldown_ready(2000));
+    }
+
+    #[test]
+    fn the_smart_policy_keeps_the_500_tick_cooldown() {
+        let mut f = F::new();
+        f.u.set_policy(SelfKillPolicy::Smart);
+        f.set_frozen(true);
+        let mut kills = Vec::new();
+        for tick in (0..=1600).step_by(2) {
+            if let Verdict::Kill(_) = f.step_smart(tick, 1, held(), false, false) {
+                kills.push(tick);
+            }
+        }
+        assert!(kills.len() >= 2 && kills[0] == 50, "{kills:?}");
+        for w in kills.windows(2) {
+            assert!(w[1] - w[0] >= KILL_COOLDOWN_TICKS, "{kills:?}");
+        }
+    }
+
+    #[test]
+    fn the_legacy_policy_ignores_the_smart_inputs() {
+        let mut f = F::new();
+        f.set_frozen(true);
+        // Same tee as the smart test above, legacy: a held forecast does not make it earlier, a thaw soon does not make it later.
+        for fc in [held(), thaws_in(5), None] {
+            let mut g = F::new();
+            g.set_frozen(true);
+            let first = (0..=400)
+                .step_by(2)
+                .find(|&t| matches!(g.step_smart(t, 1, fc, false, true), Verdict::Kill(_)));
+            assert_eq!(first, Some(200));
+        }
+        assert_eq!(f.u.policy(), SelfKillPolicy::Legacy);
     }
 }

@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 /// The marker file name inside `<data-dir>/bot/`.
 pub const SELFKILL_OFF_MARKER: &str = "selfkill.off";
 
+/// Task 4.12 (D-108): the marker file that turns the automatic duel detection off, `<data-dir>/bot/duel-detect.off`. It is read exactly like
+/// `selfkill.off` (same [`SelfKillSwitch`], once a second, an unreadable marker counts as present) but with the opposite fail-safe in mind: its
+/// presence means "do not look for a duel", so a stuck bot can always be freed without a restart or SSH to the unit.
+pub const DUEL_DETECT_OFF_MARKER: &str = "duel-detect.off";
+
 /// How often the marker is looked at.
 pub const RECHECK_EVERY: Duration = Duration::from_secs(1);
 

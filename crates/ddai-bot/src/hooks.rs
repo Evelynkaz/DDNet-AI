@@ -92,6 +92,9 @@ pub trait Navigator {
     /// `--no-selfkill` (D-102): from now on no route or trek may contain a respawn (kill) step and the navigation never asks for a kill.
     /// Called at the start and whenever the switch changes.
     fn set_no_selfkill(&mut self, _off: bool) {}
+    /// `--selfkill-policy smart` (task 4.12, D-108): plan a route on foot first, a respawn (kill) step only when no such route exists.
+    /// Called once, at the start.
+    fn set_kill_last(&mut self, _on: bool) {}
     /// A new map was loaded.
     fn on_map(&mut self, _map: &Arc<MapData>, _ident: &MapIdent) {}
     /// The map is being replaced: forget what only made sense on it (a goto, a trek, the home), save.

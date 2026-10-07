@@ -419,7 +419,7 @@ fn routes_and_treks_needing_a_respawn_are_unavailable_without_allow_kill() {
 #[test]
 fn a_navigator_without_allow_kill_never_asks_for_a_respawn() {
     use ddai_nav::navigator::{NavCtx, NavOpts, Navigator, tile_goal};
-    let run = |allow_kill: bool| -> (bool, Vec<String>) {
+    let run = |allow_kill: bool, kill_last: bool| -> (bool, Vec<String>) {
         let (mut w, spawns) = walled_room_with_spawn();
         let mut router = Router::new(w.collision(), &spawns);
         w.add_tee(
@@ -432,6 +432,7 @@ fn a_navigator_without_allow_kill_never_asks_for_a_respawn() {
         let goal = tile_goal(w.collision(), 35, 10);
         let mut nav: Navigator<PhysicsWorld> = Navigator::new(vec![goal], NavOpts::default());
         nav.set_allow_kill(allow_kill);
+        nav.set_kill_last(kill_last);
         let template = w.new_scratch();
         let mut make = move || template.new_scratch();
         let (mut asked, mut notes) = (false, Vec::new());
@@ -458,8 +459,114 @@ fn a_navigator_without_allow_kill_never_asks_for_a_respawn() {
         }
         (asked, notes)
     };
-    let (asked_on, _) = run(true);
+    let (asked_on, _) = run(true, false);
     assert!(asked_on, "control: with allow_kill the navigator asks for the respawn");
-    let (asked_off, notes) = run(false);
+    let (asked_off, notes) = run(false, false);
     assert!(!asked_off, "no respawn asked for: {notes:?}");
+    // Task 4.12: kill_last only reorders the search; when nothing but the respawn gets there, the navigator still asks for it.
+    let (asked_last, notes) = run(true, true);
+    assert!(
+        asked_last,
+        "walled off: the respawn is the last resort and it is asked for: {notes:?}"
+    );
+    let (asked_last_off, _) = run(false, true);
+    assert!(!asked_last_off, "kill_last never overrides allow_kill");
+}
+
+// --- task 4.12 (D-108): `--selfkill-policy smart` plans a respawn only when no route on foot exists --------------------------------
+
+/// A long open floor with a spawn next to the goal: the cheapest route is a respawn (cost 60), but a way on foot exists.
+fn long_floor_with_spawn_at_the_goal() -> (PhysicsWorld, Vec<(f64, f64)>) {
+    (
+        world(room(120, 12, &[])),
+        vec![(112.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0)],
+    )
+}
+
+#[test]
+fn kill_last_takes_the_route_on_foot_when_there_is_one_and_the_respawn_when_there_is_not() {
+    use ddai_nav::route::{MoveKind, RouteOpts};
+    let opts = RouteOpts {
+        near_tiles: 2,
+        allow_kill: true,
+        ..RouteOpts::default()
+    };
+    let has_kill = |r: &ddai_nav::route::RouteResult| r.steps.iter().any(|s| s.kind == MoveKind::Kill);
+
+    let (w, spawns) = long_floor_with_spawn_at_the_goal();
+    let mut router = Router::new(w.collision(), &spawns);
+    let from = (5.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0);
+    let to = (115.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0);
+    let cheapest = router.find_route(from, to, &opts).expect("a route");
+    assert!(
+        has_kill(&cheapest),
+        "control: the cheapest route respawns at the far spawn"
+    );
+    let kill_last = router.find_route_kill_last(from, to, &opts, true).expect("a route");
+    assert!(!has_kill(&kill_last), "a way on foot exists: no respawn step");
+    assert!(
+        kill_last.cost > cheapest.cost,
+        "and it is the dearer one: {} vs {}",
+        kill_last.cost,
+        cheapest.cost
+    );
+    let off = router.find_route_kill_last(from, to, &opts, false).expect("a route");
+    assert!(
+        has_kill(&off) && off.cost == cheapest.cost,
+        "kill_last off is `find_route`"
+    );
+
+    // Walled off: only the respawn gets there, with or without kill_last.
+    let (w, spawns) = walled_room_with_spawn();
+    let mut router = Router::new(w.collision(), &spawns);
+    let from = (5.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0);
+    let to = (35.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0);
+    let r = router
+        .find_route_kill_last(from, to, &opts, true)
+        .expect("the respawn gets there");
+    assert!(
+        has_kill(&r),
+        "no foot route: the respawn is the last resort and it is taken"
+    );
+    // Without allow_kill, kill_last changes nothing.
+    let no_kill = RouteOpts {
+        allow_kill: false,
+        ..opts.clone()
+    };
+    let a = router.find_route_kill_last(from, to, &no_kill, true);
+    let b = router.find_route(from, to, &no_kill);
+    assert_eq!(a.is_some(), b.is_some());
+}
+
+#[test]
+fn a_trek_with_kill_last_walks_when_it_can_and_respawns_when_it_must() {
+    use ddai_nav::route::MoveKind;
+    let avoid = HashSet::new();
+    let (w, spawns) = long_floor_with_spawn_at_the_goal();
+    let mut router = Router::new(w.collision(), &spawns);
+    let start = Vec2 {
+        x: 5.0 * 32.0 + 16.0,
+        y: 10.0 * 32.0 + 16.0,
+    };
+    let to = (115.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0);
+    let legacy = Trek::start_with_policy(&mut router, w.collision(), start, to, &avoid, 0, true, false).expect("trek");
+    assert!(legacy.steps.iter().any(|s| s.kind == MoveKind::Kill), "control");
+    let smart = Trek::start_with_policy(&mut router, w.collision(), start, to, &avoid, 0, true, true).expect("trek");
+    assert!(
+        smart.steps.iter().all(|s| s.kind != MoveKind::Kill),
+        "a way on foot: no respawn step"
+    );
+
+    let (w, spawns) = walled_room_with_spawn();
+    let mut router = Router::new(w.collision(), &spawns);
+    let start = Vec2 {
+        x: 5.0 * 32.0 + 16.0,
+        y: 10.0 * 32.0 + 16.0,
+    };
+    let to = (35.0 * 32.0 + 16.0, 10.0 * 32.0 + 16.0);
+    let t = Trek::start_with_policy(&mut router, w.collision(), start, to, &avoid, 0, true, true).expect("trek");
+    assert!(
+        t.steps.iter().any(|s| s.kind == MoveKind::Kill),
+        "walled off: the respawn is the only way"
+    );
 }

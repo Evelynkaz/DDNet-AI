@@ -583,6 +583,30 @@ impl Router {
         self.heap.dropped
     }
 
+    /// Task 4.12 (`--selfkill-policy smart`): [`Router::find_route`], but a respawn (`kill`) step is the last resort. With `kill_last`
+    /// and `opts.allow_kill`, a full route on foot (walk, fall, jump, hook) is looked for first and taken when there is one, however
+    /// much dearer than a respawn it is; only without one is the search of `opts` run (which may use a respawn, or settle for a
+    /// partial route when `opts.partial`). Without `kill_last` this is exactly [`Router::find_route`].
+    pub fn find_route_kill_last(
+        &mut self,
+        from: (f64, f64),
+        to: (f64, f64),
+        opts: &RouteOpts<'_>,
+        kill_last: bool,
+    ) -> Option<RouteResult> {
+        if kill_last && opts.allow_kill {
+            let foot = RouteOpts {
+                allow_kill: false,
+                partial: false,
+                ..opts.clone()
+            };
+            if let Some(r) = self.find_route(from, to, &foot) {
+                return Some(r);
+            }
+        }
+        self.find_route(from, to, opts)
+    }
+
     /// `findRoute(collision, from, to, opts)` with positions in pixels.
     pub fn find_route(&mut self, from: (f64, f64), to: (f64, f64), opts: &RouteOpts<'_>) -> Option<RouteResult> {
         let avoid = opts.avoid.filter(|a| !a.is_empty());

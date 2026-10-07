@@ -292,6 +292,8 @@ struct Core {
     kill_wanted: bool,
     /// `--no-selfkill` (D-102): no route or trek with a respawn (kill) step, no kill asked for.
     no_selfkill: bool,
+    /// Task 4.12 (`--selfkill-policy smart`): a respawn step only when no route on foot exists.
+    kill_last: bool,
     /// The last `crossing()` / `planned_freeze()` of the running walk, for the clip frame.
     clip_crossing: bool,
     clip_planned: bool,
@@ -357,6 +359,7 @@ impl Core {
             dull_since: -1,
             kill_wanted: false,
             no_selfkill: false,
+            kill_last: false,
             clip_crossing: false,
             clip_planned: false,
             cross_fail: None,
@@ -597,6 +600,7 @@ impl Core {
         };
         let mut nav = TsNav::new(goals, opts);
         nav.set_allow_kill(!self.no_selfkill);
+        nav.set_kill_last(self.kill_last);
         self.nav = Some(nav);
         self.set_mode(Mode::Goto);
         self.touch_status();
@@ -1261,6 +1265,7 @@ impl Core {
                 let opts = self.nav_opts(true, None);
                 let mut nav = TsNav::new(vec![Self::follow_goal(g.0, g.1, &format!("c{id}"))], opts);
                 nav.set_allow_kill(!self.no_selfkill);
+                nav.set_kill_last(self.kill_last);
                 self.nav = Some(nav);
                 if self.nav.as_ref().is_some_and(|n| n.done()) {
                     FollowStep::Wait
@@ -1289,7 +1294,7 @@ impl Core {
             x: f64::from(ctx.own.pos.x),
             y: f64::from(ctx.own.pos.y),
         };
-        match TsTrek::start_with(
+        match TsTrek::start_with_policy(
             &mut ms.router,
             ms.world.collision(),
             from,
@@ -1297,6 +1302,7 @@ impl Core {
             &self.trek_avoid,
             i64::from(ctx.tick),
             allow_kill,
+            self.kill_last,
         ) {
             Ok(t) => {
                 let line = t.describe();
@@ -1407,7 +1413,7 @@ impl Core {
         let (tx, ty) = ((spot.x / 32.0).trunc() as i32, (spot.y / 32.0).trunc() as i32);
         let allow_kill = !self.no_selfkill;
         let Some(ms) = &mut self.ms else { return };
-        let way = ms.router.find_route(
+        let way = ms.router.find_route_kill_last(
             (f64::from(ctx.own.pos.x), f64::from(ctx.own.pos.y)),
             (spot.x, spot.y),
             &RouteOpts {
@@ -1418,6 +1424,7 @@ impl Core {
                 max_nodes: REACH_MAX_NODES,
                 ..RouteOpts::default()
             },
+            self.kill_last,
         );
         if way.is_none() {
             self.log(&format!(
@@ -1743,6 +1750,13 @@ impl Navigator for NavHook {
         c.no_selfkill = off;
         if let Some(n) = &mut c.nav {
             n.set_allow_kill(!off);
+        }
+    }
+    fn set_kill_last(&mut self, on: bool) {
+        let mut c = self.0.borrow_mut();
+        c.kill_last = on;
+        if let Some(n) = &mut c.nav {
+            n.set_kill_last(on);
         }
     }
     fn on_map(&mut self, map: &Arc<MapData>, ident: &MapIdent) {

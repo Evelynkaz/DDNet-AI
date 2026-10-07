@@ -38,6 +38,10 @@ pub struct Settings {
     /// `false` switches the owner's website chat off (task 4.9, D-094: the emergency switch; `--no-owner-chat` does the same for one run).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_chat: Option<bool>,
+    /// The first words of the owner's website lines that start a duel (task 4.12, D-108): sending one is evidence that a two-player DDRace team
+    /// is a duel. Case-insensitive; default `["/duel", "/1vs1"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duel_commands: Option<Vec<String>>,
 }
 
 /// `~/aiddnet/data/bot/settings.toml`.
@@ -58,6 +62,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "clan",
     "skin",
     "owner_chat",
+    "duel_commands",
 ];
 
 /// The top-level keys of the file at `path` that [`Settings`] does not know (a typo such as `owner-chat`), sorted. An unreadable or
@@ -285,6 +290,7 @@ mod tests {
             clan: Some("a".into()),
             skin: Some("a".into()),
             owner_chat: Some(true),
+            duel_commands: Some(vec!["/duel".into()]),
         };
         let table: toml::Table = toml::to_string(&full).unwrap().parse().unwrap();
         let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
@@ -308,6 +314,7 @@ mod tests {
             clan: Some("Neuroset".into()),
             skin: Some("pinky".into()),
             owner_chat: Some(false),
+            duel_commands: Some(vec!["/duel".into(), "/1vs1".into()]),
         };
         save(&path, &s).unwrap();
         assert_eq!(load(&path), Loaded::Ok(s));

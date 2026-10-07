@@ -161,6 +161,12 @@ impl ActivityClock {
         self.stats
     }
 
+    /// Task 4.12: a block of ours is being followed (made within [`HELD_BLOCK_TICKS`], not yet held for good, escaped or died): the smart
+    /// self-kill policy does not kill a tee that stands over a block it is holding.
+    pub fn holding_block(&self) -> bool {
+        self.held_watch.iter().any(|w| w.0 >= 0)
+    }
+
     /// The block events since the last call (oldest first).
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, BlockEvent> {
         self.events.drain(..)

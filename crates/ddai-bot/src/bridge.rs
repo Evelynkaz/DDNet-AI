@@ -277,6 +277,12 @@ pub struct StatusMessage {
     /// Additive since task 5.15 (D-103, D-104): `"on"` while the smart wayblock (`--wb-smart on`) is on, else `"off"` (the default). The
     /// site's «Бот» card shows it, so a launch that did not take (an old unit without `--wb-smart`) is visible.
     pub wb_smart: String,
+    /// Additive since task 4.12 (D-108): `true` while an F-DDrace `/1vs1` duel is detected (our DDRace team holds exactly one other
+    /// player **with F-DDrace evidence**: the server's `/1vs1` chat lines or a duel command the owner sent; or the server's accept line
+    /// alone, for a minute): the bot then kills nothing itself, and `selfkill` reads `"off"` whatever the owner's switch.
+    pub duel: bool,
+    /// Additive since task 4.12 (D-108): `"legacy"` (the fixed timers, the default) or `"smart"` (`--selfkill-policy smart`).
+    pub selfkill_policy: String,
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -816,6 +822,8 @@ mod tests {
             finish: "target".into(),
             selfkill: "off".into(),
             wb_smart: "on".into(),
+            duel: true,
+            selfkill_policy: "smart".into(),
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
@@ -827,6 +835,8 @@ mod tests {
         assert_eq!(v["finish"], "target");
         assert_eq!(v["selfkill"], "off");
         assert_eq!(v["wb_smart"], "on");
+        assert_eq!(v["duel"], true);
+        assert_eq!(v["selfkill_policy"], "smart");
     }
 
     #[test]

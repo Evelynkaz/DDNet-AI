@@ -64,6 +64,11 @@ pub struct TeeSpec {
     pub hooked_player: i32,
     pub hook_state: i32,
     pub direction: i32,
+    /// Ticks of freeze left when `frozen` (the snapshot's `freeze_end` is `tick + freeze_left`); a scenario that wants the freeze to
+    /// run down lowers it itself.
+    pub freeze_left: i32,
+    /// Deep frozen (`freeze_end == -1`).
+    pub deep: bool,
 }
 
 pub fn tee(id: i32, x: i32) -> TeeSpec {
@@ -78,6 +83,8 @@ pub fn tee(id: i32, x: i32) -> TeeSpec {
         hooked_player: -1,
         hook_state: 0,
         direction: 0,
+        freeze_left: 120,
+        deep: false,
     }
 }
 
@@ -129,7 +136,13 @@ pub fn character_view(t: &TeeSpec, tick: i32) -> CharacterView {
         },
         ddnet: Some(objects::DDNetCharacter {
             flags: 0,
-            freeze_end: if t.frozen { tick + 120 } else { 0 },
+            freeze_end: if t.deep {
+                -1
+            } else if t.frozen {
+                tick + t.freeze_left
+            } else {
+                0
+            },
             jumps: 2,
             tele_checkpoint: -1,
             strong_weak_id: t.id,
@@ -184,6 +197,8 @@ pub struct Scenario {
     pub pred_tick_fixed: Option<i32>,
     /// When the driver's next input is due, after the snapshot (`None`: immediately).
     pub next_input_in: Option<std::time::Duration>,
+    /// The DDRace teams message the snapshot carries (`None`: the server never sent one).
+    pub teams: Option<ddai_net::tuning::TeamsState>,
 }
 
 impl Scenario {
@@ -198,6 +213,7 @@ impl Scenario {
             pred_ahead: 3,
             pred_tick_fixed: None,
             next_input_in: Some(std::time::Duration::from_millis(15)),
+            teams: None,
         }
     }
 
@@ -216,7 +232,7 @@ impl Scenario {
             characters: self.tees.iter().map(|t| character_view(t, self.tick)).collect(),
             tuning: DEFAULT_TUNE_PARAMS,
             switch_states: Vec::new(),
-            teams: None,
+            teams: self.teams,
             projectiles: Vec::new(),
             players: self.players.iter().map(|p| player_view(p, self.own_id)).collect(),
             pred_tick: self.pred_tick_fixed.unwrap_or(self.tick + self.pred_ahead),

@@ -158,7 +158,23 @@ impl Trek {
         tick: i64,
         allow_kill: bool,
     ) -> Result<Trek, String> {
-        let mut route = router.find_route(
+        Self::start_with_policy(router, col, from, to, avoid, tick, allow_kill, false)
+    }
+
+    /// [`Trek::start_with`]; `kill_last` (task 4.12, `--selfkill-policy smart`): a route on foot is taken first, a respawn step only
+    /// when none reaches the goal ([`Router::find_route_kill_last`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_policy(
+        router: &mut Router,
+        col: &impl PlanCollision,
+        from: Vec2,
+        to: (f64, f64),
+        avoid: &HashSet<i32>,
+        tick: i64,
+        allow_kill: bool,
+        kill_last: bool,
+    ) -> Result<Trek, String> {
+        let mut route = router.find_route_kill_last(
             (from.x, from.y),
             to,
             &RouteOpts {
@@ -169,6 +185,7 @@ impl Trek {
                 avoid: Some(avoid),
                 ..RouteOpts::default()
             },
+            kill_last,
         );
         if let Some(r) = &route
             && let Some(end) = r.steps.last()

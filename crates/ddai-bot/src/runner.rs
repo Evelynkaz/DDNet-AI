@@ -232,6 +232,16 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     if let Some(why) = selfkill.state() {
         tracing::info!("self-kill: off ({})", why.name());
     }
+    // Task 4.12 (D-108): the automatic duel detection is switched off by `--no-duel-detect` or the marker `bot/duel-detect.off` (re-read once a
+    // second, so the owner can free a bot without a restart). The same one-second marker reader as the self-kill switch.
+    let mut duel_switch = SelfKillSwitch::new(!cfg.bot.duel_detect, cfg.bot.duel_detect_marker.clone(), Instant::now());
+    bot.set_duel_detect(duel_switch.state().is_none());
+    if let Some(why) = duel_switch.state() {
+        tracing::info!("duel detection: off ({})", why.name());
+    }
+    if bot.selfkill_policy().is_smart() {
+        tracing::info!("self-kill policy: smart (kill only when waiting costs more than a kill; D-108)");
+    }
     tracing::info!(
         server = %cfg.server,
         brain = bot.brain_name(),
@@ -293,6 +303,13 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
             match now_off {
                 Some(why) => tracing::info!("self-kill: off ({})", why.name()),
                 None => tracing::info!("self-kill: on (the marker is gone)"),
+            }
+        }
+        if let Some(now_off) = duel_switch.poll(Instant::now()) {
+            bot.set_duel_detect(now_off.is_none());
+            match now_off {
+                Some(why) => tracing::info!("duel detection: off ({})", why.name()),
+                None => tracing::info!("duel detection: on (the marker is gone)"),
             }
         }
         let first = client.recv_event(Duration::from_millis(20));
@@ -363,7 +380,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         if let Some(say) = owner_chat.poll(started.elapsed(), bot.is_connected()) {
             if say.text.as_str().starts_with('/') {
                 // A server command typed by the owner (4.9b, `/kill` among them) is not the `/kill` fallback of D-078.
-                bot.on_owner_command();
+                bot.on_owner_command(say.text.as_str());
             }
             client.owner_say(say);
         }
@@ -596,6 +613,8 @@ fn handle_event(
             // sender and any known name inside the text replaced by tags unless `--web-names`; the text is neither kept
             // nor logged by the bot, and the bot never answers (D-007).
             SessionEvent::GameMessage(GameMsg::SvChat(c)) => {
+                // Task 4.12: the F-DDrace `/1vs1` system lines (read, never kept or logged) are the duel detector's second signal.
+                bot.on_chat_line(c.client_id, &c.message);
                 if crate::killfallback::is_kill_protection_notice(c.client_id, &c.message) {
                     tracing::info!("the server dropped a Cl_Kill: kill protection");
                     bot.on_kill_protection_notice();
@@ -689,7 +708,24 @@ const DIAG_BLOCK_CLIPS: u32 = 12;
 
 fn log_event(e: &BotEvent) {
     match e {
-        BotEvent::Killed { tick, reason } => tracing::info!(tick, ?reason, "unstick: Cl_Kill"),
+        BotEvent::Killed { tick, reason, why } => match why {
+            Some(why) => tracing::info!(tick, ?reason, why = why.name(), "unstick: Cl_Kill (smart)"),
+            None => tracing::info!(tick, ?reason, "unstick: Cl_Kill"),
+        },
+        BotEvent::SelfKillSkipped { tick, why } => {
+            tracing::info!(
+                tick,
+                why = why.name(),
+                "self-kill skipped: a kill the legacy timers would send is not needed"
+            )
+        }
+        BotEvent::DuelStarted { tick, why } => tracing::warn!(
+            tick,
+            by = why.name(),
+            "duel: an F-DDrace 1vs1 is on: self-kill off until it ends (like --no-selfkill)"
+        ),
+        BotEvent::DuelEvidence { tick, len } => tracing::info!(tick, "duel evidence: owner command (len {len})"),
+        BotEvent::DuelEnded { tick } => tracing::info!(tick, "duel: the 1vs1 is over: self-kill as configured again"),
         BotEvent::Block { tick, victim } => tracing::info!(tick, victim, "block"),
         BotEvent::BlockedBy { tick, by } => tracing::info!(tick, by, "blocked by"),
         BotEvent::BlockHeld { tick, victim, died } => tracing::info!(tick, victim, died, "block held"),
@@ -783,6 +819,8 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         finish: finish_label(cfg.bot.finish, cfg.brain.hybrid_finish).to_string(),
         selfkill: if bot.no_selfkill() { "off" } else { "on" }.to_string(),
         wb_smart: if cfg.nav.wb_smart { "on" } else { "off" }.to_string(),
+        duel: bot.duel().is_some(),
+        selfkill_policy: bot.selfkill_policy().name().to_string(),
     }
 }
 

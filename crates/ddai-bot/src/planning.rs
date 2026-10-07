@@ -68,6 +68,14 @@ impl PlanScratch {
         }
     }
 
+    /// Task 4.12: the exact passive forecast of our own tee ([`ddai_planner::forecast::passive_forecast`]): in how many ticks it is free
+    /// again if nobody touches it and it gives no input; `None` for `free_in` = it stays out the whole `horizon` (deep freeze, resting
+    /// on a freeze tile). Every other tee is left out of the forecast.
+    pub fn own_forecast(&mut self, base: &World<f32>, id: i32, horizon: i32) -> ddai_planner::forecast::Forecast {
+        self.world.sync_from(base);
+        ddai_planner::forecast::passive_forecast(&mut self.world, id, horizon)
+    }
+
     /// `guard` (`bot.ts:2801-2820`). `predicted` is the world the wanted input takes effect in (our
     /// own in-flight inputs already applied — the TS rolled `lag` ticks with `prevInput` for that);
     /// `prev` is the input we last sent (the shield's "sent aim"). Returns the wanted action when

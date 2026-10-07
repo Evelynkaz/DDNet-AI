@@ -271,6 +271,8 @@ pub struct Navigator<W: PlanWorld> {
     kill_wanted: bool,
     /// Whether a planned route may use a respawn (kill) step; off, a route that needs one is unavailable ([`Navigator::set_allow_kill`]).
     allow_kill: bool,
+    /// Task 4.12 (`--selfkill-policy smart`): a respawn step only when no route on foot exists ([`Navigator::set_kill_last`]).
+    kill_last: bool,
     crossings: Vec<Crossing>,
     /// Wall-clock budget of the crossing search per step in ms (`crossBudgetMs`; 0 = none).
     pub cross_budget_ms: f64,
@@ -321,6 +323,7 @@ impl<W: PlanWorld> Navigator<W> {
             walk_routed: false,
             kill_wanted: false,
             allow_kill: true,
+            kill_last: false,
             crossings: if through_freeze { opts.crossings } else { Vec::new() },
             cross_budget_ms: 0.0,
             wall_route: false,
@@ -363,6 +366,11 @@ impl<W: PlanWorld> Navigator<W> {
     /// `--no-selfkill`); a route already running keeps its steps (the bot does not send the kill, the runner then replans).
     pub fn set_allow_kill(&mut self, allow: bool) {
         self.allow_kill = allow;
+    }
+    /// Task 4.12 (`--selfkill-policy smart`): plan a route on foot first; a respawn step is used only when none exists. Off (the default):
+    /// the cheapest route wins, a respawn (cost 60) included.
+    pub fn set_kill_last(&mut self, on: bool) {
+        self.kill_last = on;
     }
     pub fn vetoed(&mut self) {
         if let Some(r) = &mut self.runner {
@@ -571,7 +579,7 @@ impl<W: PlanWorld> Navigator<W> {
             let here = dist_at(&field, tile_of(me.pos.x), tile_of(me.pos.y));
             self.field = Some(field);
             if here >= UNREACHABLE || self.walk_routed {
-                let route = ctx.router.find_route(
+                let route = ctx.router.find_route_kill_last(
                     (me.pos.x, me.pos.y),
                     (centre_of(goal.tx), centre_of(goal.ty)),
                     &RouteOpts {
@@ -581,6 +589,7 @@ impl<W: PlanWorld> Navigator<W> {
                         avoid: Some(&self.avoid),
                         ..RouteOpts::default()
                     },
+                    self.kill_last,
                 );
                 match route {
                     Some(r) if !r.steps.is_empty() => {
@@ -716,7 +725,7 @@ impl<W: PlanWorld> Navigator<W> {
         if self.probe_until < 0 && tick - self.window_start >= self.stall_ticks {
             if self.window_best >= self.window_ref && !self.walk_routed {
                 self.walk_routed = true;
-                let route = ctx.router.find_route(
+                let route = ctx.router.find_route_kill_last(
                     (me.pos.x, me.pos.y),
                     (centre_of(goal.tx), centre_of(goal.ty)),
                     &RouteOpts {
@@ -726,6 +735,7 @@ impl<W: PlanWorld> Navigator<W> {
                         avoid: Some(&self.avoid),
                         ..RouteOpts::default()
                     },
+                    self.kill_last,
                 );
                 if let Some(r) = route
                     && !r.steps.is_empty()
@@ -1041,7 +1051,7 @@ impl<W: PlanWorld> Navigator<W> {
                 best_route = None;
                 break;
             }
-            let way = ctx.router.find_route(
+            let way = ctx.router.find_route_kill_last(
                 (me.pos.x, me.pos.y),
                 (centre_of(c.start.0), centre_of(c.start.1)),
                 &RouteOpts {
@@ -1051,6 +1061,7 @@ impl<W: PlanWorld> Navigator<W> {
                     avoid: Some(&self.avoid),
                     ..RouteOpts::default()
                 },
+                self.kill_last,
             );
             let Some(way) = way else { continue };
             if way.steps.is_empty() {

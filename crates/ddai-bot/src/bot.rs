@@ -64,6 +64,7 @@ use crate::activity::{ActivityClock, BlockEvent, BlockStats};
 use crate::brains::{BrainKind, BrainOptions};
 use crate::clipper::{ClipConfig, Clipper, FrameInput};
 use crate::consts::*;
+use crate::duel::{DuelChange, DuelDetector, DuelWhy, read_chat};
 use crate::hooks::{HookContext, Hooks, MapIdent, NavStep};
 use crate::input::InputEncoder;
 use crate::latency::{DecisionEstimator, LatencyStats};
@@ -73,6 +74,7 @@ use crate::planning::PlanScratch;
 use crate::players::{PlayerTable, Salt, Tag};
 use crate::relations::Relations;
 use crate::sent::SentLog;
+use crate::smartkill::{self, SelfKillPolicy, SmartWhy};
 use crate::target::{PickCtx, TargetPicker, is_spared};
 use crate::tees::{HOOK_IDLE, Tee, TeeSet, dist};
 use crate::unstick::{KillReason, Unstick, UnstickCtx, Verdict};
@@ -166,6 +168,23 @@ pub struct BotConfig {
     pub no_selfkill: bool,
     /// The marker file `<data-dir>/bot/selfkill.off` (D-102): while it exists the switch is on. `None`: no marker.
     pub selfkill_marker: Option<PathBuf>,
+    /// Task 4.12 (D-108, `--selfkill-policy`): when the bot kills itself on its own accord. [`SelfKillPolicy::Legacy`] (the default): the
+    /// fixed timers of D-058; [`SelfKillPolicy::Smart`]: only when waiting costs more than a kill ([`crate::smartkill`]). A duel
+    /// (detected: [`crate::duel`]) or the switch above turns every kill off under either policy.
+    pub selfkill_policy: SelfKillPolicy,
+    /// Task 4.12 (D-108): look for an F-DDrace `/1vs1` duel by itself ([`crate::duel`]; default on, and then only with F-DDrace evidence).
+    /// `--no-duel-detect` turns it off, which leaves only the owner's switch ([`BotConfig::no_selfkill`], the marker file) to stop the
+    /// self-kills of a duel. The runner also re-reads [`BotConfig::duel_detect_marker`] once a second.
+    pub duel_detect: bool,
+    /// The marker file `<data-dir>/bot/duel-detect.off` (D-108): while it exists the detection is off. `None`: no marker.
+    pub duel_detect_marker: Option<PathBuf>,
+    /// The first words of an owner line (typed on the website, sent by the bot itself) that count as F-DDrace-duel evidence: the server's
+    /// own duel command, which differs by server (`/duel` on joniTee, `/1vs1` in F-DDrace). Compared case-insensitively; `settings.toml`
+    /// `duel_commands` fills it, [`DEFAULT_DUEL_COMMANDS`] otherwise.
+    pub duel_commands: Vec<String>,
+    /// Duel evidence is carried over a reconnect or a map reload only if the bot was away no longer than this (default [`DUEL_OUTAGE_MAX`]):
+    /// after a longer outage the fight is long over (the server expired the timeout code), review 4.12, F11.
+    pub duel_outage_max: Duration,
     /// Task 3.11 (diagnosis, off by default): write the per-input trace of [`crate::trace`] here (`DDAI_INPUT_TRACE` is the
     /// same for a process that has one bot).
     pub input_trace: Option<PathBuf>,
@@ -205,12 +224,23 @@ impl Default for BotConfig {
             finish: false,
             no_selfkill: false,
             selfkill_marker: None,
+            selfkill_policy: SelfKillPolicy::Legacy,
+            duel_detect: true,
+            duel_detect_marker: None,
+            duel_commands: DEFAULT_DUEL_COMMANDS.iter().map(|s| (*s).to_string()).collect(),
+            duel_outage_max: DUEL_OUTAGE_MAX,
             input_trace: None,
             kind_estimate: false,
             driver_pickup: DRIVER_PICKUP,
         }
     }
 }
+
+/// The duel commands of the owner's lines that count as evidence unless `settings.toml` says otherwise (task 4.12, D-108).
+pub const DEFAULT_DUEL_COMMANDS: &[&str] = &["/duel", "/1vs1"];
+
+/// How long the bot may be away (a reconnect, a map reload) with its duel evidence still carried over (2.5 minutes).
+pub const DUEL_OUTAGE_MAX: Duration = Duration::from_secs(150);
 
 /// What one snapshot's decision asks the shell to do.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -235,6 +265,27 @@ pub enum BotEvent {
     Killed {
         tick: i32,
         reason: KillReason,
+        /// The smart policy's own reason (task 4.12); `None` under the legacy policy.
+        why: Option<SmartWhy>,
+    },
+    /// Task 4.12: the smart policy held back a kill the legacy timers would have sent (rate limited: one per 100 ticks).
+    SelfKillSkipped {
+        tick: i32,
+        why: SmartWhy,
+    },
+    /// Task 4.12: an F-DDrace `/1vs1` duel was detected; from now on the bot kills nothing itself.
+    DuelStarted {
+        tick: i32,
+        why: DuelWhy,
+    },
+    /// Task 4.12: the owner's line `len` bytes long was a duel command: evidence that a two-player team is a duel (the text is not kept).
+    DuelEvidence {
+        tick: i32,
+        len: usize,
+    },
+    /// Task 4.12: the duel is over.
+    DuelEnded {
+        tick: i32,
     },
     Block {
         tick: i32,
@@ -428,8 +479,22 @@ pub struct Bot {
     pending_kill: bool,
     /// The `/kill` fallback after a `Cl_Kill` that had no effect (task 4.6, D-078).
     killfb: crate::killfallback::KillFallback,
-    /// `--no-selfkill` (D-102): no bot-initiated `Cl_Kill` or `/kill`.
+    /// No bot-initiated `Cl_Kill` or `/kill` **now**: the owner's switch (`--no-selfkill`, D-102) or a detected duel (task 4.12).
     no_selfkill: bool,
+    /// The owner's switch alone ([`Bot::set_no_selfkill`]).
+    manual_no_selfkill: bool,
+    /// Task 4.12: the duel detector (team and chat), see [`crate::duel`].
+    duel: DuelDetector,
+    /// Task 4.12: the detector is looking ([`Bot::set_duel_detect`]; `--no-duel-detect` and the marker turn it off).
+    duel_detect_on: bool,
+    /// The map the duel evidence belongs to (name, sha256): another map drops it ([`Bot::on_map_loaded`]).
+    duel_map: Option<(String, [u8; 32])>,
+    /// Since when the bot has been away with duel evidence carried over (a reconnect, a map reload): checked at the next snapshot.
+    duel_carry_since: Option<Instant>,
+    /// Task 4.12: a kill awaited by the fallback must be forgotten at the next step (the switch went on in the middle of a decision).
+    cancel_fallback: bool,
+    /// Task 4.12: the spawn tiles of the map (px), for the cost of a kill.
+    spawns: Vec<(f64, f64)>,
     /// `lives` as the fallback last saw it (a change is a new life).
     fb_lives: u64,
     quit: bool,
@@ -488,7 +553,8 @@ impl Bot {
         let mode = cfg.mode;
         let mut picker = TargetPicker::new(cfg.fixed_target.as_deref());
         picker.set_finish(cfg.finish);
-        Bot {
+        let policy = cfg.selfkill_policy;
+        let mut bot = Bot {
             players: PlayerTable::new(cfg.salt),
             tees: TeeSet::new(),
             clock: ActivityClock::new(),
@@ -516,6 +582,13 @@ impl Bot {
             pending_kill: false,
             killfb: crate::killfallback::KillFallback::new(),
             no_selfkill: false,
+            manual_no_selfkill: false,
+            duel: DuelDetector::new(),
+            duel_detect_on: cfg.duel_detect,
+            duel_map: None,
+            duel_carry_since: None,
+            cancel_fallback: false,
+            spawns: Vec::new(),
             fb_lives: 0,
             connected: false,
             quit: false,
@@ -563,7 +636,10 @@ impl Bot {
             brain,
             hooks,
             cfg,
-        }
+        };
+        bot.unstick.set_policy(policy);
+        bot.hooks.navigator.set_kill_last(policy.is_smart());
+        bot
     }
 
     // ---- accessors -----------------------------------------------------------------------------
@@ -742,6 +818,7 @@ impl Bot {
     /// The map the session loaded (`SessionEvent::MapLoaded`): everything map-specific is rebuilt.
     pub fn on_map_loaded(&mut self, map: Arc<MapData>) {
         self.grid = Some(MapGrid::new(&map));
+        self.spawns = ddai_nav::route::spawn_tiles(&map);
         self.plan = Some(PlanScratch::new(Arc::clone(&map)));
         self.hooks.navigator.on_map(&map, &self.map_ident);
         if self.cfg.async_seal {
@@ -757,6 +834,12 @@ impl Bot {
         self.live = None;
         self.obs = None;
         self.reset_world_state();
+        // The duel evidence belongs to the map (and so the fight) it was given on: a reload of the same map keeps it, another map drops it.
+        let this_map = (self.map_ident.name.clone(), self.map_ident.sha256);
+        if self.duel_map.as_ref() != Some(&this_map) {
+            self.duel.reset();
+            self.duel_map = Some(this_map);
+        }
         self.clipper.set_map(&self.map_ident.name, self.map_ident.sha256);
     }
 
@@ -781,6 +864,10 @@ impl Bot {
     /// The connection dropped (the driver may bring it back): in-flight knowledge is void.
     pub fn on_disconnected(&mut self) {
         self.connected = false;
+        // The timeout code puts us back into our fight team after a reconnect: the evidence stays, the teams are gone (review 4.12, F7).
+        self.duel.reset_team(self.last_tick.max(0));
+        self.duel_carry_since.get_or_insert_with(Instant::now);
+        self.refresh_selfkill_gate();
         self.killfb.reset();
         self.fb_lives = self.lives;
         self.clipper.reset();
@@ -791,6 +878,11 @@ impl Bot {
     }
 
     fn reset_world_state(&mut self) {
+        // The teams do not outlive the map; the evidence does (a reload of the same map, review 4.12, F7: [`Bot::on_map_loaded`] drops it
+        // for another map).
+        self.duel.reset_team(self.last_tick.max(0));
+        self.duel_carry_since.get_or_insert_with(Instant::now);
+        self.refresh_selfkill_gate();
         self.clipper.reset();
         self.players.clear();
         self.clock.reset();
@@ -823,22 +915,90 @@ impl Bot {
         self.connected
     }
 
-    /// Switches the duel mode "never kill ourselves" (D-102) on or off. On: the unstick, the wayblock rule, the navigation's and the
+    /// Switches the owner's mode "never kill ourselves" (D-102) on or off. On: the unstick, the wayblock rule, the navigation's and the
     /// trek's respawn steps and the `/kill` fallback of those kills decide nothing (and routes needing a respawn are not planned). The owner's own
     /// `!kill` (console) and typed chat lines are not the bot's and stay; the console `!kill` also keeps its `/kill` fallback.
+    /// A detected duel (task 4.12, [`crate::duel`]) turns the same thing on by itself; [`Bot::no_selfkill`] is true for either.
     pub fn set_no_selfkill(&mut self, off: bool) {
-        self.no_selfkill = off;
-        if off {
-            // A `Cl_Kill` the bot sent before the switch went on is no longer awaited (no `/kill` for it).
-            self.killfb.cancel_pending();
-        }
-        self.unstick.set_no_kill(off);
-        self.hooks.navigator.set_no_selfkill(off);
+        self.manual_no_selfkill = off;
+        self.refresh_selfkill_gate();
     }
 
-    /// Whether [`Bot::set_no_selfkill`] is on.
+    /// Whether the bot kills nothing itself now: the owner's switch ([`Bot::set_no_selfkill`]) or a detected duel.
     pub fn no_selfkill(&self) -> bool {
         self.no_selfkill
+    }
+
+    /// Whether an F-DDrace `/1vs1` duel is detected now, and by what (task 4.12).
+    pub fn duel(&self) -> Option<DuelWhy> {
+        self.duel.active()
+    }
+
+    /// Turns the automatic duel detection on or off at run time (the marker file `duel-detect.off`, task 4.12). Off: a duel that was detected
+    /// is forgotten at once and none is looked for.
+    pub fn set_duel_detect(&mut self, on: bool) {
+        self.duel_detect_on = on;
+        if !on {
+            self.duel.reset();
+            self.refresh_selfkill_gate();
+        }
+    }
+
+    /// Whether the automatic duel detection is looking.
+    pub fn duel_detect(&self) -> bool {
+        self.duel_detect_on
+    }
+
+    /// `--selfkill-policy` (task 4.12).
+    pub fn selfkill_policy(&self) -> SelfKillPolicy {
+        self.unstick.policy()
+    }
+
+    /// Puts the owner's switch and the duel detector together and applies the result where it acts.
+    fn refresh_selfkill_gate(&mut self) {
+        let eff = self.manual_no_selfkill || self.duel.active().is_some();
+        if Self::apply_selfkill_gate(eff, &mut self.no_selfkill, &mut self.unstick, &mut self.hooks) {
+            self.cancel_fallback = true;
+        }
+    }
+
+    /// Sets the effective "no self-kill" where it acts; `true` when it went on (a `Cl_Kill` sent before is no longer awaited).
+    fn apply_selfkill_gate(eff: bool, current: &mut bool, unstick: &mut Unstick, hooks: &mut Hooks) -> bool {
+        if eff == *current {
+            return false;
+        }
+        *current = eff;
+        unstick.set_no_kill(eff);
+        hooks.navigator.set_no_selfkill(eff);
+        eff
+    }
+
+    /// A line of the server's chat (task 4.12): only the F-DDrace `/1vs1` system lines mean anything here ([`crate::duel::read_chat`]);
+    /// nothing is stored or logged.
+    pub fn on_chat_line(&mut self, client_id: i32, text: &str) {
+        if !self.duel_detect_on {
+            return;
+        }
+        let own = self
+            .players
+            .own_id()
+            .and_then(|id| self.players.get(id))
+            .map_or("", |s| s.name.as_str());
+        let Some(signal) = read_chat(client_id, text, own) else {
+            return;
+        };
+        let tick = self.last_tick.max(0);
+        let change = self.duel.on_chat(tick, signal);
+        self.note_duel_change(tick, change);
+        self.refresh_selfkill_gate();
+    }
+
+    fn note_duel_change(&mut self, tick: i32, change: Option<DuelChange>) {
+        match change {
+            Some(DuelChange::Started(why)) => push_event(&mut self.events, BotEvent::DuelStarted { tick, why }),
+            Some(DuelChange::Ended) => push_event(&mut self.events, BotEvent::DuelEnded { tick }),
+            None => {}
+        }
     }
 
     /// Ticks until `Cl_Kill` is allowed again (0: now, also before any snapshot).
@@ -858,13 +1018,26 @@ impl Bot {
     /// A line the owner typed on the website and that starts with `/` (a server command) was just sent (task 4.9b). It is the owner's,
     /// not the fallback's (D-078): whatever it does to our life (`/kill`, `/spec`, `/team`) is not the bot's `/kill` taking effect, so
     /// the fallback forgets its in-flight `/kill` as a candidate for the learned threshold.
-    pub fn on_owner_command(&mut self) {
+    pub fn on_owner_command(&mut self, text: &str) {
         self.killfb.on_owner_command();
+        // A duel command the owner sent (`/duel x`, `/1vs1 x`) is evidence for the duel detector, and only a line the bot itself sent is.
+        let first = text.split_whitespace().next().unwrap_or("");
+        if self.duel_detect_on && self.cfg.duel_commands.iter().any(|c| c.eq_ignore_ascii_case(first)) {
+            let tick = self.last_tick.max(0);
+            push_event(&mut self.events, BotEvent::DuelEvidence { tick, len: text.len() });
+            let change = self.duel.on_owner_command(tick);
+            self.note_duel_change(tick, change);
+            self.refresh_selfkill_gate();
+        }
     }
 
     /// The `/kill` fallback's step of one snapshot: a new life or a dead tee settles an awaited kill, a protocol kill of this
     /// snapshot is awaited, and [`Output::kill_command`] is set when the fallback is due.
     fn kill_fallback_step(&mut self, tick: i32, out: &mut Output) {
+        if std::mem::take(&mut self.cancel_fallback) {
+            // The no-self-kill state went on (the owner's switch or a duel): a `Cl_Kill` sent before is no longer awaited (no `/kill` for it).
+            self.killfb.cancel_pending();
+        }
         if self.paused {
             // Paused by the server (task 4.9b): no `Cl_Kill` is decided, so nothing is awaited and no `/kill` follows.
             self.killfb.cancel_pending();
@@ -1187,6 +1360,12 @@ impl Bot {
             join_grace_until,
             paused,
             no_selfkill,
+            manual_no_selfkill,
+            duel,
+            duel_detect_on,
+            duel_carry_since,
+            cancel_fallback,
+            spawns,
             ..
         } = self;
         let (Some(live), Some(plan), Some(obs), Some(grid)) =
@@ -1215,6 +1394,30 @@ impl Bot {
                     players: players.present().count(),
                 },
             );
+        }
+        // Task 4.12: an F-DDrace `/1vs1` duel is found from our DDRace team (exactly one other player in it); chat lines add to it
+        // ([`Bot::on_chat_line`]). While it lasts the bot behaves as if the owner's switch were on.
+        // The bot was away (a reconnect, a map reload): the evidence is carried over only for a short outage (review 4.12, F11).
+        if let Some(since) = duel_carry_since.take()
+            && since.elapsed() > cfg.duel_outage_max
+        {
+            duel.drop_evidence();
+        }
+        match (*duel_detect_on)
+            .then(|| duel.update(tick, own_id, snap.teams.as_ref(), players))
+            .flatten()
+        {
+            Some(DuelChange::Started(why)) => push_event(events, BotEvent::DuelStarted { tick, why }),
+            Some(DuelChange::Ended) => push_event(events, BotEvent::DuelEnded { tick }),
+            None => {}
+        }
+        if Self::apply_selfkill_gate(
+            *manual_no_selfkill || duel.active().is_some(),
+            no_selfkill,
+            unstick,
+            hooks,
+        ) {
+            *cancel_fallback = true;
         }
         tees.rebuild(live.base_world(), &snap.characters);
         clock.update(tick, tees, players, own_id);
@@ -1375,6 +1578,9 @@ impl Bot {
         let acting = *mode != Mode::Hold;
         let wb_kill =
             hooks.wayblock.holding() && hooks.wayblock.wants_kill(&hook_ctx!(), unstick.frozen_for(tick, &own));
+        // The smart policy (task 4.12) asks the physics whether a frozen tee thaws on its own before it kills it.
+        let forecast = (acting && unstick.wants_forecast(tick, &own, wb_kill))
+            .then(|| plan.own_forecast(live.base_world(), own_id, smartkill::FORECAST_HORIZON_TICKS));
         let verdict = unstick.step(&UnstickCtx {
             tick,
             own: &own,
@@ -1385,7 +1591,17 @@ impl Bot {
             acting,
             in_dead_zone: hooks.navigator.in_dead_zone(own.pos),
             wayblock_wants_kill: wb_kill,
+            forecast,
+            cost_ticks: if forecast.is_some() {
+                smartkill::kill_cost_ticks(spawns, (own.pos.x, own.pos.y))
+            } else {
+                0
+            },
+            holding_block: clock.holding_block(),
         });
+        if let Some((skip_tick, why)) = unstick.take_skip() {
+            push_event(events, BotEvent::SelfKillSkipped { tick: skip_tick, why });
+        }
         if let Verdict::Kill(reason) = verdict {
             out.kill = true;
             *kill_why = Some(match reason {
@@ -1394,7 +1610,14 @@ impl Bot {
             });
             stats.self_kills += 1;
             hooks.navigator.kill_sent(tick, false);
-            push_event(events, BotEvent::Killed { tick, reason });
+            push_event(
+                events,
+                BotEvent::Killed {
+                    tick,
+                    reason,
+                    why: unstick.last_why(),
+                },
+            );
         }
 
         // 8. mode.

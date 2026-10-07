@@ -187,6 +187,20 @@ pub struct BotOpts {
     /// `--no-selfkill` is `true`, as before.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", default_value = "false", value_parser = parse_true_false, action = clap::ArgAction::Set)]
     pub no_selfkill: bool,
+    /// Task 4.12 (D-108): when the bot kills itself on its own accord. `legacy` (default): the fixed timers (frozen 200/400 ticks, wedged
+    /// 200/450, wayblock lying 25). `smart`: only when waiting costs more than a kill: deep freeze, no exit, a thaw slower than the respawn
+    /// plus the walk back, and no friend near or hooking; the timers stay as upper bounds; a route's respawn step only when no route on
+    /// foot exists. Either way an F-DDrace `/1vs1` duel is detected by itself (our DDRace team holds one other player **and** there is F-DDrace
+    /// evidence: the server's `/1vs1` chat lines, or a duel command the owner sent from the website) and then nothing is killed, like
+    /// `--no-selfkill`.
+    #[arg(long, value_name = "legacy|smart", default_value = "legacy")]
+    pub selfkill_policy: ddai_bot::smartkill::SelfKillPolicy,
+    /// Task 4.12 (D-108): do not look for an F-DDrace `/1vs1` duel by itself (our DDRace team holds exactly one other player **and** the
+    /// server has shown F-DDrace's `/1vs1` chat lines, or those lines say we accepted a fight). Then only `--no-selfkill` (and the marker
+    /// file) stops the self-kills of a duel. Escape hatch: by default the detection is on, under either policy. The marker file
+    /// `<data-dir>/bot/duel-detect.off` does the same and is re-read once a second.
+    #[arg(long)]
+    pub no_duel_detect: bool,
     /// Task 4.10 (D-100): do not send the DDNet timeout code `/timeout <code>` after joining (no seed file is read or made). With it the bot's
     /// only chat is the typed `/kill` and the owner's lines.
     #[arg(long)]
@@ -534,7 +548,16 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         strong,
         console_names: o.console_names,
         no_selfkill: o.no_selfkill,
+        selfkill_policy: o.selfkill_policy,
+        duel_detect: !o.no_duel_detect,
+        duel_commands: settings.duel_commands.clone().unwrap_or_else(|| {
+            ddai_bot::bot::DEFAULT_DUEL_COMMANDS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        }),
         selfkill_marker: Some(data_dir.join("bot").join(ddai_bot::selfkill::SELFKILL_OFF_MARKER)),
+        duel_detect_marker: Some(data_dir.join("bot").join(ddai_bot::selfkill::DUEL_DETECT_OFF_MARKER)),
         kind_estimate: live_timing.kind,
         ..BotConfig::default()
     };
@@ -1001,6 +1024,31 @@ mod search_threads_tests {
         use clap::CommandFactory;
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("--no-selfkill[="), "{help}");
+    }
+
+    /// Task 4.12 (D-108): the policy is `legacy` unless asked; only the two words are values.
+    #[test]
+    fn the_selfkill_policy_is_legacy_by_default_and_takes_legacy_or_smart() {
+        use ddai_bot::smartkill::SelfKillPolicy;
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.selfkill_policy)
+        };
+        assert_eq!(get(&[]).unwrap(), SelfKillPolicy::Legacy);
+        assert_eq!(get(&["--selfkill-policy", "smart"]).unwrap(), SelfKillPolicy::Smart);
+        assert_eq!(get(&["--selfkill-policy=legacy"]).unwrap(), SelfKillPolicy::Legacy);
+        let no_detect = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| c.bot.no_duel_detect)
+        };
+        assert!(!no_detect(&[]).unwrap(), "the detection is on by default");
+        assert!(no_detect(&["--no-duel-detect"]).unwrap());
+        for bad in ["--selfkill-policy=Smart", "--selfkill-policy=on", "--selfkill-policy="] {
+            assert!(get(&[bad]).is_err(), "{bad}");
+        }
+        assert!(get(&["--selfkill-policy"]).is_err());
     }
 
     /// Task 4.10 (D-100): the timeout code is on by default and `--no-timeout-code` switches it off.
