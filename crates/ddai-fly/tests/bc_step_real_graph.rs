@@ -122,6 +122,7 @@ fn bc_step_gradients_match_finite_differences_on_the_real_s_graph() {
             mask: HeadMask::ALL,
             weight: 1.5,
             hook_scale: 1.0,
+            hook_latch: false,
         },
         StepTargets {
             dir: 0,
@@ -136,6 +137,7 @@ fn bc_step_gradients_match_finite_differences_on_the_real_s_graph() {
             },
             weight: 1.0,
             hook_scale: 1.0,
+            hook_latch: false,
         },
     ];
     let cfg = BcStepConfig {
@@ -186,6 +188,7 @@ fn bc_step_gradients_match_finite_differences_on_the_real_s_graph() {
         &calib,
         &v_init,
         &observations,
+        &[false; 3],
     );
     assert_eq!(fwd.len(), out.logits.len());
     for (a, b) in fwd.iter().zip(&out.logits) {

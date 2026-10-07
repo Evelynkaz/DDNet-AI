@@ -63,6 +63,32 @@ pub struct SeqStep {
     /// Sampling weight; `0` = the step is context only (never scored, never an anchor).
     pub weight: f32,
     pub mask: HeadMask,
+    /// The latch (task 8.6): the hook key the labelled player **actually played** at the previous decision of this sequence (`false` at its
+    /// first). What an intent hook head selects its hazard by; never an input of the network. For a teacher episode it is the played
+    /// action of the previous step (the student's own command in a DAgger round), for a human run the previous label.
+    pub latch: bool,
+}
+
+/// Which decisions score the aim head (task 8.6). The aim only reaches the game when the hook is **thrown** (the key pressed while the observed
+/// hook state is idle: `hook_dir` is set on that transition only) or the weapon is fired; on a held-hook decision it changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AimMask {
+    /// Every decision the label hooks or fires (the mask of every run before 8.6).
+    #[default]
+    HookOrFire,
+    /// Only throws (the label hooks while the own hook state is idle) and shots.
+    ThrowOrFire,
+}
+
+impl AimMask {
+    /// Whether the aim is scored on a decision whose label is `label` and whose own hook state is `own_hook_state`.
+    pub fn scores(self, label: &ddai_dataset::types::ActionRec, own_hook_state: i8) -> bool {
+        match self {
+            AimMask::HookOrFire => label.hook || label.fire,
+            AimMask::ThrowOrFire => label.fire || (label.hook && i32::from(own_hook_state) == ddai_brain::HOOK_IDLE),
+        }
+    }
 }
 
 /// A contiguous run of decisions.
@@ -163,6 +189,7 @@ pub fn targets_of(step: &SeqStep, weight: f32, mirror: bool) -> StepTargets {
         mask: step.mask,
         weight,
         hook_scale: 1.0,
+        hook_latch: step.latch,
     }
 }
 
@@ -185,7 +212,10 @@ pub fn make_window(seq: &Seq, anchor: usize, len: usize, burn_in: usize, rng: &m
         targets.push(if scored {
             targets_of(step, 1.0, mirror)
         } else {
-            StepTargets::burn_in()
+            StepTargets {
+                hook_latch: step.latch,
+                ..StepTargets::burn_in()
+            }
         });
     }
     Window {
@@ -358,6 +388,7 @@ pub(crate) mod testutil {
             }),
             weight,
             mask: HeadMask::ALL,
+            latch: false,
         }
     }
 
@@ -398,6 +429,32 @@ mod tests {
                     "a window at the start scores everything"
                 );
             }
+        }
+    }
+
+    /// The latch of a sequence step reaches the targets of its window, scored or not (a burn-in step still carries it), and the mirror
+    /// augmentation leaves it alone.
+    #[test]
+    fn the_latch_of_a_step_reaches_its_window_target_burn_in_included() {
+        let mut s = seq(40);
+        for (i, st) in s.steps.iter_mut().enumerate() {
+            st.latch = i % 3 == 1;
+        }
+        let mut rng = SplitMix64::new(4);
+        for mirror in [false, true] {
+            let w = make_window(&s, 25, 16, 4, &mut rng, mirror);
+            assert!(w.start > 0, "the window has a burn-in");
+            for (k, t) in w.targets.iter().enumerate() {
+                assert_eq!(
+                    t.hook_latch,
+                    (w.start + k) % 3 == 1,
+                    "step {k} of the window (mirror {mirror})"
+                );
+            }
+            assert!(
+                w.targets[..4].iter().all(|t| t.weight == 0.0),
+                "the burn-in is not scored"
+            );
         }
     }
 

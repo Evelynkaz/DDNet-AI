@@ -705,7 +705,7 @@ pub fn evaluate_fly(
             let out = state.step_decision(model, &input_buf);
             dn_rates.copy_from_slice(out.dn_rates);
         }
-        let decoded = decoder_forward_into(decoder, &dn_rates, calib, decoder_params, &mut scratch);
+        let decoded = decoder_forward_into(decoder, &dn_rates, calib, decoder_params, &mut scratch, false);
         dir_probs.push(decoded.direction_probs);
         jump_probs.push(decoded.jump_prob);
         hook_probs.push(decoded.hook_prob);

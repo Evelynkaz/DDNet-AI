@@ -499,7 +499,7 @@ fn direction_probs_sum_to_one_and_are_nonnegative() {
         sigma: vec![1.0; model.num_outputs()],
     };
     let dn_rates = vec![0.3; model.num_outputs()];
-    let action = decoder_forward(&decoder, &dn_rates, &calib, &params);
+    let action = decoder_forward(&decoder, &dn_rates, &calib, &params, false);
     let sum: f32 = action.direction_probs.iter().sum();
     assert!((sum - 1.0).abs() < 1e-5);
     assert!(action.direction_probs.iter().all(|&p| p >= 0.0));
@@ -529,7 +529,7 @@ fn aim_population_vector_points_towards_the_dominant_preferred_angle() {
     dn_rates[decoder.aim_pairs[1].l_slot] = 0.1;
     dn_rates[decoder.aim_pairs[1].r_slot] = 0.1;
     dn_rates[decoder.aim_unpaired[0]] = 0.0;
-    let action = decoder_forward(&decoder, &dn_rates, &calib, &params);
+    let action = decoder_forward(&decoder, &dn_rates, &calib, &params, false);
     assert!(action.aim_angle.abs() < 0.2, "aim_angle={}", action.aim_angle);
 }
 
@@ -594,8 +594,8 @@ fn mirroring_z_gives_the_mirrored_decoded_action() {
         .map(|((&zi, &mu), &sigma)| zi * sigma + mu)
         .collect();
 
-    let action = decoder_forward(&decoder, &dn_rates, &calib, &params);
-    let mirrored_action = decoder_forward(&decoder, &mirrored_dn_rates, &calib, &params);
+    let action = decoder_forward(&decoder, &dn_rates, &calib, &params, false);
+    let mirrored_action = decoder_forward(&decoder, &mirrored_dn_rates, &calib, &params, false);
 
     assert!(
         (action.direction_probs[0] - mirrored_action.direction_probs[2]).abs() < 1e-5,
@@ -883,8 +883,8 @@ fn decoder_forward_into_matches_decoder_forward() {
         sigma: vec![0.9; model.num_outputs()],
     };
     let dn_rates: Vec<f32> = (0..model.num_outputs()).map(|i| 0.2 + 0.05 * i as f32).collect();
-    let via_alloc = decoder_forward(&decoder, &dn_rates, &calib, &params);
+    let via_alloc = decoder_forward(&decoder, &dn_rates, &calib, &params, false);
     let mut scratch = DecoderScratch::new(&decoder);
-    let via_scratch = decoder_forward_into(&decoder, &dn_rates, &calib, &params, &mut scratch);
+    let via_scratch = decoder_forward_into(&decoder, &dn_rates, &calib, &params, &mut scratch, false);
     assert_eq!(via_alloc, via_scratch);
 }

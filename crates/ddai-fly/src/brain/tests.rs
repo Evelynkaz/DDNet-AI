@@ -364,9 +364,17 @@ fn a_masked_bundle_is_played_in_two_views_and_a_shared_one_is_not() {
     use crate::bc::mask_own_hook;
     let (shared, masked) = own_hook_templates();
     assert!(!shared.instantiate_played(played_config()).name().ends_with("+hookview"));
-    assert!(!crate::proposer::FlyProposer::from_template(&shared, played_config(), 1).has_hook_view());
+    assert!(
+        !crate::proposer::FlyProposer::from_template(&shared, played_config(), 1)
+            .unwrap()
+            .has_hook_view()
+    );
     assert!(masked.instantiate_played(played_config()).name().ends_with("+hookview"));
-    assert!(crate::proposer::FlyProposer::from_template(&masked, played_config(), 1).has_hook_view());
+    assert!(
+        crate::proposer::FlyProposer::from_template(&masked, played_config(), 1)
+            .unwrap()
+            .has_hook_view()
+    );
 
     let mut played = masked.instantiate_played(played_config());
     let (mut full, mut hook_view) = (masked.instantiate(played_config()), masked.instantiate(played_config()));
@@ -421,8 +429,8 @@ fn a_masked_proposer_costs_two_views_on_the_work_clock() {
         let (bundle, flyg) = crate::brain_fixtures::write_tiny_fly_bundle_with(&sub, view, 4000);
         FlyBrainTemplate::load(&bundle, Some(&flyg)).unwrap()
     };
-    let shared = FlyProposer::from_template(&load(HookView::Shared), played_config(), 1);
-    let masked = FlyProposer::from_template(&load(HookView::MaskedForHookHead), played_config(), 1);
+    let shared = FlyProposer::from_template(&load(HookView::Shared), played_config(), 1).unwrap();
+    let masked = FlyProposer::from_template(&load(HookView::MaskedForHookHead), played_config(), 1).unwrap();
     assert!(shared.work_units() > 100, "{}", shared.work_units());
     assert_eq!(masked.work_units(), 2 * shared.work_units());
 }
@@ -443,8 +451,8 @@ fn a_masked_proposer_builds_its_distribution_and_frame_from_the_masked_view() {
         seed: 1,
     };
 
-    let mut p = FlyProposer::from_template(&masked, played_config(), 1);
-    let mut single = FlyProposer::from_template(&shared, played_config(), 1);
+    let mut p = FlyProposer::from_template(&masked, played_config(), 1).unwrap();
+    let mut single = FlyProposer::from_template(&shared, played_config(), 1).unwrap();
     let (mut full, mut hook_view) = (masked.instantiate(played_config()), masked.instantiate(played_config()));
     let mut shared_net = shared.instantiate(played_config());
     Proposer::reset(&mut p, &reset);

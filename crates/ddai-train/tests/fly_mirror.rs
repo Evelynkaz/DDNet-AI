@@ -70,6 +70,7 @@ fn corpus() -> Corpus {
                 soft: None,
                 weight: 1.0,
                 mask: HeadMask::ALL,
+                latch: false,
             }
         })
         .collect();

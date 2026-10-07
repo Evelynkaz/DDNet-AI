@@ -51,6 +51,8 @@ pub mod two_view;
 
 #[doc(hidden)] // test/bench support only, not covered by semver — see its own doc comment.
 pub mod brain_fixtures;
+#[cfg(test)]
+mod hook_intent_tests;
 #[doc(hidden)] // test/bench support only, not covered by semver — see its own doc comment.
 pub mod test_fixtures;
 

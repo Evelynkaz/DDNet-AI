@@ -214,7 +214,8 @@ pub fn brain_bc_step(
 }
 
 /// The same pipeline forward only, for evaluation: the head logits of every decision of `seq`,
-/// starting from `v_init`.
+/// starting from `v_init`. `hook_latches[t]` is the fly's own previous hook command at decision `t` (what an intent hook head selects its
+/// hazard by; ignored by a legacy one); it has one entry per observation.
 #[allow(clippy::too_many_arguments)]
 pub fn brain_bc_forward(
     model: &FlyModel,
@@ -225,7 +226,13 @@ pub fn brain_bc_forward(
     calib: &DnCalibration,
     v_init: &[f32],
     observations: &[Observation],
+    hook_latches: &[bool],
 ) -> Vec<HeadLogits> {
+    assert_eq!(
+        hook_latches.len(),
+        observations.len(),
+        "brain_bc_forward: observations/latches mismatch"
+    );
     let mut state = FlyState::new(model);
     state.set_v(model, v_init);
     let mut features = RayGridFeatures::new(encoder.ray_grid_config());
@@ -233,13 +240,14 @@ pub fn brain_bc_forward(
     let mut z = vec![0.0f32; decoder.num_outputs()];
     observations
         .iter()
-        .map(|obs| {
+        .zip(hook_latches)
+        .map(|(obs, &latch)| {
             let an = compute_proprioception_values(&obs.self_state, encoder.ray_grid_config());
             features.compute(obs, encoder.ray_grid_config());
             encoder.forward(&features, &an, encoder_params, &mut input_buf);
             let out = state.step_decision(model, &input_buf);
             calib.z_into(out.dn_rates, decoder.config().z_clip, &mut z);
-            decoder_logits(decoder, &z, decoder_params)
+            decoder_logits(decoder, &z, decoder_params, latch)
         })
         .collect()
 }
@@ -263,4 +271,6 @@ pub fn add_decoder_gradients(acc: &mut DecoderGradients, g: &DecoderGradients) {
     acc.fire_b += g.fire_b;
     add(&mut acc.aim_pair_theta, &g.aim_pair_theta);
     add(&mut acc.aim_unpaired_theta, &g.aim_unpaired_theta);
+    add(&mut acc.hook_release_w, &g.hook_release_w);
+    acc.hook_release_b += g.hook_release_b;
 }

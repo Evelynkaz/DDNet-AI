@@ -184,6 +184,7 @@ impl ModelBrains {
             };
             // A model trained with the hook head masked proposes through its second view (`from_template`).
             ddai_fly::proposer::FlyProposer::from_template(t, FlyBrainConfig::default(), seed)
+                .map_err(|e| EnvError::new(e.to_string()))?
         } else {
             let flyg = spec.model.as_deref().ok_or_else(|| {
                 EnvError::new("hybrid with proposer = \"fly\" needs model = <.flyg path> or fly_model = <bundle>")

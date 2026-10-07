@@ -77,6 +77,54 @@ pub enum TrainCommand {
         hook: Option<f32>,
         #[arg(long)]
         fire: Option<f32>,
+        /// Task 8.6, the **hysteresis decode** (fly only): with the own hook key up, press when the hook probability reaches this
+        /// (needs `--hook-lo`); latched on the fly's own previous hook command. The plain decode (`--hook`) is the default.
+        #[arg(long, requires = "hook_lo")]
+        hook_hi: Option<f32>,
+        /// With the own hook key down, keep it down while the hook probability stays at or above this (below `--hook-hi` for a hysteresis;
+        /// equal is the plain rule, above it the opposite of a hysteresis).
+        #[arg(long, requires = "hook_hi")]
+        hook_lo: Option<f32>,
+        /// Back to the plain decode (the bundle's `thresholds.hook` whatever the last command was).
+        #[arg(long, conflicts_with = "hook_hi")]
+        plain_hook: bool,
+    },
+    /// Information probes of the hook decision (task 8.6): small models on the fly's encoder input, on privileged exact-state features and on the
+    /// encoder input plus derived physics features, against the real flies, per latch state, on the BC's teacher-val labels of the first decisions
+    /// after a freeze. JSON on stdout / `--out`.
+    ProbeHook {
+        /// A BC config (`teacher_base`, `teacher_data` and the graph are read from it).
+        #[arg(long)]
+        config: PathBuf,
+        /// Reference flies, `name=bundle`, repeatable; the first one's encoder gives the input vector (all share the encoder of E-008 s2 upgraded).
+        #[arg(long = "fly", required = true)]
+        flies: Vec<String>,
+        /// Flies whose own network state is probed (`name=bundle`, repeatable): their DN z-scores and membrane state on the hook view.
+        #[arg(long = "state-fly")]
+        state_flies: Vec<String>,
+        #[arg(long, default_value_t = 16)]
+        first: usize,
+        #[arg(long, default_value_t = 4)]
+        frames: usize,
+        #[arg(long, default_value_t = 2)]
+        seeds: usize,
+        #[arg(long, default_value_t = 14000)]
+        max_train_rows: usize,
+        /// Only the probes on the `--state-fly` network states.
+        #[arg(long)]
+        state_only: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long, default_value_t = 3)]
+        threads: usize,
+    },
+    /// Writes a copy of a fly checkpoint whose hook head is an **intent** head (task 8.6, bundle v4): `P(press | released)` and
+    /// `P(release | held)` chosen by the fly's own previous hook command. It plays bit for bit like the original until it is trained.
+    UpgradeHook {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// A model's hook behaviour in closed loop: start and release rates against the teacher's on the same
     /// states (JSON on stdout). The model plays alone; the planner labels every state it visits.
@@ -231,7 +279,34 @@ pub fn run(args: TrainArgs) -> ExitCode {
             jump,
             hook,
             fire,
-        } => set_thresholds_cmd(&kind, &bundle, &out, jump, hook, fire),
+            hook_hi,
+            hook_lo,
+            plain_hook,
+        } => set_thresholds_cmd(&kind, &bundle, &out, jump, hook, fire, hook_hi.zip(hook_lo), plain_hook),
+        TrainCommand::UpgradeHook { bundle, out } => upgrade_hook_cmd(&bundle, &out),
+        TrainCommand::ProbeHook {
+            config,
+            flies,
+            state_flies,
+            first,
+            frames,
+            seeds,
+            max_train_rows,
+            state_only,
+            out,
+            threads,
+        } => probe_hook_cmd(
+            &config,
+            &flies,
+            &state_flies,
+            first,
+            frames,
+            seeds,
+            max_train_rows,
+            state_only,
+            out.as_deref(),
+            threads,
+        ),
         TrainCommand::HookPlay {
             actor,
             arenas,
@@ -304,6 +379,7 @@ fn upgrade_bundle_cmd(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn set_thresholds_cmd(
     kind: &str,
     bundle: &std::path::Path,
@@ -311,6 +387,8 @@ fn set_thresholds_cmd(
     jump: Option<f32>,
     hook: Option<f32>,
     fire: Option<f32>,
+    hysteresis: Option<(f32, f32)>,
+    plain_hook: bool,
 ) -> Result<(), String> {
     let apply = |t: &mut ddai_fly::bc::HeadThresholds| -> Result<(), String> {
         t.jump = jump.unwrap_or(t.jump);
@@ -324,7 +402,17 @@ fn set_thresholds_cmd(
         "fly" => {
             let mut b = ddai_fly::bundle::load_bundle(bundle).map_err(|e| e.to_string())?;
             apply(&mut b.thresholds)?;
+            if let Some((hi, lo)) = hysteresis {
+                b.hook_decode = ddai_fly::bc::HookDecode::Latched { hi, lo };
+            } else if plain_hook {
+                b.hook_decode = ddai_fly::bc::HookDecode::Plain;
+            }
+            b.hook_decode.validate()?;
+            eprintln!("hook decode: {:?}", b.hook_decode);
             ddai_fly::bundle::save_bundle(out, &b).map_err(|e| e.to_string())
+        }
+        "mlp" | "gru" if hysteresis.is_some() || plain_hook => {
+            Err("the hysteresis hook decode is for fly checkpoints only".to_string())
         }
         "mlp" | "gru" => {
             let mut b = ddai_controls::bundle::load_control_bundle(bundle).map_err(|e| e.to_string())?;
@@ -333,6 +421,104 @@ fn set_thresholds_cmd(
         }
         other => Err(format!("unknown kind {other:?} (fly, mlp, gru)")),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn probe_hook_cmd(
+    config: &std::path::Path,
+    flies: &[String],
+    state_flies: &[String],
+    first: usize,
+    frames: usize,
+    seeds: usize,
+    max_train_rows: usize,
+    state_only: bool,
+    out: Option<&std::path::Path>,
+    threads: usize,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(config).map_err(|e| format!("{}: {e}", config.display()))?;
+    let cfg: ddai_train::runner::ExperimentConfig =
+        toml::from_str(&text).map_err(|e| format!("{}: {e}", config.display()))?;
+    let env = ddai_train::experiment::load_env_with_scenarios(
+        &ddai_train::experiment::expand_home(&cfg.arenas_dir),
+        &ddai_train::experiment::expand_home(&cfg.map_dir),
+        Some(ddai_train::experiment::expand_home(&cfg.flyg)),
+        cfg.scenarios_dir
+            .as_deref()
+            .map(ddai_train::experiment::expand_home)
+            .as_deref(),
+    )?;
+    let parse = |list: &[String]| -> Result<Vec<(String, PathBuf)>, String> {
+        list.iter()
+            .map(|f| {
+                let (n, p) = f
+                    .split_once('=')
+                    .ok_or_else(|| format!("{f:?}: expected name=bundle"))?;
+                Ok((n.to_string(), ddai_train::experiment::expand_home(p)))
+            })
+            .collect()
+    };
+    let (bundles, state_bundles) = (parse(flies)?, parse(state_flies)?);
+    let spec = ddai_train::probe::ProbeSpec {
+        first,
+        frames,
+        seeds,
+        max_train_rows,
+        state_only,
+        no_membrane: state_only,
+        ..Default::default()
+    };
+    let t0 = std::time::Instant::now();
+    let res = ddai_train::probe::run_probe(
+        &cfg,
+        &env,
+        &spec,
+        &bundles,
+        &state_bundles,
+        threads.clamp(1, 3),
+        &mut |l| eprintln!("[{:5.0}s] {l}", t0.elapsed().as_secs_f64()),
+    )?;
+    for r in &res {
+        println!(
+            "latch {} ({}): {} train rows, {} validation rows, label (key pressed) rate {:.3} / {:.3}",
+            r.latch,
+            if r.latch {
+                "held: keep or release"
+            } else {
+                "released: press"
+            },
+            r.n_train,
+            r.n_val,
+            r.label_rate_train,
+            r.label_rate_val
+        );
+        for (n, m, _, ci) in &r.probes {
+            println!("   probe {n}: AUROC {m:.3} [{:.3}; {:.3}]", ci[0], ci[1]);
+        }
+        for (n, a, ci) in &r.flies {
+            println!("   fly {n}: AUROC {a:.3} [{:.3}; {:.3}]", ci[0], ci[1]);
+        }
+    }
+    let json = serde_json::to_string_pretty(&(spec, res)).map_err(|e| e.to_string())?;
+    if let Some(p) = out {
+        std::fs::write(p, json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn upgrade_hook_cmd(bundle: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
+    let b = ddai_fly::bundle::load_bundle(bundle).map_err(|e| e.to_string())?;
+    if b.hook_param == ddai_fly::bc::HookParam::Intent {
+        return Err("the checkpoint already has an intent hook head".to_string());
+    }
+    let up = ddai_fly::bundle::upgrade_to_intent_hook(&b);
+    ddai_fly::bundle::save_bundle(out, &up).map_err(|e| e.to_string())?;
+    eprintln!(
+        "wrote {} (intent hook head; decode {:?})",
+        out.display(),
+        up.hook_decode
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

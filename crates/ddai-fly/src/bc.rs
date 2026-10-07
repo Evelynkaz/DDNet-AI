@@ -81,6 +81,64 @@ impl HeadThresholds {
     }
 }
 
+/// How the hook probability becomes the hook key (task 8.6). The bundle's `thresholds.hook` is the plain rule of every bundle
+/// written before format v4: press when `p >= threshold`, whatever the fly did last decision.
+///
+/// [`HookDecode::Latched`] is the **hysteresis decode**: the threshold depends on the fly's *own previous hook command* (the latch), not on
+/// the observed hook state: with the key up, press when `p >= hi`; with the key down, keep it down while `p >= lo`. With `lo < hi` a press is
+/// harder to start than to keep (hysteresis proper); `lo = hi` is the plain rule; `lo > hi` is allowed too (a press is easier to start than to
+/// keep: the opposite of a hysteresis, explored as a variant). `p` is the probability of the hook key **given the latch**: the hook head's own
+/// for a legacy fly; for an intent fly (`HookParam::Intent`) `P(press | released)` when the key is up and `1 - P(release | held)` when it is
+/// down, so its two hazard thresholds are `hi = t_press`, `lo = 1 - t_release`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum HookDecode {
+    #[default]
+    Plain,
+    Latched {
+        hi: f32,
+        lo: f32,
+    },
+}
+
+impl HookDecode {
+    /// The threshold applied to the hook probability: `plain` (the bundle's `thresholds.hook`) for [`HookDecode::Plain`], else `hi`
+    /// when the key was up at the last decision and `lo` when it was down.
+    pub fn threshold(&self, plain: f32, latch: bool) -> f32 {
+        match *self {
+            HookDecode::Plain => plain,
+            HookDecode::Latched { hi, lo } => {
+                if latch {
+                    lo
+                } else {
+                    hi
+                }
+            }
+        }
+    }
+
+    /// `hi` and `lo` must be probabilities strictly inside `(0, 1)`.
+    pub fn validate(&self) -> Result<(), String> {
+        if let HookDecode::Latched { hi, lo } = *self {
+            for (name, t) in [("hi", hi), ("lo", lo)] {
+                if !(t.is_finite() && t > 0.0 && t < 1.0) {
+                    return Err(format!("hook decode {name} {t} is not inside (0, 1)"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How the hook head is parameterised (task 8.6, bundle format v4). `Legacy` is the one independent Bernoulli of every earlier bundle
+/// (`hook_w`, `hook_b`); `Intent` has two hazards chosen by the latch (the fly's own previous hook command): `P(press | released)` from the
+/// same weights `hook_w`/`hook_b` and `P(release | held)` from its own `hook_release`. The latch never enters the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HookParam {
+    #[default]
+    Legacy,
+    Intent,
+}
+
 impl HeadLogits {
     pub fn jump_on(&self, th: &HeadThresholds) -> bool {
         self.jump_prob() >= th.jump
@@ -186,6 +244,9 @@ pub struct StepTargets {
     /// *start* and *release* decisions (label differs from the own hook being out), which a head that
     /// copies the own-hook input gets wrong (E-005 review F2).
     pub hook_scale: f32,
+    /// The fly's **own previous hook command** (the latch, task 8.6): what an intent-parameterised hook head chooses its hazard by
+    /// (`P(press | released)` when `false`, `P(release | held)` when `true`). Never an input of the network; a legacy head ignores it.
+    pub hook_latch: bool,
 }
 
 impl StepTargets {
@@ -201,6 +262,7 @@ impl StepTargets {
             mask: HeadMask::NONE,
             weight: 0.0,
             hook_scale: 1.0,
+            hook_latch: false,
         }
     }
 }
@@ -219,6 +281,9 @@ pub struct LossConfig {
     pub soft_mix: f32,
     /// Positive-class weights of the binary heads (jump, hook, fire).
     pub pos_weight: [f32; 3],
+    /// Task 8.6: set when the hook head is an intent head: the positive-class weights of its two hazards, `[press, release]` (the rare
+    /// events: a press with the key up, a release with the key down). `None` = the legacy hook head, `pos_weight[1]` on the hook key.
+    pub hazard_pos_weight: Option<[f32; 2]>,
     /// Von Mises concentration of the aim loss (the decoder's `aim_kappa`).
     pub aim_kappa: f32,
     /// Smoothing applied to soft targets so a unanimous elite set is not a probability-one target.
@@ -235,6 +300,7 @@ impl Default for LossConfig {
             w_aim: 1.0,
             soft_mix: 0.5,
             pos_weight: [1.0, 1.0, 1.0],
+            hazard_pos_weight: None,
             aim_kappa: 4.0,
             soft_smoothing: 0.02,
         }
@@ -344,7 +410,16 @@ pub fn head_loss_and_grad(logits: &HeadLogits, t: &StepTargets, cfg: &LossConfig
     }
     if t.mask.hook {
         let tv = mixed_binary_target(t.hook, soft.map(|s| s.hook), mix, cfg.soft_smoothing);
-        let (l, g) = weighted_bce(logits.hook, tv, cfg.pos_weight[1]);
+        // `logits.hook` of an intent head is the logit of the hook key *given the latch*: with the key up it is the press hazard's, with the
+        // key down it is minus the release hazard's. The loss is the weighted BCE of the hazard the latch selects, on its rare event.
+        let (l, g) = match cfg.hazard_pos_weight {
+            None => weighted_bce(logits.hook, tv, cfg.pos_weight[1]),
+            Some([w_press, _]) if !t.hook_latch => weighted_bce(logits.hook, tv, w_press),
+            Some([_, w_release]) => {
+                let (l, g) = weighted_bce(-logits.hook, 1.0 - tv, w_release);
+                (l, -g)
+            }
+        };
         let w = cfg.w_hook * t.weight * t.hook_scale;
         loss.hook = w * l;
         d.hook = w * g;
@@ -387,6 +462,7 @@ mod tests {
             mask: HeadMask::ALL,
             weight: 1.7,
             hook_scale: 1.0,
+            hook_latch: false,
         }
     }
 
@@ -410,6 +486,7 @@ mod tests {
             w_aim: 0.5,
             soft_mix: 0.4,
             pos_weight: [2.0, 3.0, 1.5],
+            hazard_pos_weight: None,
             aim_kappa: 4.0,
             soft_smoothing: 0.02,
         }
@@ -574,5 +651,105 @@ mod tests {
         };
         let (_, g) = head_loss_and_grad(&l, &t, &c);
         assert!(g.jump.abs() < 1e-5, "gradient at the soft optimum: {}", g.jump);
+    }
+
+    #[test]
+    fn the_hook_decode_picks_its_threshold_by_the_latch_and_validates() {
+        assert_eq!(HookDecode::Plain.threshold(0.63, false), 0.63);
+        assert_eq!(HookDecode::Plain.threshold(0.63, true), 0.63);
+        let d = HookDecode::Latched { hi: 0.7, lo: 0.4 };
+        assert_eq!((d.threshold(0.63, false), d.threshold(0.63, true)), (0.7, 0.4));
+        assert!(d.validate().is_ok() && HookDecode::Plain.validate().is_ok());
+        assert!(
+            HookDecode::Latched { hi: 0.5, lo: 0.5 }.validate().is_ok(),
+            "lo = hi is the plain rule"
+        );
+        assert!(
+            HookDecode::Latched { hi: 0.4, lo: 0.7 }.validate().is_ok(),
+            "lo above hi is the opposite of a hysteresis, allowed"
+        );
+        for bad in [
+            HookDecode::Latched { hi: 1.0, lo: 0.5 },
+            HookDecode::Latched { hi: 0.5, lo: 0.0 },
+            HookDecode::Latched { hi: f32::NAN, lo: 0.2 },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        assert_eq!(HookParam::default(), HookParam::Legacy);
+        assert_eq!(HookDecode::default(), HookDecode::Plain);
+    }
+
+    /// The hazard loss: with the key up (latch `false`) the hook head's logit is the press hazard's and the rare event is the press; with
+    /// the key down the hook head's logit is the *hold* logit (minus the release hazard's) and the rare event is the release. Each
+    /// hazard has its own positive-class weight, the loss is the BCE of the hazard's own event, and the gradient is checked by finite differences.
+    #[test]
+    fn the_hazard_loss_scores_the_selected_hazard_on_its_own_event_with_its_own_weight() {
+        let (w_press, w_release) = (3.0f32, 5.0f32);
+        let c = LossConfig {
+            soft_mix: 0.0,
+            w_hook: 1.0,
+            hazard_pos_weight: Some([w_press, w_release]),
+            ..cfg()
+        };
+        let mask = HeadMask {
+            hook: true,
+            ..HeadMask::NONE
+        };
+        let mk = |hook: bool, latch: bool| StepTargets {
+            hook,
+            hook_latch: latch,
+            soft: None,
+            mask,
+            weight: 1.0,
+            hook_scale: 1.0,
+            ..targets()
+        };
+        let z = 0.8f32; // the hook logit given the latch
+        let l = HeadLogits { hook: z, ..logits() };
+        let p = crate::activation::sigmoid(z);
+        // Key up, the teacher presses: a press event, positive class weight w_press: -w_press ln p.
+        let (loss, g) = head_loss_and_grad(&l, &mk(true, false), &c);
+        assert!((loss.hook + w_press * p.ln()).abs() < 1e-5, "{}", loss.hook);
+        assert!((g.hook - (p * w_press - w_press)).abs() < 1e-5);
+        // Key up, the teacher does not press: the negative class: -ln(1 - p).
+        let (loss, _) = head_loss_and_grad(&l, &mk(false, false), &c);
+        assert!((loss.hook + (1.0 - p).ln()).abs() < 1e-5);
+        // Key down, the teacher lets go: a release event, the release probability is 1 - p, weight w_release: -w_release ln(1 - p).
+        let (loss, g) = head_loss_and_grad(&l, &mk(false, true), &c);
+        assert!((loss.hook + w_release * (1.0 - p).ln()).abs() < 1e-5, "{}", loss.hook);
+        // d/dz of -w ln(1 - sigmoid z) is w p.
+        assert!((g.hook - w_release * p).abs() < 1e-5, "{}", g.hook);
+        // Key down, the teacher keeps holding: the negative class of the release hazard: -ln p.
+        let (loss, g) = head_loss_and_grad(&l, &mk(true, true), &c);
+        assert!((loss.hook + p.ln()).abs() < 1e-5);
+        assert!((g.hook - (p - 1.0)).abs() < 1e-5);
+        // Finite differences, all four cases and a soft target.
+        for (hook, latch) in [(true, false), (false, false), (true, true), (false, true)] {
+            let mut t = mk(hook, latch);
+            t.soft = Some(SoftTargets {
+                dir: [0.3, 0.3, 0.4],
+                jump: 0.5,
+                hook: 0.7,
+                fire: 0.5,
+            });
+            let c = LossConfig { soft_mix: 0.4, ..c };
+            let (_, g) = head_loss_and_grad(&l, &t, &c);
+            let eps = 1e-3f32;
+            let at = |dz: f32| head_loss_and_grad(&HeadLogits { hook: z + dz, ..l }, &t, &c).0.hook;
+            let numeric = (at(eps) - at(-eps)) / (2.0 * eps);
+            assert!(
+                (g.hook - numeric).abs() < 2e-3 * (1.0 + numeric.abs()),
+                "{hook} {latch}: {} vs {numeric}",
+                g.hook
+            );
+        }
+        // Without hazard weights the latch changes nothing (the legacy hook loss).
+        let legacy = LossConfig {
+            hazard_pos_weight: None,
+            ..c
+        };
+        let a = head_loss_and_grad(&l, &mk(true, false), &legacy);
+        let b = head_loss_and_grad(&l, &mk(true, true), &legacy);
+        assert_eq!(a, b);
     }
 }

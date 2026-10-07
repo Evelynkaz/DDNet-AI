@@ -196,8 +196,13 @@ pub fn make_brain(kind: BrainKind, opts: &BrainOptions) -> Result<Box<dyn Brain>
 /// The template of `opts.fly_bundle` (which must be set); remembers the bundle's name and hash for the web panel.
 fn load_bundle_template(opts: &BrainOptions) -> Result<ddai_fly::bundle::FlyBrainTemplate, BrainError> {
     let bundle = opts.fly_bundle.as_deref().expect("the caller checked");
-    ddai_fly::bundle::FlyBrainTemplate::load(bundle, Some(&opts.fly_flyg))
-        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))
+    let template = ddai_fly::bundle::FlyBrainTemplate::load(bundle, Some(&opts.fly_flyg))
+        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
+    // A latched / intent hook head is not played live yet: the server pause and its resume, the guard and the hook veto change what is sent.
+    template
+        .require_unlatched("live bot")
+        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
+    Ok(template)
 }
 
 fn bundle_fly_config(opts: &BrainOptions) -> ddai_fly::brain::FlyBrainConfig {
@@ -210,11 +215,8 @@ fn bundle_fly_config(opts: &BrainOptions) -> ddai_fly::brain::FlyBrainConfig {
 /// The hybrid's proposer over `opts.fly_bundle` (which must be set): a model trained with the hook head masked takes
 /// the hook probability of its proposals from its second view (`FlyProposer::from_template`).
 fn make_bundle_proposer(opts: &BrainOptions) -> Result<FlyProposer, BrainError> {
-    Ok(FlyProposer::from_template(
-        &load_bundle_template(opts)?,
-        bundle_fly_config(opts),
-        opts.seed,
-    ))
+    FlyProposer::from_template(&load_bundle_template(opts)?, bundle_fly_config(opts), opts.seed)
+        .map_err(|e| BrainError::Fly(e.to_string()))
 }
 
 /// The brain that plays the weights of `opts.fly_bundle`, the way the bundle was trained: a model trained with the

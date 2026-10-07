@@ -6266,3 +6266,38 @@ beta_kl, best_score, best_iter, snapshots, curriculum { offsets [V, B, H], moves
 
 **`*.oppnet`** — `OppBundle { format_version = 1, feature_version, layout: [K_HIST, STRIDE, FD, N_RAYS, IF_SLOTS, IF_DIM, HORIZON], net: Mlp { n_in, h1, h2, n_out, params: Vec<f32> }, seed, epochs, val_loss, notes }`; раскладка не совпадает с раскладкой сборки, размеры не подходят или есть нефинитный вес — файл не загружается.
 Порядок параметров: `[W1 (n_in × h1, «входом вперёд»)] [b1] [W2 (h1 × h2)] [b2] [W3 (h2 × n_out)] [b3]`.
+
+## 43. Голова хука: чекпоинт v4, декодирование с гистерезисом, головы намерения (задача 8.6, D-109, `ddai-fly::{bc, decoder, bundle, brain}`, `ddai-train::{hook_eval, critical, metrics, trainer, learner}`)
+
+(Номер согласован с лидом: §41 занят задачей 3.15, §42 — 4.12.)
+
+### 43.1 Чекпоинт v4 (`ddai_fly::bundle::FlyBundle`, `format_version = 4`)
+
+Тот же контейнер, что у v3 (`[sha256 postcard] ++ zstd`, §31). К полям v3 добавлено в конец: `hook_param: HookParam` (`Legacy` | `Intent`) и `hook_decode: HookDecode` (`Plain` | `Latched { hi, lo }`, оба числа строго в (0, 1)), а в `DecoderParams` — последнее поле
+`hook_release: Option<HookRelease { w: Vec<f32>, b: f32 }>` (по одному весу на группу типов хука, как у `hook_w`, и смещение). Загрузка проверяет согласие: `Intent` ⇔ `hook_release` задан. **v1…v3 читаются** (`DecoderParamsV3` — прежняя раскладка без `hook_release`): `Legacy`,
+`Plain`, и муха играет **побитно** как раньше (тесты: файл v3 = файл v4 = «улучшение до намерения» на сценарии из 60 решений в одном и двух видах; `opp_identity`, `ppo_identity` на настоящем S). **Запись:** `Legacy` + `Plain` сохраняется как **v3** (`save_bundle`; файл v3, загруженный и записанный снова, совпадает побайтно — тест), чтобы бинари до 8.6 (откатные копии) продолжали читать обычные чекпоинты; v4 пишется только для `Intent` и для `Latched` (их старый бинарь сыграл бы неверно). `BrainCheckpoint` (7.3) — версия 2 (в `DecoderParams` добавилось поле).
+
+- **`Legacy` + `Plain`** — как до 8.6: хук нажат при `p ≥ thresholds.hook`, `p = σ(hook_b + Σ hook_w·mean z)`.
+- **`Legacy` + `Latched { hi, lo }`** (только декодирование, без новых параметров; `train set-thresholds --hook-hi H --hook-lo L`): защёлка — **собственная предыдущая команда хука мухи** (не наблюдаемое состояние хука): кнопка отпущена — нажать при `p ≥ hi`; нажата — держать, пока `p ≥ lo`. `lo < hi` — гистерезис, `lo = hi` — обычное правило,
+  `lo > hi` допустим (нажать легче, чем держать).
+- **`Intent`** — две «опасности», выбираемые **структурно** защёлкой: кнопка отпущена — `P(нажать | отпущена) = σ(hook_b + Σ hook_w·mean z)` (те же `hook_w`/`hook_b`), нажата — `P(отпустить | нажата) = σ(release.b + Σ release.w·mean z)`. Логит хука «при данной защёлке» (`HeadLogits::hook`) — логит нажатия или **минус** логит отпускания
+  (`P(держать) = 1 − P(отпустить)`), поэтому всё остальное (потеря BC, политика PPO) читает ту же голову. Декодирование — `Latched { hi = t_нажатия, lo = 1 − t_отпускания }`. **Защёлка не входит в энкодер и в сеть**: она переключает голову, активность DN от неё не зависит (тест: после переворота защёлки состояние сети и все головы, кроме хука, равны побитно).
+  Начало из ног: `train upgrade-hook` (`upgrade_to_intent_hook`) делает `release = (−hook_w, −hook_b)` и `Latched { hi = lo = thresholds.hook }`: муха играет **побитно** как старая.
+- **Отказ там, где защёлка может разойтись с отправленным хуком:** `FlyBrainTemplate::require_unlatched` — живой бот (пауза сервера и возобновление не вызывают мозг, охрана и `hook_veto` меняют хук после `decide`), `FlyProposer::from_template` (защёлка по собственному argmax мухи, не по действию гибрида), `train es critical` (подмена действий), `ppo run` (защёлки нет в политике; в `policy_forward` — `debug_assert`). Снять отказ можно только вместе с хуком `Brain`, сообщающим мозгу реально отправленное действие.
+- Защёлка живёт в `FlyBrain` (`hook_latch`, сбрасывается `reset`, ставится только собственным `decide`; у двухвидовой мухи — у маскированного вида, то есть это сыгранный хук).
+- Выделение памяти на решение — нет (как у `decide` и раньше); задержка S в двух видах не изменилась (две опасности — одна лишняя линейная голова).
+
+### 43.2 Обучение (`train run`, `train eval`)
+
+- `StepTargets::hook_latch` — защёлка шага; `SeqStep::latch` — **сыгранная** кнопка хука на предыдущем шаге последовательности (у эпизода учителя — `played` предыдущего шага: у DAgger это собственная команда ученика; у демки человека — предыдущая метка; первый шаг — `false`).
+- `[train.loss] hazard_pos_weight = [нажатие, отпускание]` — веса положительного класса опасностей (редкие события: нажатие при отпущенной кнопке, отпускание при нажатой); **обязательно** для `Intent`, отказ для `Legacy` (`train_phase`). Потеря шага: взвешенная BCE выбранной опасности на её событии (`head_loss_and_grad`); мягкая цель — доля хука элиты (для отпускания `1 −`).
+- `[train] hook_calibration = "auto" | "latched" | "plain"`: в конце фазы пороги прыжка/огня/хука (как раньше) и, у `Intent` (`auto`) или всегда (`latched`), `HookDecode::Latched { hi, lo }`: **подбор по частоте метки учителя раздельно для каждого состояния защёлки** (`MetricsAccumulator::rate_matched_hook_decode`). `plain` декодирование не трогает.
+- `[teacher_data] aim_mask = "hook_or_fire"` (по умолчанию, как раньше) | `"throw_or_fire"`: прицел оценивается только на бросках (метка нажимает хук при наблюдаемом `HOOK_IDLE`) и выстрелах; `opening_boost`, `opening_ticks`, `opening_rounds` — как в §40.
+- Метрики `train eval` / `metrics.jsonl` (`HeadReport`): `hook_by_latch { released, held, press_*, release_* }` (доля метки / модели, полнота, AUROC, **NLL метки без весов**, порог); `aim_throw` — ошибка прицела на бросках метки при любой маске.
+- Плоский вектор параметров: после `aim_unpaired_theta` добавляются `release.w` и `release.b` (только у `Intent`); `hook_param` и `hook_decode` обучение не меняет.
+
+### 43.3 Инструменты и файлы
+
+- `train es hook-eval --config C --brain B --starts N --out J`: JSON `(brain, [(набор, [StartRecord])])`, `StartRecord { class, decisions: [{ tick, state, hook, throw_err }], outcome_held, outcome_self_out }`; печатает частоту хука при состоянии `idle` (**частота старта**) и при `flying`/`grabbed` (удержание), клавишу в первых 4 решениях, долю стартов с нажатием за 8/24/50 тиков, медиану первого нажатия и ошибку прицела на броске (до пеленга на жертву).
+- `train es critical --config C --fly fly:<b> --direction forward|reverse --class V --set train-all|train-val|holdout …`: JSON `(direction, fly, CriticalSpec, [StartAnalysis])`; `StartAnalysis { arena, seed, class, base_held, base_self_out, shadow: [{ k, state, main, alt }], singles, components, windows }` с `SwapResult { from, len, components, held, self_out }` (k — номер решения от фриза, 1 решение = 2 тика). Разбор — `tools/e029/critical_tables.py`.
+- `train upgrade-hook`, `train set-thresholds --hook-hi/--hook-lo/--plain-hook`, `tools/e029/{tune_table.py, hyst_grid.sh, final_eval.sh, hook_tables.py, critical_run.sh, bc_arms.sh}`.

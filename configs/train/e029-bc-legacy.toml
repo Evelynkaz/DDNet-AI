@@ -1,0 +1,65 @@
+# E-029 (task 8.6), step 3: BC with a control arm. The SAME data (the 8.5a/8.5b teacher data: the E-008 rounds, the planner's labels after the freeze, and the
+# DAgger corpora of the 8.5b PPO runs, round 100), the same loss weights, the same optimiser and seed, from the same checkpoint (E-008 seed 2 upgraded with the
+# opponent-state channels); only the hook head differs: legacy (one Bernoulli) or intent (two hazards chosen by the latch, the fly's own previous hook command).
+#   ddnet-ai train upgrade-hook --bundle ~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle --out ~/aiddnet/data/runs/E-029/bundles/s2-upgraded-intent.bundle
+#   ddnet-ai train run --config configs/train/e029-bc-<arm>.toml
+name = "e029-bc-legacy"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+brain_config = "configs/fly/S-brain-dg.toml"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+scenarios_dir = "configs/scenarios"
+run_dir = "~/aiddnet/data/runs/E-029/e029-bc-legacy"
+teacher_base = [
+    "~/aiddnet/data/datasets/teacher/round0-v1",
+    "~/aiddnet/data/datasets/teacher/round1-v2",
+    "~/aiddnet/data/datasets/teacher/e022-postfreeze",
+    "~/aiddnet/data/runs/E-023/e023-ppo-base-s2/dagger",
+    "~/aiddnet/data/runs/E-023/e023-ppo-cur4-s2/dagger",
+    "~/aiddnet/data/runs/E-023/e023-ppo-cur6-s2/dagger",
+    "~/aiddnet/data/runs/E-023/e023-ppo-cur7-s2/dagger",
+]
+teacher_dagger = "~/aiddnet/data/datasets/teacher/e029-bc-legacy-dagger"
+bc_steps = 800
+eval_every = 0
+
+[model]
+kind = "fly"
+
+[fly]
+lr_a = 1e-3
+lr_b = 2e-3
+lr_theta = 2e-3
+lr_encoder = 1e-2
+lr_decoder = 1e-2
+l2_a = 1e-4
+alpha_init = 4.0
+calibration_windows = 300
+
+[train]
+seed = 2
+batch_windows = 24
+window_len = 32
+burn_in = 6
+warmup_steps = 50
+lr_final_frac = 0.1
+threads = 3
+log_every = 50
+eval_windows = 600
+
+[train.loss]
+pos_weight = [3.0, 1.0, 6.0]
+
+[train.own_hook]
+mode = "mask_hook_head"
+
+[teacher_data]
+val_mod = 10
+round_weights = [[7, 6.0], [8, 6.0], [100, 6.0]]
+scenario_weight = 2.0
+# The critical-decision analysis (E-029): the held block is decided in the first ~16 decisions (32 ticks) after the freeze, and by the hook key.
+opening_boost = 8.0
+opening_ticks = 32
+opening_rounds = [7, 8, 100]
+aim_mask = "throw_or_fire"

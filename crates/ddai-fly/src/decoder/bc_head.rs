@@ -9,13 +9,15 @@
 //! head weights and masks, class weights). A test pins forward equality with the original.
 
 use super::{
-    DecoderGradients, DecoderModel, DecoderParams, DnCalibration, mean_of, pooled_backward, pooled_logit,
+    DecoderGradients, DecoderModel, DecoderParams, DnCalibration, hook_logit, mean_of, pooled_backward, pooled_logit,
     population_vector,
 };
 use crate::bc::{HeadLogits, LossConfig, StepLoss, StepTargets, head_loss_and_grad};
 
-/// The five heads' logits for calibrated DN z-scores `z`.
-pub fn decoder_logits(decoder: &DecoderModel, z: &[f32], params: &DecoderParams) -> HeadLogits {
+/// The five heads' logits for calibrated DN z-scores `z`. `hook_latch` is the fly's own previous hook command: it selects the hazard of an
+/// intent hook head (`HeadLogits::hook` is then the logit of the hook key given the latch, see [`super::hook_logit`]) and is ignored by a
+/// legacy one.
+pub fn decoder_logits(decoder: &DecoderModel, z: &[f32], params: &DecoderParams, hook_latch: bool) -> HeadLogits {
     let side_logit = |left: bool| {
         decoder
             .direction_lr
@@ -41,7 +43,7 @@ pub fn decoder_logits(decoder: &DecoderModel, z: &[f32], params: &DecoderParams)
     HeadLogits {
         dir: [side_logit(true), stop, side_logit(false)],
         jump: pooled_logit(&decoder.jump, &params.jump_w, params.jump_b, z),
-        hook: pooled_logit(&decoder.hook, &params.hook_w, params.hook_b, z),
+        hook: hook_logit(decoder, params, z, hook_latch),
         fire: pooled_logit(&decoder.fire, &params.fire_w, params.fire_b, z),
         aim_c: c,
         aim_s: s,
@@ -62,7 +64,7 @@ pub fn decoder_bc_loss_and_grad(
     assert_eq!(dn_rates.len(), decoder.num_outputs);
     let clip_at = decoder.config.z_clip;
     let z = calib.z(dn_rates, clip_at);
-    let logits = decoder_logits(decoder, &z, params);
+    let logits = decoder_logits(decoder, &z, params, targets.hook_latch);
     let (loss, d) = head_loss_and_grad(&logits, targets, cfg);
     if targets.weight == 0.0 {
         return (
@@ -72,13 +74,15 @@ pub fn decoder_bc_loss_and_grad(
             logits,
         );
     }
-    let (grads, grad_dn) = decoder_logits_backward(decoder, dn_rates, calib, params, &d, &targets.mask);
+    let (grads, grad_dn) =
+        decoder_logits_backward(decoder, dn_rates, calib, params, &d, &targets.mask, targets.hook_latch);
     (loss, grads, grad_dn, logits)
 }
 
 /// The backward half of [`decoder_bc_loss_and_grad`], for any loss on the head logits (task 8.5b: the PPO objective): given
 /// `d = dL/d(head logits)` of one decision, the decoder gradients and `dL/d(dn_rates)`. Heads whose `mask` flag is off are skipped
-/// (their entries of `d` must then be zero, as `head_loss_and_grad` leaves them).
+/// (their entries of `d` must then be zero, as `head_loss_and_grad` leaves them). `hook_latch` must be the one the logits were made with:
+/// of an intent hook head only the hazard it selected gets a gradient (the release hazard's through `hook = -z_release`).
 pub fn decoder_logits_backward(
     decoder: &DecoderModel,
     dn_rates: &[f32],
@@ -86,6 +90,7 @@ pub fn decoder_logits_backward(
     params: &DecoderParams,
     d: &HeadLogits,
     mask: &crate::bc::HeadMask,
+    hook_latch: bool,
 ) -> (DecoderGradients, Vec<f32>) {
     assert_eq!(dn_rates.len(), decoder.num_outputs);
     let clip_at = decoder.config.z_clip;
@@ -139,15 +144,26 @@ pub fn decoder_logits_backward(
         );
     }
     if mask.hook {
-        pooled_backward(
-            &decoder.hook,
-            &params.hook_w,
-            d.hook,
-            &z,
-            &mut grads.hook_w,
-            &mut grads.hook_b,
-            &mut grad_z,
-        );
+        match &params.hook_release {
+            Some(r) if hook_latch => pooled_backward(
+                &decoder.hook,
+                &r.w,
+                -d.hook,
+                &z,
+                &mut grads.hook_release_w,
+                &mut grads.hook_release_b,
+                &mut grad_z,
+            ),
+            _ => pooled_backward(
+                &decoder.hook,
+                &params.hook_w,
+                d.hook,
+                &z,
+                &mut grads.hook_w,
+                &mut grads.hook_b,
+                &mut grad_z,
+            ),
+        }
     }
     if mask.fire {
         pooled_backward(
@@ -293,8 +309,8 @@ mod tests {
         let (model, decoder, params, calib) = setup();
         let r = rates(model.num_outputs(), 0.4);
         let z = calib.z(&r, decoder.config().z_clip);
-        let l = decoder_logits(&decoder, &z, &params);
-        let orig = decoder_forward(&decoder, &r, &calib, &params);
+        let l = decoder_logits(&decoder, &z, &params, false);
+        let orig = decoder_forward(&decoder, &r, &calib, &params, false);
         for (a, b) in l.dir_probs().iter().zip(&orig.direction_probs) {
             assert!((a - b).abs() < 1e-6);
         }
@@ -328,6 +344,7 @@ mod tests {
             mask: HeadMask::ALL,
             weight: 1.0,
             hook_scale: 1.0,
+            hook_latch: false,
         };
         let cfg = LossConfig {
             soft_mix: 0.0,
@@ -385,6 +402,7 @@ mod tests {
             },
             weight: 2.0,
             hook_scale: 1.0,
+            hook_latch: false,
         };
         let cfg = LossConfig {
             w_dir: 1.0,
@@ -394,6 +412,7 @@ mod tests {
             w_aim: 0.7,
             soft_mix: 0.5,
             pos_weight: [1.5, 2.0, 1.0],
+            hazard_pos_weight: None,
             aim_kappa: 4.0,
             soft_smoothing: 0.02,
         };
@@ -433,5 +452,145 @@ mod tests {
         }
         // The masked fire head must have produced no gradient at all.
         assert!(g.fire_w.iter().all(|&x| x == 0.0) && g.fire_b == 0.0);
+    }
+
+    fn intent_setup() -> (FlyModel, DecoderModel, DecoderParams, DnCalibration) {
+        let (model, decoder, params, calib) = setup();
+        let mut params = params.with_intent_hook();
+        // Move the release hazard off the mirror image so it is a head of its own.
+        let r = params.hook_release.as_mut().unwrap();
+        for (i, w) in r.w.iter_mut().enumerate() {
+            *w += 0.3 - 0.2 * i as f32;
+        }
+        r.b += 0.15;
+        (model, decoder, params, calib)
+    }
+
+    /// The intent upgrade is the legacy head in function: with the release hazard the mirror image of the press hazard, the probability of
+    /// the hook key is the legacy head's whatever the latch is, **bit for bit**.
+    #[test]
+    fn the_intent_upgrade_of_a_legacy_head_gives_the_same_hook_logit_for_both_latches() {
+        let (model, decoder, params, calib) = setup();
+        let up = params.with_intent_hook();
+        assert!(up.is_intent() && !params.is_intent());
+        for seed in [0.2f32, 1.1, 2.9] {
+            let r = rates(model.num_outputs(), seed);
+            let z = calib.z(&r, decoder.config().z_clip);
+            let legacy = decoder_logits(&decoder, &z, &params, false);
+            for latch in [false, true] {
+                let i = decoder_logits(&decoder, &z, &up, latch);
+                assert_eq!(i.hook.to_bits(), legacy.hook.to_bits(), "latch {latch}");
+                assert_eq!(
+                    (i.dir, i.jump.to_bits(), i.fire.to_bits()),
+                    (legacy.dir, legacy.jump.to_bits(), legacy.fire.to_bits())
+                );
+            }
+            // A legacy head ignores the latch.
+            assert_eq!(decoder_logits(&decoder, &z, &params, true), legacy);
+        }
+    }
+
+    /// Gradients of the intent head by finite differences, for both latches: only the hazard the latch selects gets a gradient (the other's
+    /// is exactly zero: the transition is structurally the one the latch allows), the decoder weights and `dL/d(dn_rates)` match.
+    #[test]
+    fn the_intent_head_gradients_match_finite_differences_and_only_the_selected_hazard_gets_one() {
+        let (model, decoder, params, calib) = intent_setup();
+        let r = rates(model.num_outputs(), 0.9);
+        let cfg = LossConfig {
+            hazard_pos_weight: Some([2.5, 4.0]),
+            soft_mix: 0.3,
+            ..LossConfig::default()
+        };
+        for latch in [false, true] {
+            for hook in [false, true] {
+                let t = StepTargets {
+                    dir: 1,
+                    jump: false,
+                    hook,
+                    fire: false,
+                    aim: 0.2,
+                    soft: Some(SoftTargets {
+                        dir: [0.2, 0.5, 0.3],
+                        jump: 0.2,
+                        hook: 0.6,
+                        fire: 0.1,
+                    }),
+                    mask: HeadMask::ALL,
+                    weight: 1.3,
+                    hook_scale: 1.0,
+                    hook_latch: latch,
+                };
+                let (_, g, dn, logits) = decoder_bc_loss_and_grad(&decoder, &r, &calib, &params, &t, &cfg);
+                // The hook logit given the latch: the press hazard, or minus the release hazard.
+                let z = calib.z(&r, decoder.config().z_clip);
+                assert_eq!(logits.hook, crate::decoder::hook_logit(&decoder, &params, &z, latch));
+                let (sel_w, other_w, other_b, sel_b) = if latch {
+                    (&g.hook_release_w, &g.hook_w, g.hook_b, g.hook_release_b)
+                } else {
+                    (&g.hook_w, &g.hook_release_w, g.hook_release_b, g.hook_b)
+                };
+                assert!(
+                    sel_w.iter().any(|&x| x != 0.0) && sel_b != 0.0,
+                    "the selected hazard learns"
+                );
+                assert!(
+                    other_w.iter().all(|&x| x == 0.0) && other_b == 0.0,
+                    "the other hazard gets nothing"
+                );
+                let loss_at =
+                    |r: &[f32], p: &DecoderParams| decoder_bc_loss_and_grad(&decoder, r, &calib, p, &t, &cfg).0.total;
+                let eps = 1e-3f32;
+                for i in (0..r.len()).step_by(5) {
+                    let (mut a, mut b) = (r.clone(), r.clone());
+                    a[i] += eps;
+                    b[i] -= eps;
+                    let numeric = (loss_at(&a, &params) - loss_at(&b, &params)) / (2.0 * eps);
+                    assert!(
+                        (dn[i] - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+                        "dn[{i}] latch {latch}: {} vs {numeric}",
+                        dn[i]
+                    );
+                }
+                for i in 0..params.hook_w.len() {
+                    let (mut a, mut b) = (params.clone(), params.clone());
+                    a.hook_w[i] += eps;
+                    b.hook_w[i] -= eps;
+                    let numeric = (loss_at(&r, &a) - loss_at(&r, &b)) / (2.0 * eps);
+                    assert!(
+                        (g.hook_w[i] - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+                        "press w[{i}] latch {latch}"
+                    );
+                    let (mut a, mut b) = (params.clone(), params.clone());
+                    a.hook_release.as_mut().unwrap().w[i] += eps;
+                    b.hook_release.as_mut().unwrap().w[i] -= eps;
+                    let numeric = (loss_at(&r, &a) - loss_at(&r, &b)) / (2.0 * eps);
+                    assert!(
+                        (g.hook_release_w[i] - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+                        "release w[{i}] latch {latch}: {} vs {numeric}",
+                        g.hook_release_w[i]
+                    );
+                }
+                let (mut a, mut b) = (params.clone(), params.clone());
+                a.hook_release.as_mut().unwrap().b += eps;
+                b.hook_release.as_mut().unwrap().b -= eps;
+                let numeric = (loss_at(&r, &a) - loss_at(&r, &b)) / (2.0 * eps);
+                assert!(
+                    (g.hook_release_b - numeric).abs() < 3e-3 * (1.0 + numeric.abs()),
+                    "release b latch {latch}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_release_hazard_of_the_wrong_shape_or_with_a_nan_is_refused() {
+        let (_, decoder, params, _) = intent_setup();
+        assert!(decoder.validate_params_shape(&params).is_ok());
+        let mut bad = params.clone();
+        bad.hook_release.as_mut().unwrap().w.push(0.0);
+        assert!(decoder.validate_params_shape(&bad).is_err());
+        let mut bad = params.clone();
+        bad.hook_release.as_mut().unwrap().b = f32::NAN;
+        assert!(decoder.validate_params_shape(&bad).is_err());
     }
 }

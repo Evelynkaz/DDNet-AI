@@ -11,7 +11,7 @@ use ddai_brain::{Action, IVec2, Observation, ResetContext};
 use ddai_flyg::NeuronRole;
 use serde::{Deserialize, Serialize};
 
-use crate::bc::HeadThresholds;
+use crate::bc::{HeadThresholds, HookDecode};
 use crate::decoder::{DecodedAction, DecoderModel, DecoderParams, DecoderScratch, DnCalibration, decoder_forward_into};
 use crate::encoder::{EncoderModel, EncoderParams, RayGridFeatures, compute_proprioception_values};
 use crate::model::FlyModel;
@@ -154,6 +154,11 @@ pub struct FlyBrain {
     calib: DnCalibration,
     config: FlyBrainConfig,
     thresholds: HeadThresholds,
+    /// How the hook probability becomes the hook key (task 8.6): the plain threshold or the hysteresis decode.
+    hook_decode: HookDecode,
+    /// The latch: this fly's **own previous hook command** (task 8.6). It selects the hazard of an intent hook head and the threshold of
+    /// the hysteresis decode; it is set only by this brain's own decision, is `false` after a `reset`, and never reaches the encoder.
+    hook_latch: bool,
 
     role_of_type: Vec<Option<NeuronRole>>,
     ray_features: RayGridFeatures,
@@ -230,6 +235,8 @@ impl FlyBrain {
             calib,
             config,
             thresholds: HeadThresholds::default(),
+            hook_decode: HookDecode::Plain,
+            hook_latch: false,
             role_of_type,
             ray_features,
             input_buf,
@@ -343,6 +350,26 @@ impl FlyBrain {
         self.thresholds
     }
 
+    /// Sets how the hook probability becomes the hook key (task 8.6; argmax selection only). A trained model's decode comes from its bundle.
+    pub fn set_hook_decode(&mut self, decode: HookDecode) {
+        self.hook_decode = decode;
+    }
+
+    pub fn hook_decode(&self) -> HookDecode {
+        self.hook_decode
+    }
+
+    /// The latch: the hook command this fly issued at its last decision (`false` before the first one and after a `reset`).
+    pub fn hook_latch(&self) -> bool {
+        self.hook_latch
+    }
+
+    /// Records the hook command the caller actually issued, for a driver that chooses its own action from [`FlyBrain::forward_logits`]
+    /// (the PPO actor); [`ddai_brain::Brain::decide`] does it itself.
+    pub fn set_hook_latch(&mut self, on: bool) {
+        self.hook_latch = on;
+    }
+
     /// Adopts an already warmed-up state (`rest` must come from `warm_up` on an identical model):
     /// [`ddai_brain::Brain::reset`] will then restore it in `O(neurons)` instead of searching for
     /// convergence again. `converged` is what that warm-up reported.
@@ -379,6 +406,12 @@ impl FlyBrain {
         self.last_warmup_converged
     }
 
+    /// The calibrated DN z-scores (`|z| <= z_clip`) of the most recent [`FlyBrain::forward_logits`]: the vector every decoder head reads
+    /// (task 8.6: the information probe on the network's output state). Not updated by `decide`.
+    pub fn last_dn_z(&self) -> &[f32] {
+        &self.viz_z
+    }
+
     /// The membrane state `V` the next decision starts from (task 8.5b: the recurrent state a PPO window stores, R2D2-style).
     pub fn state_v(&self) -> &[f32] {
         self.state.v()
@@ -404,7 +437,7 @@ impl FlyBrain {
         self.last_per_type_mean_rate.copy_from_slice(output.per_type_mean_rate);
         self.calib
             .z_into(&self.last_dn_rates, self.decoder.config().z_clip, &mut self.viz_z);
-        let logits = crate::decoder::decoder_logits(&self.decoder, &self.viz_z, &self.decoder_params);
+        let logits = crate::decoder::decoder_logits(&self.decoder, &self.viz_z, &self.decoder_params, self.hook_latch);
         self.last_latency = start.elapsed();
         self.decision_count += 1;
         logits
@@ -504,6 +537,7 @@ impl ddai_brain::Brain for FlyBrain {
         self.last_decoded = None;
         self.last_action = None;
         self.played_override = None;
+        self.hook_latch = false;
         // A new episode: the frame's decision number restarts with it (`docs/formats.md` §27.1), and no frame is owed.
         self.decision_count = 0;
         self.viz_seen = 0;
@@ -531,11 +565,14 @@ impl ddai_brain::Brain for FlyBrain {
             &self.calib,
             &self.decoder_params,
             &mut self.decoder_scratch,
+            self.hook_latch,
         );
 
         let direction = self.select_direction(decoded.direction_probs);
         let jump = self.select_bool(decoded.jump_prob, self.thresholds.jump);
-        let hook = self.select_bool(decoded.hook_prob, self.thresholds.hook);
+        let hook_threshold = self.hook_decode.threshold(self.thresholds.hook, self.hook_latch);
+        let hook = self.select_bool(decoded.hook_prob, hook_threshold);
+        self.hook_latch = hook;
         let fire = self.select_bool(decoded.fire_prob, self.thresholds.fire);
         let target = aim_angle_to_target(decoded.aim_angle);
 

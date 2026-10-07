@@ -64,6 +64,7 @@ fn scenes(map: &Arc<MapEntry>, n: usize, seed: u64, cfg: &BrainDemoConfig) -> Ve
                     aim: false,
                     ..HeadMask::ALL
                 },
+                latch: false,
             };
             Seq {
                 map: map.clone(),

@@ -7,8 +7,8 @@
 //! chance on the natural one). The aim head is scored only where the aim matters (a hook or shot
 //! is intended) by the angular error of `atan2(S, C)` against the label.
 
-use ddai_brain::{HOOK_FLYING, HOOK_GRABBED};
-use ddai_fly::bc::{HeadLogits, HeadThresholds};
+use ddai_brain::{HOOK_FLYING, HOOK_GRABBED, HOOK_IDLE};
+use ddai_fly::bc::{HeadLogits, HeadThresholds, HookDecode};
 use serde::Serialize;
 
 use crate::seq::Window;
@@ -98,6 +98,43 @@ pub struct HookByState {
     pub release_accuracy: f64,
 }
 
+/// The hook head on the decisions where the fly's **own previous hook command** (the latch) was one thing (task 8.6): `released` (key up: the
+/// decision to *press*) or `held` (key down: the decision to keep it down or *release*). Unlike [`HookByState`], which splits by the observed
+/// hook state, this is the split an intent head is built on, and it is **comparable across heads**: a legacy head is scored on the same
+/// decisions through the probability of the hook key it gives.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HookLatchMetrics {
+    pub n: u64,
+    /// Fraction of decisions where the teacher presses the key.
+    pub label_hook_rate: f64,
+    /// The same for the model, at the threshold in use for this latch.
+    pub pred_hook_rate: f64,
+    /// `P(pred key | label key)` and `P(pred no key | label no key)`.
+    pub recall: f64,
+    pub specificity: f64,
+    pub auroc: f64,
+    /// Mean negative log-likelihood (nats) of the teacher's hard label under the model's probability of the key, **unweighted**: the
+    /// hazard's own BCE for an intent head (the press hazard when released, the release hazard when held), the single Bernoulli's for a legacy one.
+    pub nll: f64,
+    /// The threshold in use for this latch.
+    pub threshold: f64,
+}
+
+/// [`HookLatchMetrics`] for both latches, with the two events named.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HookByLatch {
+    pub released: HookLatchMetrics,
+    pub held: HookLatchMetrics,
+    /// Press (key up): how often the teacher / the model presses, and how often the model presses where the teacher does.
+    pub press_label_rate: f64,
+    pub press_pred_rate: f64,
+    pub press_recall: f64,
+    /// Release (key down): how often the teacher / the model lets go, and how often the model lets go where the teacher does.
+    pub release_label_rate: f64,
+    pub release_pred_rate: f64,
+    pub release_recall: f64,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HeadReport {
     /// Scored decisions.
@@ -108,6 +145,11 @@ pub struct HeadReport {
     pub fire: BinaryMetrics,
     pub aim: AimMetrics,
     pub hook_by_state: HookByState,
+    /// The hook split by the latch, the fly's own previous command (task 8.6).
+    pub hook_by_latch: HookByLatch,
+    /// The aim error **at the throws** (the label presses the hook while the observed hook state is idle) whatever the aim loss mask: the
+    /// same decisions for every model, so legacy and intent heads (whose masks differ) are comparable.
+    pub aim_throw: AimMetrics,
     /// Decisions where direction, jump and hook are all right at once (aim and fire not counted).
     pub joint_dir_jump_hook: f64,
     /// The same, with the direction counted as right when it is among the two most likely.
@@ -126,7 +168,12 @@ pub struct MetricsAccumulator {
     aim_err: Vec<f32>,
     /// `(hook probability, label, own hook out)` of every scored hook decision.
     hook_state: Vec<(f32, bool, bool)>,
+    /// `(hook probability given the latch, label, latch)` of every scored hook decision (task 8.6).
+    hook_latch: Vec<(f32, bool, bool)>,
+    /// The angular error of the aim at every throw of the label.
+    aim_err_throw: Vec<f32>,
     thresholds: HeadThresholds,
+    decode: HookDecode,
 }
 
 fn wrap_pi(a: f32) -> f32 {
@@ -145,6 +192,34 @@ impl MetricsAccumulator {
             thresholds,
             ..Self::default()
         }
+    }
+
+    /// The hook decode the report's hook-by-latch point metrics are computed at (default: the plain decode at `thresholds.hook`).
+    pub fn with_hook_decode(mut self, decode: HookDecode) -> Self {
+        self.decode = decode;
+        self
+    }
+
+    /// The hysteresis decode that makes the hook key behave as the teacher's does **by latch** (task 8.6): `hi` presses with the key up as
+    /// often as the teacher does, `lo` keeps the key down as often as the teacher does (rate matching, [`rate_matched_threshold`], on the
+    /// two latch states separately: a press is a rare event with the key up, a release one with the key down). `None` when a latch
+    /// state has no decision.
+    pub fn rate_matched_hook_decode(&self) -> Option<HookDecode> {
+        let rows = |latch: bool| -> Vec<(f32, bool)> {
+            self.hook_latch
+                .iter()
+                .filter(|r| r.2 == latch)
+                .map(|r| (r.0, r.1))
+                .collect()
+        };
+        let (released, held) = (rows(false), rows(true));
+        if released.is_empty() || held.is_empty() {
+            return None;
+        }
+        Some(HookDecode::Latched {
+            hi: rate_matched_threshold(&released),
+            lo: rate_matched_threshold(&held),
+        })
     }
 
     /// The thresholds that make each binary head press as often as its labels do on everything
@@ -193,6 +268,10 @@ impl MetricsAccumulator {
                 let own = window.observations[k].self_state.hook_state;
                 self.hook_state
                     .push((l.hook_prob(), t.hook, matches!(own, HOOK_FLYING | HOOK_GRABBED)));
+                self.hook_latch.push((l.hook_prob(), t.hook, t.hook_latch));
+                if t.hook && own == HOOK_IDLE {
+                    self.aim_err_throw.push(wrap_pi(l.aim_angle() - t.aim).abs());
+                }
             }
             if t.mask.fire {
                 self.fire.push((l.fire_prob(), t.fire));
@@ -213,6 +292,8 @@ impl MetricsAccumulator {
         self.fire.extend(other.fire);
         self.aim_err.extend(other.aim_err);
         self.hook_state.extend(other.hook_state);
+        self.hook_latch.extend(other.hook_latch);
+        self.aim_err_throw.extend(other.aim_err_throw);
     }
 
     pub fn finish(self) -> HeadReport {
@@ -227,6 +308,8 @@ impl MetricsAccumulator {
             fire: binary_metrics(&self.fire, th.fire),
             aim: aim_metrics(&self.aim_err),
             hook_by_state: hook_by_state(&self.hook_state, th.hook),
+            hook_by_latch: hook_by_latch(&self.hook_latch, &th, self.decode),
+            aim_throw: aim_metrics(&self.aim_err_throw),
         }
     }
 }
@@ -336,6 +419,42 @@ fn hook_by_state(rows: &[(f32, bool, bool)], threshold: f32) -> HookByState {
         release_accuracy: out.specificity,
         not_out,
         out,
+    }
+}
+
+fn hook_by_latch(rows: &[(f32, bool, bool)], th: &HeadThresholds, decode: HookDecode) -> HookByLatch {
+    let part = |latch: bool| {
+        let threshold = decode.threshold(th.hook, latch);
+        let scores: Vec<(f32, bool)> = rows.iter().filter(|r| r.2 == latch).map(|r| (r.0, r.1)).collect();
+        let m = binary_metrics(&scores, threshold);
+        let neg = scores.len() as f64 - m.positives as f64;
+        let tn = scores.iter().filter(|s| !s.1 && s.0 < threshold).count() as f64;
+        let nll = scores
+            .iter()
+            .map(|&(p, y)| -f64::from(if y { p } else { 1.0 - p }.max(1e-12)).ln())
+            .sum::<f64>()
+            / scores.len().max(1) as f64;
+        HookLatchMetrics {
+            n: m.n,
+            label_hook_rate: m.prevalence,
+            pred_hook_rate: m.pred_rate,
+            recall: m.recall,
+            specificity: if neg > 0.0 { tn / neg } else { 0.0 },
+            auroc: m.auroc,
+            nll,
+            threshold: f64::from(threshold),
+        }
+    };
+    let (released, held) = (part(false), part(true));
+    HookByLatch {
+        press_label_rate: released.label_hook_rate,
+        press_pred_rate: released.pred_hook_rate,
+        press_recall: released.recall,
+        release_label_rate: if held.n > 0 { 1.0 - held.label_hook_rate } else { 0.0 },
+        release_pred_rate: if held.n > 0 { 1.0 - held.pred_hook_rate } else { 0.0 },
+        release_recall: held.specificity,
+        released,
+        held,
     }
 }
 
@@ -501,6 +620,7 @@ mod tests {
             mask,
             weight,
             hook_scale: 1.0,
+            hook_latch: false,
         };
         let w = Window {
             observations: vec![obs.clone(), obs.clone(), obs],
@@ -611,6 +731,7 @@ mod tests {
             mask: HeadMask::ALL,
             weight: 1.0,
             hook_scale: 1.0,
+            hook_latch: false,
         };
         let logit = |p: f32| HeadLogits {
             hook: (p / (1.0 - p)).ln(),
@@ -717,6 +838,7 @@ mod tests {
             mask: HeadMask::ALL,
             weight: 1.0,
             hook_scale: 1.0,
+            hook_latch: false,
         };
         let w = Window {
             observations: vec![obs(0), obs(HOOK_FLYING), obs(HOOK_GRABBED), obs(0)],
@@ -748,5 +870,151 @@ mod tests {
         assert_eq!(r.hook.threshold, 0.7f32 as f64);
         assert_eq!(r.hook_by_state.release_pred_rate, 1.0);
         assert_eq!(r.hook_by_state.start_accuracy, 0.0);
+    }
+
+    /// The hook split by the latch (the own previous command): press rate with the key up, release rate with the key down, the hazards'
+    /// own NLL, and the hysteresis decode rate-matched on the two latch states separately.
+    #[test]
+    fn the_hook_is_scored_and_calibrated_by_the_latch_not_by_the_observed_state() {
+        let map = Arc::new(ddai_physics::map::MapData {
+            width: 2,
+            height: 2,
+            game: vec![Default::default(); 4],
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        });
+        // The observed hook state is idle everywhere: only the latch can tell the two situations apart.
+        let obs = || {
+            let me = CharacterObservation::at_rest(0);
+            Observation {
+                map: map.clone(),
+                tick: 0,
+                self_state: me,
+                others: vec![],
+                target_id: None,
+                tuning: ddai_physics::tuning::TuningParams::default(),
+            }
+        };
+        let t = |hook: bool, latch: bool| StepTargets {
+            dir: 1,
+            jump: false,
+            hook,
+            fire: false,
+            aim: 0.0,
+            soft: None,
+            mask: HeadMask::ALL,
+            weight: 1.0,
+            hook_scale: 1.0,
+            hook_latch: latch,
+        };
+        let logit = |p: f32| HeadLogits {
+            hook: (p / (1.0 - p)).ln(),
+            jump: -5.0,
+            fire: -5.0,
+            ..HeadLogits::default()
+        };
+        let (mut observations, mut targets, mut logits) = (Vec::new(), Vec::new(), Vec::new());
+        // Key up: 10 decisions, the teacher presses in 3 (the head says 0.9) and not in 7 (0.7).
+        for i in 0..10 {
+            observations.push(obs());
+            targets.push(t(i < 3, false));
+            logits.push(logit(if i < 3 { 0.9 } else { 0.7 }));
+        }
+        // Key down: 20 decisions, the teacher keeps it in 16 (the head says 0.8) and lets go in 4 (0.3).
+        for i in 0..20 {
+            observations.push(obs());
+            targets.push(t(i < 16, true));
+            logits.push(logit(if i < 16 { 0.8 } else { 0.3 }));
+        }
+        let w = Window {
+            observations,
+            targets,
+            start: 0,
+            mirrored: false,
+        };
+        let mut acc = MetricsAccumulator::new();
+        acc.add_window(&w, &logits);
+        let Some(HookDecode::Latched { hi, lo }) = acc.rate_matched_hook_decode() else {
+            panic!("both latch states have decisions");
+        };
+        // hi: 3 presses of 10 with the key up, so it sits between the 0.9s and the 0.7s; lo: 16 holds of 20 with the key down, so it
+        // sits between the 0.8s and the 0.3s.
+        assert!(hi > 0.7 && hi < 0.9, "{hi}");
+        assert!(lo > 0.3 && lo < 0.8, "{lo}");
+        let decode = HookDecode::Latched { hi, lo };
+        let r = {
+            let mut a = MetricsAccumulator::new().with_hook_decode(decode);
+            a.add_window(&w, &logits);
+            a.finish()
+        };
+        let l = &r.hook_by_latch;
+        assert_eq!((l.released.n, l.held.n), (10, 20));
+        assert!((l.press_label_rate - 0.3).abs() < 1e-9 && (l.press_pred_rate - 0.3).abs() < 1e-9);
+        assert!((l.release_label_rate - 0.2).abs() < 1e-9 && (l.release_pred_rate - 0.2).abs() < 1e-9);
+        assert_eq!((l.press_recall, l.release_recall), (1.0, 1.0));
+        assert_eq!((l.released.threshold, l.held.threshold), (f64::from(hi), f64::from(lo)));
+        // The NLL of the teacher's label under the probability of the key: 3 x -ln 0.9 + 7 x -ln(1 - 0.7), averaged.
+        let want = (3.0 * -(0.9f64).ln() + 7.0 * -(0.3f64).ln()) / 10.0;
+        assert!((l.released.nll - want).abs() < 1e-5, "{} vs {want}", l.released.nll);
+        // Under the plain decode the same predictions are judged at one threshold for both latches.
+        let plain = {
+            let mut a = MetricsAccumulator::with_thresholds(ddai_fly::bc::HeadThresholds {
+                hook: 0.6,
+                ..Default::default()
+            });
+            a.add_window(&w, &logits);
+            a.finish()
+        };
+        assert_eq!(
+            (
+                plain.hook_by_latch.released.threshold,
+                plain.hook_by_latch.held.threshold
+            ),
+            (f64::from(0.6f32), f64::from(0.6f32))
+        );
+        // A latch state without decisions gives no decode; lo may come out above hi.
+        let mut empty = MetricsAccumulator::new();
+        let half = Window {
+            observations: vec![obs()],
+            targets: vec![t(true, false)],
+            start: 0,
+            mirrored: false,
+        };
+        empty.add_window(&half, &[logit(0.9)]);
+        assert!(empty.rate_matched_hook_decode().is_none());
+        let mut inverted = MetricsAccumulator::new();
+        let (mut observations, mut targets, mut logits) = (Vec::new(), Vec::new(), Vec::new());
+        // Key up: the teacher presses in 1 of 2, the head's presses are 0.4 (yes) / 0.2 (no): hi ~0.3; key down: holds in 1 of 2, the head says 0.9 / 0.8: lo ~0.85.
+        for (hook, latch, p) in [
+            (true, false, 0.4),
+            (false, false, 0.2),
+            (true, true, 0.9),
+            (false, true, 0.8),
+        ] {
+            observations.push(obs());
+            targets.push(t(hook, latch));
+            logits.push(logit(p));
+        }
+        inverted.add_window(
+            &Window {
+                observations,
+                targets,
+                start: 0,
+                mirrored: false,
+            },
+            &logits,
+        );
+        let Some(HookDecode::Latched { hi, lo }) = inverted.rate_matched_hook_decode() else {
+            panic!()
+        };
+        assert!(
+            lo > hi,
+            "the two thresholds are matched independently, even when lo comes out above hi: {hi} {lo}"
+        );
+        assert!(HookDecode::Latched { hi, lo }.validate().is_ok());
     }
 }

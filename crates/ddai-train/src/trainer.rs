@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ddai_brain::{HOOK_FLYING, HOOK_GRABBED, HOOK_IDLE};
-use ddai_fly::bc::{HookView, LossConfig, StepLoss};
+use ddai_fly::bc::{HookDecode, HookParam, HookView, LossConfig, StepLoss};
 use ddai_fly::bundle::{BundleMeta, read_zstd_postcard, write_zstd_postcard};
 use ddai_fly::rng::SplitMix64;
 use rayon::prelude::*;
@@ -71,6 +71,20 @@ impl OwnHookConfig {
             _ => HookView::Shared,
         }
     }
+}
+
+/// How `calibrate_thresholds` sets the hook decode of the checkpoint (task 8.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookCalibration {
+    /// A legacy hook head keeps the plain decode (its threshold rate-matched on the observed own hook state, as before 8.6); an
+    /// intent head gets its two hazard thresholds, rate-matched separately by the latch.
+    #[default]
+    Auto,
+    /// Whatever the head, the hysteresis decode with `hi` and `lo` rate-matched separately on the two latch states.
+    Latched,
+    /// Never touch the decode.
+    Plain,
 }
 
 /// The two loss configurations of the masked-hook-head training (`own_hook.mode = "mask_hook_head"`): the first
@@ -131,6 +145,8 @@ pub struct TrainConfig {
     pub threads: usize,
     pub loss: LossConfig,
     pub own_hook: OwnHookConfig,
+    /// How the hook decode is calibrated at the end of a phase (task 8.6).
+    pub hook_calibration: HookCalibration,
     /// Refresh the learner's derived state (the fly's resting state) this often.
     pub refresh_every: u64,
     pub log_every: u64,
@@ -153,6 +169,7 @@ impl Default for TrainConfig {
             threads: 6,
             loss: LossConfig::default(),
             own_hook: OwnHookConfig::default(),
+            hook_calibration: HookCalibration::default(),
             refresh_every: 25,
             log_every: 50,
             eval_windows: 600,
@@ -596,6 +613,19 @@ impl Trainer {
         eval: &[EvalSet],
         eval_every: u64,
     ) -> Result<PhaseSummary, TrainError> {
+        match (self.learner.hook_param(), self.cfg.loss.hazard_pos_weight) {
+            (HookParam::Intent, None) => {
+                return Err(TrainError(
+                    "the hook head is an intent head: set train.loss.hazard_pos_weight = [press, release]".into(),
+                ));
+            }
+            (HookParam::Legacy, Some(_)) => {
+                return Err(TrainError(
+                    "train.loss.hazard_pos_weight is for an intent hook head, this checkpoint's is legacy (train upgrade-hook)".into(),
+                ));
+            }
+            _ => {}
+        }
         if self.teacher.is_empty() && self.human.is_empty() {
             return Err(TrainError("no training data".to_string()));
         }
@@ -730,10 +760,28 @@ impl Trainer {
         let th = total.rate_matched_thresholds();
         th.validate().map_err(TrainError)?;
         self.learner.set_thresholds(th);
+        let latched = match self.cfg.hook_calibration {
+            HookCalibration::Plain => false,
+            HookCalibration::Latched => true,
+            HookCalibration::Auto => self.learner.hook_param() == HookParam::Intent,
+        };
+        let mut decode = None;
+        if latched {
+            let d = total.rate_matched_hook_decode().ok_or_else(|| {
+                TrainError("the hook decode needs decisions of both latch states in the calibration sets".into())
+            })?;
+            d.validate().map_err(TrainError)?;
+            self.learner.set_hook_decode(d);
+            decode = Some(d);
+        }
         if let Some(run) = &self.run {
+            let (hi, lo) = match decode {
+                Some(HookDecode::Latched { hi, lo }) => (Some(hi), Some(lo)),
+                _ => (None, None),
+            };
             run.append_metrics(&json!({
                 "kind": "thresholds", "phase": phase, "step": self.step, "sets": used,
-                "jump": th.jump, "hook": th.hook, "fire": th.fire, "unix_s": unix_seconds(),
+                "jump": th.jump, "hook": th.hook, "fire": th.fire, "hook_hi": hi, "hook_lo": lo, "unix_s": unix_seconds(),
             }))?;
         }
         Ok(())
@@ -801,6 +849,7 @@ pub fn accumulate_set(
         .bytes()
         .fold(0u64, |h, b| h.wrapping_mul(131).wrapping_add(u64::from(b)));
     let thresholds = learner.thresholds();
+    let decode = learner.hook_decode();
     let per_window: Vec<MetricsAccumulator> = pool.install(|| {
         (0..cfg.eval_windows)
             .filter(|&i| half.includes(i))
@@ -810,13 +859,13 @@ pub fn accumulate_set(
                 let mut rng = SplitMix64::new(mix(0xE7A1_5EED ^ name_hash, 0, i as u64));
                 let w = set.corpus.sample_window(&mut rng, cfg.window_len, cfg.burn_in, false);
                 let logits = learner.window_logits_played(&w);
-                let mut acc = MetricsAccumulator::with_thresholds(thresholds);
+                let mut acc = MetricsAccumulator::with_thresholds(thresholds).with_hook_decode(decode);
                 acc.add_window(&w, &logits);
                 acc
             })
             .collect()
     });
-    let mut total = MetricsAccumulator::with_thresholds(thresholds);
+    let mut total = MetricsAccumulator::with_thresholds(thresholds).with_hook_decode(decode);
     for a in per_window {
         total.merge(a);
     }

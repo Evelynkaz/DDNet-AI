@@ -432,7 +432,7 @@ fn action_level_mirror_symmetry_on_a_synthetic_l_r_symmetric_graph() {
         let mut input_buf = vec![0.0f32; encoder.num_inputs()];
         encoder.forward(&features, &an, &encoder_params, &mut input_buf);
         let out = state.step_decision(&model, &input_buf);
-        decoder_forward(&decoder, out.dn_rates, &calib, &decoder_params)
+        decoder_forward(&decoder, out.dn_rates, &calib, &decoder_params, false)
     };
 
     let action = decide_once(&obs);

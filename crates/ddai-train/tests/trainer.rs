@@ -75,6 +75,7 @@ fn corpus(seed: u64, n_seqs: usize) -> Corpus {
                         soft: None,
                         weight: 1.0,
                         mask: HeadMask::ALL,
+                        latch: false,
                     }
                 })
                 .collect();
@@ -405,6 +406,7 @@ fn corpus_with_state(seed: u64, n_seqs: usize, persistence: f32) -> Corpus {
                         soft: None,
                         weight: 1.0,
                         mask: HeadMask::ALL,
+                        latch: false,
                     }
                 })
                 .collect();

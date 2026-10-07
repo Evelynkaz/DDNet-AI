@@ -370,6 +370,99 @@ pub struct DecoderParams {
     /// One independent preferred angle per member with no same-type opposite-side partner
     /// (`decoder.aim_unpaired`'s order) — label **П**.
     pub aim_unpaired_theta: Vec<f32>,
+    /// The release hazard of an **intent** hook head (task 8.6, bundle v4): `Some` makes the hook head two hazards chosen by the
+    /// latch — `hook_w`/`hook_b` become `P(press | released)` and this is `P(release | held)`. `None` is the legacy single Bernoulli.
+    pub hook_release: Option<HookRelease>,
+}
+
+/// The release hazard's weights, the same shape as the hook head's (`hook_w`, `hook_b`): one weight per hook type group, one bias.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookRelease {
+    pub w: Vec<f32>,
+    pub b: f32,
+}
+
+impl DecoderParams {
+    /// The intent form of these parameters, **equal in function to the legacy hook head**: the press hazard is the hook head
+    /// (`hook_w`, `hook_b`) and the release hazard is its mirror image, `P(release | held) = 1 - P(hook)`, i.e. the weights
+    /// `-hook_w`, `-hook_b`. With the latch selecting the hazard, the probability of the hook key is then the legacy head's, whatever the
+    /// latch is, so an intent fly starts exactly where the legacy one is and the two arms of the BC comparison share one initialisation
+    /// (task 8.6). Already intent: unchanged.
+    pub fn with_intent_hook(&self) -> DecoderParams {
+        let mut out = self.clone();
+        if out.hook_release.is_none() {
+            out.hook_release = Some(HookRelease {
+                w: self.hook_w.iter().map(|w| -w).collect(),
+                b: -self.hook_b,
+            });
+        }
+        out
+    }
+
+    /// Whether the hook head is an intent head.
+    pub fn is_intent(&self) -> bool {
+        self.hook_release.is_some()
+    }
+}
+
+/// The decoder parameters as bundle format v3 (and v1, v2) stored them: no release hazard. Kept to read old files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecoderParamsV3 {
+    pub direction_lr_w: Vec<f32>,
+    pub direction_lr_b: f32,
+    pub direction_stop_w: Vec<f32>,
+    pub direction_stop_b: f32,
+    pub jump_w: Vec<f32>,
+    pub jump_b: f32,
+    pub hook_w: Vec<f32>,
+    pub hook_b: f32,
+    pub fire_w: Vec<f32>,
+    pub fire_b: f32,
+    pub aim_pair_theta: Vec<f32>,
+    pub aim_unpaired_theta: Vec<f32>,
+}
+
+impl DecoderParams {
+    /// The version-3 layout of these parameters, or `None` for an intent head (which a version 3 reader would play wrong).
+    pub fn to_v3(&self) -> Option<DecoderParamsV3> {
+        if self.hook_release.is_some() {
+            return None;
+        }
+        Some(DecoderParamsV3 {
+            direction_lr_w: self.direction_lr_w.clone(),
+            direction_lr_b: self.direction_lr_b,
+            direction_stop_w: self.direction_stop_w.clone(),
+            direction_stop_b: self.direction_stop_b,
+            jump_w: self.jump_w.clone(),
+            jump_b: self.jump_b,
+            hook_w: self.hook_w.clone(),
+            hook_b: self.hook_b,
+            fire_w: self.fire_w.clone(),
+            fire_b: self.fire_b,
+            aim_pair_theta: self.aim_pair_theta.clone(),
+            aim_unpaired_theta: self.aim_unpaired_theta.clone(),
+        })
+    }
+}
+
+impl From<DecoderParamsV3> for DecoderParams {
+    fn from(v: DecoderParamsV3) -> Self {
+        DecoderParams {
+            direction_lr_w: v.direction_lr_w,
+            direction_lr_b: v.direction_lr_b,
+            direction_stop_w: v.direction_stop_w,
+            direction_stop_b: v.direction_stop_b,
+            jump_w: v.jump_w,
+            jump_b: v.jump_b,
+            hook_w: v.hook_w,
+            hook_b: v.hook_b,
+            fire_w: v.fire_w,
+            fire_b: v.fire_b,
+            aim_pair_theta: v.aim_pair_theta,
+            aim_unpaired_theta: v.aim_unpaired_theta,
+            hook_release: None,
+        }
+    }
 }
 
 /// `dL/d` of every [`DecoderParams`] field, same shape.
@@ -387,6 +480,9 @@ pub struct DecoderGradients {
     pub fire_b: f32,
     pub aim_pair_theta: Vec<f32>,
     pub aim_unpaired_theta: Vec<f32>,
+    /// Gradient of the release hazard (zero, and unused, for a legacy hook head).
+    pub hook_release_w: Vec<f32>,
+    pub hook_release_b: f32,
 }
 
 // --- Model ----------------------------------------------------------------------------------------
@@ -600,6 +696,12 @@ impl DecoderModel {
         &self.config
     }
 
+    /// The features the **hook head** reads: the mean calibrated z of each hook type group (one number per type, both sides pooled), in
+    /// `hook_w`'s order (task 8.6: the information probe asks how much a better-fitted head on exactly these numbers could do).
+    pub fn hook_group_means(&self, z: &[f32]) -> Vec<f32> {
+        self.hook.iter().map(|g| mean_of(z, &g.slots)).collect()
+    }
+
     pub fn num_outputs(&self) -> usize {
         self.num_outputs
     }
@@ -626,6 +728,7 @@ impl DecoderModel {
             fire_b: 0.0,
             aim_pair_theta: spaced(self.aim_pairs.len()),
             aim_unpaired_theta: spaced(self.aim_unpaired.len()),
+            hook_release: None,
         }
     }
 
@@ -643,6 +746,8 @@ impl DecoderModel {
             fire_b: 0.0,
             aim_pair_theta: vec![0.0; self.aim_pairs.len()],
             aim_unpaired_theta: vec![0.0; self.aim_unpaired.len()],
+            hook_release_w: vec![0.0; self.hook.len()],
+            hook_release_b: 0.0,
         }
     }
 
@@ -679,21 +784,35 @@ impl DecoderModel {
                 )));
             }
         }
-        let all_finite = params
-            .direction_lr_w
-            .iter()
-            .chain(&params.direction_stop_w)
-            .chain(&params.jump_w)
-            .chain(&params.hook_w)
-            .chain(&params.fire_w)
-            .chain(&params.aim_pair_theta)
-            .chain(&params.aim_unpaired_theta)
-            .chain(std::iter::once(&params.direction_lr_b))
-            .chain(std::iter::once(&params.direction_stop_b))
-            .chain(std::iter::once(&params.jump_b))
-            .chain(std::iter::once(&params.hook_b))
-            .chain(std::iter::once(&params.fire_b))
-            .all(|x| x.is_finite());
+        if let Some(r) = &params.hook_release
+            && r.w.len() != self.hook.len()
+        {
+            return Err(DecoderError::ParamShapeMismatch(format!(
+                "hook_release.w.len() == {}, expected {}",
+                r.w.len(),
+                self.hook.len()
+            )));
+        }
+        let release_finite = params
+            .hook_release
+            .as_ref()
+            .is_none_or(|r| r.b.is_finite() && r.w.iter().all(|x| x.is_finite()));
+        let all_finite = release_finite
+            && params
+                .direction_lr_w
+                .iter()
+                .chain(&params.direction_stop_w)
+                .chain(&params.jump_w)
+                .chain(&params.hook_w)
+                .chain(&params.fire_w)
+                .chain(&params.aim_pair_theta)
+                .chain(&params.aim_unpaired_theta)
+                .chain(std::iter::once(&params.direction_lr_b))
+                .chain(std::iter::once(&params.direction_stop_b))
+                .chain(std::iter::once(&params.jump_b))
+                .chain(std::iter::once(&params.hook_b))
+                .chain(std::iter::once(&params.fire_b))
+                .all(|x| x.is_finite());
         if !all_finite {
             return Err(DecoderError::NonFiniteParam(
                 "at least one field contains NaN/inf".to_string(),
@@ -739,6 +858,17 @@ fn pooled_logit(groups: &[TypeGroup], w: &[f32], b: f32, z: &[f32]) -> f32 {
         .zip(w)
         .map(|(g, &wi)| wi * mean_of(z, &g.slots))
         .sum::<f32>()
+}
+
+/// The logit of the hook key **given the latch** (the fly's own previous hook command, task 8.6): the legacy head's logit for a legacy fly
+/// (the latch is ignored); for an intent fly the press hazard's logit with the key up and **minus** the release hazard's logit with the
+/// key down (`P(hold) = 1 - P(release)`). Reads only the calibrated DN `z`, like every head: the latch is a structural switch between
+/// two heads, never an input of the network.
+pub(crate) fn hook_logit(decoder: &DecoderModel, params: &DecoderParams, z: &[f32], latch: bool) -> f32 {
+    match &params.hook_release {
+        Some(r) if latch => -pooled_logit(&decoder.hook, &r.w, r.b, z),
+        _ => pooled_logit(&decoder.hook, &params.hook_w, params.hook_b, z),
+    }
 }
 
 /// `(C, S)` for the aim population vector — see the module doc comment for the tied-pair math.
@@ -787,9 +917,10 @@ pub fn decoder_forward(
     dn_rates: &[f32],
     calib: &DnCalibration,
     params: &DecoderParams,
+    hook_latch: bool,
 ) -> DecodedAction {
     let mut scratch = DecoderScratch::new(decoder);
-    decoder_forward_into(decoder, dn_rates, calib, params, &mut scratch)
+    decoder_forward_into(decoder, dn_rates, calib, params, &mut scratch, hook_latch)
 }
 
 /// The allocation-free path [`crate::brain::FlyBrain::decide`] actually calls.
@@ -799,6 +930,7 @@ pub fn decoder_forward_into(
     calib: &DnCalibration,
     params: &DecoderParams,
     scratch: &mut DecoderScratch,
+    hook_latch: bool,
 ) -> DecodedAction {
     assert_eq!(dn_rates.len(), decoder.num_outputs);
     calib.z_into(dn_rates, decoder.config.z_clip, &mut scratch.z);
@@ -827,7 +959,7 @@ pub fn decoder_forward_into(
     let dir_probs = softmax3([left_logit, stop_logit, right_logit]);
 
     let jump_logit = pooled_logit(&decoder.jump, &params.jump_w, params.jump_b, z);
-    let hook_logit = pooled_logit(&decoder.hook, &params.hook_w, params.hook_b, z);
+    let hook_logit = hook_logit(decoder, params, z, hook_latch);
     let fire_logit = pooled_logit(&decoder.fire, &params.fire_w, params.fire_b, z);
 
     let (c, s) = population_vector(

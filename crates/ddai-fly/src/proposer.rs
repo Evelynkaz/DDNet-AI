@@ -69,14 +69,22 @@ impl FlyProposer {
 
     /// A proposer over a trained bundle, played the way the bundle was trained: a model with the hook head masked
     /// (`HookView::MaskedForHookHead`) gets its second view for the hook probability.
-    pub fn from_template(template: &crate::bundle::FlyBrainTemplate, config: FlyBrainConfig, seed: u64) -> FlyProposer {
+    ///
+    /// Refuses a checkpoint with an intent hook head or a latched decode (`FlyBrainTemplate::require_unlatched`): the proposer's latch would
+    /// follow the fly's own argmax, not the action the hybrid plays.
+    pub fn from_template(
+        template: &crate::bundle::FlyBrainTemplate,
+        config: FlyBrainConfig,
+        seed: u64,
+    ) -> Result<FlyProposer, crate::bundle::BundleError> {
+        template.require_unlatched("hybrid fly proposer")?;
         let masked = template.hook_view() == crate::bc::HookView::MaskedForHookHead;
         let hook_brain = masked.then(|| template.instantiate(config.clone()));
         let p = FlyProposer::new(template.instantiate(config), seed);
-        match hook_brain {
+        Ok(match hook_brain {
             Some(h) => p.with_hook_brain(h),
             None => p,
-        }
+        })
     }
 
     pub fn brain(&self) -> &FlyBrain {

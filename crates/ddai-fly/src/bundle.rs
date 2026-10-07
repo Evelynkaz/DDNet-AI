@@ -17,18 +17,21 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::bc::{HeadThresholds, HookView};
+use crate::bc::{HeadThresholds, HookDecode, HookParam, HookView};
 use crate::brain::{FlyBrain, FlyBrainConfig};
 use crate::brain_config::{BrainConfig, parse_brain_config};
 use crate::config::FlyConfig;
-use crate::decoder::{DecoderModel, DecoderParams, DnCalibration};
+use crate::decoder::{DecoderModel, DecoderParams, DecoderParamsV3, DnCalibration};
 use crate::encoder::{EncoderModel, EncoderParams};
 use crate::model::FlyModel;
 use crate::params::FlyParams;
 
-/// Version 2 added [`FlyBundle::thresholds`], version 3 [`FlyBundle::hook_view`]; version 1 and 2 files
-/// (everything trained before 8.2b) still load, with the default thresholds / the shared hook view.
-pub const BUNDLE_FORMAT_VERSION: u32 = 3;
+/// Version 2 added [`FlyBundle::thresholds`], version 3 [`FlyBundle::hook_view`], version 4 (task 8.6) [`FlyBundle::hook_param`] and
+/// [`FlyBundle::hook_decode`] (and the release hazard in `decoder_params`); version 1 to 3 files (everything trained before 8.6) still
+/// load, with the default thresholds / the shared hook view / the `legacy` hook head and the plain decode, and **play bit for bit** as before.
+pub const BUNDLE_FORMAT_VERSION: u32 = 4;
+/// The version a `Legacy` + `Plain` bundle is still written as.
+pub const LEGACY_BUNDLE_FORMAT_VERSION: u32 = 3;
 
 /// Anything that can go wrong saving or loading a bundle; the message says what.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +78,63 @@ pub struct FlyBundle {
     pub thresholds: HeadThresholds,
     /// How the hook head sees the own hook state (format v3); a masked model is played in two views.
     pub hook_view: HookView,
+    /// How the hook head is parameterised (format v4): `Intent` iff `decoder_params.hook_release` is set.
+    pub hook_param: HookParam,
+    /// How the hook probability becomes the hook key (format v4): the plain threshold or the hysteresis decode.
+    pub hook_decode: HookDecode,
+}
+
+impl FlyBundle {
+    /// The kind of the hook head must agree with the parameters (an `Intent` bundle carries the release hazard, a `Legacy` one does not)
+    /// and the decode must be valid.
+    pub fn validate_hook(&self) -> Result<(), String> {
+        match (self.hook_param, self.decoder_params.hook_release.is_some()) {
+            (HookParam::Intent, false) => {
+                return Err("hook_param is intent but decoder_params has no release hazard".into());
+            }
+            (HookParam::Legacy, true) => {
+                return Err("hook_param is legacy but decoder_params has a release hazard".into());
+            }
+            _ => {}
+        }
+        self.hook_decode.validate()
+    }
+}
+
+/// The format-version-3 layout (no hook parameterisation, no hook decode), kept to read old files.
+#[derive(Deserialize)]
+struct FlyBundleV3 {
+    #[allow(dead_code)] // decoded to keep the layout; the version was peeked already
+    format_version: u32,
+    flyg_sha256: String,
+    flyg_path_hint: String,
+    brain_config_toml: String,
+    fly_config: FlyConfig,
+    fly_params: FlyParams,
+    encoder_params: EncoderParams,
+    decoder_params: DecoderParamsV3,
+    calibration: DnCalibration,
+    meta: BundleMeta,
+    thresholds: HeadThresholds,
+    hook_view: HookView,
+}
+
+/// The version-3 layout to **write**: a `Legacy` + `Plain` bundle is saved as version 3 so that every binary built before task 8.6 (the
+/// rollback copies) still reads it; only an intent head or a latched decode, which such a binary would play wrong, needs version 4.
+#[derive(Serialize)]
+struct FlyBundleV3Out<'a> {
+    format_version: u32,
+    flyg_sha256: &'a str,
+    flyg_path_hint: &'a str,
+    brain_config_toml: &'a str,
+    fly_config: &'a FlyConfig,
+    fly_params: &'a FlyParams,
+    encoder_params: &'a EncoderParams,
+    decoder_params: DecoderParamsV3,
+    calibration: &'a DnCalibration,
+    meta: &'a BundleMeta,
+    thresholds: &'a HeadThresholds,
+    hook_view: HookView,
 }
 
 /// The format-version-2 layout (no hook view), kept to read old files.
@@ -88,7 +148,7 @@ struct FlyBundleV2 {
     fly_config: FlyConfig,
     fly_params: FlyParams,
     encoder_params: EncoderParams,
-    decoder_params: DecoderParams,
+    decoder_params: DecoderParamsV3,
     calibration: DnCalibration,
     meta: BundleMeta,
     thresholds: HeadThresholds,
@@ -105,7 +165,7 @@ struct FlyBundleV1 {
     fly_config: FlyConfig,
     fly_params: FlyParams,
     encoder_params: EncoderParams,
-    decoder_params: DecoderParams,
+    decoder_params: DecoderParamsV3,
     calibration: DnCalibration,
     meta: BundleMeta,
 }
@@ -192,21 +252,62 @@ pub fn peek_version(path: &Path, bytes: &[u8]) -> Result<u32, BundleError> {
         .map_err(err(&format!("{}: decoding the version", path.display())))
 }
 
-/// Writes a bundle.
+/// Writes a bundle: version 3 for a `Legacy` + `Plain` one (readable by every older binary), version 4 for an intent head or a latched decode.
 pub fn save_bundle(path: &Path, bundle: &FlyBundle) -> Result<(), BundleError> {
+    if bundle.hook_param == HookParam::Legacy
+        && bundle.hook_decode == HookDecode::Plain
+        && let Some(decoder_params) = bundle.decoder_params.to_v3()
+    {
+        let v3 = FlyBundleV3Out {
+            format_version: LEGACY_BUNDLE_FORMAT_VERSION,
+            flyg_sha256: &bundle.flyg_sha256,
+            flyg_path_hint: &bundle.flyg_path_hint,
+            brain_config_toml: &bundle.brain_config_toml,
+            fly_config: &bundle.fly_config,
+            fly_params: &bundle.fly_params,
+            encoder_params: &bundle.encoder_params,
+            decoder_params,
+            calibration: &bundle.calibration,
+            meta: &bundle.meta,
+            thresholds: &bundle.thresholds,
+            hook_view: bundle.hook_view,
+        };
+        return write_zstd_postcard(path, &v3, 3);
+    }
     write_zstd_postcard(path, bundle, 3)
 }
 
-/// Reads a bundle, checking its format version (version 1 files load with default thresholds).
+/// Reads a bundle, checking its format version (version 1 files load with default thresholds; versions 1 to 3 with the `legacy` hook head
+/// and the plain hook decode).
 pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
     let bytes = read_zstd_bytes(path)?;
+    let bad = |e: String| BundleError(format!("{}: {e}", path.display()));
     match peek_version(path, &bytes)? {
         BUNDLE_FORMAT_VERSION => {
-            let b: FlyBundle = decode_payload(path, &bytes, "a v3 bundle")?;
-            b.thresholds
-                .validate()
-                .map_err(|e| BundleError(format!("{}: {e}", path.display())))?;
+            let b: FlyBundle = decode_payload(path, &bytes, "a v4 bundle")?;
+            b.thresholds.validate().map_err(bad)?;
+            b.validate_hook().map_err(bad)?;
             Ok(b)
+        }
+        3 => {
+            let b: FlyBundleV3 = decode_payload(path, &bytes, "a v3 bundle")?;
+            b.thresholds.validate().map_err(bad)?;
+            Ok(FlyBundle {
+                format_version: BUNDLE_FORMAT_VERSION,
+                flyg_sha256: b.flyg_sha256,
+                flyg_path_hint: b.flyg_path_hint,
+                brain_config_toml: b.brain_config_toml,
+                fly_config: b.fly_config,
+                fly_params: b.fly_params,
+                encoder_params: b.encoder_params,
+                decoder_params: b.decoder_params.into(),
+                calibration: b.calibration,
+                meta: b.meta,
+                thresholds: b.thresholds,
+                hook_view: b.hook_view,
+                hook_param: HookParam::Legacy,
+                hook_decode: HookDecode::Plain,
+            })
         }
         1 => {
             let b: FlyBundleV1 = decode_payload(path, &bytes, "a v1 bundle")?;
@@ -218,18 +319,18 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
                 fly_config: b.fly_config,
                 fly_params: b.fly_params,
                 encoder_params: b.encoder_params,
-                decoder_params: b.decoder_params,
+                decoder_params: b.decoder_params.into(),
                 calibration: b.calibration,
                 meta: b.meta,
                 thresholds: HeadThresholds::default(),
                 hook_view: HookView::Shared,
+                hook_param: HookParam::Legacy,
+                hook_decode: HookDecode::Plain,
             })
         }
         2 => {
             let b: FlyBundleV2 = decode_payload(path, &bytes, "a v2 bundle")?;
-            b.thresholds
-                .validate()
-                .map_err(|e| BundleError(format!("{}: {e}", path.display())))?;
+            b.thresholds.validate().map_err(bad)?;
             Ok(FlyBundle {
                 format_version: BUNDLE_FORMAT_VERSION,
                 flyg_sha256: b.flyg_sha256,
@@ -238,11 +339,13 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
                 fly_config: b.fly_config,
                 fly_params: b.fly_params,
                 encoder_params: b.encoder_params,
-                decoder_params: b.decoder_params,
+                decoder_params: b.decoder_params.into(),
                 calibration: b.calibration,
                 meta: b.meta,
                 thresholds: b.thresholds,
                 hook_view: HookView::Shared,
+                hook_param: HookParam::Legacy,
+                hook_decode: HookDecode::Plain,
             })
         }
         v => Err(BundleError(format!(
@@ -250,6 +353,21 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
             path.display()
         ))),
     }
+}
+
+/// A copy of `bundle` with the hook head turned into an intent head (task 8.6): the press hazard is the hook head, the release hazard
+/// its mirror image, so the intent fly plays **exactly** like the legacy one (same hook probability whatever the latch is) until training
+/// moves the two apart. The decode becomes the hysteresis decode at the legacy threshold on both sides (`hi = lo = thresholds.hook`),
+/// which is the plain decode: the same decisions. Already intent: unchanged.
+pub fn upgrade_to_intent_hook(bundle: &FlyBundle) -> FlyBundle {
+    let mut out = bundle.clone();
+    out.decoder_params = bundle.decoder_params.with_intent_hook();
+    out.hook_param = HookParam::Intent;
+    if out.hook_decode == HookDecode::Plain {
+        let t = out.thresholds.hook;
+        out.hook_decode = HookDecode::Latched { hi: t, lo: t };
+    }
+    out
 }
 
 /// A copy of `bundle` whose encoder also reads the target opponent's state (task 8.5a): the `[opponent_state]` section
@@ -332,6 +450,8 @@ pub struct FlyBrainTemplate {
     brain_config: BrainConfig,
     thresholds: HeadThresholds,
     hook_view: HookView,
+    hook_param: HookParam,
+    hook_decode: HookDecode,
     /// The resting state, warmed up once (each brain restores it on `reset`).
     rest: crate::state::FlyState,
     rest_converged: bool,
@@ -367,6 +487,7 @@ impl FlyBrainTemplate {
                 bundle.flyg_sha256
             )));
         }
+        bundle.validate_hook().map_err(err("hook head"))?;
         let brain_config = parse_brain_config(&bundle.brain_config_toml).map_err(err("embedded brain config"))?;
         let model = FlyModel::new(flyg, bundle.fly_config, bundle.fly_params).map_err(err("fly model"))?;
         let encoder = brain_config.encoder_model(&model).map_err(err("encoder"))?;
@@ -395,6 +516,8 @@ impl FlyBrainTemplate {
             brain_config,
             thresholds: bundle.thresholds,
             hook_view: bundle.hook_view,
+            hook_param: bundle.hook_param,
+            hook_decode: bundle.hook_decode,
             rest,
             rest_converged,
             meta: bundle.meta,
@@ -437,6 +560,29 @@ impl FlyBrainTemplate {
     pub fn hook_view(&self) -> HookView {
         self.hook_view
     }
+    /// Refuses a fly whose hook depends on the latch (an intent head or a latched decode) where the latch can diverge from the hook that is
+    /// actually played: the live bot (a server pause and its resume do not call the brain, the guard and the hook veto change the hook after
+    /// `decide`), the hybrid's [`crate::proposer::FlyProposer`] (the latch follows the fly's own argmax, not the hybrid's played action) and
+    /// the critical-decision swaps (`ddai_train::critical`). A plain legacy fly has no latch to diverge. Lift this only with a `Brain` hook
+    /// that tells the brain the action really sent.
+    pub fn require_unlatched(&self, what: &str) -> Result<(), BundleError> {
+        if self.hook_param == HookParam::Intent || self.hook_decode != HookDecode::Plain {
+            return Err(BundleError(format!(
+                "{what}: this checkpoint has an intent hook head or a latched hook decode; its latch (the fly's own previous hook command) \
+                 can diverge from the hook actually played here, so it is refused (task 8.6, review F3)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// How the hook head is parameterised (`Legacy` for every bundle written before format v4).
+    pub fn hook_param(&self) -> HookParam {
+        self.hook_param
+    }
+    /// How the hook probability becomes the hook key (`Plain` for every bundle written before format v4).
+    pub fn hook_decode(&self) -> HookDecode {
+        self.hook_decode
+    }
 
     /// A fresh brain (its own state and scratch buffers) over copies of the shared models.
     pub fn instantiate(&self, config: FlyBrainConfig) -> FlyBrain {
@@ -451,6 +597,7 @@ impl FlyBrainTemplate {
         );
         brain.adopt_rest(&self.rest, self.rest_converged);
         brain.set_thresholds(self.thresholds);
+        brain.set_hook_decode(self.hook_decode);
         if let Some((name, sha256)) = &self.identity {
             brain.set_identity(name.clone(), sha256.clone());
         }

@@ -136,6 +136,12 @@ pub fn load(cfg: &PpoConfig) -> Result<Loaded, String> {
         }
     }
     let base = load_bundle(&expand_home(&cfg.init_bundle)).map_err(|e| e.to_string())?;
+    if base.hook_param != ddai_fly::bc::HookParam::Legacy || base.hook_decode != ddai_fly::bc::HookDecode::Plain {
+        return Err(format!(
+            "{}: the PPO of 8.5b plays the legacy hook head with the plain decode (the latch of an intent head or of the hysteresis decode is not in its policy yet)",
+            cfg.init_bundle
+        ));
+    }
     let flyg_sha = sha256_hex_of_file(&flyg_path).map_err(|e| e.to_string())?;
     if flyg_sha != base.flyg_sha256 {
         return Err(format!(

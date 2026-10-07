@@ -20,14 +20,18 @@ use ddai_controls::features::{extract, input_dim};
 use ddai_controls::net::SeqNet;
 use ddai_fly::backward::BackwardIndex;
 use ddai_fly::batched::{BatchedEngine, BatchedPlan, TrainBackend};
-use ddai_fly::bc::{HeadLogits, HeadThresholds, HookView, LossConfig, StepLoss, combine_hook_view};
+use ddai_fly::bc::{
+    HeadLogits, HeadThresholds, HookDecode, HookParam, HookView, LossConfig, StepLoss, combine_hook_view,
+};
 use ddai_fly::brain_bc::{BcSequence, BcStepConfig, BcStepOutput, BcWorkspace, brain_bc_forward, brain_bc_step};
 use ddai_fly::brain_bc_batched::brain_bc_batched_step;
 use ddai_fly::brain_config::{BrainConfig, parse_brain_config};
 use ddai_fly::bundle::{BUNDLE_FORMAT_VERSION, BundleMeta, FlyBundle, save_bundle, sha256_hex_of_file};
 use ddai_fly::calibration::calibrate_from_windows;
 use ddai_fly::config::FlyConfig;
-use ddai_fly::decoder::{DecoderGradients, DecoderModel, DecoderParams, DnCalibration, calibrate_from_rest};
+use ddai_fly::decoder::{
+    DecoderGradients, DecoderModel, DecoderParams, DnCalibration, HookRelease, calibrate_from_rest,
+};
 use ddai_fly::encoder::{EncoderGradients, EncoderModel, EncoderParams, RayGridConfig, RayGridFeatures};
 use ddai_fly::model::FlyModel;
 use ddai_fly::optim::{ActivityRegularizerConfig, ParamGradients};
@@ -98,6 +102,15 @@ pub trait Learner: Send + Sync {
     /// configuration).
     fn hook_view(&self) -> HookView;
     fn set_hook_view(&mut self, view: HookView);
+    /// How the hook probability becomes the hook key (task 8.6, stored in the checkpoint); a control is always plain.
+    fn hook_decode(&self) -> HookDecode {
+        HookDecode::Plain
+    }
+    fn set_hook_decode(&mut self, _decode: HookDecode) {}
+    /// How the hook head is parameterised (task 8.6); a control is always legacy.
+    fn hook_param(&self) -> HookParam {
+        HookParam::Legacy
+    }
 
     /// The logits the **playing** model would produce: under [`HookView::MaskedForHookHead`] the hook head
     /// comes from a second pass over the observations with the own hook state hidden.
@@ -204,6 +217,9 @@ pub(crate) struct Layout {
     fire_w: usize,
     aim_pair: usize,
     aim_unpaired: usize,
+    /// Task 8.6: an intent hook head appends its release hazard (`release_w`, one bias) after everything else.
+    pub(crate) intent: bool,
+    release_w: usize,
 }
 
 impl Layout {
@@ -222,6 +238,8 @@ impl Layout {
             fire_w: dec.fire_w.len(),
             aim_pair: dec.aim_pair_theta.len(),
             aim_unpaired: dec.aim_unpaired_theta.len(),
+            intent: dec.hook_release.is_some(),
+            release_w: dec.hook_release.as_ref().map_or(0, |r| r.w.len()),
         }
     }
 
@@ -244,6 +262,7 @@ impl Layout {
             + 1
             + self.aim_pair
             + self.aim_unpaired
+            + if self.intent { self.release_w + 1 } else { 0 }
     }
 
     /// Start offsets of `(a, b, theta, g, c, decoder...)`.
@@ -265,6 +284,10 @@ pub(crate) fn push_decoder(out: &mut Vec<f32>, d: &DecoderParams) {
     out.push(d.fire_b);
     out.extend_from_slice(&d.aim_pair_theta);
     out.extend_from_slice(&d.aim_unpaired_theta);
+    if let Some(r) = &d.hook_release {
+        out.extend_from_slice(&r.w);
+        out.push(r.b);
+    }
 }
 
 pub(crate) fn take<'a>(flat: &'a [f32], at: &mut usize, n: usize) -> &'a [f32] {
@@ -288,6 +311,11 @@ pub(crate) fn decoder_from_flat(flat: &[f32], l: &Layout) -> DecoderParams {
     let fire_b = take(flat, &mut at, 1)[0];
     let aim_pair_theta = take(flat, &mut at, l.aim_pair).to_vec();
     let aim_unpaired_theta = take(flat, &mut at, l.aim_unpaired).to_vec();
+    let hook_release = l.intent.then(|| {
+        let w = take(flat, &mut at, l.release_w).to_vec();
+        let b = take(flat, &mut at, 1)[0];
+        HookRelease { w, b }
+    });
     DecoderParams {
         direction_lr_w: dir_lr_w,
         direction_lr_b: dir_lr_b,
@@ -301,6 +329,7 @@ pub(crate) fn decoder_from_flat(flat: &[f32], l: &Layout) -> DecoderParams {
         fire_b,
         aim_pair_theta,
         aim_unpaired_theta,
+        hook_release,
     }
 }
 
@@ -324,6 +353,7 @@ pub struct FlyLearner {
     layout: Layout,
     thresholds: HeadThresholds,
     hook_view: HookView,
+    hook_decode: HookDecode,
     /// The batched engine (buffers + topology plan), present iff `cfg.backend` is `Batched`.
     batched: Option<Mutex<BatchedEngine>>,
 }
@@ -396,7 +426,8 @@ impl FlyLearner {
                 bundle.flyg_sha256
             ));
         }
-        let (thresholds, hook_view) = (bundle.thresholds, bundle.hook_view);
+        bundle.validate_hook()?;
+        let (thresholds, hook_view, hook_decode) = (bundle.thresholds, bundle.hook_view, bundle.hook_decode);
         let mut l = Self::build(
             flyg,
             flyg_path.to_path_buf(),
@@ -411,6 +442,7 @@ impl FlyLearner {
         )?;
         l.thresholds = thresholds;
         l.hook_view = hook_view;
+        l.hook_decode = hook_decode;
         l.refresh();
         Ok(l)
     }
@@ -482,6 +514,7 @@ impl FlyLearner {
             layout,
             thresholds: HeadThresholds::default(),
             hook_view: HookView::Shared,
+            hook_decode: HookDecode::Plain,
             batched,
         })
     }
@@ -516,6 +549,19 @@ impl FlyLearner {
         &self.v_rest
     }
 
+    /// The vector the fly's encoder hands to the connectome for `obs` (what the fly "sees": its own ray grid, proprioception and
+    /// opponent channels turned into input currents), written into `out` (resized): the input of the information probes of task 8.6.
+    pub fn encoder_input(&self, obs: &ddai_brain::Observation, out: &mut Vec<f32>) {
+        use ddai_fly::encoder::compute_proprioception_values;
+        let cfg = self.encoder.ray_grid_config();
+        let mut features = RayGridFeatures::new(cfg);
+        features.compute(obs, cfg);
+        let an = compute_proprioception_values(&obs.self_state, cfg);
+        out.clear();
+        out.resize(self.encoder.num_inputs(), 0.0);
+        self.encoder.forward(&features, &an, &self.enc_params, out);
+    }
+
     pub(crate) fn encoder(&self) -> &EncoderModel {
         &self.encoder
     }
@@ -539,6 +585,8 @@ impl FlyLearner {
             meta,
             thresholds: self.thresholds,
             hook_view: self.hook_view,
+            hook_param: self.hook_param(),
+            hook_decode: self.hook_decode,
         }
     }
 
@@ -589,6 +637,10 @@ impl FlyLearner {
         add(&[d.fire_b]);
         add(&d.aim_pair_theta);
         add(&d.aim_unpaired_theta);
+        if l.intent {
+            add(&d.hook_release_w);
+            add(&[d.hook_release_b]);
+        }
         debug_assert_eq!(at, l.total());
     }
 }
@@ -752,6 +804,7 @@ impl Learner for FlyLearner {
             &self.calib,
             &self.v_rest,
             &window.observations,
+            &window.targets.iter().map(|t| t.hook_latch).collect::<Vec<_>>(),
         )
     }
 
@@ -792,6 +845,22 @@ impl Learner for FlyLearner {
 
     fn set_hook_view(&mut self, view: HookView) {
         self.hook_view = view;
+    }
+
+    fn hook_decode(&self) -> HookDecode {
+        self.hook_decode
+    }
+
+    fn set_hook_decode(&mut self, decode: HookDecode) {
+        self.hook_decode = decode;
+    }
+
+    fn hook_param(&self) -> HookParam {
+        if self.dec_params.is_intent() {
+            HookParam::Intent
+        } else {
+            HookParam::Legacy
+        }
     }
 
     fn save(&self, path: &Path, meta: BundleMeta) -> LearnerResult<()> {

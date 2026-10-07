@@ -128,6 +128,29 @@ impl MapFields {
         }
     }
 
+    /// From `(px, py)` along the unit vector `(ux, uy)` (pixels, in steps of 8): the distance to the first freeze or death tile and to the first
+    /// solid tile; `max` where there is none within `max`.
+    pub fn ray_distances(&self, px: f32, py: f32, ux: f32, uy: f32, max: f32) -> (f32, f32) {
+        let (mut d_freeze, mut d_solid) = (max, max);
+        let mut d = 0.0f32;
+        while d <= max {
+            let (tx, ty) = (
+                ((px + ux * d) / 32.0).floor() as i32,
+                ((py + uy * d) / 32.0).floor() as i32,
+            );
+            match self.at(tx, ty) {
+                CLASS_FREEZE | CLASS_DEATH if d_freeze >= max => d_freeze = d,
+                CLASS_SOLID => {
+                    d_solid = d;
+                    break;
+                }
+                _ => {}
+            }
+            d += 8.0;
+        }
+        (d_freeze, d_solid)
+    }
+
     /// Distance (tiles, capped) of the tile at `px` to the nearest non-freeze cell.
     pub fn exit_distance(&self, px: f32, py: f32) -> u8 {
         self.field(

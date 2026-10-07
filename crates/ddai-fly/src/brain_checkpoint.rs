@@ -24,7 +24,7 @@ use crate::decoder::{DecoderModel, DecoderParams, DnCalibration};
 use crate::encoder::{EncoderModel, EncoderParams};
 use crate::world_model::{WorldModelHead, WorldModelParams};
 
-pub const BRAIN_CHECKPOINT_FORMAT_VERSION: u32 = 1;
+pub const BRAIN_CHECKPOINT_FORMAT_VERSION: u32 = 2;
 
 const PAYLOAD_HASH_LEN: usize = 32;
 

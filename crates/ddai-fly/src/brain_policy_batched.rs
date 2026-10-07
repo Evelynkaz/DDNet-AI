@@ -79,6 +79,11 @@ pub fn policy_forward(
 ) -> Result<PolicyForward, MemoryCapExceeded> {
     let n = windows.len();
     let n_neurons = net.model.num_neurons();
+    // The PPO policy has no latch (task 8.6): `decoder_logits` is called with `false` below, which is only right for a legacy hook head.
+    debug_assert!(
+        !net.decoder_params.is_intent(),
+        "policy_forward: an intent hook head needs the latch of every decision"
+    );
     for w in windows {
         assert_eq!(w.v_init.len(), n_neurons, "policy_forward: v_init length");
         assert!(
@@ -140,7 +145,7 @@ pub fn policy_forward(
                 .map(|t| {
                     engine_ref.dn_rates(lane, t, &mut dn);
                     net.calib.z_into(&dn, clip_at, &mut z);
-                    decoder_logits(net.decoder, &z, net.decoder_params)
+                    decoder_logits(net.decoder, &z, net.decoder_params, false)
                 })
                 .collect()
         })
@@ -232,7 +237,8 @@ pub fn policy_backward(
                     continue;
                 }
                 engine_ref.dn_rates(lane, t, &mut dn);
-                let (g, gdn) = decoder_logits_backward(net.decoder, &dn, net.calib, net.decoder_params, &d, &mask);
+                let (g, gdn) =
+                    decoder_logits_backward(net.decoder, &dn, net.calib, net.decoder_params, &d, &mask, false);
                 crate::brain_bc::add_decoder_gradients(&mut grads, &g);
                 grad_dn.push(gdn);
             }

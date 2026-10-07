@@ -3,6 +3,7 @@
 //! * `train es bank`: build the post-freeze start bank from arena games;
 //! * `train es run`: run (or resume) the ES;
 //! * `train es eval`: a brain on the config's fixed evaluation episodes (baselines, the final check), JSON with the per-item outcomes;
+//! * `train es hook-eval`: what a brain does with its hook after the freeze on the same starts (task 8.6): start rate by hook state, first press, aim at the throw;
 //! * `train es compare`: two such files, paired (McNemar);
 //! * `train es scan`: how far a perturbation of each parameter group moves the fitness (the measurement behind the sigmas).
 
@@ -107,6 +108,56 @@ pub enum EsCommand {
         games: Option<u32>,
         #[arg(long)]
         seed_base: Option<u64>,
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+    /// The hook after the freeze (task 8.6): `P(key | own hook state)` (idle = the start rate), the opening, the timing of the first press and the aim at the
+    /// throw, per start class V / B / H, on the config's evaluation starts (the same starts as `eval`; read next to the planner's, `--brain planner`).
+    HookEval {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        brain: String,
+        #[arg(long)]
+        out: PathBuf,
+        /// Overrides `eval.starts`.
+        #[arg(long)]
+        starts: Option<usize>,
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+    /// Critical-decision analysis (task 8.6): on post-freeze starts of class V, replay the episode and swap one decision (or a window, or one
+    /// component) of the main brain for the alternative's action, and see whether the held block flips. `forward`: the fly plays, the planner is swapped
+    /// in; `reverse`: the planner plays, the fly is swapped in. JSON with every start's shadow run and swap results.
+    Critical {
+        #[arg(long)]
+        config: PathBuf,
+        /// The fly: `fly:<bundle>`.
+        #[arg(long)]
+        fly: String,
+        /// `forward` or `reverse`.
+        #[arg(long, default_value = "forward")]
+        direction: String,
+        #[arg(long)]
+        out: PathBuf,
+        /// Class of the starts (V, B or H).
+        #[arg(long, default_value = "V")]
+        class: String,
+        /// Which starts: `train-all` (training halls, train and validation parts), `train-val` (their validation part), `holdout` (the holdout halls).
+        #[arg(long, default_value = "train-all")]
+        set: String,
+        /// At most this many starts (spread evenly over the class).
+        #[arg(long, default_value_t = 150)]
+        max_starts: usize,
+        #[arg(long, default_value_t = 40)]
+        single_first: usize,
+        #[arg(long, default_value_t = 4)]
+        single_late_stride: usize,
+        #[arg(long, default_value_t = 6)]
+        component_decisions: usize,
+        /// No live windows (the planner takes over for a number of decisions).
+        #[arg(long)]
+        no_windows: bool,
         #[arg(long)]
         threads: Option<usize>,
     },
@@ -328,6 +379,158 @@ pub fn run(args: EsArgs) -> Result<(), String> {
             std::fs::write(
                 &out,
                 serde_json::to_string(&(brain.clone(), &p)).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        }
+        EsCommand::HookEval {
+            config,
+            brain,
+            out,
+            starts,
+            threads,
+        } => {
+            let text = std::fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
+            let mut cfg = EsConfig::parse(&text)?;
+            if let Some(v) = starts {
+                cfg.eval.starts = v;
+            }
+            if let Some(t) = threads {
+                cfg.threads = t;
+            }
+            let loaded = load(&cfg)?;
+            let pool = ddai_train::es::make_pool(cfg.threads)?;
+            let spec = ddai_env::models::player_from_arg(&brain);
+            let factory = loaded.env.models.factory();
+            let maker = || factory(&spec);
+            let n = cfg.eval.starts;
+            let sets = [
+                (
+                    "train-val",
+                    ddai_train::es::spread(&loaded.bank.select(&cfg.train_arenas, Some(true), false), n),
+                ),
+                (
+                    "holdout",
+                    ddai_train::es::spread(&loaded.bank.select(&cfg.eval.holdout_arenas, None, false), n),
+                ),
+            ];
+            let t0 = std::time::Instant::now();
+            let mut all = Vec::new();
+            for (name, list) in &sets {
+                if list.is_empty() {
+                    continue;
+                }
+                let recs = ddai_train::hook_eval::record_starts(
+                    &loaded.env,
+                    &pool,
+                    list,
+                    &loaded.bank.rules,
+                    &maker,
+                    cfg.window_ticks,
+                    cfg.burn_in_ticks,
+                )?;
+                eprintln!(
+                    "[{:.0}s] {brain}: {name}, {} starts",
+                    t0.elapsed().as_secs_f64(),
+                    recs.len()
+                );
+                print_hook_summaries(&brain, name, &ddai_train::hook_eval::summarize_by_class(&recs));
+                all.push((name.to_string(), recs));
+            }
+            std::fs::write(
+                &out,
+                serde_json::to_string(&(brain.clone(), &all)).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        }
+        EsCommand::Critical {
+            config,
+            fly,
+            direction,
+            out,
+            class,
+            set,
+            max_starts,
+            single_first,
+            single_late_stride,
+            component_decisions,
+            no_windows,
+            threads,
+        } => {
+            let text = std::fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
+            let mut cfg = EsConfig::parse(&text)?;
+            if let Some(t) = threads {
+                cfg.threads = t.clamp(1, 3);
+            }
+            // The swaps replace the played hook: a latched / intent fly's latch would follow its own command, not the played one.
+            if let Some(path) = fly.strip_prefix("fly:") {
+                let b = ddai_fly::bundle::load_bundle(&expand_home(path)).map_err(|e| e.to_string())?;
+                if b.hook_param == ddai_fly::bc::HookParam::Intent || b.hook_decode != ddai_fly::bc::HookDecode::Plain {
+                    return Err(format!(
+                        "{path}: `es critical` swaps the played action, which a latched / intent hook head cannot follow (task 8.6, review F3); use a legacy / plain fly"
+                    ));
+                }
+            }
+            let loaded = load(&cfg)?;
+            let pool = ddai_train::es::make_pool(cfg.threads)?;
+            let want = class.chars().next().unwrap_or('V');
+            let pool_of_starts = match set.as_str() {
+                "train-all" => loaded.bank.select(&cfg.train_arenas, None, false),
+                "train-val" => loaded.bank.select(&cfg.train_arenas, Some(true), false),
+                "holdout" => loaded.bank.select(&cfg.eval.holdout_arenas, None, false),
+                other => return Err(format!("--set {other:?}: train-all, train-val or holdout")),
+            };
+            let all: Vec<&ddai_train::bank::BankStart> = pool_of_starts
+                .into_iter()
+                .filter(|s| ddai_train::hook_eval::start_class(s) == want)
+                .collect();
+            let starts = ddai_train::es::spread(&all, max_starts);
+            let factory = loaded.env.models.factory();
+            let fly_spec = ddai_env::models::player_from_arg(&fly);
+            let planner_spec = ddai_env::models::player_from_arg("planner");
+            let make_fly = || factory(&fly_spec);
+            let make_planner = || factory(&planner_spec);
+            let (main, alt): (
+                &ddai_train::es::eval::BrainMaker<'_>,
+                &ddai_train::es::eval::BrainMaker<'_>,
+            ) = match direction.as_str() {
+                "forward" => (&make_fly, &make_planner),
+                "reverse" => (&make_planner, &make_fly),
+                d => return Err(format!("--direction {d:?}: forward or reverse")),
+            };
+            let mut spec = ddai_train::critical::CriticalSpec {
+                single_first,
+                single_late_stride,
+                component_decisions,
+                ..Default::default()
+            };
+            if no_windows {
+                spec.windows.clear();
+            }
+            let t0 = std::time::Instant::now();
+            eprintln!(
+                "{} starts of class {want} ({} in the class), direction {direction}",
+                starts.len(),
+                all.len()
+            );
+            let res = ddai_train::critical::analyse_starts(
+                &loaded.env,
+                &pool,
+                &loaded.bank.rules,
+                &starts,
+                main,
+                alt,
+                &spec,
+                cfg.window_ticks,
+                cfg.burn_in_ticks,
+                &|n| {
+                    if n % 10 == 0 {
+                        eprintln!("[{:.0}s] {n} starts", t0.elapsed().as_secs_f64());
+                    }
+                },
+            )?;
+            std::fs::write(
+                &out,
+                serde_json::to_string(&(direction, fly, spec, &res)).map_err(|e| e.to_string())?,
             )
             .map_err(|e| e.to_string())
         }
@@ -614,6 +817,44 @@ pub fn run(args: EsArgs) -> Result<(), String> {
                 }
             }
         }
+    }
+}
+
+fn print_hook_summaries(brain: &str, set: &str, rows: &[(String, ddai_train::hook_eval::HookSummary)]) {
+    println!("{brain} / {set}: the hook after the freeze");
+    for (class, s) in rows {
+        let pct = |f: &ddai_train::hook_eval::Frac| {
+            if f.n == 0 {
+                "n/a".to_string()
+            } else {
+                format!("{:.1}% ({}/{})", 100.0 * f.p(), f.k, f.n)
+            }
+        };
+        println!(
+            "  {class:>3} ({} starts, {} decisions): start rate (state idle) {} | hold flying {} | hold grabbed {} | opening key {} | opening throw {}",
+            s.starts,
+            s.decisions,
+            pct(&s.idle),
+            pct(&s.flying),
+            pct(&s.grabbed),
+            pct(&s.opening_key),
+            pct(&s.opening_throw)
+        );
+        println!(
+            "      first press: within 8 ticks {} | 24 {} | 50 {} | ever {} | median {:.0} mean {:.1} ticks; throws/start {:.2}; aim at the throw ({}): median {:.1} deg, mean {:.1}, within 15 deg {:.0}%, within 45 deg {:.0}%",
+            pct(&s.first_press_8),
+            pct(&s.first_press_24),
+            pct(&s.first_press_50),
+            pct(&s.first_press_ever),
+            s.first_press_median,
+            s.first_press_mean,
+            s.throws_per_start,
+            s.throw_aim_n,
+            s.throw_aim_median_deg,
+            s.throw_aim_mean_deg,
+            100.0 * s.throw_aim_within_15,
+            100.0 * s.throw_aim_within_45
+        );
     }
 }
 

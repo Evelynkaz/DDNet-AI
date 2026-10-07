@@ -144,3 +144,18 @@ ddnet-ai train es eval --config configs/train/e023-eval.toml --brain fly:<bundle
 возобновлять), curriculum (уровень, журнал воспроизведения); интеграционные на крошечной мухе и `pit` (`ppo::tests`): актёр в `Argmax` играет побитно как бандл (оба вида), сохранённые состояния воспроизводят логиты актёра в батчевых
 окнах, градиент батчевого BPTT (оба вида) равен конечным разностям по параметрам всех групп, в том числе по новым каналам, возврат эпизода равен возврату 8.5a, прогон детерминирован на 1 и 3 потоках, возобновляется и отказывает при смене
 конфига (с BC-слагаемым, curriculum и DAgger); `tests/ppo_identity.rs` (`#[ignore]`): 24 игры лучшей мухи E-008 через `PpoActor` в `Argmax` — хэши решений равны золотым 8.5a.
+
+## Задача 8.6: хук мухи — измерения и BC с контролем (`hook_eval`, `critical`, `probe`, `metrics`, `trainer`)
+
+Записка — `docs/research/fly-hook-intent.md`, итоги — E-029 и D-109, форматы — `docs/formats.md` §43.
+
+```bash
+ddnet-ai train upgrade-hook --bundle <b> --out <b2>                       # голова намерения, играет побитно как b
+ddnet-ai train set-thresholds --kind fly --bundle <b> --out <b2> --hook-hi 0.62 --hook-lo 0.633   # декодирование с гистерезисом
+ddnet-ai train es hook-eval --config configs/train/e029-eval.toml --brain fly:<b>|planner --starts 700 --out <json>   # хук после фриза по состоянию, первое нажатие, прицел на броске
+ddnet-ai train es critical --config <cfg> --fly fly:<b> --direction forward|reverse --class V --set train-all|train-val|holdout --out <json>   # критические решения
+ddnet-ai train probe-hook --config configs/train/e029-bc-legacy.toml --fly s2=<b> [--state-fly s2=<b>]   # информационные зонды
+ddnet-ai train run --config configs/train/e029-bc-{legacy,intent}.toml    # BC с контрольной рукой
+```
+
+`hook_eval` — запись решений после фриза вокруг любого мозга (`RecordingBrain`); `critical` — `SwapBrain`: повтор игры, в решениях плана (целое решение, окно, одна компонента) играет действие альтернативы (сохранённое — метка планировщика на состоянии мухи, или «живое»); `probe` — малый MLP на признаках (вход энкодера, привилегированное состояние, производные, состояние сети) против настоящих мух по защёлке. В `metrics`: `hook_by_latch`, `aim_throw`, `rate_matched_hook_decode`; в `trainer`: `hook_calibration`, проверка весов опасностей; в `teacher_data`/`seq`: защёлка шага (`SeqStep::latch`, сыгранная кнопка прошлого шага) и `aim_mask`.

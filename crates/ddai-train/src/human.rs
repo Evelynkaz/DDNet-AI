@@ -351,7 +351,8 @@ fn chunk_runs(
             // Pass 2: the steps of a kept run.
             let steps: Vec<SeqStep> = run
                 .iter()
-                .map(|&(si, weight, _)| {
+                .enumerate()
+                .map(|(k, &(si, weight, _))| {
                     let s = &chunk.samples[si];
                     let frame = &chunk.frames[s.frame as usize];
                     let me = &frame.chars[s.slot as usize];
@@ -393,6 +394,8 @@ fn chunk_runs(
                             aim: s.action.hook || s.action.fire,
                             ..HeadMask::ALL
                         },
+                        // The latch: the previous decision's hook key in this run (the run's first has none).
+                        latch: k > 0 && chunk.samples[run[k - 1].0].action.hook,
                     }
                 })
                 .collect();

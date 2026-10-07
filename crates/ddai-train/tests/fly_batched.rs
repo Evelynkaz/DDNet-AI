@@ -24,6 +24,12 @@ fn graph() -> Option<PathBuf> {
 }
 
 fn corpus(n_seqs: usize) -> Corpus {
+    corpus_with_latches(n_seqs, false)
+}
+
+/// The corpus of [`corpus`]; with `latches` every step carries a pseudo-random latch (the own previous hook command), which only an
+/// intent hook head reads.
+fn corpus_with_latches(n_seqs: usize, latches: bool) -> Corpus {
     let (w, h) = (30usize, 20usize);
     let mut game = vec![Tile::default(); w * h];
     for y in 0..h {
@@ -74,6 +80,7 @@ fn corpus(n_seqs: usize) -> Corpus {
                         soft: None,
                         weight: 1.0,
                         mask: HeadMask::ALL,
+                        latch: latches && rng.next_f32_unit() < 0.5,
                     }
                 })
                 .collect();
@@ -345,4 +352,178 @@ fn subengines_and_stop_gradient_burn_in_through_the_trainer() {
     let (s1, _) = train_with(batched(1, 2, Some(0)), 1, 5).unwrap();
     let (s4, _) = train_with(batched(1, 2, Some(0)), 4, 5).unwrap();
     assert_eq!(s1, s4, "stop-gradient trainer, 1 vs 4 threads");
+}
+
+/// Task 8.6: an **intent** hook head (two hazards chosen by the latch) trains through the batched backend as through the per-sequence one:
+/// the batch gradient equals the sum of the windows', the flat parameter vector is the legacy one plus the release hazard, and both
+/// hazards receive gradient (a window mixes latch states).
+#[test]
+fn an_intent_hook_head_trains_the_same_through_both_backends() {
+    let Some(flyg) = graph() else {
+        eprintln!("note: fly-S-v1.flyg not found, skipping");
+        return;
+    };
+    let make = |backend| {
+        let legacy = learner(backend, None).unwrap();
+        let bundle =
+            ddai_fly::bundle::upgrade_to_intent_hook(&legacy.to_bundle(ddai_fly::bundle::BundleMeta::default()));
+        let cfg = FlyTrainConfig {
+            backend,
+            activity_weight: 0.05,
+            activity_low: 0.4,
+            activity_high: 0.8,
+            ..FlyTrainConfig::default()
+        };
+        (
+            legacy.num_params(),
+            FlyLearner::from_bundle(bundle, &flyg, cfg).unwrap(),
+        )
+    };
+    let ((n_legacy, per_seq), (_, batched)) = (make(TrainBackend::PerSequence), make(TrainBackend::Batched));
+    assert_eq!(per_seq.hook_param(), ddai_fly::bc::HookParam::Intent);
+    let n_release = per_seq.num_params() - n_legacy;
+    assert!(
+        n_release >= 2,
+        "the release hazard adds its weights and a bias: {n_release}"
+    );
+    let c = corpus_with_latches(8, true);
+    let mut rng = SplitMix64::new(9);
+    let windows: Vec<Window> = (0..6)
+        .map(|i| c.sample_window(&mut rng, 8 + i, 2, i % 2 == 1))
+        .collect();
+    assert!(
+        windows.iter().flat_map(|w| &w.targets).any(|t| t.hook_latch)
+            && windows.iter().flat_map(|w| &w.targets).any(|t| !t.hook_latch),
+        "the windows carry both latch states"
+    );
+    let loss = LossConfig {
+        hazard_pos_weight: Some([3.0, 5.0]),
+        ..LossConfig::default()
+    };
+    let mut want = vec![0.0f32; per_seq.num_params()];
+    let mut ws = per_seq.new_workspace(16);
+    for w in &windows {
+        let mut g = vec![0.0f32; want.len()];
+        per_seq.window_grad(w, &loss, &mut ws, &mut g);
+        for (a, b) in want.iter_mut().zip(&g) {
+            *a += b;
+        }
+    }
+    let mut got = vec![0.0f32; want.len()];
+    batched.batch_grad(&windows, &loss, &mut got).unwrap();
+    let e = rel_err(&got, &want);
+    assert!(e < 5e-5, "{e}");
+    // The release hazard sits at the end of the vector (after the aim angles) and gets a gradient; the hook head's press hazard too.
+    let tail = &got[got.len() - n_release..];
+    assert!(tail.iter().any(|g| *g != 0.0), "the release hazard learns");
+    assert_eq!(per_seq.params().len(), got.len());
+}
+
+/// Task 8.6, "no copying" (E-005 F2): in a two-view intent fly the hook head reads the observation with the own hook state hidden and picks its
+/// hazard by the latch, which is not an input of the network. On a corpus whose hook label does not depend on the own hook state (it is the
+/// geometry rule; the observed state and the latch are random), after training: (1) flipping the **observed** own hook state of every
+/// observation leaves the played hook logit exactly where it was; (2) flipping the **latch** leaves every other head's logits bit for bit
+/// as they were (the network never sees it) and moves only the hook logit, through the hazard it selects.
+#[test]
+fn an_intent_fly_does_not_copy_the_hook_state_or_the_latch() {
+    use ddai_train::trainer::{OwnHookConfig, OwnHookMode};
+    let Some(flyg) = graph() else {
+        eprintln!("note: fly-S-v1.flyg not found, skipping");
+        return;
+    };
+    let legacy = learner(TrainBackend::Batched, None).unwrap();
+    let bundle = ddai_fly::bundle::upgrade_to_intent_hook(&legacy.to_bundle(ddai_fly::bundle::BundleMeta::default()));
+    let l = FlyLearner::from_bundle(
+        bundle,
+        &flyg,
+        FlyTrainConfig {
+            backend: TrainBackend::Batched,
+            ..FlyTrainConfig::default()
+        },
+    )
+    .unwrap();
+    let mut cfg = train_cfg(2);
+    cfg.own_hook = OwnHookConfig {
+        mode: OwnHookMode::MaskHookHead,
+        ..OwnHookConfig::default()
+    };
+    cfg.loss.hazard_pos_weight = Some([2.0, 4.0]);
+    // Random observed hook states and latches, independent of the label.
+    let mut c = corpus_with_latches(8, true);
+    let mut rng = SplitMix64::new(11);
+    for seq in &mut c.seqs {
+        for st in &mut seq.steps {
+            st.me.hook_state = if rng.next_f32_unit() < 0.5 {
+                ddai_brain::HOOK_GRABBED as i8
+            } else {
+                ddai_brain::HOOK_IDLE as i8
+            };
+        }
+    }
+    let mut t = Trainer::new(Box::new(l), cfg, Corpus::new(Vec::new()), c, None).unwrap();
+    t.train_phase("bc", 0, 6, 6, &[], 0).unwrap();
+    let probe = corpus_with_latches(4, true);
+    let mut rng = SplitMix64::new(3);
+    let mut moved_by_latch = 0.0f32;
+    for _ in 0..6 {
+        let w = probe.sample_window(&mut rng, 8, 2, false);
+        // (1) the observed own hook state, flipped everywhere.
+        let a = with_state(&w, ddai_brain::HOOK_IDLE);
+        let b = with_state(&w, ddai_brain::HOOK_GRABBED);
+        let (la, lb) = (
+            t.learner().window_logits_played(&a),
+            t.learner().window_logits_played(&b),
+        );
+        for (x, y) in la.iter().zip(&lb) {
+            assert_eq!(
+                x.hook.to_bits(),
+                y.hook.to_bits(),
+                "the played hook logit does not read the observed own hook state"
+            );
+        }
+        // (2) the latch, flipped everywhere.
+        let mut up = with_state(&w, ddai_brain::HOOK_IDLE);
+        let mut down = with_state(&w, ddai_brain::HOOK_IDLE);
+        up.targets.iter_mut().for_each(|t| t.hook_latch = false);
+        down.targets.iter_mut().for_each(|t| t.hook_latch = true);
+        let (lu, ld) = (
+            t.learner().window_logits_played(&up),
+            t.learner().window_logits_played(&down),
+        );
+        for (x, y) in lu.iter().zip(&ld) {
+            let bits = |l: &ddai_fly::bc::HeadLogits| {
+                (
+                    l.dir.map(f32::to_bits),
+                    l.jump.to_bits(),
+                    l.fire.to_bits(),
+                    l.aim_c.to_bits(),
+                    l.aim_s.to_bits(),
+                )
+            };
+            assert_eq!(bits(x), bits(y), "no head but the hook reads the latch");
+            moved_by_latch += (x.hook - y.hook).abs();
+        }
+    }
+    assert!(
+        moved_by_latch > 0.0,
+        "the hook logit does depend on the latch, through the hazard it selects"
+    );
+}
+
+/// `w` with the observed own hook state of every observation set to `state`.
+fn with_state(w: &Window, state: i32) -> Window {
+    Window {
+        observations: w
+            .observations
+            .iter()
+            .map(|o| {
+                let mut o = o.clone();
+                o.self_state.hook_state = state;
+                o
+            })
+            .collect(),
+        targets: w.targets.clone(),
+        start: w.start,
+        mirrored: w.mirrored,
+    }
 }
