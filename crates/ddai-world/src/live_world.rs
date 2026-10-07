@@ -488,15 +488,6 @@ impl LiveWorld {
         );
 
         // Task 3.20: how far past this snapshot the pre-inputs of each other tee reach (what the decision from it can use).
-        self.pre.note_snapshot(
-            tick,
-            present
-                .iter()
-                .enumerate()
-                .filter(|&(i, &p)| p && i as i32 != self.own_id)
-                .map(|(i, _)| i as i32),
-        );
-
         self.rebuild_entity_order();
 
         // Review round 1, finding F4: apply the live `Sv_TuneParams` message to *our own tee's
@@ -1067,7 +1058,17 @@ impl LiveWorld {
                     && self.pre.newest(id as i32) >= 0
                     && self.world.teams_core.team(id as i32) == own_team
                 {
-                    let snap_dir = self.world.cores.get(id as u8).map_or(0, |c| c.direction.clamp(-1, 1));
+                    let core = self.world.cores.get(id as u8);
+                    let snap_dir = core.map_or(0, |c| c.direction.clamp(-1, 1));
+                    // The hook and jump keys as the snapshot shows them. A frozen tee's keys are not what it pressed; a jump key held in the air
+                    // after both jumps are spent leaves no bit behind (`jumped & 1` stays 0): both cases cannot tell.
+                    let frozen = self.world.characters[id].as_ref().is_none_or(|c| c.freeze_time > 0);
+                    let snap_hook = core
+                        .filter(|_| !frozen)
+                        .map(|c| c.hook_state != ddai_physics::core::HOOK_IDLE);
+                    let snap_jump = core
+                        .filter(|c| !frozen && !(c.jumped & 1 == 0 && c.jumped & 2 != 0))
+                        .map(|c| c.jumped & 1 != 0);
                     let is_model = victim.is_some_and(|(v, inputs)| v == id as i32 && step < inputs.len());
                     roll.input(
                         &mut self.pre,
@@ -1076,6 +1077,8 @@ impl LiveWorld {
                             tick: next_tick,
                             base_tick,
                             snapshot_dir: snap_dir,
+                            snapshot_hook: snap_hook,
+                            snapshot_jump: snap_jump,
                             assumed_is_model: is_model,
                         },
                         &input,

@@ -16,8 +16,8 @@
 //! the snapshot's (a lost message, a spent `sv_max_preinputs_per_tick` budget).
 //!
 //! Two details of the mapping to the physics input: the **aim** is the message's only on its own tick (it is stale on the ticks in between: the
-//! assumed input's aim plays then); the **fire counter** is the owner's real one, which the world does not know (a held `fire = 0` there), so the
-//! world's counter moves on by the message's counter delta (a press is a press, no phantom press from the offset). Weapon fields are not mapped.
+//! assumed input's aim plays then); the **fire** is not mapped at all: the server fires when the input arrives, before the intended tick, so a swing may already be in the snapshot
+//! (review round 2, F9); the assumed fire stays. Weapon fields are not mapped either.
 
 use ddai_physics::core::{MAX_CLIENTS, PlayerInput};
 
@@ -266,17 +266,15 @@ pub struct Step {
     /// The snapshot's tick, and the direction it shows for the owner (the trust check).
     pub base_tick: i32,
     pub snapshot_dir: i32,
+    /// What the snapshot shows of the hook and the jump key (`Some(held)`), or `None` when it cannot tell (frozen, or the jump flags are ambiguous).
+    pub snapshot_hook: Option<bool>,
+    pub snapshot_jump: Option<bool>,
     /// The assumed input is the window model's prediction (it plays past the newest message), not hold (the last real input does).
     pub assumed_is_model: bool,
 }
 
-/// The state of one prediction roll over the store: per owner the fire mapping. Stack-only (a few KiB).
+/// The state of one prediction roll over the store: per owner whether the state at the snapshot was trusted. Stack-only.
 pub struct Roll {
-    /// The owner was looked at in this roll (state below is meaningful).
-    seen: [bool; MAX_CLIENTS],
-    /// The raw fire counter of the last message used, and the world's counter it was mapped to.
-    raw_fire: [i32; MAX_CLIENTS],
-    world_fire: [i32; MAX_CLIENTS],
     /// The owner's state at the snapshot was checked: trusted or not.
     trusted: [Option<bool>; MAX_CLIENTS],
 }
@@ -284,9 +282,6 @@ pub struct Roll {
 impl Roll {
     pub fn new() -> Roll {
         Roll {
-            seen: [false; MAX_CLIENTS],
-            raw_fire: [0; MAX_CLIENTS],
-            world_fire: [0; MAX_CLIENTS],
             trusted: [None; MAX_CLIENTS],
         }
     }
@@ -301,12 +296,14 @@ impl Roll {
             tick,
             base_tick,
             snapshot_dir,
+            snapshot_hook,
+            snapshot_jump,
             assumed_is_model,
         } = *step;
         let o = usize::try_from(owner).ok().filter(|&o| o < MAX_CLIENTS)?;
         let newest = store.newest(owner);
         // Past the newest message nothing is known of a change. The window model's prediction plays then; without one, the last real input
-        // persists (a better "hold" than the snapshot-derived one: it has the jump, hook and fire keys).
+        // persists (a better "hold" than the snapshot-derived one: it has the jump and hook keys).
         if tick > newest && assumed_is_model {
             return None;
         }
@@ -315,7 +312,13 @@ impl Roll {
         // The state at the snapshot must agree with what the snapshot shows, once per roll and owner.
         if self.trusted[o].is_none() {
             let ok = match store.as_of(owner, base_tick) {
-                Some((_, m)) => m.direction.clamp(-1, 1) == snapshot_dir,
+                // `Sv_PreInput` is neither vital nor repeated (the server sends changes only), so a lost message leaves a stale state behind: the
+                // state at the snapshot must agree on the direction and, when the snapshot can tell, on the hook and the jump key too.
+                Some((_, m)) => {
+                    m.direction.clamp(-1, 1) == snapshot_dir
+                        && snapshot_hook.is_none_or(|h| h == (m.hook != 0))
+                        && snapshot_jump.is_none_or(|j| j == (m.jump != 0))
+                }
                 // Nothing at or before the snapshot: the first message is a change from the unknown; trust what it says from its tick on.
                 None => true,
             };
@@ -327,20 +330,13 @@ impl Roll {
         if self.trusted[o] == Some(false) {
             return None;
         }
-        // Fire: the world's counter moves by the messages' delta.
-        if !self.seen[o] {
-            self.seen[o] = true;
-            self.raw_fire[o] = msg.fire;
-            self.world_fire[o] = assumed.fire;
-        } else {
-            self.world_fire[o] = self.world_fire[o].wrapping_add(msg.fire.wrapping_sub(self.raw_fire[o]));
-            self.raw_fire[o] = msg.fire;
-        }
         let mut input = *assumed;
         input.direction = msg.direction.clamp(-1, 1);
         input.jump = msg.jump;
         input.hook = msg.hook;
-        input.fire = self.world_fire[o];
+        // `fire` is deliberately NOT taken from the message: the server fires when the input ARRIVES (`OnClientDirectInput` -> `FireWeapon`,
+        // `server.cpp:1989`), earlier than the intended tick, so a swing may already be in the snapshot and replaying it would add a phantom one.
+        // The assumed fire stays (D-115).
         if at == tick {
             // The aim is the message's only on its own tick.
             input.target_x = msg.target_x;
@@ -367,6 +363,8 @@ mod tests {
             tick,
             base_tick,
             snapshot_dir,
+            snapshot_hook: None,
+            snapshot_jump: None,
             assumed_is_model,
         }
     }
@@ -487,24 +485,53 @@ mod tests {
     }
 
     #[test]
-    fn the_fire_counter_moves_by_the_messages_delta_not_to_their_value() {
+    fn fire_is_never_taken_from_a_message_so_no_phantom_swing_is_replayed() {
         let mut s = PreInputStore::new();
-        s.insert(1, 100, msg(0, 0, 41), Some(98)); // a long-running counter
-        s.insert(1, 102, msg(0, 0, 43), Some(98)); // pressed and released
-        s.insert(1, 104, msg(0, 0, 44), Some(98)); // pressed
+        s.insert(1, 100, msg(0, 0, 41), Some(98));
+        s.insert(1, 101, msg(0, 0, 42), Some(98)); // a press at the first rolled tick
+        s.insert(1, 103, msg(0, 0, 43), Some(98));
         let assumed = PlayerInput {
-            fire: 0,
+            fire: 7,
             ..PlayerInput::default()
         };
         let mut r = Roll::new();
-        let f = |r: &mut Roll, s: &mut PreInputStore, t| r.input(s, &st(1, t, 99, 0, false), &assumed).unwrap().fire;
-        assert_eq!(
-            f(&mut r, &mut s, 100),
-            0,
-            "the first message is a baseline: no phantom press"
+        for t in 100..=103 {
+            let got = r.input(&mut s, &st(1, t, 99, 0, false), &assumed).unwrap();
+            assert_eq!(got.fire, 7, "tick {t}: the assumed fire plays");
+        }
+    }
+
+    #[test]
+    fn a_lost_release_of_the_hook_or_the_jump_key_is_noticed_from_the_snapshot() {
+        let mut s = PreInputStore::new();
+        // "hook down" and "jump down" at 95; the release messages were lost. The snapshot at 100 shows neither held.
+        s.insert(1, 95, msg(0, 1, 0), Some(94));
+        let mut j = msg(0, 0, 0);
+        j.jump = 1;
+        s.insert(2, 95, j, Some(94));
+        s.insert(1, 102, msg(0, 1, 0), Some(100));
+        s.insert(2, 102, j, Some(100));
+        let assumed = PlayerInput::default();
+        let step = |owner, hook, jump| Step {
+            snapshot_hook: hook,
+            snapshot_jump: jump,
+            ..st(owner, 102, 100, 0, false)
+        };
+        let mut r = Roll::new();
+        assert!(
+            r.input(&mut s, &step(1, Some(false), None), &assumed).is_none(),
+            "stale hook"
         );
-        assert_eq!(f(&mut r, &mut s, 101), 0);
-        assert_eq!(f(&mut r, &mut s, 102), 2);
-        assert_eq!(f(&mut r, &mut s, 104), 3);
+        assert!(
+            r.input(&mut s, &step(2, None, Some(false)), &assumed).is_none(),
+            "stale jump"
+        );
+        assert_eq!(s.counts().distrusted, 2);
+        // Agreeing snapshots, and a snapshot that cannot tell (frozen), are trusted.
+        let mut r = Roll::new();
+        assert!(r.input(&mut s, &step(1, Some(true), None), &assumed).is_some());
+        assert!(r.input(&mut s, &step(2, None, Some(true)), &assumed).is_some());
+        let mut r = Roll::new();
+        assert!(r.input(&mut s, &step(1, None, None), &assumed).is_some());
     }
 }
