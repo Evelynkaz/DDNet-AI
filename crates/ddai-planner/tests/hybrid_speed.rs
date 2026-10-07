@@ -674,8 +674,9 @@ fn mirror_work_report() {
 
 /// Task 3.10, D-042: the finishing switches keep the live decision inside its budget. Decisions of the finishing phase (the victim frozen next to
 /// us, 150 ticks of freeze left) on the work clock with the opponent model on: the baseline, the default switch (`HybridConfig::with_finish`, the drag
-/// shaping), and -- as a diagnostic, not a promise -- every finishing knob at once (families, staging point, exact forecast). The work p99 at 2 tees
-/// of the first two must stay at most 5 ms.
+/// shaping), and -- as a diagnostic, not a promise -- every finishing knob at once (families, staging point, exact forecast); task 3.10b adds the longer
+/// horizon (`frozen_steps` 16) and the approach family (`approach_plans` 12), alone and together. The work p99 at 2 tees of every arm but "all knobs"
+/// must stay at most 5 ms.
 ///
 /// ```text
 /// cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture finish_work_report
@@ -694,12 +695,34 @@ fn finish_work_report() {
     println!("\n| tees | finish | work ms p50 / p90 / p99 / max | candidates p50 |\n|---|---|---|---|");
     let mut worst = 0.0f64;
     for tees in [2usize, 4] {
-        for mode in ["off", "default", "all knobs"] {
+        for mode in [
+            "off",
+            "default",
+            "all knobs",
+            "long 16",
+            "approach",
+            "long 16 + approach",
+            "long 16 + approach + default",
+            "candidate A",
+        ] {
             let mut cfg = deadline(4.0, 1, true, 0);
             cfg.work_clock_us_per_tick = Some(WORK_US_PER_TEE_TICK);
             cfg.mirror = true;
-            if mode != "off" {
+            if matches!(mode, "default" | "all knobs" | "long 16 + approach + default") {
                 cfg = cfg.with_finish();
+            }
+            // Task 3.10b (D-110): the longer horizon of a frozen victim and the approach family.
+            if mode.starts_with("long 16") {
+                cfg.frozen_steps = 16;
+            }
+            // The 3.10b duel candidate: the long horizon, 6 approach plans and the long-horizon decisions' own budget of 4.5 ms.
+            if mode == "candidate A" {
+                cfg.frozen_steps = 16;
+                cfg.approach_plans = 6;
+                cfg.frozen_budget_ms = Some(4.5);
+            }
+            if mode.contains("approach") {
+                cfg.approach_plans = 12;
             }
             if mode == "all knobs" {
                 cfg.finish_families = true;
@@ -710,6 +733,7 @@ fn finish_work_report() {
             let mut w = r.tee_ticks.clone();
             let ms = |v: &mut Vec<f64>, p: f64| pct(v, p) * WORK_US_PER_TEE_TICK / 1000.0;
             let p99 = ms(&mut w, 99.0);
+            // The bound is the proposed arms'; "all knobs" is a diagnostic.
             if tees == 2 && mode != "all knobs" {
                 worst = worst.max(p99);
             }

@@ -1,0 +1,40 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): the diagnosis of the escapes after a freeze, with the target rule on (`hold_target`). DEVELOPMENT seeds 11001.. (never
+# used for a claim): the hybrid with the main defaults against the OLD fixed planner (duels, 3 halls) and in two crowds on clb-left.
+#   ddnet-ai arena run --config configs/arena/e030-diag.toml --out ~/aiddnet/data/runs/E-023-3.10b/diag --threads 3
+name = "E-030: escapes after the freeze, diagnosis (hybrid main defaults, hold_target on), development seeds 11001.."
+base_seed = 11001
+games = 150
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "clb-left duel"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]

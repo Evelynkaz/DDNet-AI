@@ -1097,6 +1097,25 @@ load average, не больше 4, D-080). Постоянный пул (`engine`
 (и при пустом окне: у неё своя история), её цена — `HybridSearch::charge_units` → часы работы и `work.units` телеметрии. Сеть, которая это реализует, — крейт `ddai-oppnet`;
 планировщик от него не зависит. Тесты: `tests/window_model.rs` (модель играет соперника в окне; при выключенном ключе её не спрашивают и ничего не меняется; пустое окно; цена в счётчиках; `reset`).
 
+### Остаток побегов: длинный горизонт, подход, проверка шва (задача 3.10b, E-030, D-110) — все переключатели выключены по умолчанию
+
+Диагноз — `docs/research/held-block.md` §7 (в дуэлях 57% побегов — наша собственная заморозка, 26 из 47 следом за жертвой в пределах 3 тиков; диагноз на старом планировщике; свободный бот «нянчит» жертву на хуке и не кладёт её во фриз на тике ≥ 50, когда фриз обновляется; молот размораживает).
+Умолчания побитно прежние (проверено); новые поля `HybridConfig`/`PlannerConfig`:
+
+| Что | Где | Умолчание | Смысл |
+|---|---|---|---|
+| `HybridConfig::frozen_steps` | `search.rs::decide`, `engine.rs::Ctx::steps`, `planner.rs::set_plan_steps` | 0 (выкл.) | порт `frozenTargetSteps` апстрима: пока жертва заморожена и до оттаивания ≥ `frozen_steps_min_ticks` (30) тиков, а мы свободны, все планы решения длиной `frozen_steps` (16 ≈ 48 тиков вместо 27). Таблица шагов воркера растёт на месте (без аллокаций), тёплый план подгоняется по длине |
+| `HybridConfig::frozen_budget_ms` | `search.rs` | `None` | собственный бюджет решений с длинным горизонтом (зеркало в этой фазе не работает: потолок 5 мс D-042 оставляет поиску 4,5 мс) |
+| `HybridConfig::frozen_no_extension` | `search.rs` | `true` (действует только при `frozen_steps` > 0) | решения с длинным горизонтом не используют адаптивное расширение D-042 (без этого work p99 при 2 ти 9,7 мс, с этим 4,8) |
+| `HybridConfig::approach_plans` | `techniques.rs::approach_plans` (T30) | 0 | не больше стольких планов «подойти и добить» против замороженной жертвы вне фриза: жертва между нами и фризом — шаг к ней, прыжок через неё, хук с дальней стороны; фриз с нашей стороны — подойти на длину верёвки и тянуть хуком к фризу (идя к нему или стоя). **Молота нет**: удар молота размораживает цель |
+| `PlannerConfig::frozen_seal_weight` | `planner.rs::score_tick` | 0 | за каждый тик роллаута, в котором замороженная жертва касается фриза |
+| `PlannerConfig::sealed_forecast_weight` | `planner.rs::evaluate_impl` | 0 | роллаут, чей «запечатанный» конец признан баллистической прикидкой, проверяется точным пассивным прогнозом (`forecast::passive_forecast`, жертва одна на реальной физике); оценка меняется на `weight·(out/250 − 1)`: шов, который скоро оттает, стоит дороже. Тики прогноза — в счётчик работы |
+| `PlannerConfig::mutual_freeze_cost` | `planner.rs::score_tick` | 0 | штраф за тик, пока заморожены и мы, и жертва (размен не блок) |
+
+Тесты: `tests/hybrid_finish.rs` (длина планов, возврат к 9 шагам, 1 и 4 потока побитно, T30 в пуле только при условиях), `tests/hybrid_alloc.rs::the_longer_horizon_keeps_worker_scoring_allocation_free` (0 аллокаций, в том числе при переключении 9 ↔ 16),
+модульные тесты T30, `frozen_seal_weight`, `sealed_forecast_weight`, `mutual_freeze_cost`. Отчёты на реальной карте: `cargo test -p ddai-planner --release --test hybrid_finish -- --ignored --nocapture clb_scene_report`,
+скорость — `finish_work_report` (теперь и арки 3.10b). Диагностика побегов — `cargo run --release -p ddai-env --example finish_diag -- --help`.
+
 ### Телеметрия (`Brain::telemetry`, JSON)
 
 `{"brain","proposer","workers","totals":{решения, extended, danger_flagged, shielded, shield_incomplete, out_of_time,

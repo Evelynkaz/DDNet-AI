@@ -343,6 +343,30 @@ pub struct HybridSpec {
     /// Task 3.10 (opt-in, default 0): per-tile reward for the progress toward the staging point behind a frozen victim (`PlannerConfig::frozen_stage_weight`).
     #[serde(default)]
     pub frozen_stage_weight: Option<f64>,
+    /// Task 3.10b (c, opt-in, default 0 = off): per-tick reward for the frozen victim touching a freeze tile in the rollout (`PlannerConfig::frozen_seal_weight`).
+    #[serde(default)]
+    pub frozen_seal_weight: Option<f64>,
+    /// Task 3.10b (c, opt-in, default 0 = off): the exact-forecast check of a rollout's seal (`PlannerConfig::sealed_forecast_weight`).
+    #[serde(default)]
+    pub sealed_forecast_weight: Option<f64>,
+    /// Task 3.10b (d, opt-in, default 0 = off): per-tick cost while both we and the victim are frozen (`PlannerConfig::mutual_freeze_cost`).
+    #[serde(default)]
+    pub mutual_freeze_cost: Option<f64>,
+    /// Task 3.10b (opt-in, default 0 = off): the plan length while the victim is frozen with enough freeze left (`HybridConfig::frozen_steps`,
+    /// upstream's `frozenTargetSteps`, 16) and the freeze ticks it needs (`HybridConfig::frozen_steps_min_ticks`, default 30).
+    #[serde(default)]
+    pub frozen_steps: Option<i32>,
+    #[serde(default)]
+    pub frozen_steps_min_ticks: Option<i32>,
+    /// Task 3.10b (a, opt-in): the search budget (ms) of a decision that uses the longer horizon (`HybridConfig::frozen_budget_ms`).
+    #[serde(default)]
+    pub frozen_budget_ms: Option<f64>,
+    /// Task 3.10b (a, default true): the long-horizon decisions skip D-042's adaptive extension (`HybridConfig::frozen_no_extension`).
+    #[serde(default)]
+    pub frozen_no_extension: Option<bool>,
+    /// Task 3.10b (opt-in, default 0 = off): at most this many approach-then-push plans against a frozen victim off the freeze (`HybridConfig::approach_plans`).
+    #[serde(default)]
+    pub approach_plans: Option<usize>,
     /// Samples per CEM iteration and CEM iterations of the search (planner presets: 20 and 2): a diagnostic knob (task 3.7b).
     #[serde(default)]
     pub cem_population: Option<i32>,
@@ -550,6 +574,30 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         }
         if let Some(v) = h.frozen_stage_weight {
             cfg.planner.frozen_stage_weight = v;
+        }
+        if let Some(v) = h.mutual_freeze_cost {
+            cfg.planner.mutual_freeze_cost = v;
+        }
+        if let Some(v) = h.sealed_forecast_weight {
+            cfg.planner.sealed_forecast_weight = v;
+        }
+        if let Some(v) = h.frozen_seal_weight {
+            cfg.planner.frozen_seal_weight = v;
+        }
+        if let Some(v) = h.frozen_steps {
+            cfg.frozen_steps = v;
+        }
+        if let Some(v) = h.frozen_no_extension {
+            cfg.frozen_no_extension = v;
+        }
+        if let Some(v) = h.frozen_budget_ms {
+            cfg.frozen_budget_ms = Some(v);
+        }
+        if let Some(v) = h.frozen_steps_min_ticks {
+            cfg.frozen_steps_min_ticks = v;
+        }
+        if let Some(v) = h.approach_plans {
+            cfg.approach_plans = v;
         }
         if let Some(v) = h.techniques {
             cfg.techniques = v;

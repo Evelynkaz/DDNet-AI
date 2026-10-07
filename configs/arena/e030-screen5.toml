@@ -1,0 +1,73 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): SCREENING 5 on DEVELOPMENT seeds 12001.. (duels vs the OLD planner, 3 halls x 250; hold_target on in every arm). "base" = the main hybrid.
+# K1 = the three remedies together: the longer horizon `frozen_steps = 16` (a), `approach_plans = 6` (b: leapfrog and haul plans), the seal check over the thaw horizon
+# `sealed_forecast_weight = 20` (c); K2 = K1 plus the long-horizon decisions' own budget `frozen_budget_ms = 4.5` (the opponent model does not run, D-042's cap
+# of 5 ms leaves 4.5 ms to the search); K3 = the seal check alone.
+#   ddnet-ai arena run --config configs/arena/e030-screen5.toml --out ~/aiddnet/data/runs/E-023-3.10b/screen5 --threads 3
+name = "E-030: screening 5, the remedies together, development seeds 12001.."
+base_seed = 12001
+games = 250
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "clb-left base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right base"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 base"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left K1"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right K1"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 K1"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left K2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, sealed_forecast_weight = 20.0, frozen_budget_ms = 4.5 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right K2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, sealed_forecast_weight = 20.0, frozen_budget_ms = 4.5 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 K2"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, sealed_forecast_weight = 20.0, frozen_budget_ms = 4.5 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left K3"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right K3"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 K3"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]

@@ -1,0 +1,53 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): the identity check -- the defaults of this branch play exactly like main (same seeds, both binaries, every field but wall times equal).
+#   for B in ddnet-ai-main ddnet-ai-4; do $B arena run --config configs/arena/e030-identity.toml --out <dir> --threads 2; done
+name = "E-030: identity of the defaults against main"
+base_seed = 15001
+games = 6
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "clb-left vs old"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 vs old"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right vs v2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "normal-v2" }]
+
+[[condition]]
+name = "clb-left vs v2live"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-right vs v2live"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left vs old, hold_target off, window 150"
+arena = "clb-left"
+rules = { hold_target = false, after_ticks = 150 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed" }]

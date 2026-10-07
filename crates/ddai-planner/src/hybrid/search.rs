@@ -261,6 +261,9 @@ pub struct DecisionTelemetry {
     pub react_belief: f64,
     /// The chosen plan ends with us out under some modelled response.
     pub unsafe_choice: bool,
+    /// Task 3.10b (diagnostics, not in the JSON): the chosen plan ends, under "everybody holds", with the victim frozen and resting in a freeze
+    /// (or dead): a plan that seals it was chosen.
+    pub chosen_sealed: bool,
     /// `HybridConfig::debug_dump`: the best candidates by cheap score: `(label, cheap score,
     /// per-combination scores, first step)`.
     pub dump: Vec<(String, f64, Vec<f64>, String)>,
@@ -293,6 +296,8 @@ pub struct PoolRec {
     /// Full-model scores by combination (`None` = not re-scored) and the ticks we were out in each.
     pub scores: [Option<f64>; MAX_COMBOS],
     pub self_out: [Option<i32>; MAX_COMBOS],
+    /// Task 3.10b: whether the victim ended the rollout frozen and resting in a hazard (or dead), by combination (`None` = not scored).
+    pub enemy_sealed: [Option<bool>; MAX_COMBOS],
 }
 
 /// A plan scored after the fact by a decision's own evaluator (`HybridSearch::debug_score`).
@@ -508,6 +513,8 @@ pub struct DecisionInput<'a> {
 /// The decision procedure and everything it keeps between decisions.
 pub struct HybridSearch {
     cfg: HybridConfig,
+    /// The configured plan length (`cfg.planner.steps` is the decision's own while the longer horizon is on).
+    base_steps: i32,
     // Boxed: the planner is ~300 KB and a world/snapshot ~100 KB; threads have small stacks.
     planner: Box<Planner<PhysicsWorld>>,
     /// The decision planning world: the brain syncs it, rolls it forward and hands it over.
@@ -607,9 +614,11 @@ impl HybridSearch {
             travel_goal: None,
             threats: None,
             self_freeze_bias: 1.0,
+            steps: 0,
         });
         let engine = Engine::new(&cfg, &world, ctx, clock);
         HybridSearch {
+            base_steps: cfg.planner.steps,
             cfg,
             planner,
             world: Box::new(world),
@@ -1162,7 +1171,14 @@ impl HybridSearch {
             if let Some(v) = inputs_out.as_deref_mut() {
                 v.push(input);
             }
-            for _ in 0..self.planner.step_ticks[s] {
+            // A plan of the longer horizon (`frozen_steps`) outlives the table once the decision is over: its steps last `plan_step` ticks.
+            for _ in 0..self
+                .planner
+                .step_ticks
+                .get(s)
+                .copied()
+                .unwrap_or(self.cfg.planner.plan_step)
+            {
                 self.world.set_input(self_id, input);
                 self.world.set_input(victim_id, opp(t));
                 self.world.step_into(&mut events);
@@ -1265,8 +1281,42 @@ impl HybridSearch {
     }
 
     /// One decision. `clock` is only read in deadline mode.
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// Task 3.10b (a): with [`HybridConfig::frozen_steps`] the plans of a decision are that many steps long while the victim is frozen
+    /// with enough freeze left (the port of upstream's `frozenTargetSteps`); every other decision plays exactly as before.
     pub fn decide(&mut self, clock: &dyn Clock, inp: &DecisionInput<'_>) -> (PlayerInput, DecisionTelemetry) {
+        let base = self.cfg.planner.steps;
+        let steps = if self.cfg.frozen_steps > base
+            && let (Some(me), Some(victim)) = (self.world.get_tee(inp.self_id), self.world.get_tee(inp.victim_id))
+            && me.alive
+            && !me.frozen
+            && victim.alive
+            && victim.frozen
+            && victim.freeze_ticks_left >= i64::from(self.cfg.frozen_steps_min_ticks)
+        {
+            self.cfg.frozen_steps
+        } else {
+            base
+        };
+        if let Some(w) = self.planner.warm.as_mut()
+            && w.len() != steps as usize
+            && let Some(&last) = w.last()
+        {
+            w.resize(steps as usize, last);
+        }
+        if steps == base {
+            return self.decide_planned(clock, inp);
+        }
+        self.cfg.planner.steps = steps;
+        self.planner.set_plan_steps(steps);
+        let out = self.decide_planned(clock, inp);
+        self.cfg.planner.steps = base;
+        self.planner.set_plan_steps(base);
+        out
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn decide_planned(&mut self, clock: &dyn Clock, inp: &DecisionInput<'_>) -> (PlayerInput, DecisionTelemetry) {
         let timed = matches!(self.cfg.mode, HybridMode::Deadline { .. });
         self.timed = timed;
         self.rollout_ms = 0.0;
@@ -1300,6 +1350,8 @@ impl HybridSearch {
         self.planner.opp_seed = js::opp_seed_next(self.planner.opp_seed);
         let cfg = self.cfg.clone();
         let n = cfg.planner.steps as usize;
+        // Task 3.10b: a decision of the longer horizon may be held to its budget (no D-042 extension, neither in the search nor in the shield's `safer_input`).
+        let adaptive_on = cfg.adaptive.enabled && !(n > self.base_steps as usize && cfg.frozen_no_extension);
         let track_aim = cfg.planner.track_aim;
         let aim_at = js::atan2(victim.pos.y - me.pos.y, victim.pos.x - me.pos.x);
         let aim_base = if track_aim { aim_at } else { 0.0 };
@@ -1532,6 +1584,7 @@ impl HybridSearch {
                 c.frozen_bystander_vels = bv;
                 c.threats = ts;
                 c.self_freeze_bias = 1.0;
+                c.steps = cfg.planner.steps;
             });
         }
 
@@ -1754,6 +1807,7 @@ impl HybridSearch {
                 &TechCaps {
                     generic_escape: danger.flagged(),
                     frozen_offence: cfg.finish_families,
+                    approach: cfg.approach_plans,
                     ..TechCaps::default()
                 },
             );
@@ -1778,6 +1832,12 @@ impl HybridSearch {
             // The decision cap (search + shield) shortens the search when the shield's reserve
             // would not fit under it (many tees); never below `MIN_SEARCH_MS`.
             HybridMode::Deadline { budget_ms } => {
+                // Task 3.10b: a decision of the longer horizon (a frozen victim) may have its own budget.
+                let budget_ms = if n > self.base_steps as usize {
+                    cfg.frozen_budget_ms.unwrap_or(budget_ms)
+                } else {
+                    budget_ms
+                };
                 let budget_ms = match cfg.decision_cap_ms {
                     Some(cap) => js::min(
                         budget_ms,
@@ -2182,7 +2242,7 @@ impl HybridSearch {
         // ---- adaptive extension (D-042) -------------------------------------------------------
         let unsafe_now =
             |cands: &[Cand], pick: Option<usize>| pick.is_some_and(|i| cands[i].worst_self_out(ncombos.max(1)) > 0);
-        if timed && cfg.adaptive.enabled && !me.frozen && danger.flagged() && unsafe_now(&cands, pick) {
+        if timed && adaptive_on && !me.frozen && danger.flagged() && unsafe_now(&cands, pick) {
             tel.extended = true;
             let ext_end = t_decision + cfg.adaptive.max_total_ms - shield_reserve;
             let mut ticks_e = 0u64;
@@ -2337,6 +2397,7 @@ impl HybridSearch {
                     cheap: c.cheap(),
                     scores: c.res.map(|r| r.map(|e| e.score)),
                     self_out: c.res.map(|r| r.map(|e| e.self_out)),
+                    enemy_sealed: c.res.map(|r| r.map(|e| e.enemy_sealed)),
                 })
                 .collect();
             tel.pick = pick;
@@ -2363,6 +2424,7 @@ impl HybridSearch {
         tel.chosen_plan.clone_from(&best);
         tel.best_score = chosen_cand.full0().or_else(|| chosen_cand.cheap()).unwrap_or(0.0);
         tel.unsafe_choice = chosen_cand.worst_self_out(ncombos.max(1)) > 0;
+        tel.chosen_sealed = chosen_cand.res[0].or(chosen_cand.red).is_some_and(|r| r.enemy_sealed);
         tel.robust_value = if chosen_cand.complete(ncombos) {
             robust_value_weighted(&scores_of(&chosen_cand, ncombos), &self.mask_weights[..ncombos], lambda)
         } else {
@@ -2508,7 +2570,7 @@ impl HybridSearch {
                     let danger = matches!(status, crate::shield::Bounded::Done(false))
                         || tel.unsafe_choice
                         || cfg.shield_timeout_danger;
-                    let safer_deadline = if danger && cfg.adaptive.enabled {
+                    let safer_deadline = if danger && adaptive_on {
                         js::max(reserve_deadline, call_start + cfg.adaptive.max_total_ms)
                     } else {
                         reserve_deadline

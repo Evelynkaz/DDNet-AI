@@ -129,16 +129,60 @@ fn finishing_terms_keep_worker_scoring_allocation_free() {
     scoring_is_allocation_free(cfg, true);
 }
 
-fn scoring_is_allocation_free(cfg: HybridConfig, frozen_victim: bool) {
+/// Task 3.10b: the longer horizon of a frozen victim (`frozen_steps` 16, 48 ticks a rollout) and the approach family add no allocation to a rollout
+/// either, once the worker has been through a long decision (its step-tick table grew with the config, at construction).
+#[test]
+fn the_longer_horizon_keeps_worker_scoring_allocation_free() {
+    let cfg = {
+        let mut c = HybridConfig::fixed().with_finish();
+        c.workers = 1;
+        c.frozen_steps = 16;
+        c.approach_plans = 12;
+        c
+    };
+    scoring_is_allocation_free_n(cfg.clone(), true, 16);
+    // And a worker that switches between 9 and 16 steps from one decision to the next (a victim thawing, or frozen again).
     let map = hall();
-    let mut pw = scene(&map, 4);
-    if frozen_victim {
-        let mut st = pw.get_tee(1).expect("victim");
-        st.frozen = true;
-        st.freeze_ticks_left = 150;
-        pw.apply_tee_state(1, &st);
+    let mut pw = scene(&map, 2);
+    let mut st = pw.get_tee(1).expect("victim");
+    st.frozen = true;
+    st.freeze_ticks_left = 150;
+    pw.apply_tee_state(1, &st);
+    let mut ctx = Box::new(base_ctx(&pw));
+    ctx.threats = None;
+    let mut engine = Engine::new(&cfg, &pw, ctx, Arc::new(WallClock::new()));
+    let clock = WallClock::new();
+    let (mut batch, mut out) = (Batch::default(), Vec::new());
+    let base_plan = plans()[0].clone();
+    let by_len: Vec<Vec<PlanStep>> = [9usize, 16]
+        .iter()
+        .map(|&n| base_plan.iter().copied().cycle().take(n).collect())
+        .collect();
+    let mut run = |engine: &mut Engine, steps: usize| {
+        engine.with_ctx(|c| c.steps = steps as i32);
+        batch.clear(steps);
+        let pi = batch.push_plan(&by_len[usize::from(steps == 16)]);
+        batch.push_job(pi, 0);
+        engine.evaluate(&mut batch, &clock, None, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].res.is_some() && out[0].ticks >= 3 * steps as u32, "{:?}", out[0]);
+    };
+    for s in [9, 16, 9, 16] {
+        run(&mut engine, s);
     }
-    let ctx = Box::new(Ctx {
+    let info = measure(|| {
+        for s in [9, 16, 9, 16, 16, 9] {
+            run(&mut engine, s);
+        }
+    });
+    assert_eq!(
+        info.count_total, 0,
+        "switching between 9 and 16 steps allocated: {info:?}"
+    );
+}
+
+fn base_ctx(pw: &PhysicsWorld) -> Ctx {
+    Ctx {
         generation: 1,
         saved: Box::new(pw.save_state()),
         self_id: 0,
@@ -163,14 +207,35 @@ fn scoring_is_allocation_free(cfg: HybridConfig, frozen_victim: bool) {
             hook_targets: true,
         }),
         self_freeze_bias: 1.0,
-    });
+        steps: 0,
+    }
+}
+
+fn scoring_is_allocation_free(cfg: HybridConfig, frozen_victim: bool) {
+    scoring_is_allocation_free_n(cfg, frozen_victim, 9);
+}
+
+fn scoring_is_allocation_free_n(cfg: HybridConfig, frozen_victim: bool, steps: usize) {
+    let map = hall();
+    let mut pw = scene(&map, 4);
+    if frozen_victim {
+        let mut st = pw.get_tee(1).expect("victim");
+        st.frozen = true;
+        st.freeze_ticks_left = 150;
+        pw.apply_tee_state(1, &st);
+    }
+    let mut ctx = Box::new(base_ctx(&pw));
+    ctx.steps = steps as i32;
     let mut engine = Engine::new(&cfg, &pw, ctx, Arc::new(WallClock::new()));
     let mut batch = Batch::default();
     let mut out = Vec::new();
     let clock = WallClock::new();
-    let all_plans = plans();
+    let all_plans: Vec<Vec<PlanStep>> = plans()
+        .iter()
+        .map(|p| p.iter().copied().cycle().take(steps).collect())
+        .collect();
     let fill = |b: &mut Batch| {
-        b.clear(9);
+        b.clear(steps);
         for (i, p) in all_plans.iter().enumerate() {
             let pi = b.push_plan(p);
             // Every model combination: victim and both threats holding or reacting.
@@ -185,13 +250,15 @@ fn scoring_is_allocation_free(cfg: HybridConfig, frozen_victim: bool) {
     }
     assert_eq!(out.len(), 20);
     // The forecast of a frozen victim is charged on top of the rollout's own 27 ticks.
-    assert!(
-        out.iter()
-            .all(|o| o.res.is_some() && if frozen_victim { o.ticks >= 27 } else { o.ticks == 27 })
-    );
-    if frozen_victim {
+    assert!(out.iter().all(|o| o.res.is_some()
+        && if frozen_victim {
+            o.ticks >= 3 * steps as u32
+        } else {
+            o.ticks == 3 * steps as u32
+        }));
+    if frozen_victim && cfg.planner.held_forecast_weight > 0.0 {
         assert!(
-            out.iter().any(|o| o.ticks > 27),
+            out.iter().any(|o| o.ticks > 3 * steps as u32),
             "the forecast ran in at least one rollout"
         );
     }

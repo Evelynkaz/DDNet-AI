@@ -278,6 +278,23 @@ pub struct PlannerConfig {
     /// death ceiling above us (the `rope_ceiling_cost` field) costs `ceiling_guard_cost` times how deep inside that gap we are (0 at the edge, 1 touching).
     pub ceiling_guard_cost: f64,
     pub ceiling_guard_px: f64,
+    /// Task 3.10b (c, hybrid only, `0` = off): per tick of a rollout in which the **frozen** victim touches a freeze/death tile (its freeze
+    /// timer is renewed), this much. The terminal seal terms pay the same for a victim that is in the freeze from the first tick and one that
+    /// gets there on the last, so a plan that "gets it in later" always scores like one that gets it in now and is re-planned for ever
+    /// (the escapes of E-030: 'sealed' plans chosen decision after decision, the victim never arriving). With it the earlier arrival is worth more.
+    pub frozen_seal_weight: f64,
+    /// Task 3.10b (c, hybrid only, `0` = off): the "seal" of a rollout that ends with the frozen victim resting in a freeze (`rests_in_freeze`) is a
+    /// ballistic guess: a victim that merely touches the lip of a freeze for a tick (a hook that keeps lifting it out of it, a touch less than 50 ticks
+    /// after the last renewal, which DDNet does not renew) counts as sealed and thaws 150 ticks later. For such rollouts the exact passive forecast
+    /// ([`crate::forecast::passive_forecast`], the victim alone on the real physics) tells how long it really stays out, and the score changes by
+    /// `weight * (out_ticks / 250 - 1)`: nothing for a seal that holds, down to `-weight` for one that thaws at once. Costs the forecast's ticks,
+    /// only in rollouts that seal.
+    pub sealed_forecast_weight: f64,
+    /// Task 3.10b (d, hybrid only, `0` = off): per tick of a rollout in which **both** we and the victim are frozen, this much is taken off. The base
+    /// score values a tick of the victim's freeze and a tick of ours equally (`frozen_weight`), so a trade -- the swing that freezes the victim against
+    /// the ceiling and carries us in after it, 3-5 ticks later -- scores about zero, and the arena credits it as a win: in E-030 it is 47 of the 83
+    /// duel wins whose block does not hold (26 of them a follow-in within 3 ticks; diagnosed against the old planner) (we thaw together with the victim, which walks off).
+    pub mutual_freeze_cost: f64,
 }
 
 /// The opponent distance within which the ceiling guard applies (the hook's length plus two decisions of closing speed, the hybrid's threat radius).
@@ -439,6 +456,9 @@ impl Default for PlannerConfig {
             duel_win_bonus: 0.0,
             ceiling_guard_cost: 0.0,
             ceiling_guard_px: 0.0,
+            frozen_seal_weight: 0.0,
+            sealed_forecast_weight: 0.0,
+            mutual_freeze_cost: 0.0,
         }
     }
 }
@@ -619,6 +639,10 @@ mod tests {
             // Task 3.14: and so are the duel terms.
             assert_eq!((c.duel_loss_cost, c.duel_win_bonus), (0.0, 0.0));
             assert_eq!((c.ceiling_guard_cost, c.ceiling_guard_px), (0.0, 0.0));
+            assert_eq!(
+                (c.frozen_seal_weight, c.sealed_forecast_weight, c.mutual_freeze_cost),
+                (0.0, 0.0, 0.0)
+            );
         }
     }
 

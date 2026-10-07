@@ -1,0 +1,128 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): SCREENING 3 on DEVELOPMENT seeds 11001.. (base arm = the diagnosis run `e030-diag.toml`; same seeds and layouts, so the arms pair up).
+# "SF20"/"SF45" = `sealed_forecast_weight` 20 / 45 (c: the seal of a rollout checked on the real physics over the thaw horizon), "L16" = `frozen_steps = 16`
+# (a), "AP" = `approach_plans = 12` (b). hold_target on everywhere.
+#   ddnet-ai arena run --config configs/arena/e030-screen3.toml --out ~/aiddnet/data/runs/E-023-3.10b/screen3 --threads 3
+name = "E-030: screening 3 of the escape remedies (seal check over the thaw horizon), development seeds 11001.."
+base_seed = 11001
+games = 150
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "clb-left duel SF20"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel SF20"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel SF20"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted SF20"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders SF20"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left duel SF45"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel SF45"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel SF45"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted SF45"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders SF45"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left duel SF45+L16"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel SF45+L16"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel SF45+L16"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted SF45+L16"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders SF45+L16"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left duel SF45+L16+AP"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel SF45+L16+AP"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel SF45+L16+AP"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted SF45+L16+AP"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders SF45+L16+AP"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 45.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]

@@ -1,0 +1,45 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): CONFIRMATION against `v2live` (the competitor's real live configuration, preset live-v2), duels on clb-left and clb-right, FRESH seeds
+# 13001.. (never used), hold_target on in every arm. Arms play the same games (same seeds and layouts) and pair up.
+# base = the main hybrid; A = the post-freeze remedies `frozen_steps = 16` (a), `approach_plans = 6` (b) and the long-horizon decisions' own budget
+# `frozen_budget_ms = 4.5`, **with D-042's adaptive extension on** (`frozen_no_extension = false`, which is how A was run, before the field existed with a default of true;
+# A fails D-042: work p99 9.67 ms; A without extension = A2, see e030-confirm-v2live-a2.toml); B = the seal check over the thaw horizon `sealed_forecast_weight = 20` (c).
+# Both A and B were played on all 400 games: two arms were tested on these seeds.
+#   ddnet-ai arena run --config configs/arena/e030-confirm-v2live.toml --out ~/aiddnet/data/runs/E-023-3.10b/confirm-v2live --threads 3
+name = "E-030: confirmation vs v2live, clb-left and clb-right duels, fresh seeds 13001.."
+base_seed = 13001
+games = 200
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "clb-left base"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-right base"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-left A"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, frozen_budget_ms = 4.5, frozen_no_extension = false } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-right A"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, frozen_budget_ms = 4.5, frozen_no_extension = false } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-left B"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-right B"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { sealed_forecast_weight = 20.0 } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]

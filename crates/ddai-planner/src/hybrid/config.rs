@@ -275,7 +275,31 @@ pub struct HybridConfig {
     /// ([`crate::hybrid::window::WindowModel`], set with `HybridBrain::set_window_model`) predicts for each tick, instead of "it keeps the input its snapshot
     /// shows". Without a model, or with no lag, nothing changes. It takes precedence over `lag_mirror` for the ticks it predicts.
     pub window_model: bool,
+    // --- Task 3.10b (D-110, E-030): closing the escapes after a freeze. Every switch below is OFF by default (the default hybrid is bit-identical to
+    // the one before), and none of them changes anything while the victim is not frozen (or while we are).
+    /// Task 3.10b (a), the port of upstream's `frozenTargetSteps`: while the victim is frozen with at least [`Self::frozen_steps_min_ticks`] ticks of
+    /// freeze left, every plan of the decision has this many steps (the competitor's wayblock guard uses 16: 48 ticks instead of 27). `0` = off,
+    /// else it must exceed `planner.steps`. A longer plan costs proportionally more per rollout, so fewer candidates fit the budget.
+    pub frozen_steps: i32,
+    /// Task 3.10b (a): the freeze must still last this many ticks for the longer horizon to be used (upstream's `FROZEN_PLAN_MIN_TICKS`, 30).
+    pub frozen_steps_min_ticks: i32,
+    /// Task 3.10b (a): the search budget (ms, the same clock as `mode`'s) of a decision that uses the longer horizon, `None` = the mode's own. The opponent
+    /// model does not run while the victim is frozen, so the 1.4 ms or so it takes in a duel decision is free under the decision cap (D-042: 5 ms): a
+    /// 16-step rollout costs 1.8 times a 9-step one, and a budget of 4 ms leaves the CEM nothing. Only [`HybridMode::Deadline`]; the cap still applies
+    /// (`decision_cap_ms` less the shield's reserve).
+    pub frozen_budget_ms: Option<f64>,
+    /// Task 3.10b (a): a decision of the longer horizon does not use D-042's adaptive extension (the search's, nor the shield's `safer_input`): a 48-tick rollout
+    /// sees more of our own falls than a 27-tick one, flags danger more often and the extension then runs to 15 ms (measured: work p99 9.7 ms at 2 tees against 4.3
+    /// without). Default `true`; it matters only with `frozen_steps` on.
+    pub frozen_no_extension: bool,
+    /// Task 3.10b (b): at most this many approach-then-push plans (technique T30, [`crate::hybrid::techniques::approach_plans`]) join the pool while the
+    /// victim lies frozen off the freeze with freeze left: leap over it and hook it from the far side, or walk up and hook-pull it toward the freeze. Never a hammer: a hammer hit unfreezes the tee it hits.
+    /// `0` = off. Each one costs a rollout.
+    pub approach_plans: usize,
 }
+
+/// The longest plan the hybrid can be asked for (`frozen_steps`).
+pub const MAX_PLAN_STEPS: i32 = 32;
 
 /// How far (tiles) a wall may be for `wall_throws` to offer the wall swings.
 pub const WALL_REACH_TILES: i32 = 5;
@@ -329,6 +353,11 @@ impl Default for HybridConfig {
             mirror_planner: None,
             lag_mirror: false,
             window_model: false,
+            frozen_steps: 0,
+            frozen_steps_min_ticks: 30,
+            frozen_budget_ms: None,
+            frozen_no_extension: true,
+            approach_plans: 0,
         }
     }
 }
@@ -394,6 +423,16 @@ impl HybridConfig {
             || self.prune.steps >= self.planner.steps.max(1) as usize
         {
             return Err("hybrid: prune.steps in 1..plan steps, prune.keep in (0, 1]".into());
+        }
+        if self.frozen_steps != 0
+            && (self.frozen_steps <= self.planner.steps
+                || self.frozen_steps > MAX_PLAN_STEPS
+                || self.frozen_steps_min_ticks < 0)
+        {
+            return Err("hybrid: frozen_steps must be 0 or in (planner.steps, 32], frozen_steps_min_ticks >= 0".into());
+        }
+        if self.frozen_budget_ms.is_some_and(|b| !positive(b)) {
+            return Err("hybrid: frozen_budget_ms must be finite and positive".into());
         }
         if self.anchors > 36 {
             return Err("hybrid: anchors above the ray count".into());

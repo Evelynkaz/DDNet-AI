@@ -253,6 +253,10 @@ fn score_tick<W: PlanWorld>(
     }
     if me.frozen {
         s -= cfg.frozen_weight * cfg.self_freeze_bias;
+        // Task 3.10b (d): a trade (both of us frozen) is not a block.
+        if en.frozen && en.alive && me.alive {
+            s -= cfg.mutual_freeze_cost;
+        }
     }
     if let Some(band) = band
         && cfg.band_cost > 0.0
@@ -310,6 +314,14 @@ fn score_tick<W: PlanWorld>(
         s += cfg.frozen_drag_weight * (en_near - drag.prev_enemy_near);
     }
     drag.prev_enemy_near = en_near;
+    // Task 3.10b (c): the sooner the frozen victim is in the freeze, the longer its timer is renewed within the rollout.
+    if cfg.frozen_seal_weight > 0.0
+        && en.frozen
+        && en.alive
+        && crate::seal::touches_freeze(world.collision(), en.pos.x, en.pos.y)
+    {
+        s += cfg.frozen_seal_weight;
+    }
     // Task 3.10: a frozen victim lying off the freeze is hauled back only by someone standing on its freeze side (the rope pulls it to us), and
     // that takes longer than the 27 ticks of a rollout: reward the progress toward that spot (per tile gained), the way the drag term rewards its progress.
     if cfg.frozen_stage_weight > 0.0 && en.frozen && en.alive && me.alive && !me.frozen && en_near < 0.95 {
@@ -510,6 +522,11 @@ fn snap_target(input: &mut PlayerInput, aim: f64) {
     if input.target_x == 0.0 && input.target_y == 0.0 {
         input.target_x = crate::action::AIM_RADIUS;
     }
+}
+
+/// Whether [`build_step_ticks`] makes every step `plan_step` ticks long whatever the number of steps (no fine front steps).
+fn build_step_ticks_is_uniform(front_steps: f64, front_step: f64, plan_step: i32) -> bool {
+    js::trunc(front_steps) <= 0.0 || front_step <= 0.0 || front_step >= f64::from(plan_step)
 }
 
 /// `buildStepTicks(steps, planStep, frontSteps, frontStep)` (`planner.ts:192-207`).
@@ -804,6 +821,21 @@ impl<W: PlanWorld> Planner<W> {
     /// Task 3.5: the hybrid search's worker planners tune their private copy per decision.
     pub(crate) fn cfg_mut(&mut self) -> &mut PlannerConfig {
         &mut self.cfg
+    }
+
+    /// Task 3.10b (hybrid only): plans of `steps` steps from now on (the longer horizon while the victim is frozen). With the uniform grid
+    /// (`front_steps` 0, the hybrid's) the step-tick table is resized in place -- no allocation once it has been that long -- else
+    /// it is rebuilt. A no-op when the length is already `steps`.
+    pub(crate) fn set_plan_steps(&mut self, steps: i32) {
+        if self.cfg.steps == steps && self.step_ticks.len() == steps as usize {
+            return;
+        }
+        self.cfg.steps = steps;
+        if build_step_ticks_is_uniform(self.cfg.front_steps, self.cfg.front_step, self.cfg.plan_step) {
+            self.step_ticks.resize(steps as usize, self.cfg.plan_step);
+        } else {
+            self.sync_grid();
+        }
     }
 
     pub fn set_freeze_memory(&mut self, memory: Option<FreezeMemory>) {
@@ -3671,6 +3703,20 @@ impl<W: PlanWorld> Planner<W> {
             let h = crate::forecast::HELD_HORIZON_TICKS;
             score += self.cfg.held_forecast_weight * f64::from(f.out_ticks(h)) / f64::from(h);
         }
+        // Task 3.10b (c): a seal that the ballistic guess grants is checked on the real physics (the victim alone); one that thaws soon pays for it.
+        if self.cfg.sealed_forecast_weight > 0.0
+            && !self.keep_final
+            && let Some(en_end) = world.get_tee(enemy_id)
+            && en_end.alive
+            && en_end.frozen
+            && rests_in_freeze(world.collision(), en_end.pos, en_end.vel) > 0
+        {
+            let tees = crate::forecast::tee_count(world).max(1) as u64;
+            let h = crate::forecast::HELD_HORIZON_TICKS;
+            let f = crate::forecast::passive_forecast(world, enemy_id, h);
+            self.eval_ticks += (f.steps.max(0) as u64).div_ceil(tees);
+            score += self.cfg.sealed_forecast_weight * (f64::from(f.out_ticks(h)) / f64::from(h) - 1.0);
+        }
         self.last_input = input;
         if !self.keep_final {
             world.restore_state(self.saved.as_ref().unwrap());
@@ -4316,5 +4362,219 @@ mod tests {
         let a = decide(crate::config::preset_normal());
         let b = decide(crate::config::preset_normal().with_version(crate::config::PlannerVersion::Classic));
         assert_eq!(a, b);
+    }
+
+    /// 20 x 22 tiles: solid floor from row 18, a freeze pit in it at x 8..=12 (rows 18 and 19).
+    fn pit_map() -> Arc<ddai_physics::map::MapData> {
+        let (w, h) = (20usize, 22usize);
+        let mut game = vec![ddai_physics::map::Tile::default(); w * h];
+        for y in 18..h {
+            for x in 0..w {
+                let freeze = y < 20 && (8..=12).contains(&x);
+                game[y * w + x] = ddai_physics::map::Tile {
+                    index: if freeze {
+                        ddai_physics::map::TILE_FREEZE
+                    } else {
+                        ddai_physics::map::TILE_SOLID
+                    },
+                    flags: 0,
+                    skip: 0,
+                    reserved: 0,
+                };
+            }
+        }
+        Arc::new(ddai_physics::map::MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        })
+    }
+
+    /// Task 3.10b (c): `frozen_seal_weight` pays the weight per tick of a frozen victim that touches a freeze tile, and nothing for one that does not
+    /// (nor when it is off).
+    #[test]
+    fn frozen_seal_weight_pays_per_tick_the_frozen_victim_touches_a_freeze() {
+        let tick = |victim_x_tile: f64, frozen: bool, weight: f64| {
+            let mut w = PhysicsWorld::new(pit_map(), 1);
+            w.add_tee(
+                0,
+                Vec2 {
+                    x: 2.0 * 32.0,
+                    y: 17.0 * 32.0,
+                },
+            );
+            w.add_tee(
+                1,
+                Vec2 {
+                    x: victim_x_tile * 32.0,
+                    y: 19.0 * 32.0,
+                },
+            );
+            let mut en = w.get_tee(1).unwrap();
+            en.frozen = frozen;
+            en.freeze_ticks_left = if frozen { 100 } else { 0 };
+            w.apply_tee_state(1, &en);
+            let field = fields::hazard_field(w.collision());
+            let unfreeze = fields::unfreeze_field(w.collision());
+            let cfg = PlannerConfig {
+                frozen_seal_weight: weight,
+                ..crate::config::preset_normal()
+            };
+            let mut drag = DragTracker {
+                prev_enemy_near: 0.0,
+                start_enemy_near: 0.0,
+                started_in_dead: false,
+                prev_stage_dist: f64::NAN,
+            };
+            score_tick(
+                &w,
+                0,
+                1,
+                &[],
+                &field,
+                &unfreeze,
+                &cfg,
+                &mut drag,
+                None,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+            )
+        };
+        // In the pit, frozen: exactly the weight more.
+        assert!((tick(10.0, true, 0.3) - tick(10.0, true, 0.0) - 0.3).abs() < 1e-12);
+        // Off the pit, or not frozen there: nothing.
+        assert_eq!(tick(3.0, true, 0.3), tick(3.0, true, 0.0));
+        assert_eq!(tick(10.0, false, 0.3), tick(10.0, false, 0.0));
+    }
+
+    /// Task 3.10b (c): a seal that the ballistic guess grants but the exact forecast refutes costs `sealed_forecast_weight * (1 - out / 250)`; a seal
+    /// that holds costs nothing; off, nothing changes.
+    #[test]
+    fn sealed_forecast_weight_charges_a_seal_that_thaws_before_it_arrives() {
+        let score = |victim_y_tile: f64, freeze_left: i64, weight: f64| {
+            let mut w = PhysicsWorld::new(pit_map(), 1);
+            w.add_tee(
+                0,
+                Vec2 {
+                    x: 2.0 * 32.0,
+                    y: 17.0 * 32.0,
+                },
+            );
+            w.add_tee(
+                1,
+                Vec2 {
+                    x: 10.0 * 32.0,
+                    y: victim_y_tile * 32.0,
+                },
+            );
+            let mut en = w.get_tee(1).unwrap();
+            en.frozen = true;
+            en.freeze_ticks_left = freeze_left;
+            w.apply_tee_state(1, &en);
+            let field = fields::hazard_field(w.collision());
+            let unfreeze = fields::unfreeze_field(w.collision());
+            let cfg = PlannerConfig {
+                sealed_forecast_weight: weight,
+                ..crate::config::preset_normal()
+            };
+            let mut planner: Planner<PhysicsWorld> = Planner::new(cfg);
+            planner.reset();
+            planner.saved = Some(w.save_state());
+            let plan = vec![
+                PlanStep {
+                    dir: 0,
+                    jump: 0,
+                    hook: 0,
+                    fire: 0,
+                    aim: 0.0,
+                };
+                9
+            ];
+            let prev = crate::types::empty_input();
+            planner.evaluate(&mut w, 0, 1, prev, &plan, prev, &field, &unfreeze)
+        };
+        // Resting in the pit, 100 ticks left: the forecast says held (the pit renews it) -- no charge.
+        assert_eq!(score(19.0, 100, 45.0), score(19.0, 100, 0.0));
+        // High above the pit, frozen for only 40 more ticks: still in the air when the rollout ends (the ballistic guess says it lands in the
+        // pit), but it thaws before it gets there -- the seal is refuted.
+        let (on, off) = (score(2.0, 40, 45.0), score(2.0, 40, 0.0));
+        assert!(
+            off - on > 30.0 && off - on <= 45.0,
+            "charged {} of at most 45",
+            off - on
+        );
+        // The same victim frozen long enough to arrive: a true seal, no charge.
+        assert_eq!(score(2.0, 400, 45.0), score(2.0, 400, 0.0));
+    }
+
+    /// Task 3.10b (d): `mutual_freeze_cost` is taken off per tick only while both tees are frozen.
+    #[test]
+    fn mutual_freeze_cost_applies_only_to_a_trade() {
+        let tick = |me_frozen: bool, en_frozen: bool, cost: f64| {
+            let mut w = PhysicsWorld::new(pit_map(), 1);
+            w.add_tee(
+                0,
+                Vec2 {
+                    x: 2.0 * 32.0,
+                    y: 17.0 * 32.0,
+                },
+            );
+            w.add_tee(
+                1,
+                Vec2 {
+                    x: 4.0 * 32.0,
+                    y: 17.0 * 32.0,
+                },
+            );
+            for (id, frozen) in [(0, me_frozen), (1, en_frozen)] {
+                let mut t = w.get_tee(id).unwrap();
+                t.frozen = frozen;
+                t.freeze_ticks_left = if frozen { 100 } else { 0 };
+                w.apply_tee_state(id, &t);
+            }
+            let field = fields::hazard_field(w.collision());
+            let unfreeze = fields::unfreeze_field(w.collision());
+            let cfg = PlannerConfig {
+                mutual_freeze_cost: cost,
+                ..crate::config::preset_normal()
+            };
+            let mut drag = DragTracker {
+                prev_enemy_near: 0.0,
+                start_enemy_near: 0.0,
+                started_in_dead: false,
+                prev_stage_dist: f64::NAN,
+            };
+            score_tick(
+                &w,
+                0,
+                1,
+                &[],
+                &field,
+                &unfreeze,
+                &cfg,
+                &mut drag,
+                None,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+            )
+        };
+        assert!((tick(true, true, 1.5) - tick(true, true, 0.0) + 1.5).abs() < 1e-12);
+        assert_eq!(tick(true, false, 1.5), tick(true, false, 0.0));
+        assert_eq!(tick(false, true, 1.5), tick(false, true, 0.0));
+        assert_eq!(tick(false, false, 1.5), tick(false, false, 0.0));
     }
 }

@@ -28,6 +28,7 @@
 //! | T29 | jump before a freeze ahead when running or falling sideways fast | `|vx| > 2.2`, freeze 1-3 tiles ahead |
 //! | T1b | hook the victim, jump past it, pull it on toward the hazard behind it | hazard beyond the victim, away from us |
 //! | T42 | hook the victim along a ray that clears the corner blocking the direct line | victim in rope range, direct line blocked |
+//! | T30 | approach a frozen victim lying off the freeze, leap over it and hook it from the far side or hook-haul it toward the freeze (task 3.10b, opt-in; never a hammer: a hit unfreezes) | victim frozen, freeze left, off the freeze side |
 
 use crate::fields::{HazardField, hazard_nearness};
 use crate::hybrid::abs_aim;
@@ -72,6 +73,8 @@ pub enum Tech {
     T42,
     /// Hook the victim, jump past it and pull it on toward the hazard behind it (leapfrog, a T1 variant).
     T1b,
+    /// Task 3.10b (opt-in, [`TechCaps::approach`]): walk (and jump) to a hook position beside a frozen victim and haul it toward the freeze (never a hammer: a hit unfreezes it).
+    T30,
 }
 
 impl Tech {
@@ -99,6 +102,7 @@ impl Tech {
             Tech::T29 => "T29 jump before the freeze ahead",
             Tech::T42 => "T42 hook past the corner",
             Tech::T1b => "T1b hook leapfrog",
+            Tech::T30 => "T30 approach and push a frozen opponent",
         }
     }
 
@@ -161,6 +165,8 @@ pub struct TechCaps {
     /// leapfrog, the corner hook) are generated too, not only T7/T8 (which only hold it or push it where it already lies near a hazard):
     /// a victim frozen on open ground thaws in 3 s unless it is hauled back into the freeze.
     pub frozen_offence: bool,
+    /// Task 3.10b (opt-in, `0` = off): at most this many approach-then-push plans against a frozen victim that lies off the freeze ([`approach_plans`]).
+    pub approach: usize,
 }
 
 impl Default for TechCaps {
@@ -170,6 +176,7 @@ impl Default for TechCaps {
             swing_anchors: 2,
             generic_escape: false,
             frozen_offence: false,
+            approach: 0,
         }
     }
 }
@@ -681,6 +688,9 @@ fn offence<C: PlanCollision>(ctx: &TechCtx<'_, C>, anchors: &[Anchor], caps: &Te
                 plan: plan(n, |s| st(if s < 3 { toward } else { 0 }, false, false, false, 0.0)),
             });
         }
+        if caps.approach > 0 {
+            approach_plans(ctx, caps.approach, out);
+        }
         if !caps.frozen_offence {
             return;
         }
@@ -839,6 +849,89 @@ fn offence<C: PlanCollision>(ctx: &TechCtx<'_, C>, anchors: &[Anchor], caps: &Te
             }
         }
     }
+}
+
+/// The freeze must still last this many ticks for [`approach_plans`] (shorter than that nothing walked to arrives in time).
+const APPROACH_MIN_TICKS: i64 = 25;
+/// Nearest the victim may already lie to a freeze/death tile for the approach (above this, T7/T8 hold or push it where it lies).
+const APPROACH_MAX_NEARNESS: f64 = 0.93;
+/// How far (px) the victim may be: beyond a few tiles of walking per step nothing arrives before the freeze ends.
+const APPROACH_MAX_SEP: f64 = 560.0;
+/// Walking px per plan step (3 ticks at about 7 px/tick once running), for the length of the approach.
+const APPROACH_PX_PER_STEP: f64 = 21.0;
+
+/// Task 3.10b (b): approach-then-push plans for a frozen victim that lies on open ground off the freeze (the victim of the 25% of wins that
+/// thaw and escape: 3-8 tiles from the freeze, the bot 100-230 px away). Only the geometry is decided here (which side the freeze is on, how
+/// far the walk is); the exact rollouts decide whether a plan works:
+/// * the victim lies between us and the freeze: walk to it, jump over it and hook it from the far side, which pulls it on toward the freeze (a
+///   T1b leapfrog that also works far from the freeze). **Never the hammer**: a hammer hit unfreezes the tee it hits (`world::unfreeze` in the
+///   hammer), so against a frozen victim it is a hand-off, not a push;
+/// * the freeze is on our side of the victim: walk toward it until the rope reaches and hook-pull it along while walking toward the freeze
+///   (or standing).
+pub fn approach_plans<C: PlanCollision>(ctx: &TechCtx<'_, C>, cap: usize, out: &mut Vec<TechPlan>) {
+    let (me, v, n) = (ctx.me, ctx.victim, ctx.steps);
+    let sep = vdistance(me.pos, v.pos);
+    if me.frozen
+        || !me.alive
+        || !v.alive
+        || !v.frozen
+        || v.freeze_ticks_left < APPROACH_MIN_TICKS
+        || !(24.0..APPROACH_MAX_SEP).contains(&sep)
+        || n < 4
+        || hazard_nearness(ctx.field, v.pos.x, v.pos.y) >= APPROACH_MAX_NEARNESS
+    {
+        return;
+    }
+    let to_freeze = sign_dir(toward_hazard(ctx.field, v.pos).x, 0.3);
+    if to_freeze == 0 {
+        return;
+    }
+    let toward = if v.pos.x >= me.pos.x { 1 } else { -1 };
+    // Steps of walking until the victim is within reach of the rope (200 px, a pull that holds) or a jump from it (60 px).
+    let est = |reach: f64| (((sep - reach) / APPROACH_PX_PER_STEP).ceil().max(0.0) as usize).min(n - 2);
+    let first = out.len();
+    let ks = |reach: f64| {
+        let e = est(reach);
+        let mut list = vec![e.max(1)];
+        if e > 1 {
+            list.push(e - 1);
+        }
+        if e < n - 2 {
+            list.push(e + 1);
+        }
+        list
+    };
+    if toward == to_freeze {
+        // The victim is between us and the freeze: leap over it, then hook it (at once, or one or two steps later).
+        if me.jumps_left > 0 {
+            for k in ks(60.0) {
+                for lag in [0usize, 2] {
+                    if k + lag >= n {
+                        continue;
+                    }
+                    out.push(TechPlan {
+                        tech: Tech::T30,
+                        plan: plan(n, |s| st(toward, s + 1 == k, s >= k + lag, false, 0.0)),
+                    });
+                }
+            }
+        }
+    } else {
+        // We are on the freeze's side of the victim: haul it along the ground toward us.
+        for k in ks(200.0) {
+            out.push(TechPlan {
+                tech: Tech::T30,
+                plan: plan(n, |s| {
+                    st(if s >= k { to_freeze } else { toward }, false, s >= k, false, 0.0)
+                }),
+            });
+            out.push(TechPlan {
+                tech: Tech::T30,
+                plan: plan(n, |s| st(if s >= k { 0 } else { toward }, false, s >= k, false, 0.0)),
+            });
+        }
+    }
+    out.truncate(first + cap);
 }
 
 #[cfg(test)]
@@ -1366,5 +1459,121 @@ mod tests {
         let field2 = crate::fields::hazard_field(&clear);
         let g = generate(&ctx(&clear, &field2, &me, &v), &[], &TechCaps::default());
         assert!(!g.offence.iter().any(|p| p.tech == Tech::T42));
+    }
+
+    /// A long floor with a freeze patch at x 29..=36 (tiles) at its right end.
+    fn long_floor() -> Grid {
+        Grid::new(&[
+            "########################################",
+            "#......................................#",
+            "#......................................#",
+            "#......................................#",
+            "#......................................#",
+            "#......................................#",
+            "#......................................#",
+            "#############################ffffffff####",
+            "########################################",
+        ])
+    }
+
+    fn frozen_tee(x_tile: f64, left: i64) -> TeeState {
+        let mut t = tee(x_tile * 32.0, 6.5 * 32.0);
+        t.frozen = true;
+        t.freeze_ticks_left = left;
+        t
+    }
+
+    fn t30(g: &Generated) -> Vec<&TechPlan> {
+        g.offence.iter().filter(|p| p.tech == Tech::T30).collect()
+    }
+
+    #[test]
+    fn t30_approach_plans_are_opt_in_and_only_for_a_frozen_victim_off_the_freeze() {
+        let col = long_floor();
+        let field = crate::fields::hazard_field(&col);
+        let me = tee(14.0 * 32.0, 6.5 * 32.0);
+        let victim = frozen_tee(20.0, 150);
+        let on = TechCaps {
+            approach: 12,
+            ..TechCaps::default()
+        };
+        // Off by default.
+        assert!(t30(&generate(&ctx(&col, &field, &me, &victim), &[], &TechCaps::default())).is_empty());
+        let g = generate(&ctx(&col, &field, &me, &victim), &[], &on);
+        let plans = t30(&g);
+        assert!(!plans.is_empty() && plans.len() <= 12);
+        assert!(plans.iter().all(|p| p.plan.len() == 9));
+        // The cap counts plans.
+        let capped = TechCaps {
+            approach: 2,
+            ..TechCaps::default()
+        };
+        assert_eq!(t30(&generate(&ctx(&col, &field, &me, &victim), &[], &capped)).len(), 2);
+        // Not for a free victim, one about to thaw, one already in the freeze, or when we are frozen.
+        let mut free = victim;
+        free.frozen = false;
+        assert!(t30(&generate(&ctx(&col, &field, &me, &free), &[], &on)).is_empty());
+        assert!(t30(&generate(&ctx(&col, &field, &me, &frozen_tee(20.0, 20)), &[], &on)).is_empty());
+        assert!(t30(&generate(&ctx(&col, &field, &me, &frozen_tee(31.0, 150)), &[], &on)).is_empty());
+        let mut me_frozen = me;
+        me_frozen.frozen = true;
+        assert!(t30(&generate(&ctx(&col, &field, &me_frozen, &victim), &[], &on)).is_empty());
+        // Too far to walk to before it thaws.
+        let (far_me, far_victim) = (tee(2.0 * 32.0, 6.5 * 32.0), frozen_tee(27.0, 150));
+        assert!(t30(&generate(&ctx(&col, &field, &far_me, &far_victim), &[], &on)).is_empty());
+    }
+
+    #[test]
+    fn t30_leaps_over_a_victim_between_us_and_the_freeze_and_never_hammers_it() {
+        let col = long_floor();
+        let field = crate::fields::hazard_field(&col);
+        let me = tee(14.0 * 32.0, 6.5 * 32.0);
+        let victim = frozen_tee(20.0, 150);
+        let on = TechCaps {
+            approach: 12,
+            ..TechCaps::default()
+        };
+        let g = generate(&ctx(&col, &field, &me, &victim), &[], &on);
+        let plans = t30(&g);
+        assert!(!plans.is_empty());
+        // A hammer hit unfreezes a frozen tee: no plan fires. Each walks toward the victim (right), jumps once, and hooks from then on.
+        for p in &plans {
+            assert!(p.plan.iter().all(|s| s.fire == 0 && s.dir == 1), "{:?}", p.plan);
+            assert_eq!(p.plan.iter().filter(|s| s.jump == 1).count(), 1);
+            let j = p.plan.iter().position(|s| s.jump == 1).unwrap();
+            let h = p.plan.iter().position(|s| s.hook == 1).expect("hooks");
+            assert!(h > j, "the hook comes after the jump");
+            assert!(p.plan[h..].iter().all(|s| s.hook == 1) && p.plan[..h].iter().all(|s| s.hook == 0));
+        }
+        // Without a jump left there is nothing to leap with.
+        let mut me2 = me;
+        me2.jumps_left = 0;
+        assert!(t30(&generate(&ctx(&col, &field, &me2, &victim), &[], &on)).is_empty());
+    }
+
+    #[test]
+    fn t30_hooks_and_hauls_a_victim_when_the_freeze_is_on_our_side_of_it() {
+        let col = long_floor();
+        let field = crate::fields::hazard_field(&col);
+        let me = tee(26.0 * 32.0, 6.5 * 32.0);
+        let victim = frozen_tee(20.0, 150);
+        let on = TechCaps {
+            approach: 12,
+            ..TechCaps::default()
+        };
+        let g = generate(&ctx(&col, &field, &me, &victim), &[], &on);
+        let plans = t30(&g);
+        assert!(!plans.is_empty());
+        for p in &plans {
+            // Walk toward the victim (left) until it is within the rope, then hook; never fire.
+            assert!(p.plan.iter().all(|s| s.fire == 0 && s.jump == 0));
+            assert_eq!(p.plan[0].dir, -1);
+            let k = p.plan.iter().position(|s| s.hook == 1).expect("hooks");
+            assert!(p.plan[k..].iter().all(|s| s.hook == 1 && (s.dir == 1 || s.dir == 0)));
+            assert!(p.plan[..k].iter().all(|s| s.hook == 0 && s.dir == -1));
+        }
+        // Both ways of hauling are offered: walking toward the freeze, and standing.
+        assert!(plans.iter().any(|p| p.plan.last().unwrap().dir == 1));
+        assert!(plans.iter().any(|p| p.plan.last().unwrap().dir == 0));
     }
 }

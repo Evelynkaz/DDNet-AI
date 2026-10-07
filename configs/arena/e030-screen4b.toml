@@ -1,0 +1,51 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): the UPPER BOUND, continued (DEVELOPMENT seeds 11001..11060, clb-left and clb-right, paired with the base arm of `e030-diag.toml`): which part of the
+# remedies pays when the search has the budget? "B40" = 40 ms of work and no decision cap (10x); "B16" = 16 ms (4x).
+#   ddnet-ai arena run --config configs/arena/e030-screen4b.toml --out ~/aiddnet/data/runs/E-023-3.10b/screen4b --threads 3
+name = "E-030: upper bound, which remedy pays at a large budget, development seeds 11001.."
+base_seed = 11001
+games = 60
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "clb-left duel B40+L16"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 40.0, hybrid = { decision_cap_ms = 0.0, frozen_steps = 16 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel B40+L16"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 40.0, hybrid = { decision_cap_ms = 0.0, frozen_steps = 16 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left duel B40+AP"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 40.0, hybrid = { decision_cap_ms = 0.0, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel B40+AP"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 40.0, hybrid = { decision_cap_ms = 0.0, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left duel B16+L16+AP"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 16.0, hybrid = { decision_cap_ms = 0.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel B16+L16+AP"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 16.0, hybrid = { decision_cap_ms = 0.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left duel B8+L16+AP"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 8.0, hybrid = { decision_cap_ms = 0.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel B8+L16+AP"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 8.0, hybrid = { decision_cap_ms = 0.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]

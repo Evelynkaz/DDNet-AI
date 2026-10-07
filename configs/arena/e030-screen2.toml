@@ -1,0 +1,128 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): SCREENING 2 on DEVELOPMENT seeds 11001.. (base arm = the diagnosis run `e030-diag.toml`; same seeds and layouts, so the arms pair up).
+# "SW03"/"SW1" = `frozen_seal_weight` 0.3 / 1.0 (c: per tick the frozen victim touches a freeze tile in the rollout), "L16" = `frozen_steps = 16` (a),
+# "AP" = `approach_plans = 12` (b). hold_target on everywhere.
+#   ddnet-ai arena run --config configs/arena/e030-screen2.toml --out ~/aiddnet/data/runs/E-023-3.10b/screen2 --threads 3
+name = "E-030: screening 2 of the escape remedies (seal-time weight), development seeds 11001.."
+base_seed = 11001
+games = 150
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "clb-left duel SW03"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel SW03"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel SW03"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted SW03"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders SW03"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left duel SW1"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 1.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel SW1"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 1.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel SW1"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 1.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted SW1"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 1.0 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders SW1"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 1.0 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left duel SW03+L16"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel SW03+L16"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel SW03+L16"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted SW03+L16"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders SW03+L16"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]
+
+[[condition]]
+name = "clb-left duel SW03+L16+AP"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel SW03+L16+AP"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "chillblock5 duel SW03+L16+AP"
+arena = "chillblock5-ruler"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left 1v3 scripted SW03+L16+AP"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16, approach_plans = 12 } }, { brain = "scripted", count = 3 }]
+
+[[condition]]
+name = "clb-left 8 tees idle bystanders SW03+L16+AP"
+arena = "clb-left"
+rules = { crowd_from = 2, crowd_spacing = 1.0 }
+games = 100
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_seal_weight = 0.3, frozen_steps = 16, approach_plans = 12 } }, { brain = "scripted" }, { brain = "idle", count = 6 }]

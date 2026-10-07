@@ -101,6 +101,9 @@ pub struct Ctx {
     /// Multiplier of the self-freeze weight: `1` normally, the planner's `escapeBias` during the
     /// extension (plans that get us frozen are penalised harder).
     pub self_freeze_bias: f64,
+    /// Task 3.10b: steps of the plans of this decision (`0` = the worker planner's configured length). The longer horizon of a frozen victim
+    /// (`HybridConfig::frozen_steps`) makes a worker's step-tick table follow it.
+    pub steps: i32,
 }
 
 /// One rollout to run: plan `plan` of the batch under model combination `combo` (bit 0: the
@@ -198,6 +201,7 @@ pub struct Worker {
     world: Box<PhysicsWorld>,
     loaded: u64,
     base_bias: f64,
+    base_steps: i32,
     /// Snapshot buffer of the shield's escape phase (`plan_escape`).
     escape_slot: Box<Option<PhysicsSavedState>>,
     /// The loaded decision's small values, copied out of the [`Ctx`] so a rollout needs no lock.
@@ -215,8 +219,14 @@ impl Worker {
         planner.deterministic_thaw = true;
         planner.track_rollout = true;
         planner.launch_memo = Some(Box::default());
+        if cfg.frozen_steps > 0 {
+            // Grow the step-tick table once, here, so that a decision with the longer horizon allocates nothing.
+            planner.set_plan_steps(cfg.frozen_steps);
+            planner.set_plan_steps(cfg.planner.steps);
+        }
         Worker {
             base_bias: cfg.planner.self_freeze_bias,
+            base_steps: cfg.planner.steps,
             planner,
             world: Box::new(world),
             loaded: 0,
@@ -253,6 +263,8 @@ impl Worker {
         self.planner.threats.clone_from(&ctx.threats);
         self.planner.set_predicted(&ctx.victim_plan);
         self.planner.cfg_mut().self_freeze_bias = self.base_bias * ctx.self_freeze_bias;
+        self.planner
+            .set_plan_steps(if ctx.steps > 0 { ctx.steps } else { self.base_steps });
         self.self_id = ctx.self_id;
         self.victim_id = ctx.victim_id;
         self.prev = ctx.prev;
@@ -1071,6 +1083,7 @@ mod pool_tests {
                 hook_targets: true,
             }),
             self_freeze_bias: 1.0,
+            steps: 0,
         })
     }
 

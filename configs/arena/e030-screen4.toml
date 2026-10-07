@@ -1,0 +1,32 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): the UPPER BOUND of what a better search could give, on DEVELOPMENT seeds 11001.. (base arm = `e030-diag.toml`): the same hybrid with a
+# 10x work budget ("B40": 40 ms of work, no decision cap), with and without the long horizon + approach family ("B40+L16+AP"). Not a candidate (D-042 caps the
+# live decision at 5 ms): it says whether the escapes are a matter of search effort.
+#   ddnet-ai arena run --config configs/arena/e030-screen4.toml --out ~/aiddnet/data/runs/E-023-3.10b/screen4 --threads 3
+name = "E-030: upper bound, 10x work budget, development seeds 11001.."
+base_seed = 11001
+games = 60
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "clb-left duel B40"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 40.0, hybrid = { decision_cap_ms = 0.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel B40"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 40.0, hybrid = { decision_cap_ms = 0.0 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-left duel B40+L16+AP"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 40.0, hybrid = { decision_cap_ms = 0.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]
+
+[[condition]]
+name = "clb-right duel B40+L16+AP"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 40.0, hybrid = { decision_cap_ms = 0.0, frozen_steps = 16, approach_plans = 12 } }, { brain = "planner", mode = "fixed" }]

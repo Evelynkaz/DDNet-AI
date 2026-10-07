@@ -1,0 +1,25 @@
+# work-clock: default-rate
+# Task 3.10b (E-030): CONFIRMATION against `v2live` (the competitor's real live configuration, preset live-v2), duels on clb-left and clb-right, FRESH seeds
+# 13001.. (never used), hold_target on in every arm. Arms play the same games (same seeds and layouts) and pair up.
+# This file: the arm A only, re-run with `frozen_no_extension` (default true, D-042 p99: see E-030 section 6), first 100 games of the base arm of e030-confirm-v2live.toml.
+# base = the main hybrid; A = the post-freeze remedies `frozen_steps = 16` (a), `approach_plans = 6` (b) and the long-horizon decisions' own budget
+# `frozen_budget_ms = 4.5`; B = the seal check over the thaw horizon `sealed_forecast_weight = 20` (c).
+#   ddnet-ai arena run --config configs/arena/e030-confirm-v2live.toml --out ~/aiddnet/data/runs/E-023-3.10b/confirm-v2live --threads 3
+name = "E-030: confirmation vs v2live, clb-left and clb-right duels, fresh seeds 13001.."
+base_seed = 13001
+games = 100
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+
+[[condition]]
+name = "clb-left A2"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, frozen_budget_ms = 4.5 } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-right A2"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { frozen_steps = 16, approach_plans = 6, frozen_budget_ms = 4.5 } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
