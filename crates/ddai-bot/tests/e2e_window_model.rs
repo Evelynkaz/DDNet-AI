@@ -166,7 +166,10 @@ fn start_bot(scratch: &Path, model: &WindowModelConfig, seed: u64) -> Bot {
         client: ClientConfig {
             name: BOT.to_string(),
             cache_dir: cache,
-            adaptive_margin: true,
+            // A fixed 60 ms margin (3 ticks): the bot's input lands about 3 ticks past each snapshot whatever the machine's load, so the lag window
+            // the model is asked about is 2-4 ticks like on a real link (the adaptive margin of a quiet loopback shrinks to a few ms, windows of 0-1).
+            adaptive_margin: false,
+            prediction_margin_ms: 60,
             ..ClientConfig::default()
         },
         bot: BotConfig {
