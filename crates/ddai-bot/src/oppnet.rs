@@ -284,18 +284,8 @@ impl WindowModelRt {
         }
     }
 
-    /// Once a second, outside the decision path: reads the marker, hands the log to its thread, reports the guard's changes.
-    pub fn poll(&mut self, now: Instant) {
-        if now < self.next_check {
-            return;
-        }
-        self.next_check = now + RECHECK_EVERY;
-        let chunk = self.live.take_log();
-        if let Some(w) = &self.writer
-            && !w.send(chunk)
-        {
-            self.log_lost += 1;
-        }
+    /// Logs the guard's changes of state since the last look (also at the end of the run: a change in the last second is not lost).
+    fn report_transitions(&mut self) {
         self.live.take_transitions(&mut self.transitions);
         for t in self.transitions.drain(..) {
             match t.to {
@@ -315,6 +305,21 @@ impl WindowModelRt {
                 ),
             }
         }
+    }
+
+    /// Once a second, outside the decision path: reads the marker, hands the log to its thread, reports the guard's changes.
+    pub fn poll(&mut self, now: Instant) {
+        if now < self.next_check {
+            return;
+        }
+        self.next_check = now + RECHECK_EVERY;
+        let chunk = self.live.take_log();
+        if let Some(w) = &self.writer
+            && !w.send(chunk)
+        {
+            self.log_lost += 1;
+        }
+        self.report_transitions();
         let Some(marker) = &self.marker else { return };
         let present = marker_present(marker);
         if present == self.killed {
@@ -372,6 +377,7 @@ impl WindowModelRt {
 impl Drop for WindowModelRt {
     /// The lines formatted since the last look reach the file before the thread is joined.
     fn drop(&mut self) {
+        self.report_transitions();
         let chunk = self.live.take_log();
         if let Some(w) = &self.writer {
             w.send(chunk);
