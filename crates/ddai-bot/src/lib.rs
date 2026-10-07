@@ -36,6 +36,7 @@ pub mod killfallback;
 pub mod latency;
 pub mod mapgrid;
 pub mod nav_hooks;
+pub mod oppnet;
 pub mod ownerchat;
 pub mod planning;
 pub mod players;

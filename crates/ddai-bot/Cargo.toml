@@ -22,6 +22,7 @@ ddai-clip = { path = "../ddai-clip" }
 ddai-botctl = { path = "../ddai-botctl" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-nav = { path = "../ddai-nav" }
+ddai-oppnet = { path = "../ddai-oppnet" }
 ddai-flyg = { path = "../ddai-flyg" }
 ddai-map = { path = "../ddai-map" }
 ddai-net = { path = "../ddai-net" }

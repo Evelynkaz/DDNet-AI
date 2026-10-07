@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 clap = { workspace = true }
 ddai-bot = { path = "../ddai-bot" }
+ddai-oppnet = { path = "../ddai-oppnet" }
 # Task 3.5: the arena brain factory names `Brain` and builds the hybrid brain with the fly proposer.
 ddai-brain = { path = "../ddai-brain" }
 ddai-client = { path = "../ddai-client" }

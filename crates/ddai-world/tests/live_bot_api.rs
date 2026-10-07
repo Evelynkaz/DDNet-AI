@@ -193,6 +193,105 @@ fn a_steady_state_snapshot_and_prediction_allocate_nothing() {
     assert_eq!(info.count_total, 0, "{info:?}");
 }
 
+// ---- task 3.17: the opponent's inputs from a model in the roll -------------------------------------------
+
+fn walk(direction: i32) -> PlayerInput {
+    PlayerInput {
+        direction,
+        target_y: -1,
+        player_flags: 1,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn without_an_override_the_prediction_is_the_old_one_bit_for_bit() {
+    let chars = [tee(0, 1000), tee(1, 1100), tee(2, 1200)];
+    let mut live = LiveWorld::new(room(), 0, 1);
+    live.on_snapshot(SnapshotInput::new(500, &chars, DEFAULT_TUNE_PARAMS));
+    let mut obs = live.build_observation(&live.base_world().clone(), None);
+    let keep = [true; MAX_CLIENTS];
+    let inputs = [(501, run_right()), (503, run_right())];
+    let plain = live
+        .predict_local_observation(505, &inputs, &keep, Some(1), &mut obs)
+        .clone();
+    let none = live
+        .predict_local_observation_with(505, &inputs, &keep, Some(1), &mut obs, None)
+        .clone();
+    for id in 0..3u8 {
+        assert_eq!(plain.cores.get(id), none.cores.get(id));
+    }
+    // An empty override and an override for a tee that is not there change nothing either.
+    let empty: [PlayerInput; 0] = [];
+    let e = live
+        .predict_local_observation_with(505, &inputs, &keep, Some(1), &mut obs, Some((1, &empty)))
+        .clone();
+    let absent = live
+        .predict_local_observation_with(505, &inputs, &keep, Some(1), &mut obs, Some((9, &[walk(1)])))
+        .clone();
+    for id in 0..3u8 {
+        assert_eq!(plain.cores.get(id), e.cores.get(id));
+        assert_eq!(plain.cores.get(id), absent.cores.get(id));
+    }
+}
+
+#[test]
+fn the_overridden_tee_plays_its_inputs_by_step_and_holds_afterwards() {
+    let chars = [tee(0, 1000), tee(1, 1300), tee(2, 1500)];
+    let mut live = LiveWorld::new(room(), 0, 1);
+    live.on_snapshot(SnapshotInput::new(500, &chars, DEFAULT_TUNE_PARAMS));
+    let mut obs = live.build_observation(&live.base_world().clone(), None);
+    let keep = [true; MAX_CLIENTS];
+    // Held, tee 1 stands (direction 0 in the snapshot). Walking left for 2 of the 4 steps moves it left of where it started; the other
+    // tee, which has no override, and ourselves are untouched by the override.
+    let held = live
+        .predict_local_observation(504, &[], &keep, Some(1), &mut obs)
+        .clone();
+    let over = [walk(-1), walk(-1)];
+    let played = live
+        .predict_local_observation_with(504, &[], &keep, Some(1), &mut obs, Some((1, &over)))
+        .clone();
+    let x = |w: &ddai_physics::world::World<f32>, id| w.cores.get(id).unwrap().pos.x;
+    assert!(x(&played, 1) < x(&held, 1), "{} vs {}", x(&played, 1), x(&held, 1));
+    assert_eq!(x(&played, 0), x(&held, 0));
+    assert_eq!(x(&played, 2), x(&held, 2));
+    // Step 0 of the override alone moves tee 1 in the first step already.
+    let first = live
+        .predict_local_observation_with(501, &[], &keep, Some(1), &mut obs, Some((1, &over)))
+        .clone();
+    let still = live
+        .predict_local_observation(501, &[], &keep, Some(1), &mut obs)
+        .clone();
+    assert!(first.cores.get(1).unwrap().vel.x < still.cores.get(1).unwrap().vel.x);
+}
+
+#[test]
+fn own_inputs_over_are_the_inputs_the_prediction_uses() {
+    let chars = [tee(0, 1000), tee(1, 1100)];
+    let mut live = LiveWorld::new(room(), 0, 1);
+    live.on_snapshot(SnapshotInput::new(500, &chars, DEFAULT_TUNE_PARAMS));
+    let mut out = Vec::new();
+    // Nothing in flight: the held input (ours, first sighting: derived) for every step.
+    live.own_inputs_over(504, &[], &mut out);
+    assert_eq!(out.len(), 4);
+    assert!(out.iter().all(|i| *i == out[0]));
+    // Claims at 502 and 504: step k runs into tick 501 + k, so steps 0 is held, 1 and 2 take the 502 input, 3 the 504 one.
+    let (a, b) = (walk(1), walk(-1));
+    live.own_inputs_over(504, &[(502, a), (504, b)], &mut out);
+    assert_eq!(out.len(), 4);
+    assert_eq!((out[1], out[2], out[3]), (a, a, b));
+    assert_ne!(out[0], a);
+    // Not ahead of the snapshot: nothing.
+    live.own_inputs_over(500, &[], &mut out);
+    assert!(out.is_empty());
+    live.own_inputs_over(400, &[], &mut out);
+    assert!(out.is_empty());
+    // The held input of another tee is what a plain prediction holds; an unknown id has none.
+    assert_eq!(live.held_input_of(1).map(|i| i.direction), Some(0));
+    assert_eq!(live.held_input_of(7), None);
+    assert_eq!(live.held_input_of(-1), None);
+}
+
 // ---- task 4.3: carrying our own tee through a clip replay --------------------------------------------
 
 #[test]

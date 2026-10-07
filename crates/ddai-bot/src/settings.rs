@@ -42,6 +42,10 @@ pub struct Settings {
     /// is a duel. Case-insensitive; default `["/duel", "/1vs1"]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duel_commands: Option<Vec<String>>,
+    /// Task 3.17 (D-111): the learned window model (`--window-model <file>`; the flag wins). Without it the bot decides as before; the marker
+    /// `bot/window-model.off` switches the model off while it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_model: Option<PathBuf>,
 }
 
 /// `~/aiddnet/data/bot/settings.toml`.
@@ -63,6 +67,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "skin",
     "owner_chat",
     "duel_commands",
+    "window_model",
 ];
 
 /// The top-level keys of the file at `path` that [`Settings`] does not know (a typo such as `owner-chat`), sorted. An unreadable or
@@ -291,6 +296,7 @@ mod tests {
             skin: Some("a".into()),
             owner_chat: Some(true),
             duel_commands: Some(vec!["/duel".into()]),
+            window_model: Some(PathBuf::from("a")),
         };
         let table: toml::Table = toml::to_string(&full).unwrap().parse().unwrap();
         let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
@@ -315,6 +321,7 @@ mod tests {
             skin: Some("pinky".into()),
             owner_chat: Some(false),
             duel_commands: Some(vec!["/duel".into(), "/1vs1".into()]),
+            window_model: Some(PathBuf::from("/x/m1.oppnet")),
         };
         save(&path, &s).unwrap();
         assert_eq!(load(&path), Loaded::Ok(s));

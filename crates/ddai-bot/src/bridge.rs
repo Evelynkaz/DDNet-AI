@@ -283,6 +283,12 @@ pub struct StatusMessage {
     pub duel: bool,
     /// Additive since task 4.12 (D-108): `"legacy"` (the fixed timers, the default) or `"smart"` (`--selfkill-policy smart`).
     pub selfkill_policy: String,
+    /// Additive since task 3.17 (D-111): the learned window model. `"off"` without one (the default), `"on"` while it drives the lag window,
+    /// `"hold"` while the online guard has benched it (it is still scored in the shadow) and `"killed"` while the marker `bot/window-model.off`
+    /// exists. A bot of an older build sends no such field.
+    pub window_model: String,
+    /// Additive since task 3.17: the guard's numbers (see [`crate::oppnet::WindowGuardStatus`]); `null` without a model.
+    pub window_guard: Option<serde_json::Value>,
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -824,6 +830,8 @@ mod tests {
             wb_smart: "on".into(),
             duel: true,
             selfkill_policy: "smart".into(),
+            window_model: "off".into(),
+            window_guard: None,
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
@@ -837,6 +845,9 @@ mod tests {
         assert_eq!(v["wb_smart"], "on");
         assert_eq!(v["duel"], true);
         assert_eq!(v["selfkill_policy"], "smart");
+        // Task 3.17: additive, "off" and null without a model.
+        assert_eq!(v["window_model"], "off");
+        assert!(v["window_guard"].is_null());
     }
 
     #[test]

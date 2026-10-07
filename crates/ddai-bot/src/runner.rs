@@ -174,6 +174,8 @@ impl RunReport {
 pub enum RunnerError {
     #[error("brain: {0}")]
     Brain(#[from] BrainError),
+    #[error("{0}")]
+    WindowModel(String),
     #[error("bridge {path}: {source}")]
     Bridge { path: PathBuf, source: std::io::Error },
 }
@@ -250,6 +252,24 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         strong = cfg.nav.strong,
         "starting the bot"
     );
+    // Task 3.17 (D-111): the learned window model, if asked for (only the hybrid brain uses it). A model that cannot be loaded refuses the
+    // start: running an A/B without the arm that was asked for would be worse than not running.
+    match (&cfg.bot.window_model, cfg.bot.brain) {
+        (Some(wm), crate::brains::BrainKind::Hybrid) => {
+            let wm = crate::oppnet::WindowModelConfig {
+                server_tag: cfg.server.to_string(),
+                ..wm.clone()
+            };
+            let rt = crate::oppnet::WindowModelRt::load(&wm, Instant::now()).map_err(RunnerError::WindowModel)?;
+            bot.set_window_model(Some(rt));
+        }
+        (Some(wm), other) => tracing::info!(
+            model = %wm.model.display(),
+            brain = other.name(),
+            "window model: ignored (it belongs to the hybrid brain)"
+        ),
+        (None, _) => {}
+    }
     let mut client = Client::connect(cfg.server, client_cfg);
 
     let started = Instant::now();
@@ -312,6 +332,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
                 None => tracing::info!("duel detection: on (the marker is gone)"),
             }
         }
+        bot.window_model_poll(Instant::now());
         let first = client.recv_event(Duration::from_millis(20));
         let mut batch: Vec<ClientEvent> = Vec::new();
         batch.extend(first);
@@ -785,6 +806,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
     let s = bot.status();
     let (total, brain, overhead) = bot.latency().status_summaries();
     let nav = cfg.nav_handle.status();
+    let (window_model, window_guard) = bot.window_model_status();
     StatusMessage {
         tick,
         own: s.own_id,
@@ -821,6 +843,8 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         wb_smart: if cfg.nav.wb_smart { "on" } else { "off" }.to_string(),
         duel: bot.duel().is_some(),
         selfkill_policy: bot.selfkill_policy().name().to_string(),
+        window_model: window_model.to_string(),
+        window_guard: window_guard.and_then(|g| serde_json::to_value(g).ok()),
     }
 }
 

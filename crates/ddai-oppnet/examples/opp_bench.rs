@@ -139,4 +139,57 @@ fn main() {
         pct(&mut fw.clone(), 0.0),
         pct(&mut fw, 0.5)
     );
+
+    // Task 3.17: the whole live decision (`LiveOpp::window`): the snapshot's history and scoring work, the window prediction, the guard, the log
+    // line, on a moving pair (one new snapshot tick per call, as live).
+    {
+        use ddai_oppnet::live::guard::GuardConfig;
+        use ddai_oppnet::live::{LiveOpp, Pair};
+        use ddai_planner::types::empty_input;
+        let bundle = match model_file {
+            Some(f) => OppBundle::load(std::path::Path::new(f)).expect("model"),
+            None => OppBundle::new(Mlp::new(INPUT_DIM, h1, h2, OUT_DIM, 1), 1, 0, 0.0, "bench".into()),
+        };
+        let mut l = LiveOpp::new(
+            OppPredictor::new(bundle, "bench").unwrap(),
+            GuardConfig::default(),
+            [0; 32],
+        )
+        .unwrap();
+        let mut worlds = Vec::new();
+        for t in 0..6000 {
+            let mut i = empty_input();
+            i.direction = if (t / 7) % 2 == 0 { 1 } else { -1 };
+            pw.set_input(1, i);
+            pw.step();
+            if pw.inner().tick % 2 == 0 {
+                worlds.push(pw.inner().clone());
+            }
+        }
+        let own = vec![Wire::default(); 3];
+        let mut victim = Vec::with_capacity(8);
+        let mut us = Vec::new();
+        for (j, w) in worlds.iter().enumerate() {
+            let pair = Pair {
+                world: w,
+                self_id: 0,
+                target: 1,
+                tag: "c1-bench",
+            };
+            let t = Instant::now();
+            l.window(&pair, &own, &Wire::default(), &mut victim);
+            if j >= 300 {
+                us.push(t.elapsed().as_secs_f64() * 1e6);
+            }
+            if j % 25 == 0 {
+                let _ = l.take_log();
+            }
+        }
+        println!(
+            "live decision (LiveOpp::window: history, scoring, prediction, guard, log): min {:.1} us, median {:.1} us, p99 {:.1} us",
+            pct(&mut us.clone(), 0.0),
+            pct(&mut us.clone(), 0.5),
+            pct(&mut us, 0.99)
+        );
+    }
 }

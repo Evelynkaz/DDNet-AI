@@ -14,6 +14,7 @@ mod fly_cmd;
 mod fly_watch;
 mod launch_cmd;
 mod map_cmd;
+mod oppnet_cmd;
 mod play_cmd;
 mod ppo_cmd;
 mod proxy_cmd;
@@ -82,6 +83,9 @@ enum Command {
     /// stops the bot unit; `launch exited` is the bot unit's stop hook. Never takes a path, address or command line from the
     /// request: every value is checked against fixed allow-lists.
     Launch(launch_cmd::LaunchArgs),
+    /// The live window model's log (task 3.17, D-111): `oppnet-live report <file>...` prints the accuracy of the model against hold by tick of the
+    /// window and by our lag. Reads files only.
+    OppnetLive(oppnet_cmd::OppnetLiveArgs),
 }
 
 /// True in the opt-in **training-only build** (`tools/train-v3-build.sh`: `-C target-cpu=x86-64-v3`,
@@ -137,6 +141,7 @@ fn main() -> ExitCode {
         Some(Command::Clip(args)) => clip_cmd::run(args),
         Some(Command::ProxyCheck(args)) => proxy_cmd::run(args),
         Some(Command::Launch(args)) => launch_cmd::run(args),
+        Some(Command::OppnetLive(args)) => oppnet_cmd::run(args),
     }
 }
 

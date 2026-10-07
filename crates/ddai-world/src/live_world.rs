@@ -857,7 +857,7 @@ impl LiveWorld {
     /// `to_tick < base_tick()` is a no-op (returns the base world unchanged, `to_tick > base_tick`
     /// is the only case this function ever actually steps).
     pub fn predict(&mut self, to_tick: i32, own_inputs_in_flight: &[(i32, PlayerInput)]) -> &World<f32> {
-        self.predict_impl(to_tick, own_inputs_in_flight, None)
+        self.predict_impl(to_tick, own_inputs_in_flight, None, None)
     }
 
     /// [`LiveWorld::predict`] over only the characters `keep` marks (plus our own): every other
@@ -872,7 +872,60 @@ impl LiveWorld {
         own_inputs_in_flight: &[(i32, PlayerInput)],
         keep: &[bool; MAX_CLIENTS],
     ) -> &World<f32> {
-        self.predict_impl(to_tick, own_inputs_in_flight, Some(keep))
+        self.predict_impl(to_tick, own_inputs_in_flight, Some(keep), None)
+    }
+
+    /// Task 3.17 (D-111, opt-in): [`LiveWorld::predict_local_observation`] where the character `victim.0` plays `victim.1[k]` in the step from tick
+    /// `base_tick() + k` instead of its held input (steps past the slice keep the held input). This is how the learned window model
+    /// (`ddai-oppnet`) puts its prediction of the opponent's inputs into the world the brain decides on. With no override this **is**
+    /// `predict_local_observation`, which calls it with `None`.
+    pub fn predict_local_observation_with(
+        &mut self,
+        to_tick: i32,
+        own_inputs_in_flight: &[(i32, PlayerInput)],
+        keep: &[bool; MAX_CLIENTS],
+        target_id: Option<i32>,
+        obs: &mut Observation,
+        victim: Option<(i32, &[PlayerInput])>,
+    ) -> &World<f32> {
+        self.predict_impl(to_tick, own_inputs_in_flight, Some(keep), victim);
+        fill_observation_from(&self.map, self.own_id, &self.scratch, target_id, obs);
+        &self.scratch
+    }
+
+    /// Our own input for each step of a prediction to `to_tick` (the step `k` runs from tick `base_tick() + k`), exactly as
+    /// [`LiveWorld::predict`] picks them: the in-flight input claimed for the step's target tick, else the one before it (the held input
+    /// to begin with). `out` is cleared first and ends up with `min(to_tick, cap) - base_tick()` entries (none when `to_tick` is not ahead).
+    /// The window model reads them as the "our inputs in flight" of its features. Allocation-free once `out` has grown.
+    pub fn own_inputs_over(
+        &self,
+        to_tick: i32,
+        own_inputs_in_flight: &[(i32, PlayerInput)],
+        out: &mut Vec<PlayerInput>,
+    ) {
+        out.clear();
+        let base = self.world.tick;
+        let to_tick = to_tick.min(base.saturating_add(MAX_EVOLVE_AGE_TICKS));
+        let mut latest = self
+            .held_input
+            .get(self.own_id as usize)
+            .copied()
+            .flatten()
+            .unwrap_or_default();
+        for next_tick in base + 1..=to_tick {
+            if let Some(&(_, input)) = own_inputs_in_flight.iter().find(|&&(t, _)| t == next_tick) {
+                latest = input;
+            }
+            out.push(latest);
+        }
+    }
+
+    /// The input [`LiveWorld::predict`] holds for character `id` (its [`derive_held_input`] from the last snapshot; our own tee's is its
+    /// last known applied input). `None` for an id never seen.
+    pub fn held_input_of(&self, id: i32) -> Option<PlayerInput> {
+        usize::try_from(id)
+            .ok()
+            .and_then(|i| self.held_input.get(i).copied().flatten())
     }
 
     fn predict_impl(
@@ -880,6 +933,7 @@ impl LiveWorld {
         to_tick: i32,
         own_inputs_in_flight: &[(i32, PlayerInput)],
         keep: Option<&[bool; MAX_CLIENTS]>,
+        victim: Option<(i32, &[PlayerInput])>,
     ) -> &World<f32> {
         self.scratch.restore_from(&self.world);
         // 2.4b review round 1, F1: the server destroys a projectile whose owner is dead
@@ -921,11 +975,14 @@ impl LiveWorld {
             .flatten()
             .unwrap_or_default();
 
+        let base_tick = self.scratch.tick;
         while self.scratch.tick < to_tick {
             let next_tick = self.scratch.tick + 1;
             if let Some(&(_, input)) = own_inputs_in_flight.iter().find(|&&(t, _)| t == next_tick) {
                 latest_own_input = input;
             }
+            // Task 3.17: the step's index in the window, for the victim's override.
+            let step = (next_tick - base_tick - 1) as usize;
 
             self.tick_inputs_scratch.clear();
             for id in 0..MAX_CLIENTS {
@@ -934,6 +991,11 @@ impl LiveWorld {
                 }
                 let input = if id as i32 == own_id {
                     latest_own_input
+                } else if let Some(&over) = victim
+                    .filter(|&(v, _)| v == id as i32)
+                    .and_then(|(_, inputs)| inputs.get(step))
+                {
+                    over
                 } else {
                     self.held_input[id].unwrap_or_default()
                 };
@@ -984,9 +1046,7 @@ impl LiveWorld {
         target_id: Option<i32>,
         obs: &mut Observation,
     ) -> &World<f32> {
-        self.predict_impl(to_tick, own_inputs_in_flight, Some(keep));
-        fill_observation_from(&self.map, self.own_id, &self.scratch, target_id, obs);
-        &self.scratch
+        self.predict_local_observation_with(to_tick, own_inputs_in_flight, keep, target_id, obs, None)
     }
 
     /// [`LiveWorld::export_own`] from the world of the last [`LiveWorld::predict`] call.

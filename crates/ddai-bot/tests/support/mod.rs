@@ -260,6 +260,9 @@ pub struct Seen {
     pub self_x: f32,
     /// Whether that predicted tee is frozen.
     pub self_frozen: bool,
+    /// Task 3.17: the target's predicted position and velocity (px, px/tick) in the exact world the brain was handed.
+    pub target_pos: Option<(f32, f32)>,
+    pub target_vel: Option<(f32, f32)>,
 }
 
 /// A brain that records what it is given and returns a fixed action.
@@ -326,6 +329,14 @@ impl Brain for Probe {
             spare_ids: self.spare_ids.clone(),
             self_x: obs.self_state.pos.x,
             self_frozen: obs.self_state.is_frozen,
+            target_pos: obs
+                .target_id
+                .and_then(|t| view.world.cores.get(t as u8))
+                .map(|c| (c.pos.x, c.pos.y)),
+            target_vel: obs
+                .target_id
+                .and_then(|t| view.world.cores.get(t as u8))
+                .map(|c| (c.vel.x, c.vel.y)),
         });
         *self.action.borrow()
     }

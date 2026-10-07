@@ -185,6 +185,9 @@ pub struct BotConfig {
     /// Duel evidence is carried over a reconnect or a map reload only if the bot was away no longer than this (default [`DUEL_OUTAGE_MAX`]):
     /// after a longer outage the fight is long over (the server expired the timeout code), review 4.12, F11.
     pub duel_outage_max: Duration,
+    /// Task 3.17 (D-111, opt-in, `--window-model` / `window_model` in the settings): the learned model of the opponent's inputs in the lag
+    /// window ([`crate::oppnet`]). `None` (the default): the bot decides exactly as before. Only the hybrid brain uses it.
+    pub window_model: Option<crate::oppnet::WindowModelConfig>,
     /// Task 3.11 (diagnosis, off by default): write the per-input trace of [`crate::trace`] here (`DDAI_INPUT_TRACE` is the
     /// same for a process that has one bot).
     pub input_trace: Option<PathBuf>,
@@ -229,6 +232,7 @@ impl Default for BotConfig {
             duel_detect_marker: None,
             duel_commands: DEFAULT_DUEL_COMMANDS.iter().map(|s| (*s).to_string()).collect(),
             duel_outage_max: DUEL_OUTAGE_MAX,
+            window_model: None,
             input_trace: None,
             kind_estimate: false,
             driver_pickup: DRIVER_PICKUP,
@@ -495,6 +499,8 @@ pub struct Bot {
     cancel_fallback: bool,
     /// Task 4.12: the spawn tiles of the map (px), for the cost of a kill.
     spawns: Vec<(f64, f64)>,
+    /// Task 3.17: the loaded window model, if the run was started with one.
+    window_model: Option<crate::oppnet::WindowModelRt>,
     /// `lives` as the fallback last saw it (a change is a new life).
     fb_lives: u64,
     quit: bool,
@@ -589,6 +595,7 @@ impl Bot {
             duel_carry_since: None,
             cancel_fallback: false,
             spawns: Vec::new(),
+            window_model: None,
             fb_lives: 0,
             connected: false,
             quit: false,
@@ -1001,6 +1008,26 @@ impl Bot {
         }
     }
 
+    /// Task 3.17 (D-111): hands the bot the loaded window model ([`crate::oppnet::WindowModelRt::load`]). It acts only while the brain is the hybrid.
+    pub fn set_window_model(&mut self, model: Option<crate::oppnet::WindowModelRt>) {
+        self.window_model = model;
+    }
+
+    /// Once a second from the runner, outside the decision path: the kill marker, the log's hand-over, the guard's changes.
+    pub fn window_model_poll(&mut self, now: Instant) {
+        if let Some(m) = self.window_model.as_mut() {
+            m.poll(now);
+        }
+    }
+
+    /// STATUS: `"off"` without a model, else `"on"`, `"hold"` (the guard benched it) or `"killed"` (the marker), and the guard's numbers.
+    pub fn window_model_status(&self) -> (&'static str, Option<crate::oppnet::WindowGuardStatus>) {
+        match self.window_model.as_ref() {
+            None => ("off", None),
+            Some(m) => (m.state_word(), Some(m.guard_status())),
+        }
+    }
+
     /// Ticks until `Cl_Kill` is allowed again (0: now, also before any snapshot).
     pub fn kill_cooldown_ticks(&self) -> i32 {
         if self.last_tick < 0 {
@@ -1366,6 +1393,7 @@ impl Bot {
             duel_carry_since,
             cancel_fallback,
             spawns,
+            window_model,
             ..
         } = self;
         let (Some(live), Some(plan), Some(obs), Some(grid)) =
@@ -1540,6 +1568,9 @@ impl Bot {
                 self_id: own_id,
                 seed: cfg.seed.wrapping_add(*lives),
             });
+            if let Some(m) = window_model.as_mut() {
+                m.reset();
+            }
             push_event(events, BotEvent::Respawned { tick });
         }
 
@@ -1682,6 +1713,13 @@ impl Bot {
             self.latency.pick.push(t_pick.elapsed());
         }
         picker.set_target(target);
+        // Task 3.17: the window model's history is fed by every snapshot that has a target, not only by the ones a brain decision follows.
+        if target >= 0
+            && cfg.brain == BrainKind::Hybrid
+            && let Some(m) = window_model.as_mut()
+        {
+            m.observe(live.base_world(), own_id, target, &players.tag(target));
+        }
         if target != previous_target {
             let to = (target >= 0).then(|| players.tag(target).to_string());
             push_event(events, BotEvent::TargetChanged { tick, to });
@@ -1843,7 +1881,13 @@ impl Bot {
                 travel_goal,
                 wb,
             });
-            let predicted = live.predict_local_observation(to_tick, in_flight, keep, target_id, obs);
+            // Task 3.17 (D-111): with the window model on, the target plays the model's inputs in the roll to `to_tick` (hold otherwise).
+            let predicted = match (window_model.as_mut(), target_id) {
+                (Some(m), Some(tid)) if cfg.brain == BrainKind::Hybrid => {
+                    m.predict(live, to_tick, in_flight, keep, tid, &players.tag(tid), obs)
+                }
+                _ => live.predict_local_observation(to_tick, in_flight, keep, target_id, obs),
+            };
             let view = WorldView {
                 world: predicted,
                 self_id: own_id,

@@ -201,6 +201,14 @@ pub struct BotOpts {
     /// `<data-dir>/bot/duel-detect.off` does the same and is re-read once a second.
     #[arg(long)]
     pub no_duel_detect: bool,
+    /// The learned model of the opponent's inputs in the input-lag window (task 3.17, D-111; a `.oppnet` file, never in git; **off** by default,
+    /// and then the bot decides byte for byte as without the flag). `window_model = "<file>"` in `settings.toml` does the same (the flag wins).
+    /// With the hybrid brain the target plays the model's inputs in the roll over the lag window; an online guard benches the model when it
+    /// predicts worse than "hold" (STATUS `window_model` / `window_guard`); the marker file `<data-dir>/bot/window-model.off` switches it off
+    /// while it exists (re-read once a second). Per-window log: `<data-dir>/bot/oppnet-live.jsonl` (rotated; `ddnet-ai oppnet-live report`).
+    /// The file's sha256 is logged at the start; a file that cannot be loaded refuses the start.
+    #[arg(long, value_name = "FILE", value_parser = parse_path_or_empty)]
+    pub window_model: Option<PathBuf>,
     /// Task 4.10 (D-100): do not send the DDNet timeout code `/timeout <code>` after joining (no seed file is read or made). With it the bot's
     /// only chat is the typed `/kill` and the owner's lines.
     #[arg(long)]
@@ -213,6 +221,11 @@ pub struct BotOpts {
 
 /// Whether `--flag` (or `--flag=value`) was typed on the command line, as opposed to being a default: a
 /// value in the settings file only fills what the command line left open.
+/// A path that may be empty (clap refuses an empty `PathBuf` value): `--window-model=` is "off".
+fn parse_path_or_empty(s: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(s))
+}
+
 fn flag_given(flag: &str) -> bool {
     std::env::args().any(|a| a == flag || a.strip_prefix(flag).is_some_and(|r| r.starts_with('=')))
 }
@@ -556,11 +569,50 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
                 .map(|s| (*s).to_string())
                 .collect()
         }),
+        // An empty value is "off" (the launch unit passes `--window-model=${BOT_WINDOW_MODEL}`, empty when the toggle is off); a relative path is
+        // relative to the data directory, not to wherever the unit happens to run.
+        window_model: (if flag_given("--window-model") {
+            o.window_model.clone()
+        } else {
+            settings.window_model.clone()
+        })
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|model| {
+            let model = if model.is_relative() {
+                data_dir.join(model)
+            } else {
+                model
+            };
+            ddai_bot::oppnet::WindowModelConfig::in_data_dir(model, data_dir)
+        }),
         selfkill_marker: Some(data_dir.join("bot").join(ddai_bot::selfkill::SELFKILL_OFF_MARKER)),
         duel_detect_marker: Some(data_dir.join("bot").join(ddai_bot::selfkill::DUEL_DETECT_OFF_MARKER)),
         kind_estimate: live_timing.kind,
         ..BotConfig::default()
     };
+    if let Some(wm) = &bot.window_model {
+        if kind == BrainKind::Hybrid {
+            eprintln!(
+                "window model: {} ({}; task 3.17, D-111): loaded at the start (sha256 in the log), off while the marker {} exists, log {}",
+                wm.model.display(),
+                if flag_given("--window-model") {
+                    "--window-model"
+                } else {
+                    "settings.toml"
+                },
+                wm.marker
+                    .as_deref()
+                    .map_or_else(String::new, |p| p.display().to_string()),
+                wm.log.as_deref().map_or_else(String::new, |p| p.display().to_string()),
+            );
+        } else {
+            eprintln!(
+                "window model: {} is IGNORED: it belongs to the hybrid brain and this run's brain is {} (task 3.17)",
+                wm.model.display(),
+                kind.name()
+            );
+        }
+    }
     let wb_text = if flag_given("--wb") {
         o.wb.clone()
     } else {
@@ -1061,6 +1113,23 @@ mod search_threads_tests {
         };
         assert!(!get(&[]).unwrap());
         assert!(get(&["--no-timeout-code"]).unwrap());
+    }
+
+    #[test]
+    fn the_window_model_is_off_by_default_and_takes_a_file() {
+        let get = |extra: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(extra);
+            Cli::try_parse_from(v).map(|c| c.bot.window_model)
+        };
+        assert_eq!(get(&[]).unwrap(), None);
+        assert_eq!(
+            get(&["--window-model", "/x/m1.oppnet"]).unwrap(),
+            Some(PathBuf::from("/x/m1.oppnet"))
+        );
+        assert!(get(&["--window-model"]).is_err(), "the flag needs a file");
+        // The launch unit's form: `--window-model=` with nothing after it is a valid "off" for the CLI (the bot treats it as no model).
+        assert_eq!(get(&["--window-model="]).unwrap(), Some(PathBuf::from("")));
     }
 
     #[test]
