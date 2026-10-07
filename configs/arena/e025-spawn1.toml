@@ -1,0 +1,25 @@
+# work-clock: default-rate
+# Task 3.13 (E-025): round 1 of the full-map duel (new arena clb-spawn, the real spawn ledges): seeds 20001..20030. 1v1 against the competitor's planner `live-v2` on clb-spawn.
+# 30 games per arena and arm from seed 20001, `after_ticks = 250`. Arms: docs/research/e025/gen_configs.py (`spawn1 --seed 20001 --games 30 --arms main,fly,fly8 --arenas clb-spawn --opp live-v2`).
+#   ddnet-ai arena run --config configs/arena/e025-spawn1.toml --out ~/aiddnet/data/runs/E-025/spawn1 --threads 3
+name = "E-025: spawn1"
+base_seed = 20001
+games = 30
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-spawn: main vs v2live"
+arena = "clb-spawn"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0 }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-spawn: fly vs v2live"
+arena = "clb-spawn"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { proposer = "fly", fly_model = "~/aiddnet/data/runs/E-005/e005-fly/checkpoints/final.bundle" } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-spawn: fly8 vs v2live"
+arena = "clb-spawn"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { proposer = "fly", fly_model = "~/aiddnet/data/runs/E-008/e008-p2-fly-d2-maskhook-s2/checkpoints/selected.bundle" } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]

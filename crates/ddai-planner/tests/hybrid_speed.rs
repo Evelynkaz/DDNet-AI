@@ -799,7 +799,15 @@ fn v2_work_report() {
         if !name.contains(&only) {
             continue;
         }
-        for (pname, units) in [("none", 0u64), ("fly-cost 500", 500)] {
+        // `DDAI_FLY_UNITS=500,1000` prices the proposer (task 3.13: the E-005 fly is one view, the E-008 bundle two views).
+        let fly_units: Vec<u64> = std::env::var("DDAI_FLY_UNITS")
+            .ok()
+            .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+            .filter(|v: &Vec<u64>| !v.is_empty())
+            .unwrap_or_else(|| vec![500]);
+        let mut proposers: Vec<(String, u64)> = vec![("none".to_string(), 0)];
+        proposers.extend(fly_units.iter().map(|&u| (format!("fly-cost {u}"), u)));
+        for (pname, units) in proposers {
             let mut cfg = deadline(4.0, 1, true, if units > 0 { 3 } else { 0 });
             cfg.work_clock_us_per_tick = Some(WORK_US_PER_TEE_TICK);
             cfg.mirror = true;

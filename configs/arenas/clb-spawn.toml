@@ -1,0 +1,23 @@
+# Copy Love Box, the real spawn ledges (task 3.13, E-025): the full map is played, from where a server puts two tees.
+#
+# Map: Copy Love Box, archive build of 2020-09-03 (387x250), the same file as `clb-left`. The game layer has six ordinary spawn
+# points, (103,34), (103,35), (104,35) and their mirror x' = 234 - x, (131,34), (131,35), (130,35), standing on two ledges of
+# width 5 at y35 (x103..107 and x127..131; docs/research/block-knowledge.md section 3.2). DDNet puts a new tee on the spawn point farthest from
+# the tees already there, so two tees of a duel start on opposite ledges: 20..28 tiles apart. The boxes hold exactly those two ledges; the
+# distance window keeps the pair on opposite ledges. Nothing else is restricted: the tees fight wherever the map takes them.
+name = "clb-spawn"
+tag = "holdout"
+description = "Copy Love Box, full map from the two real spawn ledges (opposite ledges, 20..28 tiles apart)."
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[spawn]
+min_tiles = 20.0
+max_tiles = 28.5
+boxes = [
+    { x0 = 103, y0 = 34, x1 = 107, y1 = 35 },
+    { x0 = 127, y0 = 34, x1 = 131, y1 = 35 },
+]

@@ -1,0 +1,15 @@
+# work-clock: default-rate
+# Task 3.13 (E-025): development screen, the E-008 two-view fly bundle as the proposer (same games as screenB, clb-left only). 1v1 against the competitor's planner `live-v2` on clb-left.
+# 100 games per arena and arm from seed 6001, `after_ticks = 250`. Arms: docs/research/e025/gen_configs.py (`screenC --seed 6001 --games 100 --arms fly8 --arenas clb-left --opp live-v2`).
+#   ddnet-ai arena run --config configs/arena/e025-screenC.toml --out ~/aiddnet/data/runs/E-025/screenC --threads 3
+name = "E-025: screenC"
+base_seed = 6001
+games = 100
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-left: fly8 vs v2live"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { proposer = "fly", fly_model = "~/aiddnet/data/runs/E-008/e008-p2-fly-d2-maskhook-s2/checkpoints/selected.bundle" } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]

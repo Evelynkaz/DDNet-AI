@@ -1,0 +1,25 @@
+# work-clock: default-rate
+# Task 3.13 (E-025): development screen, clb-right half of screenB (same games). 1v1 against the competitor's planner `live-v2` on clb-right.
+# 100 games per arena and arm from seed 6001, `after_ticks = 250`. Arms: docs/research/e025/gen_configs.py (`screenD --seed 6001 --games 100 --arms mirlive,liveW-mirlive,fly --arenas clb-right --opp live-v2`).
+#   ddnet-ai arena run --config configs/arena/e025-screenD.toml --out ~/aiddnet/data/runs/E-025/screenD --threads 3
+name = "E-025: screenD"
+base_seed = 6001
+games = 100
+
+[rules]
+after_ticks = 250
+
+[[condition]]
+name = "clb-right: mirlive vs v2live"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { mirror_preset = "live-v2" } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-right: liveW-mirlive vs v2live"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { launch_exposure = 1.5, jumpless_hazard_cost = 0.4, mirror_preset = "live-v2" } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "clb-right: fly vs v2live"
+arena = "clb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, hybrid = { proposer = "fly", fly_model = "~/aiddnet/data/runs/E-005/e005-fly/checkpoints/final.bundle" } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
