@@ -268,6 +268,12 @@ pub struct LiveWorld {
     /// Reused by the `frozen_last_tick` derivation (`m_FrozenLastTick`): the tile indices of one anti-skip walk.
     walk_scratch: Vec<i32>,
     seed: u64,
+    /// Task 3.20 (D-115): the other tees' real inputs the server sent ahead of their ticks ([`crate::preinput`]); always stored (receive-only,
+    /// no effect on anything), played in [`LiveWorld::predict`] only after [`LiveWorld::set_preinput`]`(true)`.
+    pre: Box<crate::preinput::PreInputStore>,
+    pre_on: bool,
+    /// Each character's DDRace team at the last snapshot (a change forgets its pre-inputs: the server stops sending them to us).
+    pre_team: [i32; MAX_CLIENTS],
     /// The pre-2.4c reconstruction: `prev_pos` snapped to the current position. Only for A/B measurements.
     snap_prev_pos: bool,
     /// The pre-2.4d reconstruction: `last_refill_jumps` never set. Only for A/B measurements.
@@ -318,6 +324,9 @@ impl LiveWorld {
             entity_order_scratch: Vec::with_capacity(MAX_CLIENTS),
             walk_scratch: Vec::with_capacity(64),
             seed,
+            pre: Box::default(),
+            pre_on: false,
+            pre_team: [0; MAX_CLIENTS],
             snap_prev_pos: false,
             skip_refill_jumps: false,
         }
@@ -460,7 +469,33 @@ impl LiveWorld {
             if !is_present && self.world.characters[id].is_some() {
                 self.remove_character(id as i32);
             }
+            if is_present {
+                // Task 3.20: the server sends pre-inputs only within a DDRace team; a tee that changed team has none any more.
+                let team = self.world.teams_core.team(id as i32);
+                if team != self.pre_team[id] {
+                    self.pre_team[id] = team;
+                    self.pre.forget(id as i32);
+                }
+            }
         }
+        self.pre.note_snapshot(
+            tick,
+            present
+                .iter()
+                .enumerate()
+                .filter(|&(i, &p)| p && i as i32 != self.own_id)
+                .map(|(i, _)| i as i32),
+        );
+
+        // Task 3.20: how far past this snapshot the pre-inputs of each other tee reach (what the decision from it can use).
+        self.pre.note_snapshot(
+            tick,
+            present
+                .iter()
+                .enumerate()
+                .filter(|&(i, &p)| p && i as i32 != self.own_id)
+                .map(|(i, _)| i as i32),
+        );
 
         self.rebuild_entity_order();
 
@@ -802,6 +837,7 @@ impl LiveWorld {
         self.world.characters[id as usize] = None;
         self.world.players[id as usize] = None;
         self.held_input[id as usize] = None;
+        self.pre.forget(id);
         // Review round 1, finding F6: mirrors `upsert_character`'s own `teams_core.set_solo` —
         // a departed character must not leave a stale `solo` entry another (later, id-reused)
         // character could inherit.
@@ -893,6 +929,29 @@ impl LiveWorld {
         &self.scratch
     }
 
+    /// Task 3.20 (D-115): switches the use of the server's pre-inputs in the predictions on or off (default off; storing them never stops).
+    pub fn set_preinput(&mut self, on: bool) {
+        self.pre_on = on;
+    }
+
+    pub fn preinput_on(&self) -> bool {
+        self.pre_on
+    }
+
+    /// Task 3.20: one `Sv_PreInput` of the server (`owner`'s input for `intended_tick`), in the physics input shape. Our own id is ignored.
+    pub fn on_pre_input(&mut self, owner: i32, intended_tick: i32, input: PlayerInput) -> crate::preinput::Inserted {
+        if owner == self.own_id {
+            // Counted as received (the server never sends our own, but a hostile one might), stored nowhere.
+            return self.pre.insert(-1, intended_tick, input, None);
+        }
+        let snap = (self.world.tick > 0).then_some(self.world.tick);
+        self.pre.insert(owner, intended_tick, input, snap)
+    }
+
+    pub fn pre_inputs(&self) -> &crate::preinput::PreInputStore {
+        &self.pre
+    }
+
     /// Our own input for each step of a prediction to `to_tick` (the step `k` runs from tick `base_tick() + k`), exactly as
     /// [`LiveWorld::predict`] picks them: the in-flight input claimed for the step's target tick, else the one before it (the held input
     /// to begin with). `out` is cleared first and ends up with `min(to_tick, cap) - base_tick()` entries (none when `to_tick` is not ahead).
@@ -976,6 +1035,9 @@ impl LiveWorld {
             .unwrap_or_default();
 
         let base_tick = self.scratch.tick;
+        let use_pre = self.pre_on;
+        let mut roll = crate::preinput::Roll::new();
+        let own_team = self.world.teams_core.team(own_id);
         while self.scratch.tick < to_tick {
             let next_tick = self.scratch.tick + 1;
             if let Some(&(_, input)) = own_inputs_in_flight.iter().find(|&&(t, _)| t == next_tick) {
@@ -998,6 +1060,29 @@ impl LiveWorld {
                     over
                 } else {
                     self.held_input[id].unwrap_or_default()
+                };
+                // Task 3.20 (D-115): the owner's real input for this tick, when the server told us -- over the window model's and over hold.
+                let input = if use_pre
+                    && id as i32 != own_id
+                    && self.pre.newest(id as i32) >= 0
+                    && self.world.teams_core.team(id as i32) == own_team
+                {
+                    let snap_dir = self.world.cores.get(id as u8).map_or(0, |c| c.direction.clamp(-1, 1));
+                    let is_model = victim.is_some_and(|(v, inputs)| v == id as i32 && step < inputs.len());
+                    roll.input(
+                        &mut self.pre,
+                        &crate::preinput::Step {
+                            owner: id as i32,
+                            tick: next_tick,
+                            base_tick,
+                            snapshot_dir: snap_dir,
+                            assumed_is_model: is_model,
+                        },
+                        &input,
+                    )
+                    .unwrap_or(input)
+                } else {
+                    input
                 };
                 self.tick_inputs_scratch.push(TickInput {
                     id: id as u8,

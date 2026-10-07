@@ -117,6 +117,8 @@ pub struct WindowGuardStatus {
     pub skipped_own_frozen: u64,
     pub skipped_regime: u64,
     pub observed: u64,
+    /// Lengths of the windows decisions asked about (`0..=9`, the last bin holds longer ones).
+    pub window_lens: [u64; 10],
     /// Log lines lost (a full buffer or queue, a write error).
     pub log_lost: u64,
     /// The model file's sha256 (hex).
@@ -360,6 +362,7 @@ impl WindowModelRt {
             skipped_own_frozen: c.skipped_own_frozen,
             skipped_regime: c.skipped_regime,
             observed: c.observed,
+            window_lens: c.window_lens,
             log_lost: self.log_lost + c.log_dropped + lost,
             sha256: self.sha_hex.clone(),
         }

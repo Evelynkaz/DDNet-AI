@@ -54,7 +54,7 @@ pub mod unstick;
 pub mod wander;
 pub mod wb_guard;
 
-pub use bot::{Bot, BotConfig, BotEvent, BotStats, Mode, Output, Status};
+pub use bot::{Bot, BotConfig, BotEvent, BotStats, Mode, Output, PreInputMode, Status};
 pub use brains::{BrainError, BrainKind, BrainOptions, make_brain};
 pub use command::{BotCommand, CommandReply};
 pub use ddai_botctl::names;

@@ -209,6 +209,12 @@ pub struct BotOpts {
     /// The file's sha256 is logged at the start; a file that cannot be loaded refuses the start.
     #[arg(long, value_name = "FILE", value_parser = parse_path_or_empty)]
     pub window_model: Option<PathBuf>,
+    /// The server's pre-inputs (task 3.20, D-115; `on` or `off`, **off** by default). A DDNet >= 19.4 server sends us the other tees' REAL inputs a
+    /// little before their ticks (`Sv_PreInput`; we announce 20010, a bot that announces 19000 gets none). They are always counted and stored
+    /// (STATUS `preinput_stats`, a log line every 10 s); with `on` they also play in the prediction, over the window model's and over "hold". The
+    /// marker `<data-dir>/bot/preinput.off` switches the use off while it exists (re-read once a second). Receive-only: nothing is sent.
+    #[arg(long, default_value = "off", value_parser = parse_on_off, action = clap::ArgAction::Set)]
+    pub preinput: bool,
     /// Task 4.10 (D-100): do not send the DDNet timeout code `/timeout <code>` after joining (no seed file is read or made). With it the bot's
     /// only chat is the typed `/kill` and the owner's lines.
     #[arg(long)]
@@ -586,6 +592,8 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
             ddai_bot::oppnet::WindowModelConfig::in_data_dir(model, data_dir)
         }),
         selfkill_marker: Some(data_dir.join("bot").join(ddai_bot::selfkill::SELFKILL_OFF_MARKER)),
+        preinput: o.preinput,
+        preinput_marker: Some(data_dir.join("bot").join(ddai_bot::selfkill::PREINPUT_OFF_MARKER)),
         duel_detect_marker: Some(data_dir.join("bot").join(ddai_bot::selfkill::DUEL_DETECT_OFF_MARKER)),
         kind_estimate: live_timing.kind,
         ..BotConfig::default()
@@ -1130,6 +1138,19 @@ mod search_threads_tests {
         assert!(get(&["--window-model"]).is_err(), "the flag needs a file");
         // The launch unit's form: `--window-model=` with nothing after it is a valid "off" for the CLI (the bot treats it as no model).
         assert_eq!(get(&["--window-model="]).unwrap(), Some(PathBuf::from("")));
+    }
+
+    #[test]
+    fn the_preinput_flag_is_off_by_default_and_takes_on_or_off() {
+        let get = |extra: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(extra);
+            Cli::try_parse_from(v).map(|c| c.bot.preinput)
+        };
+        assert!(!get(&[]).unwrap());
+        assert!(get(&["--preinput", "on"]).unwrap());
+        assert!(!get(&["--preinput", "off"]).unwrap());
+        assert!(get(&["--preinput", "maybe"]).is_err());
     }
 
     #[test]

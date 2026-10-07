@@ -114,6 +114,27 @@ impl Mode {
     }
 }
 
+/// Task 3.20: the state of the pre-input use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreInputMode {
+    /// Not asked for (the default): the messages are counted and stored, nothing plays them.
+    Off,
+    /// Played in the prediction.
+    On,
+    /// Asked for, but the marker `bot/preinput.off` exists.
+    Killed,
+}
+
+impl PreInputMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            PreInputMode::Off => "off",
+            PreInputMode::On => "on",
+            PreInputMode::Killed => "killed",
+        }
+    }
+}
+
 /// Bot settings.
 #[derive(Debug, Clone)]
 pub struct BotConfig {
@@ -188,6 +209,11 @@ pub struct BotConfig {
     /// Task 3.17 (D-111, opt-in, `--window-model` / `window_model` in the settings): the learned model of the opponent's inputs in the lag
     /// window ([`crate::oppnet`]). `None` (the default): the bot decides exactly as before. Only the hybrid brain uses it.
     pub window_model: Option<crate::oppnet::WindowModelConfig>,
+    /// Task 3.20 (D-115, opt-in, `--preinput on`): play the other tees' real inputs the server sends ahead of their ticks (`Sv_PreInput`) in the
+    /// prediction. Off by default; the messages are counted and stored either way (receive-only).
+    pub preinput: bool,
+    /// The marker file `<data-dir>/bot/preinput.off`: while it exists the pre-inputs are not played. `None`: no marker.
+    pub preinput_marker: Option<PathBuf>,
     /// Task 3.11 (diagnosis, off by default): write the per-input trace of [`crate::trace`] here (`DDAI_INPUT_TRACE` is the
     /// same for a process that has one bot).
     pub input_trace: Option<PathBuf>,
@@ -233,6 +259,8 @@ impl Default for BotConfig {
             duel_commands: DEFAULT_DUEL_COMMANDS.iter().map(|s| (*s).to_string()).collect(),
             duel_outage_max: DUEL_OUTAGE_MAX,
             window_model: None,
+            preinput: false,
+            preinput_marker: None,
             input_trace: None,
             kind_estimate: false,
             driver_pickup: DRIVER_PICKUP,
@@ -501,6 +529,8 @@ pub struct Bot {
     spawns: Vec<(f64, f64)>,
     /// Task 3.17: the loaded window model, if the run was started with one.
     window_model: Option<crate::oppnet::WindowModelRt>,
+    /// Task 3.20: whether the pre-inputs are played (set by the runner from the flag and the marker).
+    preinput: PreInputMode,
     /// `lives` as the fallback last saw it (a change is a new life).
     fb_lives: u64,
     quit: bool,
@@ -596,6 +626,7 @@ impl Bot {
             cancel_fallback: false,
             spawns: Vec::new(),
             window_model: None,
+            preinput: PreInputMode::Off,
             fb_lives: 0,
             connected: false,
             quit: false,
@@ -1013,6 +1044,46 @@ impl Bot {
         self.window_model = model;
     }
 
+    /// Task 3.20 (D-115): whether the pre-inputs are played (`On`), not asked for (`Off`) or switched off by the marker (`Killed`).
+    pub fn set_preinput(&mut self, mode: PreInputMode) {
+        self.preinput = mode;
+        if let Some(live) = self.live.as_mut() {
+            live.set_preinput(mode == PreInputMode::On);
+        }
+    }
+
+    /// `SessionEvent::ExGameMessage(SvPreInput)`: the owner's real input for `intended_tick`. Stored always, played only in mode `On`.
+    pub fn on_pre_input(&mut self, p: &ddai_net::generated::messages::SvPreInput) {
+        if let Some(live) = self.live.as_mut() {
+            live.on_pre_input(
+                p.owner,
+                p.intended_tick,
+                PhysInput {
+                    direction: p.direction,
+                    target_x: p.target_x,
+                    target_y: p.target_y,
+                    jump: p.jump,
+                    fire: p.fire,
+                    hook: p.hook,
+                    player_flags: 0,
+                    wanted_weapon: 0,
+                    next_weapon: 0,
+                    prev_weapon: 0,
+                },
+            );
+        }
+    }
+
+    /// STATUS: the mode and the counters (zeros before the first snapshot).
+    pub fn preinput_status(&self) -> (PreInputMode, ddai_world::preinput::PreInputCounts) {
+        (
+            self.preinput,
+            self.live
+                .as_ref()
+                .map_or_else(Default::default, |l| l.pre_inputs().counts()),
+        )
+    }
+
     /// Once a second from the runner, outside the decision path: the kill marker, the log's hand-over, the guard's changes.
     pub fn window_model_poll(&mut self, now: Instant) {
         if let Some(m) = self.window_model.as_mut() {
@@ -1339,7 +1410,8 @@ impl Bot {
         }
         self.last_tick = tick;
         if self.live.as_ref().is_none_or(|l| l.own_id() != own_id) {
-            let live = LiveWorld::new(Arc::clone(&map), own_id, self.cfg.seed);
+            let mut live = LiveWorld::new(Arc::clone(&map), own_id, self.cfg.seed);
+            live.set_preinput(self.preinput == PreInputMode::On);
             self.obs = Some(live.build_observation(live.base_world(), None));
             self.live = Some(live);
         }

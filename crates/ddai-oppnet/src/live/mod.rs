@@ -223,6 +223,8 @@ pub struct LiveCounts {
     pub skipped_regime: u64,
     /// Snapshots whose frame fed the history.
     pub observed: u64,
+    /// Lengths of the windows the decisions asked about (`0..=9`, the last bin holds longer ones): how long our lag really is.
+    pub window_lens: [u64; 10],
     /// Log lines dropped because the buffer was full.
     pub log_dropped: u64,
 }
@@ -518,6 +520,7 @@ impl LiveOpp {
             world, self_id, target, ..
         } = *pair;
         let lag = own.len();
+        self.counts.window_lens[lag.min(9)] += 1;
         if lag == 0 || lag > WINDOW_MAX {
             self.counts.skipped_window += 1;
             return WindowUse::Hold;

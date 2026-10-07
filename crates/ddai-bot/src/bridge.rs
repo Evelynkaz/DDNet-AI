@@ -289,6 +289,12 @@ pub struct StatusMessage {
     pub window_model: String,
     /// Additive since task 3.17: the guard's numbers (see [`crate::oppnet::WindowGuardStatus`]); `null` without a model.
     pub window_guard: Option<serde_json::Value>,
+    /// Additive since task 3.20 (D-115): the server's pre-inputs. `"off"` (the default: counted, not played), `"on"` (played in the prediction) or
+    /// `"killed"` (asked for, but the marker `bot/preinput.off` exists).
+    pub preinput: String,
+    /// Additive since task 3.20: the counters (`received`, `stored`, `ahead`, `behind`, `stale`, `invalid`, `duplicate`, `used`, `distrusted`,
+    /// and `lead`, a histogram of `intended_tick - latest snapshot tick` from `lead_from` upwards); counted whatever the mode.
+    pub preinput_stats: serde_json::Value,
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -832,6 +838,8 @@ mod tests {
             selfkill_policy: "smart".into(),
             window_model: "off".into(),
             window_guard: None,
+            preinput: "on".into(),
+            preinput_stats: serde_json::json!({"received": 7}),
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
@@ -848,6 +856,8 @@ mod tests {
         // Task 3.17: additive, "off" and null without a model.
         assert_eq!(v["window_model"], "off");
         assert!(v["window_guard"].is_null());
+        assert_eq!(v["preinput"], "on");
+        assert_eq!(v["preinput_stats"]["received"], 7);
     }
 
     #[test]

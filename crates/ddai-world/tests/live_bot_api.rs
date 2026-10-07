@@ -292,6 +292,137 @@ fn own_inputs_over_are_the_inputs_the_prediction_uses() {
     assert_eq!(live.held_input_of(-1), None);
 }
 
+// ---- task 3.20: the server's pre-inputs in the roll ---------------------------------------------------------
+
+fn pre(direction: i32) -> PlayerInput {
+    PlayerInput {
+        direction,
+        target_x: 100,
+        target_y: -1,
+        player_flags: 1,
+        ..Default::default()
+    }
+}
+
+fn pos_x(w: &ddai_physics::world::World<f32>, id: u8) -> f32 {
+    w.cores.get(id).unwrap().pos.x
+}
+
+fn pre_rig() -> (LiveWorld, ddai_brain::Observation, [bool; MAX_CLIENTS]) {
+    let chars = [tee(0, 1000), tee(1, 1300), tee(2, 2500)];
+    let mut live = LiveWorld::new(room(), 0, 1);
+    live.on_snapshot(SnapshotInput::new(500, &chars, DEFAULT_TUNE_PARAMS));
+    let obs = live.build_observation(&live.base_world().clone(), None);
+    (live, obs, [true; MAX_CLIENTS])
+}
+
+#[test]
+fn a_pre_input_moves_the_predicted_tee_exactly_as_the_input_would_and_only_when_switched_on() {
+    let (mut live, mut obs, keep) = pre_rig();
+    let held = pos_x(live.predict_local_observation(504, &[], &keep, Some(1), &mut obs), 1);
+    // The server says tee 1 walks left from tick 501 on (heard ahead: the newest message is for 503).
+    live.on_pre_input(1, 501, pre(-1));
+    live.on_pre_input(1, 503, pre(-1));
+    // Stored, not used: off is the old prediction, bit for bit.
+    assert_eq!(
+        pos_x(live.predict_local_observation(504, &[], &keep, Some(1), &mut obs), 1),
+        held
+    );
+    live.set_preinput(true);
+    let with = pos_x(live.predict_local_observation(504, &[], &keep, Some(1), &mut obs), 1);
+    assert!(with < held, "{with} vs {held}");
+    // The same motion as playing that input by hand: the override with the same inputs on the same ticks (501..=503 walk left from the messages; 504 is beyond
+    // the newest message, where the last real input persists, still walking left).
+    live.set_preinput(false);
+    let by_hand = pos_x(
+        live.predict_local_observation_with(
+            504,
+            &[],
+            &keep,
+            Some(1),
+            &mut obs,
+            Some((1, &[pre(-1), pre(-1), pre(-1), pre(-1)])),
+        ),
+        1,
+    );
+    assert_eq!(with, by_hand);
+    // Other tees are untouched.
+    live.set_preinput(true);
+    let w = live.predict_local_observation(504, &[], &keep, Some(1), &mut obs);
+    assert_eq!(pos_x(w, 2), 2500.0);
+    assert!(live.pre_inputs().counts().used >= 3);
+}
+
+#[test]
+fn a_pre_input_beats_the_window_models_override_and_the_model_plays_where_nothing_is_known() {
+    let (mut live, mut obs, keep) = pre_rig();
+    live.set_preinput(true);
+    // Truth for ticks 501-502: right. The model says left for all four steps.
+    live.on_pre_input(1, 501, pre(1));
+    live.on_pre_input(1, 502, pre(1));
+    let left = [pre(-1); 4];
+    let x_model_only = {
+        live.set_preinput(false);
+        let v = pos_x(
+            live.predict_local_observation_with(504, &[], &keep, Some(1), &mut obs, Some((1, &left))),
+            1,
+        );
+        live.set_preinput(true);
+        v
+    };
+    let x_both = pos_x(
+        live.predict_local_observation_with(504, &[], &keep, Some(1), &mut obs, Some((1, &left))),
+        1,
+    );
+    assert!(
+        x_both > x_model_only,
+        "the truth for the first ticks turned it around: {x_both} vs {x_model_only}"
+    );
+}
+
+#[test]
+fn stale_foreign_and_own_pre_inputs_change_nothing() {
+    let (mut live, mut obs, keep) = pre_rig();
+    live.set_preinput(true);
+    let base = pos_x(live.predict_local_observation(504, &[], &keep, Some(1), &mut obs), 1);
+    // For our own id (ignored), for a tick the snapshot already confirmed with nothing after it, for a tick beyond the horizon of the roll.
+    live.on_pre_input(0, 502, pre(-1));
+    live.on_pre_input(1, 499, pre(-1));
+    live.on_pre_input(1, 530, pre(-1));
+    let x = pos_x(live.predict_local_observation(504, &[], &keep, Some(1), &mut obs), 1);
+    // The message at 499 says "left" while the snapshot at 500 shows the tee standing: a message went missing in between, so its state is not trusted
+    // (the other message, at 530, is beyond the roll) and the prediction is the old one.
+    assert_eq!(x, base);
+    assert_eq!(live.pre_inputs().counts().distrusted, 1);
+    let c = live.pre_inputs().counts();
+    assert_eq!(c.invalid, 1, "our own id: counted, stored nowhere");
+}
+
+#[test]
+fn a_tee_that_changes_team_or_leaves_loses_its_pre_inputs() {
+    let (mut live, mut obs, keep) = pre_rig();
+    live.set_preinput(true);
+    live.on_pre_input(1, 501, pre(-1));
+    live.on_pre_input(1, 504, pre(-1));
+    assert!(live.pre_inputs().newest(1) == 504);
+    // The next snapshot has tee 1 in another DDRace team.
+    let chars = [tee(0, 1000), tee(1, 1300), tee(2, 2500)];
+    let mut teams = ddai_net::tuning::TeamsState {
+        teams: [0; 128],
+        received: 3,
+    };
+    teams.teams[1] = 5;
+    let mut input = SnapshotInput::new(502, &chars, DEFAULT_TUNE_PARAMS);
+    input.teams = Some(&teams);
+    live.on_snapshot(input);
+    assert_eq!(live.pre_inputs().newest(1), -1, "forgotten with the team change");
+    let _ = (&mut obs, &keep);
+    // A tee that is gone from the snapshot is forgotten too.
+    live.on_pre_input(2, 505, pre(1));
+    live.on_snapshot(SnapshotInput::new(504, &chars[..2], DEFAULT_TUNE_PARAMS));
+    assert_eq!(live.pre_inputs().newest(2), -1);
+}
+
 // ---- task 4.3: carrying our own tee through a clip replay --------------------------------------------
 
 #[test]

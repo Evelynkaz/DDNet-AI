@@ -157,3 +157,8 @@
 - `server_list` — кэш мастер-списка (`MasterCache`, `CacheRow`, `RefreshStatus`): только публичные IPv4, очищенный и обрезанный текст, строгий читатель, который проверяет и сам писатель (`ddnet-ai servers-cache`); у `ServerRow` новое поле `v06`.
 - `proxy`: **привязка `for_server` снята** (прокси назначает владелец записи сервера; `ProxyConfig::allows`, `NotForServer` и сверка в воротах драйвера удалены, ключ ещё читается как дополнительные адреса для фильтра cgroup и правила ретранслятора); `load_proxy` не следует за симлинком; `parse_proxy_text` — тот же разбор без диска (сайт проверяет профиль до записи).
 - Тесты: `favourites::tests::*`, `safe_file::tests::*`, `server_list::tests::the_cache_*`, `proxy::tests::for_server_is_read_but_no_longer_pins_the_proxy`, `a_proxy_file_that_is_a_symlink_or_a_fifo_is_refused`; `tests/socks5_client.rs::a_proxy_file_issued_for_another_server_is_used_where_the_entry_assigns_it`.
+
+## Дополнения задачи 3.20 (`Sv_PreInput`, D-115; только приём)
+
+Сессия декодирует `Sv_PreInput` (`preinput@netmsg.ddnet.org`) в `SessionEvent::ExGameMessage(ExGameMsg::SvPreInput(..))` с проверкой диапазонов как в DDNet (поле вне диапазона отвергает сообщение); событие, как и остальные игровые сообщения, «вытесняемое» при переполнении очереди.
+Хранит и проигрывает его бот (`ddai-world::preinput`), клиент ничего не отправляет и версию (20010, D-037) не меняет: сервер шлёт сообщения клиентам ≥ 19040 в той же команде DDRace, не AFK (`docs/research/preinput.md`).

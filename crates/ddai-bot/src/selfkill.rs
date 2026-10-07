@@ -21,6 +21,8 @@ pub const SELFKILL_OFF_MARKER: &str = "selfkill.off";
 /// `selfkill.off` (same [`SelfKillSwitch`], once a second, an unreadable marker counts as present) but with the opposite fail-safe in mind: its
 /// presence means "do not look for a duel", so a stuck bot can always be freed without a restart or SSH to the unit.
 pub const DUEL_DETECT_OFF_MARKER: &str = "duel-detect.off";
+/// Task 3.20: the marker that stops the use of the server's pre-inputs (the same one-second reader).
+pub const PREINPUT_OFF_MARKER: &str = "preinput.off";
 
 /// How often the marker is looked at.
 pub const RECHECK_EVERY: Duration = Duration::from_secs(1);

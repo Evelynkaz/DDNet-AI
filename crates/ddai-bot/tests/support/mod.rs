@@ -3,6 +3,8 @@
 //! no real nicknames (names are `p<id>`-style test strings).
 #![allow(dead_code)]
 
+pub mod private_server;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;

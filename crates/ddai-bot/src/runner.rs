@@ -241,6 +241,21 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     if let Some(why) = duel_switch.state() {
         tracing::info!("duel detection: off ({})", why.name());
     }
+    // Task 3.20 (D-115): the server's pre-inputs are played with `--preinput on` unless the marker `bot/preinput.off` exists (re-read once a second).
+    let mut pre_switch = SelfKillSwitch::new(!cfg.bot.preinput, cfg.bot.preinput_marker.clone(), Instant::now());
+    let pre_mode = |sw: &SelfKillSwitch| match (cfg.bot.preinput, sw.state()) {
+        (false, _) => crate::bot::PreInputMode::Off,
+        (true, None) => crate::bot::PreInputMode::On,
+        (true, Some(_)) => crate::bot::PreInputMode::Killed,
+    };
+    bot.set_preinput(pre_mode(&pre_switch));
+    if cfg.bot.preinput {
+        tracing::info!(
+            "pre-inputs: {} (--preinput; task 3.20, D-115): the other tees' real inputs the server sends ahead of their ticks play in the prediction; the marker {:?} switches it off",
+            bot.preinput_status().0.name(),
+            cfg.bot.preinput_marker
+        );
+    }
     if bot.selfkill_policy().is_smart() {
         tracing::info!("self-kill policy: smart (kill only when waiting costs more than a kill; D-108)");
     }
@@ -331,6 +346,10 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
                 Some(why) => tracing::info!("duel detection: off ({})", why.name()),
                 None => tracing::info!("duel detection: on (the marker is gone)"),
             }
+        }
+        if pre_switch.poll(Instant::now()).is_some() {
+            bot.set_preinput(pre_mode(&pre_switch));
+            tracing::info!("pre-inputs: {}", bot.preinput_status().0.name());
         }
         bot.window_model_poll(Instant::now());
         let first = client.recv_event(Duration::from_millis(20));
@@ -471,6 +490,23 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         if now >= next_log {
             next_log = now + LOG_EVERY;
             tracing::info!(stats = ?bot.stats(), "bot status\n{}", bot.latency().report());
+            let (mode, c) = bot.preinput_status();
+            if c.received > 0 || mode != crate::bot::PreInputMode::Off {
+                tracing::info!(
+                    mode = mode.name(),
+                    received = c.received,
+                    stored = c.stored,
+                    ahead = c.ahead,
+                    behind = c.behind,
+                    stale = c.stale,
+                    invalid = c.invalid,
+                    used = c.used,
+                    distrusted = c.distrusted,
+                    lead = ?c.lead,
+                    known_ahead = ?c.known_ahead,
+                    "pre-inputs (lead = intended tick - latest snapshot tick, bins -4..=11)"
+                );
+            }
             if let Some(m) = &report.margin {
                 tracing::info!(
                     count = m.count,
@@ -599,6 +635,9 @@ fn handle_event(
                     t.timing(tick, time_left);
                 }
                 bot.on_input_timing(tick, time_left)
+            }
+            SessionEvent::ExGameMessage(ddai_net::generated::messages::ExGameMsg::SvPreInput(p)) => {
+                bot.on_pre_input(&p)
             }
             SessionEvent::MapChanging { name, .. } => {
                 tracing::info!(map = %name, "map changing");
@@ -807,6 +846,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
     let (total, brain, overhead) = bot.latency().status_summaries();
     let nav = cfg.nav_handle.status();
     let (window_model, window_guard) = bot.window_model_status();
+    let (pre_mode, pre_counts) = bot.preinput_status();
     StatusMessage {
         tick,
         own: s.own_id,
@@ -843,9 +883,20 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         wb_smart: if cfg.nav.wb_smart { "on" } else { "off" }.to_string(),
         duel: bot.duel().is_some(),
         selfkill_policy: bot.selfkill_policy().name().to_string(),
+        preinput: pre_mode.name().to_string(),
+        preinput_stats: preinput_stats(&pre_counts),
         window_model: window_model.to_string(),
         window_guard: window_guard.and_then(|g| serde_json::to_value(g).ok()),
     }
+}
+
+/// STATUS `preinput_stats`: the counters of the server's pre-inputs (task 3.20).
+fn preinput_stats(c: &ddai_world::preinput::PreInputCounts) -> serde_json::Value {
+    serde_json::json!({
+        "received": c.received, "stored": c.stored, "ahead": c.ahead, "behind": c.behind, "stale": c.stale,
+        "invalid": c.invalid, "duplicate": c.duplicate, "used": c.used, "distrusted": c.distrusted,
+        "lead_from": ddai_world::preinput::LEAD_MIN, "lead": c.lead.to_vec(), "known_ahead": c.known_ahead.to_vec(),
+    })
 }
 
 /// The finishing mode the process runs with, as `--finish` spells it: `off`, `target` (the bot's target rule) or `full` (the target
