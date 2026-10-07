@@ -39,9 +39,9 @@ use ddai_client::live_servers::{LiveServers, is_loopback};
 use ddai_client::socks5::{ProxyCheck, RelayHost, Socks5Error, Timeouts};
 use ddai_web::launch::{
     Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_REQUEST_BYTES,
-    MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, State as RunState,
-    bundle_run_name, parse_request, read_regular_nofollow, read_regular_nofollow_with_mtime, request_is_fresh,
-    unix_now, write_atomic,
+    MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, State as RunState, WbSmart,
+    bundle_run_name, no_selfkill_flag_value, parse_request, read_regular_nofollow, read_regular_nofollow_with_mtime,
+    request_is_fresh, unix_now, write_atomic,
 };
 use ddai_web::serverbrowser::{
     BLOCKED_FILE, BlockedEntry, BlockedFile, MAX_PROXY_CHECK_BYTES, PROXY_CHECK_REQUEST_FILE, PROXY_CHECK_RESULT_FILE,
@@ -178,6 +178,12 @@ struct LaunchInfo {
     /// The finishing mode of the launch (task 5.13); older state files have none, which is `off`.
     #[serde(default)]
     finish: Finish,
+    /// The smart wayblock of the launch (task 5.15); older state files have none, which is `off`.
+    #[serde(default)]
+    wb_smart: WbSmart,
+    /// The duel switch of the launch (task 5.15); older state files have none, which is `false`.
+    #[serde(default)]
+    no_selfkill: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +316,10 @@ struct Plan {
     mirror: Mirror,
     /// The finishing mode (`off` unless the request says otherwise, task 5.13, D-097).
     finish: Finish,
+    /// The smart wayblock (`off` unless the request says otherwise, task 5.15, D-103/D-104); every brain takes it.
+    wb_smart: WbSmart,
+    /// The duel switch (`false` unless the request says otherwise, task 5.15, D-102); every brain takes it.
+    no_selfkill: bool,
 }
 
 fn valid_nick(nick: &str) -> bool {
@@ -486,6 +496,8 @@ fn decide(
         bundle,
         mirror: req.mirror.unwrap_or(Mirror::On),
         finish,
+        wb_smart: req.wb_smart.unwrap_or_default(),
+        no_selfkill: req.no_selfkill.unwrap_or_default(),
     })
 }
 
@@ -522,6 +534,8 @@ fn render_env(id: &str, plan: &Plan) -> Result<String, Refuse> {
     out += &env_line("BOT_FLY_ARGS", &fly_args)?;
     out += &env_line("BOT_HYBRID_MIRROR", plan.mirror.flag_value())?;
     out += &env_line("BOT_FINISH", plan.finish.flag_value())?;
+    out += &env_line("BOT_WB_SMART", plan.wb_smart.flag_value())?;
+    out += &env_line("BOT_NO_SELFKILL", no_selfkill_flag_value(plan.no_selfkill))?;
     Ok(out)
 }
 
@@ -760,6 +774,8 @@ fn status_of(info: &LaunchInfo, state: RunState, now: u64) -> LaunchStatus {
     status.sparring = Some(info.sparring);
     status.bundle = info.bundle.clone();
     status.finish = Some(info.finish);
+    status.wb_smart = Some(info.wb_smart);
+    status.no_selfkill = Some(info.no_selfkill);
     status
 }
 
@@ -971,6 +987,8 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         favourite: matches!(plan.target.reopen, Reopen::Favourite { .. }),
         bundle: plan.bundle.as_deref().map(bundle_run_name),
         finish: plan.finish,
+        wb_smart: plan.wb_smart,
+        no_selfkill: plan.no_selfkill,
     };
     let fail = |code: &str| {
         let mut status = status_of(&info, RunState::Error, now);
@@ -1035,11 +1053,13 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         }
     }
     eprintln!(
-        "launch: started (brain {:?}, local {}, sparring {}, finish {})",
+        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {})",
         plan.brain,
         !plan.target.public,
         plan.sparring,
-        plan.finish.flag_value()
+        plan.finish.flag_value(),
+        plan.wb_smart.flag_value(),
+        no_selfkill_flag_value(plan.no_selfkill)
     );
     ExitCode::SUCCESS
 }
@@ -1319,6 +1339,8 @@ mod tests {
             sparring: Some(0),
             mirror: None,
             finish: None,
+            wb_smart: None,
+            no_selfkill: None,
         }
     }
 
@@ -1653,12 +1675,72 @@ mod tests {
             favourite: false,
             bundle: None,
             finish: Finish::Target,
+            wb_smart: WbSmart::Off,
+            no_selfkill: false,
         };
         assert_eq!(status_of(&info, RunState::Started, 5).finish, Some(Finish::Target));
         let mut old = serde_json::to_value(&info).unwrap();
         old.as_object_mut().unwrap().remove("finish");
         let old: LaunchInfo = serde_json::from_value(old).unwrap();
         assert_eq!(old.finish, Finish::Off);
+    }
+
+    #[test]
+    fn the_smart_wayblock_and_the_duel_switch_are_off_unless_asked_go_to_the_env_and_every_brain_takes_them() {
+        // Task 5.15.
+        let plan_for = |brain: Brain, wb: Option<WbSmart>, ns: Option<bool>| {
+            let mut r = req("local");
+            r.brain = Some(brain);
+            r.wb_smart = wb;
+            r.no_selfkill = ns;
+            decide_with(&r, &LiveServers::default(), Some(&State::default()), 0, 1000)
+        };
+        let env_of = |plan: &Plan| render_env("0123456789abcdef", plan).unwrap();
+        // No fields (an old request): both are written explicitly as off, so a stale value in the environment can never leak into the run.
+        let plan = plan_for(Brain::Hybrid, None, None).unwrap();
+        assert_eq!((plan.wb_smart, plan.no_selfkill), (WbSmart::Off, false));
+        let env = env_of(&plan);
+        assert!(
+            env.contains("BOT_WB_SMART=\"off\"\n") && env.contains("BOT_NO_SELFKILL=\"false\"\n"),
+            "{env}"
+        );
+        // Every brain, the pure fly included, takes both; the two lines are independent of each other and of the others.
+        for brain in [Brain::Hybrid, Brain::HybridFly, Brain::Fly] {
+            for (wb, wb_word) in [(WbSmart::Off, "off"), (WbSmart::On, "on")] {
+                for (ns, ns_word) in [(false, "false"), (true, "true")] {
+                    let plan = plan_for(brain, Some(wb), Some(ns)).unwrap();
+                    assert_eq!((plan.wb_smart, plan.no_selfkill), (wb, ns), "{brain:?}");
+                    let env = env_of(&plan);
+                    assert!(
+                        env.contains(&format!("BOT_WB_SMART=\"{wb_word}\"\n"))
+                            && env.contains(&format!("BOT_NO_SELFKILL=\"{ns_word}\"\n"))
+                            && env.contains("BOT_FINISH=\"off\"\n"),
+                        "{brain:?} {wb_word} {ns_word}: {env}"
+                    );
+                }
+            }
+        }
+        // The status the site reads names both; a launch remembered before the fields existed reads as off / false.
+        let info = LaunchInfo {
+            id: "0123456789abcdef".to_string(),
+            brain: Brain::Hybrid,
+            server: "local".to_string(),
+            duration: DurationChoice::M15,
+            sparring: 0,
+            public: false,
+            favourite: false,
+            bundle: None,
+            finish: Finish::Off,
+            wb_smart: WbSmart::On,
+            no_selfkill: true,
+        };
+        let status = status_of(&info, RunState::Started, 5);
+        assert_eq!((status.wb_smart, status.no_selfkill), (Some(WbSmart::On), Some(true)));
+        let mut old = serde_json::to_value(&info).unwrap();
+        old.as_object_mut().unwrap().remove("wb_smart");
+        old.as_object_mut().unwrap().remove("no_selfkill");
+        let old: LaunchInfo = serde_json::from_value(old).unwrap();
+        assert_eq!((old.wb_smart, old.no_selfkill), (WbSmart::Off, false));
     }
 
     #[test]

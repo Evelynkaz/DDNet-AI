@@ -27,6 +27,17 @@
       "Не рекомендуется: к «цели» добавляется подтягивание замороженной жертвы к фризу в оценке гибрида. В ревью прирост на дуэли не подтвердился. Нужен только для сравнения.",
   };
 
+  // Task 5.15 (D-103/D-104): the smart wayblock. For every brain: it is the bot's navigation and target choice, not the brain's decision.
+  var WB_HINT = {
+    off: "Умный ВБ выключен: правила AFK и стороны ВБ прежние.",
+    on: "Простаивающего (AFK) игрока бот бьёт, только если он мешает: стоит в удерживаемом зале, рядом или на маршруте. Сторону ВБ выбирает по числу целей, которых можно блокировать. Переходы труб на Copy Love Box безопаснее: после возрождения не бродит, а сразу начинает путь, поиск перехода учитывает других игроков, неподвижного на ступеньке перепрыгивает. Работает со всеми мозгами; рассчитан на Copy Love Box.",
+  };
+  // Task 5.15 (D-102): the duel switch. On, it is a warning: the bot then loses its own way out of a stuck spot.
+  var SELFKILL_HINT = {
+    off: "Выключено. Для дуэли 1vs1 в F-DDrace выберите «вкл (дуэль)».",
+    on: "Для 1vs1 F-DDrace: любая смерть бота даёт очко сопернику, поэтому бот сам себя не убивает. На обычных серверах не включать: бот лишается выхода из застревания (самоубийство при застревании и в заморозке). Убить бота можно только вручную: кнопкой «Убить» в «Командах» (или строкой /kill на вкладке «Игра»).",
+  };
+
   // What a refusal or an ending means, in words for the owner. The helper only ever sends these codes.
   var REASON_TEXT = {
     stopped_by_owner: "Остановлен по вашей просьбе.",
@@ -202,6 +213,15 @@
         { value: "target", text: "цель (рекомендуется)" },
         { value: "full", text: "полный (не рекомендуется)" },
       ]);
+      // Task 5.15: two more switches, both off by default and sent only when on. Neither is brain-specific, so both stay shown for the fly.
+      ui.wbSmart = select([
+        { value: "off", text: "выкл" },
+        { value: "on", text: "вкл" },
+      ]);
+      ui.noSelfkill = select([
+        { value: "off", text: "выкл" },
+        { value: "on", text: "вкл (дуэль)" },
+      ]);
       var form = el("div", "lc-form");
       form.appendChild(field("Сервер", ui.server));
       form.appendChild(field("Мозг", ui.brain));
@@ -210,12 +230,18 @@
       form.appendChild(ui.mirrorField);
       ui.finishField = field("Дожим", ui.finish);
       form.appendChild(ui.finishField);
+      form.appendChild(field("Умный ВБ", ui.wbSmart));
+      form.appendChild(field("Без самоубийств (дуэль)", ui.noSelfkill));
       form.appendChild(field("Длительность", ui.duration));
       ui.sparringField = field("Спарринг (только локальный сервер)", ui.sparring);
       form.appendChild(ui.sparringField);
       card.appendChild(form);
       ui.finishHint = el("p", "hint lc-finish-hint");
       card.appendChild(ui.finishHint);
+      ui.wbHint = el("p", "hint lc-opt-hint lc-wb-hint");
+      card.appendChild(ui.wbHint);
+      ui.selfkillHint = el("p", "hint lc-opt-hint lc-selfkill-hint");
+      card.appendChild(ui.selfkillHint);
       ui.bundle = el("p", "hint lc-bundle");
       card.appendChild(ui.bundle);
 
@@ -249,7 +275,10 @@
       });
       ui.brain.addEventListener("change", syncMirror);
       ui.finish.addEventListener("change", syncMirror);
+      ui.wbSmart.addEventListener("change", syncOptions);
+      ui.noSelfkill.addEventListener("change", syncOptions);
       syncMirror();
+      syncOptions();
       ui.start.addEventListener("click", onStart);
       ui.stop.addEventListener("click", onStop);
       ui.watch.addEventListener("click", function () {
@@ -268,6 +297,14 @@
       ui.finishHint.hidden = fly;
       ui.finishHint.textContent = FINISH_HINT[ui.finish.value] || "";
       ui.finishHint.classList.toggle("lc-finish-warn", ui.finish.value === "full");
+    }
+
+    // The hints of the two switches that every brain has; the duel switch turns its hint into a warning while it is on.
+    function syncOptions() {
+      ui.wbHint.textContent = WB_HINT[ui.wbSmart.value] || "";
+      var duel = ui.noSelfkill.value === "on";
+      ui.selfkillHint.textContent = SELFKILL_HINT[duel ? "on" : "off"];
+      ui.selfkillHint.classList.toggle("warn", duel);
     }
 
     function syncSparring() {
@@ -348,6 +385,12 @@
       if (status.finish && status.finish !== "off") {
         parts.push("дожим: " + (FINISH_LABEL[status.finish] || status.finish));
       }
+      if (status.wb_smart === "on") {
+        parts.push("умный ВБ");
+      }
+      if (status.no_selfkill === true) {
+        parts.push("без самоубийств");
+      }
       if (status.bundle && status.brain && status.brain !== "hybrid") {
         parts.push("муха " + status.bundle);
       }
@@ -421,7 +464,7 @@
       ui.start.classList.toggle("is-loading", busy && ui.start === pressed);
       ui.stop.classList.toggle("is-loading", busy && ui.stop === pressed);
       ui.watch.hidden = !live;
-      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish].forEach(function (c) {
+      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill].forEach(function (c) {
         c.disabled = busy || !enabled;
       });
       syncSparring();
@@ -500,6 +543,13 @@
         if (ui.finish.value === "target" || ui.finish.value === "full") {
           body.finish = ui.finish.value;
         }
+      }
+      // Task 5.15: only a switch that is on is sent («off» is the absence of the field), for every brain including the pure fly.
+      if (ui.wbSmart.value === "on") {
+        body.wb_smart = "on";
+      }
+      if (ui.noSelfkill.value === "on") {
+        body.no_selfkill = true;
       }
       if (body.server !== "local") {
         var ok = window.confirm(

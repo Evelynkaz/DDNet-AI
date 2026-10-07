@@ -41,7 +41,8 @@
 }
 
 /* The one-line explanation under the form for the chosen finishing mode (task 5.13); «полный» is flagged as not recommended. */
-.launch-card .lc-finish-hint {
+.launch-card .lc-finish-hint,
+.launch-card .lc-opt-hint {
   margin: var(--sp-1) 0 0;
   overflow-wrap: anywhere;
 }

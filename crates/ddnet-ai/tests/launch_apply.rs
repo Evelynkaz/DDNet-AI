@@ -477,6 +477,169 @@ fn the_pure_fly_takes_no_finishing_but_off() {
 }
 
 #[test]
+fn the_smart_wayblock_and_the_duel_switch_are_written_always_from_closed_values_for_every_brain_and_server_kind() {
+    // Task 5.15. No fields (an old request): both are written explicitly as off / false, so no value left in a unit's environment can leak.
+    let rig = Rig::new();
+    assert!(rig.send(&start("local")).status.success());
+    let env = rig.env_file();
+    assert!(
+        env.contains("BOT_WB_SMART=\"off\"\n") && env.contains("BOT_NO_SELFKILL=\"false\"\n"),
+        "{env}"
+    );
+    let st = rig.status();
+    assert_eq!(
+        (st["wb_smart"].as_str(), st["no_selfkill"].as_bool()),
+        (Some("off"), Some(false)),
+        "{st}"
+    );
+
+    // Every brain (the pure fly included: both are bot-level navigation, target and self-kill rules), both values of both fields.
+    for brain in ["hybrid", "hybrid-fly", "fly"] {
+        for (wb, ns) in [("off", false), ("on", false), ("off", true), ("on", true)] {
+            let rig = Rig::new();
+            let mut body = start("local");
+            body["brain"] = json!(brain);
+            body["wb_smart"] = json!(wb);
+            body["no_selfkill"] = json!(ns);
+            let out = rig.send(&body);
+            assert!(out.status.success(), "{out:?}");
+            let st = rig.status();
+            assert_eq!(st["state"], "started", "{brain} {wb} {ns}: {st}");
+            let env = rig.env_file();
+            assert!(
+                env.contains(&format!("BOT_WB_SMART=\"{wb}\"\n"))
+                    && env.contains(&format!("BOT_NO_SELFKILL=\"{ns}\"\n"))
+                    && env.contains(&format!(
+                        "BOT_BRAIN=\"{}\"\n",
+                        if brain == "fly" { "fly" } else { "hybrid" }
+                    )),
+                "{brain} {wb} {ns}: {env}"
+            );
+            assert_eq!(
+                (st["wb_smart"].as_str(), st["no_selfkill"].as_bool()),
+                (Some(wb), Some(ns)),
+                "{st}"
+            );
+            assert_eq!(rig.actions().last().unwrap(), "start ddnet-ai-bot.service");
+            for line in env.lines().filter(|l| !l.starts_with('#')) {
+                assert!(line.contains("=\""), "{line}");
+            }
+        }
+    }
+
+    // An allow-list entry (public, through a proxy) and a favourite.
+    let rig = Rig::new();
+    rig.allow_list(&public_entry(true, true));
+    rig.proxy_file();
+    let mut body = start(&format!("{SERVER_IP}:8308"));
+    body["wb_smart"] = json!("on");
+    body["no_selfkill"] = json!(true);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    let env = rig.env_file();
+    assert!(
+        env.contains("BOT_WB_SMART=\"on\"\n") && env.contains("BOT_NO_SELFKILL=\"true\"\n"),
+        "{env}"
+    );
+
+    let rig = Rig::new();
+    let addr = format!("{FAV_IP}:8303");
+    rig.favourites(&[(&addr, "direct", 0)]);
+    let mut body = start(&addr);
+    body["no_selfkill"] = json!(true);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    let env = rig.env_file();
+    assert!(
+        env.contains(&format!("BOT_SERVER=\"{addr}\"\n"))
+            && env.contains("BOT_NO_SELFKILL=\"true\"\n")
+            && env.contains("BOT_WB_SMART=\"off\"\n"),
+        "{env}"
+    );
+
+    // Both survive to the status the exit hook writes (read from the helper's memory, not from the request).
+    let out = rig.exited("exited", "0");
+    assert!(out.status.success(), "{out:?}");
+    let st = rig.status();
+    assert_eq!(
+        (
+            st["state"].as_str(),
+            st["wb_smart"].as_str(),
+            st["no_selfkill"].as_bool()
+        ),
+        (Some("stopped"), Some("off"), Some(true)),
+        "{st}"
+    );
+}
+
+#[test]
+fn a_bad_smart_wayblock_or_duel_value_is_refused_and_changes_nothing_not_even_an_injection() {
+    let cases: Vec<(&str, Value)> = vec![
+        ("wb_smart", json!("true")),
+        ("wb_smart", json!("On")),
+        ("wb_smart", json!("ON")),
+        ("wb_smart", json!("on ")),
+        ("wb_smart", json!("on\n")),
+        ("wb_smart", json!("off; rm -rf /")),
+        ("wb_smart", json!("on --report /etc/passwd")),
+        ("wb_smart", json!("on\"\nBOT_SERVER=\"203.0.113.5:8308")),
+        ("wb_smart", json!("on\nBOT_NAME=\"evil")),
+        ("wb_smart", json!("$(id)")),
+        ("wb_smart", json!("`id`")),
+        ("wb_smart", json!("")),
+        ("wb_smart", json!(true)),
+        ("wb_smart", json!(1)),
+        ("wb_smart", json!(["on"])),
+        ("no_selfkill", json!("true")),
+        ("no_selfkill", json!("false")),
+        ("no_selfkill", json!("on")),
+        ("no_selfkill", json!("true --report /etc/passwd")),
+        ("no_selfkill", json!("true\"\nBOT_SERVER=\"203.0.113.5:8308")),
+        ("no_selfkill", json!("$(id)")),
+        ("no_selfkill", json!("")),
+        ("no_selfkill", json!(0)),
+        ("no_selfkill", json!(1)),
+        ("no_selfkill", json!([true])),
+        ("no_selfkill", json!({"on": true})),
+    ];
+    for (key, bad) in cases {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body[key] = bad.clone();
+        let out = rig.send(&body);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(reason(&rig.status()), "bad_request", "{key}={bad}: {}", rig.status());
+        assert!(rig.actions().is_empty(), "{key}={bad}: {:?}", rig.actions());
+        assert!(
+            !rig.p("etc/bot-launch.env").exists(),
+            "{key}={bad}: no environment file for a refused request"
+        );
+        assert!(!rig.request().exists(), "the request is consumed");
+    }
+    // `null` is the same as no field (serde: an absent option): the defaults.
+    for key in ["wb_smart", "no_selfkill"] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body[key] = Value::Null;
+        assert!(rig.send(&body).status.success());
+        assert_eq!(rig.status()["state"], "started", "{key}: {}", rig.status());
+        let env = rig.env_file();
+        assert!(
+            env.contains("BOT_WB_SMART=\"off\"\n") && env.contains("BOT_NO_SELFKILL=\"false\"\n"),
+            "{env}"
+        );
+    }
+    // A stop carries neither.
+    for (key, val) in [("wb_smart", json!("off")), ("no_selfkill", json!(false))] {
+        let rig = Rig::new();
+        let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop", key: val}));
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(reason(&rig.status()), "bad_request", "{key}");
+        assert!(rig.actions().is_empty());
+    }
+}
+
+#[test]
 fn stop_stops_the_bot_and_all_sparring_units() {
     let rig = Rig::new();
     assert!(rig.send(&start("local")).status.success());

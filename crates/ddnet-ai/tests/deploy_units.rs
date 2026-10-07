@@ -247,3 +247,53 @@ fn the_bot_unit_takes_the_finishing_mode_from_the_environment_and_is_off_without
         );
     }
 }
+
+#[test]
+fn the_bot_unit_passes_the_smart_wayblock_and_the_duel_switch_as_single_arguments_and_both_are_off_by_default() {
+    // Task 5.15 (D-103/D-104, D-102).
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    let env = values(&s, "Environment");
+    assert!(env.contains(&"BOT_WB_SMART=off"), "{env:?}");
+    assert!(env.contains(&"BOT_NO_SELFKILL=false"), "{env:?}");
+    let exec = values(&s, "ExecStart");
+    assert_eq!(exec.len(), 1);
+    // The smart wayblock takes its value as a separate word (`--wb-smart on|off`); the duel switch is a boolean flag, which cannot be given
+    // an empty argument, so the unit passes the one-argument form `--no-selfkill=true|false`. systemd puts `${VAR}` into exactly one argument.
+    assert!(exec[0].contains(" --wb-smart ${BOT_WB_SMART} "), "{}", exec[0]);
+    assert!(exec[0].contains(" --no-selfkill=${BOT_NO_SELFKILL} "), "{}", exec[0]);
+    // Never the bare flag (it would be always on), and never the old words unquoted into the line by `$VAR` splitting.
+    assert!(!exec[0].contains(" --no-selfkill "), "{}", exec[0]);
+    assert!(
+        !exec[0].contains("$BOT_WB_SMART") && !exec[0].contains("$BOT_NO_SELFKILL"),
+        "{}",
+        exec[0]
+    );
+}
+
+#[test]
+fn the_launcher_installer_refuses_a_binary_older_than_the_unit() {
+    // Task 5.15: the new bot unit passes `--no-selfkill=${BOT_NO_SELFKILL}`, which an older binary rejects, so the installer checks the
+    // binary's help for the `--no-selfkill[=` form before it touches anything.
+    let script = fs::read_to_string(deploy().join("install-launcher.sh")).unwrap();
+    let check = script
+        .find("grep -q -- '--no-selfkill\\[='")
+        .expect("install-launcher.sh checks the binary for the --no-selfkill= form");
+    assert!(
+        script[check..]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("run deploy/install.sh first")
+    );
+    assert!(script.contains("\"$BIN_SRC\" play --help"));
+    // It is in the preconditions: before the unit files are installed and before anything is stopped or reloaded.
+    for later in ["daemon-reload", "install -o root -g root -m 0644"] {
+        let first_use = script.rfind(later).unwrap();
+        assert!(check < first_use, "the binary check must come before `{later}`");
+    }
+    let unit_src = fs::read_to_string(deploy().join("systemd").join("ddnet-ai-bot.service")).unwrap();
+    assert!(
+        unit_src.contains("--no-selfkill=${BOT_NO_SELFKILL}"),
+        "the check is for this very form"
+    );
+}

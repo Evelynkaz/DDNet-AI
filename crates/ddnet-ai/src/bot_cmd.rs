@@ -182,7 +182,10 @@ pub struct BotOpts {
     /// Duel switch (task 4.11, D-102): the bot never kills itself (no unstick `Cl_Kill`, no `/kill` fallback, no route or trek with a
     /// respawn step; in F-DDrace `/1vs1` any death of ours is a point for the opponent). The owner's own `!kill` and website lines
     /// stay. The marker file `<data-dir>/bot/selfkill.off` does the same and is re-read once a second, so it can be toggled live.
-    #[arg(long)]
+    /// Task 5.15: also takes `=true|false` (the equals sign is required, so `--no-selfkill true` is not read as a value): the launch unit passes
+    /// `--no-selfkill=${BOT_NO_SELFKILL}`, one argument that is never empty (a bare boolean flag cannot be given an empty one). Bare
+    /// `--no-selfkill` is `true`, as before.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", default_value = "false", value_parser = parse_true_false, action = clap::ArgAction::Set)]
     pub no_selfkill: bool,
     /// Task 4.10 (D-100): do not send the DDNet timeout code `/timeout <code>` after joining (no seed file is read or made). With it the bot's
     /// only chat is the typed `/kill` and the owner's lines.
@@ -287,6 +290,14 @@ fn parse_on_off(s: &str) -> Result<bool, String> {
         "on" => Ok(true),
         "off" => Ok(false),
         _ => Err(format!("expected `on` or `off`, got {s:?}")),
+    }
+}
+
+fn parse_true_false(s: &str) -> Result<bool, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("expected `true` or `false`, got {s:?}")),
     }
 }
 
@@ -956,14 +967,40 @@ mod search_threads_tests {
 
     /// Task 4.11 (D-102): the duel switch is a flag, off by default.
     #[test]
-    fn the_no_selfkill_switch_is_a_flag_and_off_by_default() {
+    fn the_no_selfkill_switch_is_a_flag_off_by_default_and_takes_true_or_false_after_an_equals_sign() {
         let get = |args: &[&str]| {
             let mut v = vec!["x"];
             v.extend_from_slice(args);
             Cli::try_parse_from(v).map(|c| c.bot.no_selfkill)
         };
         assert!(!get(&[]).unwrap());
-        assert!(get(&["--no-selfkill"]).unwrap());
+        assert!(get(&["--no-selfkill"]).unwrap(), "the bare flag still works");
+        // Task 5.15: the value form the launch unit passes (`--no-selfkill=${BOT_NO_SELFKILL}`).
+        assert!(get(&["--no-selfkill=true"]).unwrap());
+        assert!(!get(&["--no-selfkill=false"]).unwrap());
+        assert!(get(&["--no-selfkill=TRUE"]).unwrap());
+        // Nothing else is a value: not empty, not on/off, not a word; and a space-separated word is not swallowed as a value.
+        for bad in [
+            "--no-selfkill=",
+            "--no-selfkill=on",
+            "--no-selfkill=off",
+            "--no-selfkill=1",
+            "--no-selfkill=yes",
+        ] {
+            assert!(get(&[bad]).is_err(), "{bad}");
+        }
+        assert!(
+            get(&["--no-selfkill", "false"]).is_err(),
+            "`false` after a space is a stray argument, not a value"
+        );
+        // The bare flag next to other flags, in either order.
+        assert!(get(&["--no-selfkill", "--no-console"]).unwrap());
+        assert!(get(&["--no-console", "--no-selfkill"]).unwrap());
+        assert!(get(&["--no-console", "--no-selfkill=true", "--strong"]).unwrap());
+        // `deploy/install-launcher.sh` greps the help for this exact spelling to refuse a binary older than the unit.
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("--no-selfkill[="), "{help}");
     }
 
     /// Task 4.10 (D-100): the timeout code is on by default and `--no-timeout-code` switches it off.

@@ -514,6 +514,8 @@
     // Task 4.11 (D-102): the duel switch (`--no-selfkill` or the marker file `bot/selfkill.off`). «выкл» is the unusual state: the bot then never kills
     // itself, which also takes away its way out of a stuck spot, so it is flagged (a forgotten marker would switch unsticking off unnoticed).
     var SELFKILL_LABELS = { on: "вкл", off: "выкл (флажок)" };
+    // Task 5.15 (D-103/D-104): the smart wayblock the bot runs with (`wb_smart` of the status); a status without the field shows «—», never «выкл».
+    var WB_SMART_LABELS = { on: "вкл", off: "выкл" };
     var FINISH_LABELS = { off: "выкл", target: "цель", full: "полный (не рекомендуется)" };
     var APPLIED_TEXT = {
       applied: "применено к работающему боту (бот перечитал тот же файл)",
@@ -645,7 +647,7 @@
                 ? "бот не запущен: сейчас на сайте показ (муха на арене), настоящей игры нет"
                 : "бот не запущен (нет живого статуса)";
         setText("bot-conn-text", why);
-        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
+        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-wbsmart", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
           setText(id, "—");
         });
         el("bs-selfkill").classList.remove("kv-warn");
@@ -667,6 +669,7 @@
       setText("bs-finish", Object.prototype.hasOwnProperty.call(FINISH_LABELS, s.finish) ? FINISH_LABELS[s.finish] : "—");
       setText("bs-target", s.target_tag || "нет");
       setText("bs-wb", (s.wb || "—") + (s.goto ? " · идёт: " + s.goto : ""));
+      setText("bs-wbsmart", Object.prototype.hasOwnProperty.call(WB_SMART_LABELS, s.wb_smart) ? WB_SMART_LABELS[s.wb_smart] : "—");
       // A status without the field (an older bot) shows «—», never «вкл».
       setText("bs-selfkill", Object.prototype.hasOwnProperty.call(SELFKILL_LABELS, s.selfkill) ? SELFKILL_LABELS[s.selfkill] : "—");
       el("bs-selfkill").classList.toggle("kv-warn", s.selfkill === "off");

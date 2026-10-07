@@ -129,6 +129,35 @@ impl Finish {
     }
 }
 
+/// The smart wayblock switch (task 5.15; `ddnet-ai play --wb-smart`, tasks 3.12/3.12b, D-103, D-104): a closed list of two words, so the helper
+/// writes only `on` or `off` to the unit's environment. `Off` is the default and what a request without the field means. It is allowed with
+/// every brain: it changes the bot's navigation and target choice (the wayblock side, the AFK rule, the tube crossings), which all three brains
+/// run on, not the brain's own decision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WbSmart {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "on")]
+    On,
+}
+
+impl WbSmart {
+    /// The value of `ddnet-ai play --wb-smart`.
+    pub fn flag_value(self) -> &'static str {
+        match self {
+            WbSmart::Off => "off",
+            WbSmart::On => "on",
+        }
+    }
+}
+
+/// The value of `ddnet-ai play --no-selfkill=<value>` (the duel switch, task 5.15, D-102) for the request's `no_selfkill` flag: a boolean flag
+/// cannot take an empty argument from the unit's environment, so the unit passes the one-argument form `--no-selfkill=${BOT_NO_SELFKILL}`.
+pub fn no_selfkill_flag_value(on: bool) -> &'static str {
+    if on { "true" } else { "false" }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurationChoice {
     #[serde(rename = "15m")]
@@ -175,6 +204,13 @@ pub struct LaunchRequest {
     /// (the helper refuses `finish_hybrid_only`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<Finish>,
+    /// The smart wayblock (task 5.15, D-103/D-104); `off` when absent. Allowed with every brain (it is navigation and target logic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wb_smart: Option<WbSmart>,
+    /// The duel switch «the bot never kills itself» (task 5.15, D-102); `false` when absent. A JSON boolean, nothing else. Allowed with
+    /// every brain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_selfkill: Option<bool>,
 }
 
 /// Whether a request made at `ts` (and written to a file last modified at `mtime`), seen at `now`, is fresh: neither older than
@@ -224,7 +260,9 @@ pub fn parse_request(bytes: &[u8]) -> Result<LaunchRequest, ParseError> {
         && req.duration.is_none()
         && req.sparring.is_none()
         && req.mirror.is_none()
-        && req.finish.is_none();
+        && req.finish.is_none()
+        && req.wb_smart.is_none()
+        && req.no_selfkill.is_none();
     match req.action {
         Action::Start if !complete => Err(ParseError::Invalid),
         Action::Stop if !empty => Err(ParseError::Invalid),
@@ -275,6 +313,12 @@ pub struct LaunchStatus {
     /// The finishing mode of the launch (task 5.13); none in the status of a launch made before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<Finish>,
+    /// The smart wayblock of the launch (task 5.15); none in the status of a launch made before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wb_smart: Option<WbSmart>,
+    /// The duel switch of the launch (task 5.15); none in the status of a launch made before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_selfkill: Option<bool>,
 }
 
 impl LaunchStatus {
@@ -292,6 +336,8 @@ impl LaunchStatus {
             bundle: None,
             exit_code: None,
             finish: None,
+            wb_smart: None,
+            no_selfkill: None,
         }
     }
 }
@@ -483,6 +529,87 @@ mod tests {
         let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
         stop["finish"] = serde_json::json!("off");
         assert_eq!(parse(&stop), Err(ParseError::Invalid));
+    }
+
+    #[test]
+    fn the_wb_smart_and_no_selfkill_fields_are_additive_closed_and_absent_means_off() {
+        // Task 5.15. An old request (no fields) parses and means off / false.
+        let old = parse(&start_json()).unwrap();
+        assert_eq!((old.wb_smart, old.no_selfkill), (None, None));
+        assert_eq!(old.wb_smart.unwrap_or_default(), WbSmart::Off);
+        assert!(!old.no_selfkill.unwrap_or_default());
+        // An absent field is not written (an old helper's strict schema never sees an unknown key from an unchanged request).
+        let text = String::from_utf8(serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(!text.contains("wb_smart") && !text.contains("no_selfkill"), "{text}");
+        for (word, want) in [("off", WbSmart::Off), ("on", WbSmart::On)] {
+            let mut v = start_json();
+            v["wb_smart"] = serde_json::json!(word);
+            let r = parse(&v).unwrap();
+            assert_eq!(r.wb_smart, Some(want), "{word}");
+            assert_eq!(want.flag_value(), word);
+            assert_eq!(
+                parse_request(&serde_json::to_vec(&r).unwrap()).unwrap(),
+                r,
+                "round trip"
+            );
+        }
+        for want in [false, true] {
+            let mut v = start_json();
+            v["no_selfkill"] = serde_json::json!(want);
+            let r = parse(&v).unwrap();
+            assert_eq!(r.no_selfkill, Some(want));
+            assert_eq!(
+                parse_request(&serde_json::to_vec(&r).unwrap()).unwrap(),
+                r,
+                "round trip"
+            );
+            assert_eq!(no_selfkill_flag_value(want), if want { "true" } else { "false" });
+        }
+        // Closed values: nothing but `off|on` (lower case) and a JSON boolean; no strings, numbers, injection.
+        for bad in [
+            serde_json::json!("true"),
+            serde_json::json!("yes"),
+            serde_json::json!("On"),
+            serde_json::json!("ON"),
+            serde_json::json!("on "),
+            serde_json::json!("on\n"),
+            serde_json::json!("on --report /etc/passwd"),
+            serde_json::json!("on\"\nBOT_SERVER=\"1.2.3.4:5\""),
+            serde_json::json!("$(id)"),
+            serde_json::json!(""),
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!(["on"]),
+        ] {
+            let mut v = start_json();
+            v["wb_smart"] = bad.clone();
+            assert_eq!(parse(&v), Err(ParseError::Invalid), "wb_smart={bad}");
+        }
+        for bad in [
+            serde_json::json!("true"),
+            serde_json::json!("false"),
+            serde_json::json!("on"),
+            serde_json::json!("true --x"),
+            serde_json::json!("$(id)"),
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!([true]),
+            serde_json::json!({"on": true}),
+        ] {
+            let mut v = start_json();
+            v["no_selfkill"] = bad.clone();
+            assert_eq!(parse(&v), Err(ParseError::Invalid), "no_selfkill={bad}");
+        }
+        // A stop carries nothing, these two included.
+        for (key, val) in [
+            ("wb_smart", serde_json::json!("off")),
+            ("no_selfkill", serde_json::json!(false)),
+        ] {
+            let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
+            stop[key] = val;
+            assert_eq!(parse(&stop), Err(ParseError::Invalid), "{key}");
+        }
     }
 
     #[test]

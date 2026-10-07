@@ -117,6 +117,10 @@ if "$BIN_SRC" --version 2>/dev/null | grep -q 'loopback-favourites'; then
   die "$BIN_SRC is a test build (+loopback-favourites): build and install a release binary with deploy/install.sh"
 fi
 "$BIN_SRC" launch --help >/dev/null 2>&1 || die "$BIN_SRC has no 'launch' subcommand: it is an older build"
+# Task 5.15: the bot unit passes `--no-selfkill=${BOT_NO_SELFKILL}`, which a binary from before 5.15 rejects (every bot start would fail).
+# The new binary's help prints `--no-selfkill[=<...>]`. (The help is captured first: `grep -q` closing a pipe early fails under pipefail.)
+play_help="$("$BIN_SRC" play --help 2>&1 || true)"
+grep -q -- '--no-selfkill\[=' <<<"$play_help" || die "$BIN_SRC is an older build (no '--no-selfkill=true|false' form, task 5.15): run deploy/install.sh first, so the binary is newer than the unit"
 if bot_is_active; then
   die "ddnet-ai-bot.service or a sparring unit is active: not touching a running bot. Let it finish (or stop it) and run this again."
 fi

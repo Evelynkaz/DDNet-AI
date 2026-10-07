@@ -274,6 +274,9 @@ pub struct StatusMessage {
     /// Additive since task 4.11 (D-102): `"off"` while the duel switch is on (`--no-selfkill` or the marker `bot/selfkill.off`: the bot
     /// never kills itself), else `"on"` (the default: the unstick and the other self-kills work).
     pub selfkill: String,
+    /// Additive since task 5.15 (D-103, D-104): `"on"` while the smart wayblock (`--wb-smart on`) is on, else `"off"` (the default). The
+    /// site's «Бот» card shows it, so a launch that did not take (an old unit without `--wb-smart`) is visible.
+    pub wb_smart: String,
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -812,6 +815,7 @@ mod tests {
             paused: false,
             finish: "target".into(),
             selfkill: "off".into(),
+            wb_smart: "on".into(),
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
@@ -822,6 +826,7 @@ mod tests {
         assert_eq!(v["kill_cooldown_ticks"], 120);
         assert_eq!(v["finish"], "target");
         assert_eq!(v["selfkill"], "off");
+        assert_eq!(v["wb_smart"], "on");
     }
 
     #[test]

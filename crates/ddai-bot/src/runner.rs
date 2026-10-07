@@ -782,6 +782,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         paused: bot.paused(),
         finish: finish_label(cfg.bot.finish, cfg.brain.hybrid_finish).to_string(),
         selfkill: if bot.no_selfkill() { "off" } else { "on" }.to_string(),
+        wb_smart: if cfg.nav.wb_smart { "on" } else { "off" }.to_string(),
     }
 }
 

@@ -34,8 +34,8 @@ use crate::http::bot::{authorize_get, authorize_post, json_error};
 use crate::http::servers::{closing_block, favourite_choices};
 use crate::launch::{
     Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_SPARRING,
-    MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, bundle_run_name,
-    read_regular_nofollow, unix_now, write_atomic,
+    MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, WbSmart,
+    bundle_run_name, read_regular_nofollow, unix_now, write_atomic,
 };
 use crate::state::SharedState;
 
@@ -177,6 +177,8 @@ struct LaunchForm {
     sparring: Option<u8>,
     mirror: Option<Mirror>,
     finish: Option<Finish>,
+    wb_smart: Option<WbSmart>,
+    no_selfkill: Option<bool>,
 }
 
 fn new_id() -> String {
@@ -197,6 +199,8 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 || form.sparring.is_some()
                 || form.mirror.is_some()
                 || form.finish.is_some()
+                || form.wb_smart.is_some()
+                || form.no_selfkill.is_some()
             {
                 return Err("bad_request");
             }
@@ -211,6 +215,8 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 sparring: None,
                 mirror: None,
                 finish: None,
+                wb_smart: None,
+                no_selfkill: None,
             })
         }
         Action::Start => {
@@ -246,6 +252,9 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 sparring: Some(sparring),
                 mirror: form.mirror,
                 finish: form.finish,
+                // Task 5.15: both are bot-level switches (navigation, target choice, self-kills), so every brain takes them.
+                wb_smart: form.wb_smart,
+                no_selfkill: form.no_selfkill,
             })
         }
     }
@@ -483,5 +492,50 @@ mod tests {
         // A stop carries no finishing.
         let stop = serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","finish":"off"})).unwrap();
         assert_eq!(build_request(stop, &ready, true).unwrap_err(), "bad_request");
+    }
+
+    #[test]
+    fn the_smart_wayblock_and_the_duel_switch_are_closed_values_and_every_brain_takes_them() {
+        let ready: Vec<String> = Vec::new();
+        let start = |brain: &str, key: &str, val: serde_json::Value| {
+            let mut v = serde_json::json!({"action":"start","brain":brain,"server":"local","duration":"15m"});
+            if !val.is_null() {
+                v[key] = val;
+            }
+            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true))
+        };
+        // The pure fly takes both too: they are navigation, target choice and self-kill rules the bot runs under every brain.
+        for brain in ["hybrid", "hybrid-fly", "fly"] {
+            for (word, want) in [("off", WbSmart::Off), ("on", WbSmart::On)] {
+                let req = start(brain, "wb_smart", serde_json::json!(word)).unwrap().unwrap();
+                assert_eq!(req.wb_smart, Some(want), "{brain} {word}");
+            }
+            for want in [false, true] {
+                let req = start(brain, "no_selfkill", serde_json::json!(want)).unwrap().unwrap();
+                assert_eq!(req.no_selfkill, Some(want), "{brain} {want}");
+            }
+            let bare = start(brain, "wb_smart", serde_json::Value::Null).unwrap().unwrap();
+            assert_eq!((bare.wb_smart, bare.no_selfkill), (None, None), "absent stays absent");
+        }
+        // Closed values: never reach `build_request`.
+        for bad in ["true", "On", "ON", "on ", "maybe", "", "on --x", "$(id)"] {
+            assert!(start("hybrid", "wb_smart", serde_json::json!(bad)).is_err(), "{bad:?}");
+        }
+        for bad in [
+            serde_json::json!("true"),
+            serde_json::json!("false"),
+            serde_json::json!(1),
+            serde_json::json!(""),
+        ] {
+            assert!(start("hybrid", "no_selfkill", bad.clone()).is_err(), "{bad}");
+        }
+        // A stop carries neither.
+        for (key, val) in [
+            ("wb_smart", serde_json::json!("off")),
+            ("no_selfkill", serde_json::json!(false)),
+        ] {
+            let stop = serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop", key: val})).unwrap();
+            assert_eq!(build_request(stop, &ready, true).unwrap_err(), "bad_request", "{key}");
+        }
     }
 }

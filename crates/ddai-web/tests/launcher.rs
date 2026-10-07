@@ -8,7 +8,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ddai_web::launch::{Action, Brain, DurationChoice, Finish, Mirror, parse_request};
+use ddai_web::launch::{Action, Brain, DurationChoice, Finish, Mirror, WbSmart, parse_request};
 use support::{Req, TestServer, send};
 
 struct Login {
@@ -192,8 +192,99 @@ async fn a_start_writes_one_request_file_atomically_with_the_chosen_values() {
     );
     let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
     assert!(
-        !text.contains("finish"),
+        !text.contains("finish") && !text.contains("wb_smart") && !text.contains("no_selfkill"),
         "an unchanged form writes an unchanged request: {text}"
+    );
+    assert_eq!(
+        (req.wb_smart, req.no_selfkill),
+        (None, None),
+        "no `wb_smart` / `no_selfkill` in the form: none in the request (an old request; the helper reads off / false)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_smart_wayblock_and_the_duel_switch_reach_the_request_as_closed_values_for_every_brain() {
+    // Task 5.15 (D-103/D-104, D-102).
+    let server = deployed().await;
+    let l = login(&server);
+    let with = |brain: &str, key: &str, val: serde_json::Value| {
+        let mut body = start_body();
+        body["brain"] = serde_json::json!(brain);
+        body[key] = val;
+        body
+    };
+    // The pure fly takes both, like the hybrid brains. (A server per brain: the site takes at most 6 accepted requests a minute.)
+    for brain in ["hybrid", "hybrid-fly", "fly"] {
+        let server = deployed().await;
+        let l = login(&server);
+        for (word, want) in [("off", WbSmart::Off), ("on", WbSmart::On)] {
+            let r = post(&server, &l, &with(brain, "wb_smart", serde_json::json!(word)));
+            assert_eq!(r.status, 202, "{brain} {word}: {r:?}");
+            let req =
+                parse_request(&fs::read(request_file(&server)).unwrap()).expect("the helper's own parser accepts it");
+            assert_eq!(
+                (req.brain.is_some(), req.wb_smart, req.no_selfkill),
+                (true, Some(want), None),
+                "{brain} {word}"
+            );
+            fs::remove_file(request_file(&server)).unwrap();
+        }
+        for want in [false, true] {
+            let r = post(&server, &l, &with(brain, "no_selfkill", serde_json::json!(want)));
+            assert_eq!(r.status, 202, "{brain} {want}: {r:?}");
+            let req =
+                parse_request(&fs::read(request_file(&server)).unwrap()).expect("the helper's own parser accepts it");
+            assert_eq!((req.wb_smart, req.no_selfkill), (None, Some(want)), "{brain} {want}");
+            fs::remove_file(request_file(&server)).unwrap();
+        }
+    }
+    // Both at once, with finishing: independent fields of one request.
+    let mut body = with("hybrid", "wb_smart", serde_json::json!("on"));
+    body["no_selfkill"] = serde_json::json!(true);
+    body["finish"] = serde_json::json!("target");
+    assert_eq!(post(&server, &l, &body).status, 202);
+    let req = parse_request(&fs::read(request_file(&server)).unwrap()).unwrap();
+    assert_eq!(
+        (req.wb_smart, req.no_selfkill, req.finish),
+        (Some(WbSmart::On), Some(true), Some(Finish::Target))
+    );
+    fs::remove_file(request_file(&server)).unwrap();
+    // Anything outside the closed values, and either on a stop: refused, nothing written (the injection attempts included).
+    for (key, bad) in [
+        ("wb_smart", serde_json::json!("true")),
+        ("wb_smart", serde_json::json!("On")),
+        ("wb_smart", serde_json::json!(true)),
+        ("wb_smart", serde_json::json!(1)),
+        ("wb_smart", serde_json::json!("on --report /etc/passwd")),
+        ("wb_smart", serde_json::json!("on\nBOT_SERVER=\"203.0.113.5:8308\"")),
+        ("wb_smart", serde_json::json!("$(id)")),
+        ("no_selfkill", serde_json::json!("true")),
+        ("no_selfkill", serde_json::json!("on")),
+        ("no_selfkill", serde_json::json!(1)),
+        ("no_selfkill", serde_json::json!("true\nBOT_NAME=\"evil\"")),
+        ("no_selfkill", serde_json::json!("$(id)")),
+    ] {
+        let r = post(&server, &l, &with("hybrid", key, bad.clone()));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{key}={bad}"
+        );
+    }
+    for (key, val) in [
+        ("wb_smart", serde_json::json!("off")),
+        ("no_selfkill", serde_json::json!(false)),
+    ] {
+        let r = post(&server, &l, &serde_json::json!({"action":"stop", key: val}));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{key}"
+        );
+    }
+    assert!(
+        files_in(&launch_dir(&server)).is_empty(),
+        "a refused call writes nothing"
     );
 }
 
@@ -279,6 +370,42 @@ async fn the_page_gets_the_finishing_mode_of_the_helpers_status_and_an_old_statu
     // A word outside the list makes the whole status unreadable, never a mode of its own.
     fs::write(&status, r#"{"v":1,"state":"started","at":5,"finish":"turbo"}"#).unwrap();
     assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_page_gets_the_smart_wayblock_and_the_duel_switch_of_the_helpers_status_and_an_old_status_has_none() {
+    // Task 5.15.
+    let server = deployed().await;
+    let l = login(&server);
+    let status = server.config.status_dir.join("status.json");
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"request_id":"0123456789abcdef","brain":"hybrid","server":"local","duration":"15m","sparring":0,"finish":"off","wb_smart":"on","no_selfkill":true}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(
+        (j["status"]["wb_smart"].as_str(), j["status"]["no_selfkill"].as_bool()),
+        (Some("on"), Some(true)),
+        "{j}"
+    );
+    // A status written before the fields existed has none (the card then says nothing about them).
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"brain":"hybrid","server":"local","duration":"15m","sparring":0,"finish":"off"}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["state"], "started");
+    assert!(
+        j["status"].get("wb_smart").is_none() && j["status"].get("no_selfkill").is_none(),
+        "{j}"
+    );
+    // A value outside the closed list makes the whole status unreadable, never a mode of its own.
+    for bad in [r#""wb_smart":"turbo""#, r#""no_selfkill":"yes""#] {
+        fs::write(&status, format!(r#"{{"v":1,"state":"started","at":5,{bad}}}"#)).unwrap();
+        assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null, "{bad}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -572,7 +699,18 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         "цель (рекомендуется)",
         "полный (не рекомендуется)",
         "finish_hybrid_only",
+        // Task 5.15: the two more switches, their hints and the fields they send.
+        "Умный ВБ",
+        "Без самоубийств (дуэль)",
+        "только если он мешает",
+        "Для 1vs1 F-DDrace: любая смерть бота даёт очко сопернику",
+        "На обычных серверах не включать",
+        "кнопкой «Убить» в «Командах» (или строкой /kill на вкладке «Игра»)",
+        "не бродит, а сразу начинает путь",
+        "body.wb_smart",
+        "body.no_selfkill",
     ] {
         assert!(js.contains(needle), "launch.js lacks {needle}");
     }
+    assert!(html.contains(r#"id="bs-wbsmart""#));
 }
