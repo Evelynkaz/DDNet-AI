@@ -420,6 +420,25 @@ systemctl cat ddnet-ai-bot | grep -- '--wb-smart ${BOT_WB_SMART} --no-selfkill=$
 
 Новый помощник со **старым** юнитом молча не передал бы флаги боту: признак — после запуска с «вкл» строка «Умный ВБ» (или «Самоубийства») в карточке «Бот» не показывает выбранное. Новый юнит со **старым** бинарником бота не запустится (неизвестный `--wb-smart` / `--no-selfkill=`): поэтому `install.sh` раньше `install-launcher.sh`, и `install-launcher.sh` это проверяет: он смотрит в `ddnet-ai play --help` форму `--no-selfkill[=` и без неё отказывается («older build: run deploy/install.sh first»). Пока страница уже новая, а помощник ещё старый (между двумя скриптами, бот остановлен), обычный запуск проходит, а запуск с включённым выбором старый помощник отклонит как `bad_request`. Откат: прежний юнит из `/var/backups/ddnet-ai-launcher/<метка>/`; лишние строки окружения старому юниту не мешают. **Бинарник старше 5.15 нельзя вернуть при новом юните** (юнит с `--no-selfkill=…` у него не запустится): сначала верните прежний юнит (копия из резерва выше: `sudo install -m 0644 <копия> /etc/systemd/system/ddnet-ai-bot.service`, `sudo systemctl daemon-reload`), потом бинарник (`git checkout <старый коммит>`, `deploy/install.sh`). Проверка на этой машине без боевых юнитов: `tools/e2e/options-e2e.sh` (приватный сервер 127.0.0.1:8463/8464, тестовый путь запуска, Playwright `launch-options.spec.ts`; см. `tools/e2e/README.md`).
 
+### «Предсказатель соперника (эксперимент)» (задача 3.17, D-111): что меняется при развёртывании
+
+На карточке «Запуск» появился ещё один выбор, «выкл» по умолчанию, только для гибридных мозгов. Поле запроса `window_model` (`true`, **только булево**, шлётся только когда включено) не называет путь: помощник сам строит `<data-dir>/bot/models/opp-m1.oppnet` и проверяет, что это обычный непустой файл (не ссылка, не каталог, ≤ 4 МиБ), иначе отказывает `window_model_missing`
+(бот с недоступной моделью отказывается стартовать, а под `Restart=on-failure` это стало бы перезапуском по кругу — поэтому отказ на этапе запроса). Чистой мухе — `window_model_hybrid_only`. Помощник **всегда** пишет в `/etc/ddnet-ai/bot-launch.env` строку `BOT_WINDOW_MODEL="<путь>"` или `BOT_WINDOW_MODEL=""` (пусто = выкл). Юнит передаёт `--window-model=${BOT_WINDOW_MODEL}`
+**одним аргументом**: пустое значение — `--window-model=`, бот читает его как «выкл» (и оно сильнее ключа `window_model` в `settings.toml`: ключ при запуске из юнита не действует). **Файл модели в git не попадает; лид кладёт `m1.oppnet` сам** (`mkdir -p ~/aiddnet/data/bot/models && cp ~/aiddnet/data/runs/E-028/m1.oppnet ~/aiddnet/data/bot/models/opp-m1.oppnet`; sha256 `f244c47d…91de` бот пишет в журнал при старте).
+
+**Порядок выкладки (меняется юнит бота, значит бот должен быть остановлен):**
+
+```bash
+cd ~/aiddnet/DDNet-AI
+deploy/install.sh                  # веб (карточка) и бинарник ~/aiddnet/bin/ddnet-ai с --window-model
+deploy/install-launcher.sh         # ОБНОВЛЯЕТ юнит бота и помощника; отказывается при работающем боте и при бинарнике без --window-model
+systemctl cat ddnet-ai-bot | grep -- '--window-model=${BOT_WINDOW_MODEL}'   # юнит новый
+```
+
+Новый юнит со **старым** бинарником не запустится (неизвестный `--window-model`): `install.sh` раньше `install-launcher.sh`, и `install-launcher.sh` ищет `--window-model` в `ddnet-ai play --help` («older build: run deploy/install.sh first»). Новый помощник со **старым** юнитом молча не передал бы флаг: признак — после запуска с «вкл» строка «Предсказатель» в карточке «Бот» не `вкл`.
+Откат: прежний юнит из `/var/backups/ddnet-ai-launcher/<метка>/` и бинарник (юнит с `--window-model=…` у бинарника старше 3.17 не запустится: сначала юнит, потом бинарник, как в разделе про 5.15). Выключить на ходу, не останавливая бота: `touch ~/aiddnet/data/bot/window-model.off` (раз в секунду). Журнал модели — `~/aiddnet/data/bot/oppnet-live.jsonl`, разбор `ddnet-ai oppnet-live report`.
+Проверка без боевых юнитов: `tools/e2e/options-e2e.sh` (карточка кликается в Playwright, реальные запуски — с пустым `--window-model=`).
+
 ### Диагностика
 
 ```bash

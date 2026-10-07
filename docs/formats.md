@@ -6366,3 +6366,12 @@ beta_kl, best_score, best_iter, snapshots, curriculum { offsets [V, B, H], moves
 **Журнал** бота раз в 10 с (если пришло хоть одно сообщение или режим не `off`): `pre-inputs (lead = …)` с теми же числами.
 
 **`known_ahead`** (в STATUS и в строке журнала): на каждом снапшоте для каждого чужого персонажа с сообщениями — `newest − тик снапшота`, бины `-4..=11`; бины выше 0 — тики за снапшотом, настоящий ввод которых уже известен решению.
+
+## 46. Предсказатель соперника на карточке «Запуск»: поле запроса, статус, окружение юнита (задача 3.17, D-111, `ddai-web::{launch, http::launch}`, `ddnet-ai launch`)
+
+Дополнение к §34, аддитивное. **Запрос** `request.json` (start): необязательное `"window_model": true|false` — **только JSON-булево** (любая строка, число, массив, объект — `bad_request`; у `stop` поля нет). Нет поля = `false`; карточка шлёт поле только при `true`. Путь в запросе не передаётся никогда.
+Допустимо у `hybrid` и `hybrid-fly`; у `fly` — отказ `window_model_hybrid_only` (и сайт, и помощник). Файл модели помощник строит сам: `<data-dir>/bot/models/opp-m1.oppnet`, абсолютный путь из замкнутого набора символов, обычный файл (не ссылка и не каталог), непустой, ≤ 4 МиБ; иначе отказ `window_model_missing` (путь недопустим — `window_model_bad_path`).
+
+**Окружение** `/etc/ddnet-ai/bot-launch.env`: строка `BOT_WINDOW_MODEL="<путь>"` или `BOT_WINDOW_MODEL=""` — пишется всегда. Юнит: `Environment=BOT_WINDOW_MODEL=` и `--window-model=${BOT_WINDOW_MODEL}` одним аргументом; пусто = выкл (`ddnet-ai play --window-model=` читает пустое значение как «выкл» и оно сильнее ключа `window_model` в `settings.toml`).
+
+**Статус запуска** (`status.json`): `"window_model": true|false` (нет поля у запуска, сделанного до 3.17; не булево — весь статус нечитаем для сайта). **`GET /api/bot/launch`**: `"window_model_present": true|false` (файл модели на месте). STATUS бота — §44 (`window_model`, `window_guard`). Коды отказа для страницы: `window_model_missing`, `window_model_hybrid_only`, `window_model_bad_path`.

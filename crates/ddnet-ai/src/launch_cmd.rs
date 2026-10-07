@@ -184,6 +184,9 @@ struct LaunchInfo {
     /// The duel switch of the launch (task 5.15); older state files have none, which is `false`.
     #[serde(default)]
     no_selfkill: bool,
+    /// The opponent-input predictor of the launch (task 3.17); older state files have none, which is `false`.
+    #[serde(default)]
+    window_model: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +323,8 @@ struct Plan {
     wb_smart: WbSmart,
     /// The duel switch (`false` unless the request says otherwise, task 5.15, D-102); every brain takes it.
     no_selfkill: bool,
+    /// The opponent-input model file (task 3.17, D-111) when the request asked for the predictor; hybrid brains only.
+    window_model: Option<PathBuf>,
 }
 
 fn valid_nick(nick: &str) -> bool {
@@ -429,6 +434,29 @@ fn configured_bundle(config: &Path, data_dir: &Path) -> Result<PathBuf, Refuse> 
     Ok(path)
 }
 
+/// The opponent-input model the launch card's toggle means (task 3.17, D-111): `<data-dir>/bot/models/opp-m1.oppnet`, a plain absolute path
+/// that is a regular file (not a symlink, not a directory) of a sane size. The request names no path, so nothing else can be reached through it.
+fn configured_window_model(data_dir: &Path) -> Result<PathBuf, Refuse> {
+    let path = data_dir.join(ddai_web::launch::DEFAULT_WINDOW_MODEL_REL);
+    let text = path.to_str().ok_or(Refuse("window_model_bad_path"))?;
+    let plain = text
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'));
+    let normal = path
+        .components()
+        .all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
+    if !path.is_absolute() || !plain || !normal {
+        return Err(Refuse("window_model_bad_path"));
+    }
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.file_type().is_file() && m.len() > 0 && m.len() <= MAX_WINDOW_MODEL_BYTES => Ok(path),
+        _ => Err(Refuse("window_model_missing")),
+    }
+}
+
+/// The model file is 0.3 MB; a file beyond this is not it.
+const MAX_WINDOW_MODEL_BYTES: u64 = 4 << 20;
+
 /// Everything a start is judged against besides the state: the owner's two lists.
 struct Catalog<'a> {
     live: &'a LiveServers,
@@ -437,6 +465,8 @@ struct Catalog<'a> {
     /// Unix seconds when the owner last edited the allow-list: a ban of an allow-list entry stays until the file is newer. A
     /// favourite is re-opened by its own `reopened_at` instead.
     live_servers_mtime: u64,
+    /// The opponent-input model file the launch card's toggle means (task 3.17, D-111): resolved only when a request asks for it.
+    window_model: &'a dyn Fn() -> Result<PathBuf, Refuse>,
 }
 
 /// Judges a start request against the allow-lists and the rate rules. `state` is `None` when the state file cannot be trusted
@@ -464,11 +494,21 @@ fn decide(
     if brain == Brain::Fly && finish.is_on() {
         return Err(Refuse("finish_hybrid_only"));
     }
+    // Task 3.17 (D-111): the opponent-input model sits in the hybrid's lag window; the pure fly has none. The web refuses the same request first.
+    let window_model_asked = req.window_model.unwrap_or_default();
+    if brain == Brain::Fly && window_model_asked {
+        return Err(Refuse("window_model_hybrid_only"));
+    }
     let target = resolve_server(selector, cat.live, cat.favs, cat.rules)?;
     if sparring > 0 && target.public {
         return Err(Refuse("sparring_local_only"));
     }
     let bundle = if brain.needs_bundle() { Some(bundle()?) } else { None };
+    let window_model = if window_model_asked {
+        Some((cat.window_model)()?)
+    } else {
+        None
+    };
 
     // Policy: the ban memory first, then the rates.
     match state {
@@ -498,6 +538,7 @@ fn decide(
         finish,
         wb_smart: req.wb_smart.unwrap_or_default(),
         no_selfkill: req.no_selfkill.unwrap_or_default(),
+        window_model,
     })
 }
 
@@ -536,6 +577,13 @@ fn render_env(id: &str, plan: &Plan) -> Result<String, Refuse> {
     out += &env_line("BOT_FINISH", plan.finish.flag_value())?;
     out += &env_line("BOT_WB_SMART", plan.wb_smart.flag_value())?;
     out += &env_line("BOT_NO_SELFKILL", no_selfkill_flag_value(plan.no_selfkill))?;
+    // Always written (empty = off): the unit passes `--window-model=${BOT_WINDOW_MODEL}` as one argument, so a stale path can never leak into a run.
+    let model = plan
+        .window_model
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    out += &env_line("BOT_WINDOW_MODEL", &model)?;
     Ok(out)
 }
 
@@ -776,6 +824,7 @@ fn status_of(info: &LaunchInfo, state: RunState, now: u64) -> LaunchStatus {
     status.finish = Some(info.finish);
     status.wb_smart = Some(info.wb_smart);
     status.no_selfkill = Some(info.no_selfkill);
+    status.window_model = Some(info.window_model);
     status
 }
 
@@ -916,11 +965,13 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         Err(favourites::LoadError::Invalid(_)) => Err("favourites_invalid"),
     };
     let live_mtime = mtime_secs(&paths.live_servers);
+    let window_model = || configured_window_model(&paths.data_dir);
     let cat = Catalog {
         live: &live,
         favs: &favs,
         rules,
         live_servers_mtime: live_mtime,
+        window_model: &window_model,
     };
     let state = load_state(&paths.state).ok();
     if let Some(st) = &state {
@@ -989,6 +1040,7 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         finish: plan.finish,
         wb_smart: plan.wb_smart,
         no_selfkill: plan.no_selfkill,
+        window_model: plan.window_model.is_some(),
     };
     let fail = |code: &str| {
         let mut status = status_of(&info, RunState::Error, now);
@@ -1053,13 +1105,14 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         }
     }
     eprintln!(
-        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {})",
+        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {}, window-model {})",
         plan.brain,
         !plan.target.public,
         plan.sparring,
         plan.finish.flag_value(),
         plan.wb_smart.flag_value(),
-        no_selfkill_flag_value(plan.no_selfkill)
+        no_selfkill_flag_value(plan.no_selfkill),
+        plan.window_model.is_some()
     );
     ExitCode::SUCCESS
 }
@@ -1341,7 +1394,12 @@ mod tests {
             finish: None,
             wb_smart: None,
             no_selfkill: None,
+            window_model: None,
         }
+    }
+
+    fn model_ok() -> Result<PathBuf, Refuse> {
+        Ok(PathBuf::from("/data/bot/models/opp-m1.oppnet"))
     }
 
     fn bundle_ok() -> Result<PathBuf, Refuse> {
@@ -1372,6 +1430,7 @@ mod tests {
             favs: &favs,
             rules: Rules::default(),
             live_servers_mtime: mtime,
+            window_model: &model_ok,
         };
         decide(r, &cat, st, &bundle_ok, now)
     }
@@ -1488,6 +1547,7 @@ mod tests {
             favs: &favs,
             rules: Rules::default(),
             live_servers_mtime: 0,
+            window_model: &model_ok,
         };
         assert_eq!(
             decide(&r, &cat, Some(&State::default()), &missing, 1000),
@@ -1677,6 +1737,7 @@ mod tests {
             finish: Finish::Target,
             wb_smart: WbSmart::Off,
             no_selfkill: false,
+            window_model: false,
         };
         assert_eq!(status_of(&info, RunState::Started, 5).finish, Some(Finish::Target));
         let mut old = serde_json::to_value(&info).unwrap();
@@ -1733,6 +1794,7 @@ mod tests {
             finish: Finish::Off,
             wb_smart: WbSmart::On,
             no_selfkill: true,
+            window_model: false,
         };
         let status = status_of(&info, RunState::Started, 5);
         assert_eq!((status.wb_smart, status.no_selfkill), (Some(WbSmart::On), Some(true)));
@@ -1741,6 +1803,132 @@ mod tests {
         old.as_object_mut().unwrap().remove("no_selfkill");
         let old: LaunchInfo = serde_json::from_value(old).unwrap();
         assert_eq!((old.wb_smart, old.no_selfkill), (WbSmart::Off, false));
+    }
+
+    #[test]
+    fn the_opponent_predictor_is_off_unless_asked_names_its_file_in_the_env_and_the_pure_fly_refuses_it() {
+        // Task 3.17 (D-111).
+        let plan_for = |brain: Brain, wm: Option<bool>| {
+            let mut r = req("local");
+            r.brain = Some(brain);
+            r.window_model = wm;
+            decide_with(&r, &LiveServers::default(), Some(&State::default()), 0, 1000)
+        };
+        let env_of = |plan: &Plan| render_env("0123456789abcdef", plan).unwrap();
+        // No field (an old request) and `false`: the line is written explicitly and empty, so a stale path in the environment never leaks in.
+        for wm in [None, Some(false)] {
+            let plan = plan_for(Brain::Hybrid, wm).unwrap();
+            assert_eq!(plan.window_model, None);
+            let env = env_of(&plan);
+            assert!(env.contains("BOT_WINDOW_MODEL=\"\"\n"), "{env}");
+        }
+        // On: the helper's own path, for both hybrids; the other lines are unchanged.
+        for brain in [Brain::Hybrid, Brain::HybridFly] {
+            let plan = plan_for(brain, Some(true)).unwrap();
+            assert_eq!(plan.window_model, Some(PathBuf::from("/data/bot/models/opp-m1.oppnet")));
+            let env = env_of(&plan);
+            assert!(
+                env.contains("BOT_WINDOW_MODEL=\"/data/bot/models/opp-m1.oppnet\"\n")
+                    && env.contains("BOT_FINISH=\"off\"\n")
+                    && env.contains("BOT_WB_SMART=\"off\"\n"),
+                "{env}"
+            );
+        }
+        // The pure fly has no lag window: refused, however the rest looks.
+        assert_eq!(
+            plan_for(Brain::Fly, Some(true)).unwrap_err(),
+            Refuse("window_model_hybrid_only")
+        );
+        assert!(plan_for(Brain::Fly, Some(false)).is_ok());
+        // A missing file refuses only a request that asks for it.
+        let favs: FavouritesView = Ok(Favourites::default());
+        let live = LiveServers::default();
+        let missing = || Err(Refuse("window_model_missing"));
+        let cat = Catalog {
+            live: &live,
+            favs: &favs,
+            rules: Rules::default(),
+            live_servers_mtime: 0,
+            window_model: &missing,
+        };
+        let mut r = req("local");
+        r.brain = Some(Brain::Hybrid);
+        r.window_model = Some(true);
+        assert_eq!(
+            decide(&r, &cat, Some(&State::default()), &bundle_ok, 1000),
+            Err(Refuse("window_model_missing"))
+        );
+        r.window_model = None;
+        assert!(decide(&r, &cat, Some(&State::default()), &bundle_ok, 1000).is_ok());
+        // The status the site reads names it; a launch remembered before the field existed reads as false.
+        let info = LaunchInfo {
+            id: "0123456789abcdef".to_string(),
+            brain: Brain::Hybrid,
+            server: "local".to_string(),
+            duration: DurationChoice::M15,
+            sparring: 0,
+            public: false,
+            favourite: false,
+            bundle: None,
+            finish: Finish::Off,
+            wb_smart: WbSmart::Off,
+            no_selfkill: false,
+            window_model: true,
+        };
+        assert_eq!(status_of(&info, RunState::Started, 5).window_model, Some(true));
+        let mut old = serde_json::to_value(&info).unwrap();
+        old.as_object_mut().unwrap().remove("window_model");
+        let old: LaunchInfo = serde_json::from_value(old).unwrap();
+        assert!(!old.window_model);
+    }
+
+    #[test]
+    fn the_model_file_must_be_a_plain_regular_file_under_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let model = data.join(ddai_web::launch::DEFAULT_WINDOW_MODEL_REL);
+        // Nothing there, an empty file, a directory, a symlink and an oversized file are all "missing": the bot would not start with them.
+        assert_eq!(configured_window_model(data), Err(Refuse("window_model_missing")));
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"").unwrap();
+        assert_eq!(
+            configured_window_model(data),
+            Err(Refuse("window_model_missing")),
+            "empty"
+        );
+        std::fs::remove_file(&model).unwrap();
+        std::fs::create_dir(&model).unwrap();
+        assert_eq!(
+            configured_window_model(data),
+            Err(Refuse("window_model_missing")),
+            "directory"
+        );
+        std::fs::remove_dir(&model).unwrap();
+        let real = data.join("real.oppnet");
+        std::fs::write(&real, b"x").unwrap();
+        std::os::unix::fs::symlink(&real, &model).unwrap();
+        assert_eq!(
+            configured_window_model(data),
+            Err(Refuse("window_model_missing")),
+            "symlink"
+        );
+        std::fs::remove_file(&model).unwrap();
+        std::fs::write(&model, vec![0u8; (MAX_WINDOW_MODEL_BYTES + 1) as usize]).unwrap();
+        assert_eq!(
+            configured_window_model(data),
+            Err(Refuse("window_model_missing")),
+            "oversized"
+        );
+        std::fs::write(&model, b"weights").unwrap();
+        assert_eq!(configured_window_model(data), Ok(model));
+        // A data directory with a character outside the closed set cannot be written to the environment: refused up front.
+        let odd = data.join("a b");
+        std::fs::create_dir_all(&odd).unwrap();
+        assert_eq!(configured_window_model(&odd), Err(Refuse("window_model_bad_path")));
+        assert_eq!(
+            configured_window_model(Path::new("relative/dir")),
+            Err(Refuse("window_model_bad_path"))
+        );
     }
 
     #[test]
@@ -2139,6 +2327,7 @@ mod tests {
                 favs: &view,
                 rules: Rules::default(),
                 live_servers_mtime: 0,
+                window_model: &model_ok,
             };
             assert_eq!(
                 decide(&req(FAV_ADDR), &cat, Some(&st), &bundle_ok, 1000),
@@ -2187,6 +2376,7 @@ mod tests {
             favs: &view,
             rules: Rules::default(),
             live_servers_mtime: 0,
+            window_model: &model_ok,
         };
         assert_eq!(
             decide(&req("127.0.0.1:8463"), &cat, Some(&st), &bundle_ok, 1000),

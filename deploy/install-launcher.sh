@@ -121,6 +121,8 @@ fi
 # The new binary's help prints `--no-selfkill[=<...>]`. (The help is captured first: `grep -q` closing a pipe early fails under pipefail.)
 play_help="$("$BIN_SRC" play --help 2>&1 || true)"
 grep -q -- '--no-selfkill\[=' <<<"$play_help" || die "$BIN_SRC is an older build (no '--no-selfkill=true|false' form, task 5.15): run deploy/install.sh first, so the binary is newer than the unit"
+# Task 3.17: the unit also passes `--window-model=${BOT_WINDOW_MODEL}` (empty = off), which a binary from before 3.17 rejects as an unknown flag.
+grep -q -- '--window-model' <<<"$play_help" || die "$BIN_SRC is an older build (no '--window-model', task 3.17): run deploy/install.sh first, so the binary is newer than the unit"
 if bot_is_active; then
   die "ddnet-ai-bot.service or a sparring unit is active: not touching a running bot. Let it finish (or stop it) and run this again."
 fi

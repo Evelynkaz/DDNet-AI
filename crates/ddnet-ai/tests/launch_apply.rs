@@ -639,6 +639,133 @@ fn a_bad_smart_wayblock_or_duel_value_is_refused_and_changes_nothing_not_even_an
     }
 }
 
+impl Rig {
+    /// The opponent-input model file of the launch card's toggle (task 3.17): `<data>/bot/models/opp-m1.oppnet`.
+    fn model(&self) -> PathBuf {
+        self.data().join("bot/models/opp-m1.oppnet")
+    }
+
+    fn put_model(&self) {
+        fs::create_dir_all(self.model().parent().unwrap()).unwrap();
+        fs::write(self.model(), b"weights").unwrap();
+    }
+}
+
+#[test]
+fn the_opponent_predictor_is_written_always_empty_unless_asked_and_then_the_helpers_own_path() {
+    // Task 3.17 (D-111). No field (an old request) and `false`: the line is there and empty, so no path left in a unit's environment leaks in.
+    for body in [start("local"), {
+        let mut b = start("local");
+        b["window_model"] = json!(false);
+        b
+    }] {
+        let rig = Rig::new();
+        assert!(rig.send(&body).status.success());
+        assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+        assert!(rig.env_file().contains("BOT_WINDOW_MODEL=\"\"\n"), "{}", rig.env_file());
+        assert_eq!(rig.status()["window_model"].as_bool(), Some(false));
+    }
+    // On, with the file there: both hybrid brains get the one path the helper builds, nothing from the request.
+    for brain in ["hybrid", "hybrid-fly"] {
+        let rig = Rig::new();
+        rig.put_model();
+        let mut body = start("local");
+        body["brain"] = json!(brain);
+        body["window_model"] = json!(true);
+        assert!(rig.send(&body).status.success());
+        let st = rig.status();
+        assert_eq!(st["state"], "started", "{brain}: {st}");
+        assert_eq!(st["window_model"].as_bool(), Some(true), "{st}");
+        let env = rig.env_file();
+        assert!(
+            env.contains(&format!("BOT_WINDOW_MODEL=\"{}\"\n", rig.model().display()))
+                && env.contains("BOT_FINISH=\"off\"\n"),
+            "{brain}: {env}"
+        );
+        assert_eq!(rig.actions().last().unwrap(), "start ddnet-ai-bot.service");
+        for line in env.lines().filter(|l| !l.starts_with('#')) {
+            assert!(line.contains("=\""), "{line}");
+        }
+        // It survives to the status the exit hook writes.
+        assert!(rig.exited("exited", "0").status.success());
+        assert_eq!(rig.status()["window_model"].as_bool(), Some(true));
+    }
+}
+
+#[test]
+fn the_opponent_predictor_is_refused_without_its_file_for_the_pure_fly_and_for_any_value_but_a_boolean() {
+    // No file: refused, nothing started (the bot would not start with it either; a restart loop is worse than a refusal).
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["window_model"] = json!(true);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(reason(&rig.status()), "window_model_missing", "{}", rig.status());
+    assert!(rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists());
+    // An empty file, a symlink and a directory are no model.
+    for make in [
+        (|r: &Rig| {
+            fs::create_dir_all(r.model().parent().unwrap()).unwrap();
+            fs::write(r.model(), b"").unwrap();
+        }) as fn(&Rig),
+        |r: &Rig| {
+            fs::create_dir_all(r.model().parent().unwrap()).unwrap();
+            fs::write(r.data().join("real"), b"x").unwrap();
+            std::os::unix::fs::symlink(r.data().join("real"), r.model()).unwrap();
+        },
+        |r: &Rig| fs::create_dir_all(r.model()).unwrap(),
+    ] {
+        let rig = Rig::new();
+        make(&rig);
+        let mut body = start("local");
+        body["window_model"] = json!(true);
+        assert!(rig.send(&body).status.success());
+        assert_eq!(reason(&rig.status()), "window_model_missing", "{}", rig.status());
+        assert!(rig.actions().is_empty());
+    }
+    // The pure fly has no lag window: refused even with the file there; `false` is fine.
+    let rig = Rig::new();
+    rig.put_model();
+    let mut body = start("local");
+    body["brain"] = json!("fly");
+    body["window_model"] = json!(true);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(reason(&rig.status()), "window_model_hybrid_only", "{}", rig.status());
+    assert!(rig.actions().is_empty());
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["brain"] = json!("fly");
+    body["window_model"] = json!(false);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    // Nothing but a JSON boolean, and a stop carries none: no path, no word, no injection.
+    for bad in [
+        json!("true"),
+        json!("on"),
+        json!("/etc/passwd"),
+        json!("/home/ubuntu/aiddnet/data/bot/models/opp-m1.oppnet\nBOT_SERVER=\"203.0.113.5:8308\""),
+        json!("$(id)"),
+        json!(1),
+        json!(""),
+        json!(["x"]),
+        json!({"path": "/etc/passwd"}),
+    ] {
+        let rig = Rig::new();
+        rig.put_model();
+        let mut body = start("local");
+        body["window_model"] = bad.clone();
+        assert!(rig.send(&body).status.success());
+        assert_eq!(reason(&rig.status()), "bad_request", "{bad}: {}", rig.status());
+        assert!(
+            rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists(),
+            "{bad}"
+        );
+    }
+    let rig = Rig::new();
+    let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop","window_model":false}));
+    assert!(out.status.success());
+    assert_eq!(reason(&rig.status()), "bad_request");
+}
+
 #[test]
 fn stop_stops_the_bot_and_all_sparring_units() {
     let rig = Rig::new();

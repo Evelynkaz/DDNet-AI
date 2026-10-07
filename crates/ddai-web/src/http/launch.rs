@@ -76,6 +76,11 @@ fn bundle_path(state: &SharedState) -> std::path::PathBuf {
         .unwrap_or_else(|| state.config.data_dir.join(crate::launch::DEFAULT_BUNDLE_REL))
 }
 
+/// The opponent-input model the helper will use (task 3.17): `<data-dir>/bot/models/opp-m1.oppnet`.
+fn window_model_path(state: &SharedState) -> std::path::PathBuf {
+    state.config.data_dir.join(crate::launch::DEFAULT_WINDOW_MODEL_REL)
+}
+
 /// The age of the request file, if one is waiting.
 fn pending_age(launch_dir: &Path) -> Option<Duration> {
     let meta = std::fs::symlink_metadata(launch_dir.join(REQUEST_FILE)).ok()?;
@@ -152,6 +157,7 @@ pub async fn launch_get(State(state): State<SharedState>, jar: CookieJar) -> Res
                 "max_sparring": MAX_SPARRING,
                 "bundle": bundle_run_name(&bundle),
                 "bundle_present": bundle.is_file(),
+                "window_model_present": window_model_path(&state).is_file(),
                 "status": status,
                 "launcher_down": launcher_down,
                 "pending": pending.is_some(),
@@ -179,6 +185,7 @@ struct LaunchForm {
     finish: Option<Finish>,
     wb_smart: Option<WbSmart>,
     no_selfkill: Option<bool>,
+    window_model: Option<bool>,
 }
 
 fn new_id() -> String {
@@ -189,7 +196,12 @@ fn new_id() -> String {
 }
 
 /// Checks the form against the same choices the helper will check, and builds the request.
-fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<LaunchRequest, &'static str> {
+fn build_request(
+    form: LaunchForm,
+    ready: &[String],
+    bundle_ok: bool,
+    model_ok: bool,
+) -> Result<LaunchRequest, &'static str> {
     let id = new_id();
     match form.action {
         Action::Stop => {
@@ -201,6 +213,7 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 || form.finish.is_some()
                 || form.wb_smart.is_some()
                 || form.no_selfkill.is_some()
+                || form.window_model.is_some()
             {
                 return Err("bad_request");
             }
@@ -217,6 +230,7 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 finish: None,
                 wb_smart: None,
                 no_selfkill: None,
+                window_model: None,
             })
         }
         Action::Start => {
@@ -241,6 +255,16 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
             if brain == Brain::Fly && form.finish.is_some_and(Finish::is_on) {
                 return Err("finish_hybrid_only");
             }
+            // Task 3.17 (D-111): the opponent-input model belongs to the hybrid (its lag window); the pure fly has no such window. A model file that
+            // is not there is refused here, so the owner sees it at once instead of a bot that does not start.
+            if form.window_model == Some(true) {
+                if brain == Brain::Fly {
+                    return Err("window_model_hybrid_only");
+                }
+                if !model_ok {
+                    return Err("window_model_missing");
+                }
+            }
             Ok(LaunchRequest {
                 v: PROTOCOL_VERSION,
                 id,
@@ -255,6 +279,7 @@ fn build_request(form: LaunchForm, ready: &[String], bundle_ok: bool) -> Result<
                 // Task 5.15: both are bot-level switches (navigation, target choice, self-kills), so every brain takes them.
                 wb_smart: form.wb_smart,
                 no_selfkill: form.no_selfkill,
+                window_model: form.window_model,
             })
         }
     }
@@ -303,7 +328,8 @@ pub async fn launch_post(
             let fav = favourite_choices(&state);
             ready.extend(fav.favourites.iter().map(|f| f.address.clone()));
             let bundle_ok = bundle_path(&state).is_file();
-            let req = build_request(form, &ready, bundle_ok).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            let model_ok = window_model_path(&state).is_file();
+            let req = build_request(form, &ready, bundle_ok, model_ok).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
             if let Some(server) = req.server.as_deref()
                 && fav
                     .favourites
@@ -377,7 +403,7 @@ mod tests {
     #[test]
     fn the_form_is_checked_against_the_choices() {
         let ready = vec!["5.6.7.8:8308".to_string()];
-        let ok = |v| build_request(form(v), &ready, true);
+        let ok = |v| build_request(form(v), &ready, true, true);
         let r = ok(
             serde_json::json!({"action":"start","brain":"hybrid-fly","server":"local","duration":"15m","sparring":2}),
         )
@@ -390,7 +416,7 @@ mod tests {
             ok(serde_json::json!({"action":"start","brain":"hybrid","server":"5.6.7.8:8308","duration":"unlimited"}))
                 .is_ok()
         );
-        let refused = |v, ready: &[String], bundle| build_request(form(v), ready, bundle).unwrap_err();
+        let refused = |v, ready: &[String], bundle| build_request(form(v), ready, bundle, true).unwrap_err();
         assert_eq!(
             refused(
                 serde_json::json!({"action":"start","brain":"hybrid","server":"1.2.3.4:8303","duration":"15m"}),
@@ -459,7 +485,7 @@ mod tests {
             if !finish.is_null() {
                 v["finish"] = finish;
             }
-            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true))
+            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true, true))
         };
         for brain in ["hybrid", "hybrid-fly"] {
             for (word, want) in [("off", Finish::Off), ("target", Finish::Target), ("full", Finish::Full)] {
@@ -491,7 +517,7 @@ mod tests {
         }
         // A stop carries no finishing.
         let stop = serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","finish":"off"})).unwrap();
-        assert_eq!(build_request(stop, &ready, true).unwrap_err(), "bad_request");
+        assert_eq!(build_request(stop, &ready, true, true).unwrap_err(), "bad_request");
     }
 
     #[test]
@@ -502,7 +528,7 @@ mod tests {
             if !val.is_null() {
                 v[key] = val;
             }
-            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true))
+            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true, true))
         };
         // The pure fly takes both too: they are navigation, target choice and self-kill rules the bot runs under every brain.
         for brain in ["hybrid", "hybrid-fly", "fly"] {
@@ -535,7 +561,65 @@ mod tests {
             ("no_selfkill", serde_json::json!(false)),
         ] {
             let stop = serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop", key: val})).unwrap();
-            assert_eq!(build_request(stop, &ready, true).unwrap_err(), "bad_request", "{key}");
+            assert_eq!(
+                build_request(stop, &ready, true, true).unwrap_err(),
+                "bad_request",
+                "{key}"
+            );
         }
+    }
+
+    #[test]
+    fn the_opponent_predictor_is_a_boolean_for_the_hybrids_only_and_needs_its_file() {
+        // Task 3.17 (D-111).
+        let ready: Vec<String> = Vec::new();
+        let start = |brain: &str, val: serde_json::Value, model_ok: bool| {
+            let mut v = serde_json::json!({"action":"start","brain":brain,"server":"local","duration":"15m"});
+            if !val.is_null() {
+                v["window_model"] = val;
+            }
+            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true, model_ok))
+        };
+        for brain in ["hybrid", "hybrid-fly"] {
+            for want in [false, true] {
+                let req = start(brain, serde_json::json!(want), true).unwrap().unwrap();
+                assert_eq!(req.window_model, Some(want), "{brain} {want}");
+            }
+            let bare = start(brain, serde_json::Value::Null, true).unwrap().unwrap();
+            assert_eq!(bare.window_model, None, "absent stays absent");
+        }
+        // The pure fly has no lag window to put the model in; «off» is harmless, «on» is refused.
+        assert_eq!(
+            start("fly", serde_json::json!(true), true).unwrap().unwrap_err(),
+            "window_model_hybrid_only"
+        );
+        assert_eq!(
+            start("fly", serde_json::json!(false), true)
+                .unwrap()
+                .unwrap()
+                .window_model,
+            Some(false)
+        );
+        // A model that is not on the disk is refused when asked for, never when not.
+        assert_eq!(
+            start("hybrid", serde_json::json!(true), false).unwrap().unwrap_err(),
+            "window_model_missing"
+        );
+        assert!(start("hybrid", serde_json::json!(false), false).unwrap().is_ok());
+        assert!(start("hybrid", serde_json::Value::Null, false).unwrap().is_ok());
+        // Nothing but a JSON boolean ever gets as far as `build_request`: no path, no word.
+        for bad in [
+            serde_json::json!("true"),
+            serde_json::json!("on"),
+            serde_json::json!("/etc/passwd"),
+            serde_json::json!(1),
+            serde_json::json!(""),
+        ] {
+            assert!(start("hybrid", bad.clone(), true).is_err(), "{bad}");
+        }
+        // A stop carries nothing.
+        let stop =
+            serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","window_model":false})).unwrap();
+        assert_eq!(build_request(stop, &ready, true, true).unwrap_err(), "bad_request");
     }
 }

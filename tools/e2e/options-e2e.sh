@@ -57,6 +57,10 @@ chmod 0700 "$E2E/data/secrets"
 # helper's refusal; a fly brain is never started here, and this file is not a bundle).
 mkdir -p "$E2E/data/runs/E-005/e005-fly/checkpoints"
 echo "placeholder, not a bundle" >"$E2E/data/runs/E-005/e005-fly/checkpoints/final.bundle"
+# A placeholder where the helper looks for the opponent-input model (task 3.17), so that the card offers the toggle. It is not a model: the
+# test only clicks the toggle with the POST answered by the test, and every real start here has the toggle off (`--window-model=` empty).
+mkdir -p "$E2E/data/bot/models"
+echo "placeholder, not a model" >"$E2E/data/bot/models/opp-m1.oppnet"
 : >"$E2E/none.toml"
 chmod 0644 "$E2E/none.toml"
 install -m 0755 "$HERE/support/fake-systemctl.sh" "$E2E/shim/systemctl"

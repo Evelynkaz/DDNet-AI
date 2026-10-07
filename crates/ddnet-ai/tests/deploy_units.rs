@@ -297,3 +297,43 @@ fn the_launcher_installer_refuses_a_binary_older_than_the_unit() {
         "the check is for this very form"
     );
 }
+
+#[test]
+fn the_bot_unit_passes_the_opponent_predictor_as_one_argument_and_it_is_off_by_default() {
+    // Task 3.17 (D-111): the path of the model file, empty = off. `${VAR}` is one argument, so an empty value is `--window-model=`, which the bot reads as off.
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    let env = values(&s, "Environment");
+    assert!(env.contains(&"BOT_WINDOW_MODEL="), "{env:?}");
+    let exec = values(&s, "ExecStart");
+    assert_eq!(exec.len(), 1);
+    assert!(exec[0].contains(" --window-model=${BOT_WINDOW_MODEL} "), "{}", exec[0]);
+    // Never split by `$VAR` (a path with a space would become two words), never the bare flag, never with a space before the value.
+    assert!(
+        !exec[0].contains("$BOT_WINDOW_MODEL")
+            && !exec[0].contains(" --window-model ")
+            && !exec[0].contains("--window-model ${"),
+        "{}",
+        exec[0]
+    );
+    // The earlier switches are untouched.
+    assert!(exec[0].contains(" --no-selfkill=${BOT_NO_SELFKILL} "), "{}", exec[0]);
+}
+
+#[test]
+fn the_launcher_installer_refuses_a_binary_without_the_window_model_flag() {
+    let script = fs::read_to_string(deploy().join("install-launcher.sh")).unwrap();
+    let check = script
+        .find("grep -q -- '--window-model' <<<\"$play_help\"")
+        .expect("install-launcher.sh checks the binary for --window-model");
+    assert!(
+        script[check..]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("run deploy/install.sh first")
+    );
+    for later in ["daemon-reload", "install -o root -g root -m 0644"] {
+        let first_use = script.rfind(later).unwrap();
+        assert!(check < first_use, "the binary check must come before `{later}`");
+    }
+}

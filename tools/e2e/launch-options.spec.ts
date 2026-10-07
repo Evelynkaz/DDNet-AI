@@ -302,3 +302,55 @@ test("the real run on the private server: `--wb-smart on` and `--no-selfkill=tru
   expect(starts).toHaveLength(4);
   expect(readFileSync(path.join(DIR, "etc", "50-launch.conf"), "utf8")).not.toContain("IPAddressDeny");
 });
+
+test("the card: «Предсказатель соперника (эксперимент)» is off by default, hidden for the pure fly, says what it is, and is sent only when on", async ({ page }) => {
+  test.setTimeout(120_000);
+  await login(page);
+  // Task 3.17 (D-111). The POST is answered here: nothing may start (the placeholder file is not a model).
+  const posted: any[] = [];
+  await page.route("**/api/bot/launch", async (route) => {
+    if (route.request().method() === "POST") {
+      posted.push(JSON.parse(route.request().postData() ?? "{}"));
+      await route.fulfill({ status: 429, contentType: "application/json", body: JSON.stringify({ error: "rate_limited" }) });
+    } else {
+      await route.continue();
+    }
+  });
+  await openBotTab(page);
+  await expect(card(page).locator(".lc-state-text")).toHaveText("Бот остановлен", { timeout: 20_000 });
+
+  const model = field(page, "Предсказатель соперника \\(эксперимент\\)");
+  const hint = card(page).locator(".lc-model-hint");
+  await expect(model).toBeVisible();
+  await expect(model).toHaveValue("off");
+  expect(await model.locator("option").allTextContents()).toEqual(["выкл", "вкл (эксперимент)"]);
+  await expect(hint).toContainText("Предсказатель выключен");
+  // On: the hint says what it is and is honest about the evidence.
+  await field(page, "Мозг").selectOption("hybrid");
+  await model.selectOption("on");
+  await expect(hint).toContainText("маленькая сеть предсказывает ввод соперника");
+  await expect(hint).toContainText("на живых клипах при окне 2 пользы не видно");
+  await expect(hint).toContainText("предохранитель сам отключает её");
+  await page.screenshot({ path: path.join(SHOTS, "3.17-card-on.png"), fullPage: true });
+  await noHorizontalScroll(page);
+
+  await field(page, "Сервер").selectOption("local");
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(posted[0]).toMatchObject({ action: "start", brain: "hybrid", server: "local", window_model: true });
+  // The request names no file.
+  expect(JSON.stringify(posted[0])).not.toContain("oppnet");
+
+  // Off sends no field at all; the pure fly hides the control and never sends it, even if it was on.
+  await model.selectOption("off");
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(2);
+  expect(Object.keys(posted[1])).not.toContain("window_model");
+  await model.selectOption("on");
+  await field(page, "Мозг").selectOption("fly");
+  await expect(model).toBeHidden();
+  await expect(hint).toBeHidden();
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(3);
+  expect(Object.keys(posted[2])).not.toContain("window_model");
+});

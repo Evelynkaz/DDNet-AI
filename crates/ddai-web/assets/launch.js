@@ -38,6 +38,12 @@
     on: "Для 1vs1 F-DDrace: любая смерть бота даёт очко сопернику, поэтому бот сам себя не убивает. На обычных серверах не включать: бот лишается выхода из застревания (самоубийство при застревании и в заморозке). Убить бота можно только вручную: кнопкой «Убить» в «Командах» (или строкой /kill на вкладке «Игра»).",
   };
 
+  // Task 3.17 (D-111): the opponent-input predictor (an experiment, hybrid brains only).
+  var MODEL_HINT = {
+    off: "Предсказатель выключен: в окне лага соперник «держит то, что показывает снапшот».",
+    on: "Эксперимент: маленькая сеть предсказывает ввод соперника в окне лага (3.15). В арене помогала на дальних тиках окна, на живых клипах при окне 2 пользы не видно; предохранитель сам отключает её, если она хуже «держит» (карточка «Бот», строка «Предсказатель»). Журнал — data/bot/oppnet-live.jsonl. Вне дуэли 1 на 1 не работает. Выключить на ходу: файл data/bot/window-model.off.",
+  };
+
   // What a refusal or an ending means, in words for the owner. The helper only ever sends these codes.
   var REASON_TEXT = {
     stopped_by_owner: "Остановлен по вашей просьбе.",
@@ -64,6 +70,9 @@
     sparring_local_only: "Спарринг-боты бывают только на локальном сервере.",
     bundle_missing: "Файл мухи (bundle) не найден.",
     finish_hybrid_only: "Дожим бывает только у гибридных мозгов: для «Мухи» он выключен.",
+    window_model_missing: "Файл предсказателя соперника (data/bot/models/opp-m1.oppnet) не найден: положите его туда.",
+    window_model_hybrid_only: "Предсказатель соперника бывает только у гибридных мозгов: для «Мухи» его нет.",
+    window_model_bad_path: "Путь к файлу предсказателя недопустим.",
     bundle_bad_path: "Путь к bundle в конфиге недопустим.",
     config_bad: "Конфиг запуска не читается.",
     config_untrusted: "Конфиг запуска доступен на запись не только root: отказ.",
@@ -98,6 +107,9 @@
     sparring_local_only: "Спарринг-боты бывают только на локальном сервере.",
     bundle_missing: "Файл мухи (bundle) не найден.",
     finish_hybrid_only: "Дожим бывает только у гибридных мозгов: для «Мухи» он выключен.",
+    window_model_missing: "Файл предсказателя соперника (data/bot/models/opp-m1.oppnet) не найден: положите его туда.",
+    window_model_hybrid_only: "Предсказатель соперника бывает только у гибридных мозгов: для «Мухи» его нет.",
+    window_model_bad_path: "Путь к файлу предсказателя недопустим.",
     rate_limited: "Слишком часто: подождите несколько секунд (не больше 6 запросов в минуту).",
     pending: "Предыдущий запрос ещё не обработан.",
     launcher_unavailable: "Запуск с сайта не установлен на сервере (нет каталога data/launch).",
@@ -222,6 +234,11 @@
         { value: "off", text: "выкл" },
         { value: "on", text: "вкл (дуэль)" },
       ]);
+      // Task 3.17: the predictor of the opponent's input, off by default and sent only when on; the hybrid brains only (the control is hidden for the fly).
+      ui.windowModel = select([
+        { value: "off", text: "выкл" },
+        { value: "on", text: "вкл (эксперимент)" },
+      ]);
       var form = el("div", "lc-form");
       form.appendChild(field("Сервер", ui.server));
       form.appendChild(field("Мозг", ui.brain));
@@ -232,6 +249,8 @@
       form.appendChild(ui.finishField);
       form.appendChild(field("Умный ВБ", ui.wbSmart));
       form.appendChild(field("Без самоубийств (дуэль)", ui.noSelfkill));
+      ui.windowModelField = field("Предсказатель соперника (эксперимент)", ui.windowModel);
+      form.appendChild(ui.windowModelField);
       form.appendChild(field("Длительность", ui.duration));
       ui.sparringField = field("Спарринг (только локальный сервер)", ui.sparring);
       form.appendChild(ui.sparringField);
@@ -242,6 +261,8 @@
       card.appendChild(ui.wbHint);
       ui.selfkillHint = el("p", "hint lc-opt-hint lc-selfkill-hint");
       card.appendChild(ui.selfkillHint);
+      ui.modelHint = el("p", "hint lc-opt-hint lc-model-hint");
+      card.appendChild(ui.modelHint);
       ui.bundle = el("p", "hint lc-bundle");
       card.appendChild(ui.bundle);
 
@@ -277,6 +298,7 @@
       ui.finish.addEventListener("change", syncMirror);
       ui.wbSmart.addEventListener("change", syncOptions);
       ui.noSelfkill.addEventListener("change", syncOptions);
+      ui.windowModel.addEventListener("change", syncMirror);
       syncMirror();
       syncOptions();
       ui.start.addEventListener("click", onStart);
@@ -297,6 +319,17 @@
       ui.finishHint.hidden = fly;
       ui.finishHint.textContent = FINISH_HINT[ui.finish.value] || "";
       ui.finishHint.classList.toggle("lc-finish-warn", ui.finish.value === "full");
+      // The predictor lives in the hybrid's lag window: not offered to the pure fly.
+      ui.windowModelField.hidden = fly;
+      ui.modelHint.hidden = fly;
+      var present = !info || info.window_model_present !== false;
+      ui.windowModel.options[1].disabled = !present;
+      if (!present && ui.windowModel.value === "on") {
+        ui.windowModel.value = "off";
+      }
+      ui.modelHint.textContent = present
+        ? MODEL_HINT[ui.windowModel.value] || ""
+        : "Файл предсказателя не найден: положите его в data/bot/models/opp-m1.oppnet (в git его нет).";
     }
 
     // The hints of the two switches that every brain has; the duel switch turns its hint into a warning while it is on.
@@ -391,6 +424,9 @@
       if (status.no_selfkill === true) {
         parts.push("без самоубийств");
       }
+      if (status.window_model === true) {
+        parts.push("предсказатель соперника");
+      }
       if (status.bundle && status.brain && status.brain !== "hybrid") {
         parts.push("муха " + status.bundle);
       }
@@ -464,7 +500,7 @@
       ui.start.classList.toggle("is-loading", busy && ui.start === pressed);
       ui.stop.classList.toggle("is-loading", busy && ui.stop === pressed);
       ui.watch.hidden = !live;
-      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill].forEach(function (c) {
+      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel].forEach(function (c) {
         c.disabled = busy || !enabled;
       });
       syncSparring();
@@ -550,6 +586,10 @@
       }
       if (ui.noSelfkill.value === "on") {
         body.no_selfkill = true;
+      }
+      // Task 3.17: the predictor is sent only when on and never for the pure fly (the helper refuses that anyway).
+      if (ui.windowModel.value === "on" && ui.brain.value !== "fly") {
+        body.window_model = true;
       }
       if (body.server !== "local") {
         var ok = window.confirm(

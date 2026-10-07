@@ -42,6 +42,11 @@ pub const REQUEST_FUTURE_SLACK_SECS: u64 = 5;
 pub const DEFAULT_STATUS_DIR: &str = "/run/ddnet-ai";
 /// The default fly bundle (run `E-005`), under `<data-dir>`; the root-owned config may name another one.
 pub const DEFAULT_BUNDLE_REL: &str = "runs/E-005/e005-fly/checkpoints/final.bundle";
+
+/// The opponent-input model of the launch card's «Предсказатель соперника (эксперимент)» (task 3.17, D-111), relative to `<data-dir>`. The file is
+/// never in git; the lead copies it there. The toggle names no path: the helper builds this one and refuses (`window_model_missing`) when it is not a
+/// plain regular file, so a request can never point the bot at anything else.
+pub const DEFAULT_WINDOW_MODEL_REL: &str = "bot/models/opp-m1.oppnet";
 /// Root-owned launcher config.
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/ddnet-ai/launch.toml";
 
@@ -211,6 +216,11 @@ pub struct LaunchRequest {
     /// every brain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_selfkill: Option<bool>,
+    /// The opponent-input predictor (task 3.17, D-111; `ddnet-ai play --window-model`): a JSON boolean, `false` when absent. Only the hybrid
+    /// brains take it (the model belongs to the hybrid's lag window; the helper refuses `window_model_hybrid_only` for the pure fly). It names no
+    /// file: the helper uses [`DEFAULT_WINDOW_MODEL_REL`] under the data directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_model: Option<bool>,
 }
 
 /// Whether a request made at `ts` (and written to a file last modified at `mtime`), seen at `now`, is fresh: neither older than
@@ -262,7 +272,8 @@ pub fn parse_request(bytes: &[u8]) -> Result<LaunchRequest, ParseError> {
         && req.mirror.is_none()
         && req.finish.is_none()
         && req.wb_smart.is_none()
-        && req.no_selfkill.is_none();
+        && req.no_selfkill.is_none()
+        && req.window_model.is_none();
     match req.action {
         Action::Start if !complete => Err(ParseError::Invalid),
         Action::Stop if !empty => Err(ParseError::Invalid),
@@ -319,6 +330,9 @@ pub struct LaunchStatus {
     /// The duel switch of the launch (task 5.15); none in the status of a launch made before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_selfkill: Option<bool>,
+    /// The opponent-input predictor of the launch (task 3.17); none in the status of a launch made before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_model: Option<bool>,
 }
 
 impl LaunchStatus {
@@ -338,6 +352,7 @@ impl LaunchStatus {
             finish: None,
             wb_smart: None,
             no_selfkill: None,
+            window_model: None,
         }
     }
 }
@@ -610,6 +625,47 @@ mod tests {
             stop[key] = val;
             assert_eq!(parse(&stop), Err(ParseError::Invalid), "{key}");
         }
+    }
+
+    #[test]
+    fn the_window_model_field_is_an_additive_json_boolean_and_absent_means_off() {
+        // Task 3.17 (D-111). An old request parses and means off; an absent field is not written.
+        let old = parse(&start_json()).unwrap();
+        assert_eq!(old.window_model, None);
+        assert!(!old.window_model.unwrap_or_default());
+        let text = String::from_utf8(serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(!text.contains("window_model"), "{text}");
+        for want in [false, true] {
+            let mut v = start_json();
+            v["window_model"] = serde_json::json!(want);
+            let r = parse(&v).unwrap();
+            assert_eq!(r.window_model, Some(want));
+            assert_eq!(
+                parse_request(&serde_json::to_vec(&r).unwrap()).unwrap(),
+                r,
+                "round trip"
+            );
+        }
+        // Nothing but a JSON boolean: no path, no string, no number.
+        for bad in [
+            serde_json::json!("true"),
+            serde_json::json!("/etc/passwd"),
+            serde_json::json!("on"),
+            serde_json::json!("~/aiddnet/data/bot/models/opp-m1.oppnet"),
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(["x"]),
+            serde_json::json!({"path": "x"}),
+        ] {
+            let mut v = start_json();
+            v["window_model"] = bad.clone();
+            assert_eq!(parse(&v), Err(ParseError::Invalid), "window_model={bad}");
+        }
+        // A stop carries nothing.
+        let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
+        stop["window_model"] = serde_json::json!(false);
+        assert_eq!(parse(&stop), Err(ParseError::Invalid));
     }
 
     #[test]

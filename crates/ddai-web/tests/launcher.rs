@@ -409,6 +409,110 @@ async fn the_page_gets_the_smart_wayblock_and_the_duel_switch_of_the_helpers_sta
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_opponent_predictor_toggle_reaches_the_request_as_a_boolean_for_the_hybrids_only_and_needs_its_file() {
+    // Task 3.17 (D-111).
+    let model = |server: &TestServer| server.config.data_dir.join("bot/models/opp-m1.oppnet");
+    let with = |brain: &str, val: serde_json::Value| {
+        let mut body = start_body();
+        body["brain"] = serde_json::json!(brain);
+        body["window_model"] = val;
+        body
+    };
+    // Without the file: refused when asked for (nothing written), accepted when not; the page is told the file is not there.
+    let server = deployed().await;
+    let l = login(&server);
+    assert_eq!(
+        get(&server, &l).json()["window_model_present"],
+        serde_json::json!(false)
+    );
+    let r = post(&server, &l, &with("hybrid", serde_json::json!(true)));
+    assert_eq!(
+        (r.status, r.json()["error"].as_str()),
+        (400, Some("window_model_missing")),
+        "{r:?}"
+    );
+    assert!(files_in(&launch_dir(&server)).is_empty());
+    let r = post(&server, &l, &with("hybrid", serde_json::json!(false)));
+    assert_eq!(r.status, 202, "{r:?}");
+    fs::remove_file(request_file(&server)).unwrap();
+    // With the file: both hybrid brains carry `window_model: true` into the request, the helper's own parser accepts it, and it names no path.
+    for brain in ["hybrid", "hybrid-fly"] {
+        let server = deployed().await;
+        let l = login(&server);
+        fs::create_dir_all(model(&server).parent().unwrap()).unwrap();
+        fs::write(model(&server), b"weights").unwrap();
+        assert_eq!(get(&server, &l).json()["window_model_present"], serde_json::json!(true));
+        let r = post(&server, &l, &with(brain, serde_json::json!(true)));
+        assert_eq!(r.status, 202, "{brain}: {r:?}");
+        let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
+        assert!(
+            !text.contains("oppnet") && !text.contains("/models/"),
+            "no path in the request: {text}"
+        );
+        let req = parse_request(text.as_bytes()).expect("the helper's own parser accepts it");
+        assert_eq!(req.window_model, Some(true), "{brain}");
+    }
+    // The pure fly: refused with its own code.
+    let server = deployed().await;
+    let l = login(&server);
+    fs::create_dir_all(model(&server).parent().unwrap()).unwrap();
+    fs::write(model(&server), b"weights").unwrap();
+    let r = post(&server, &l, &with("fly", serde_json::json!(true)));
+    assert_eq!(
+        (r.status, r.json()["error"].as_str()),
+        (400, Some("window_model_hybrid_only")),
+        "{r:?}"
+    );
+    // Nothing but a JSON boolean; a stop carries none. Refused, nothing written.
+    for bad in [
+        serde_json::json!("true"),
+        serde_json::json!("on"),
+        serde_json::json!("/etc/passwd"),
+        serde_json::json!("true\nBOT_NAME=\"evil\""),
+        serde_json::json!(1),
+        serde_json::json!(""),
+        serde_json::json!(["x"]),
+    ] {
+        let r = post(&server, &l, &with("hybrid", bad.clone()));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{bad}"
+        );
+    }
+    let r = post(&server, &l, &serde_json::json!({"action":"stop","window_model":false}));
+    assert_eq!((r.status, r.json()["error"].as_str()), (400, Some("bad_request")));
+    assert!(
+        files_in(&launch_dir(&server)).is_empty(),
+        "a refused call writes nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_page_gets_the_predictor_of_the_helpers_status_and_an_old_status_has_none() {
+    let server = deployed().await;
+    let l = login(&server);
+    let status = server.config.status_dir.join("status.json");
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"request_id":"0123456789abcdef","brain":"hybrid","server":"local","duration":"15m","sparring":0,"finish":"off","window_model":true}"#,
+    )
+    .unwrap();
+    assert_eq!(get(&server, &l).json()["status"]["window_model"].as_bool(), Some(true));
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"brain":"hybrid","server":"local","duration":"15m","sparring":0}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["state"], "started");
+    assert!(j["status"].get("window_model").is_none(), "{j}");
+    // A value that is not a boolean makes the whole status unreadable, never a mode of its own.
+    fs::write(&status, r#"{"v":1,"state":"started","at":5,"window_model":"yes"}"#).unwrap();
+    assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_opponent_model_switch_reaches_the_request_and_only_as_on_or_off() {
     // Task 3.7b F9 (D-090).
     let server = deployed().await;
@@ -709,8 +813,17 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         "не бродит, а сразу начинает путь",
         "body.wb_smart",
         "body.no_selfkill",
+        // Task 3.17: the predictor toggle, its hint (honest about the window-2 result) and its refusals.
+        "Предсказатель соперника (эксперимент)",
+        "вкл (эксперимент)",
+        "на живых клипах при окне 2 пользы не видно",
+        "предохранитель сам отключает её",
+        "window_model_missing",
+        "window_model_hybrid_only",
+        "body.window_model",
     ] {
         assert!(js.contains(needle), "launch.js lacks {needle}");
     }
     assert!(html.contains(r#"id="bs-wbsmart""#));
+    assert!(html.contains(r#"id="bs-windowmodel""#));
 }
