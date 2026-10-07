@@ -379,6 +379,37 @@ impl FlyBrain {
         self.last_warmup_converged
     }
 
+    /// The membrane state `V` the next decision starts from (task 8.5b: the recurrent state a PPO window stores, R2D2-style).
+    pub fn state_v(&self) -> &[f32] {
+        self.state.v()
+    }
+
+    /// One decision through encoder, fly and decoder **without choosing an action** (task 8.5b): the head logits of this
+    /// observation, which a policy-gradient actor samples from ([`crate::policy`]) and a learner scores. Advances the recurrent
+    /// state exactly as [`ddai_brain::Brain::decide`] does and leaves the same `last_*` behind, so a driver may use one or the
+    /// other per decision; allocation-free like `decide`. Its probabilities are those `decide` decodes, bit for bit
+    /// (`decoder::decoder_logits` repeats `decoder_forward_into`'s formulas).
+    pub fn forward_logits(&mut self, obs: &Observation) -> crate::bc::HeadLogits {
+        let start = Instant::now();
+        let an_values = compute_proprioception_values(&obs.self_state, self.encoder.ray_grid_config());
+        self.ray_features.compute(obs, self.encoder.ray_grid_config());
+        self.encoder.forward(
+            &self.ray_features,
+            &an_values,
+            &self.encoder_params,
+            &mut self.input_buf,
+        );
+        let output = self.state.step_decision(&self.model, &self.input_buf);
+        self.last_dn_rates.copy_from_slice(output.dn_rates);
+        self.last_per_type_mean_rate.copy_from_slice(output.per_type_mean_rate);
+        self.calib
+            .z_into(&self.last_dn_rates, self.decoder.config().z_clip, &mut self.viz_z);
+        let logits = crate::decoder::decoder_logits(&self.decoder, &self.viz_z, &self.decoder_params);
+        self.last_latency = start.elapsed();
+        self.decision_count += 1;
+        logits
+    }
+
     fn select_direction(&mut self, probs: [f32; 3]) -> i32 {
         let idx = match self.config.action_selection {
             ActionSelection::Argmax => (0..3)

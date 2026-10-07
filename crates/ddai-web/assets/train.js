@@ -636,6 +636,74 @@
     });
   }
 
+  // Outcome training (tasks 8.5a, 8.5b): the held share of post-freeze starts and the fly's own freezes, evaluated on fixed starts.
+  function heldPoints(rows, field) {
+    return rows.filter(function (r) { return isNum(r[field]); }).map(function (r) { return [r.step, r[field]]; });
+  }
+
+  function heldChart(metrics) {
+    var rows = metrics.held || [];
+    return lineChart({
+      title: "Удержание блока на стартах «после фриза»: доля удержаний и свои фризы",
+      aria: "Доля удержанных блоков на проверочных и отложенных стартах, доля стартов с собственным фризом мухи",
+      series: [
+        { label: "удержано, обуч. (все)", short: "", slot: 1, dash: 0, points: heldPoints(rows, "train_held") },
+        { label: "удержано, обуч. (жертва убегает)", short: "", slot: 1, dash: 1, points: heldPoints(rows, "train_held_v") },
+        { label: "удержано, holdout (все)", short: "", slot: 2, dash: 0, points: heldPoints(rows, "holdout_held") },
+        { label: "удержано, holdout (жертва убегает)", short: "", slot: 2, dash: 1, points: heldPoints(rows, "holdout_held_v") },
+        { label: "свой фриз, обуч.", short: "", slot: 3, dash: 0, points: heldPoints(rows, "train_own") },
+        { label: "свой фриз, holdout", short: "", slot: 4, dash: 0, points: heldPoints(rows, "holdout_own") },
+        { label: "первый фриз, обуч.", short: "", slot: 5, dash: 0, points: heldPoints(rows, "first_train") },
+        { label: "первый фриз, holdout", short: "", slot: 6, dash: 0, points: heldPoints(rows, "first_holdout") },
+      ].filter(function (s) { return s.points.length; }),
+      xName: "итерация",
+      xFmt: stepFmt,
+      yFmt: pct,
+      yTick: function (v) { return (v * 100).toFixed(0) + "%"; },
+      clamp: [0, 1],
+      alwaysLegend: true,
+      empty: "Оценок удержания пока нет (их пишут ES и PPO).",
+    });
+  }
+
+  // PPO iterations: shares (0..1) on one axis, the learner's own diagnostics (different scales) on another.
+  function ppoChart(metrics) {
+    var rows = metrics.ppo || [];
+    return lineChart({
+      title: "PPO: свои эпизоды итерации (с шумом) и уровень curriculum",
+      aria: "Доля удержаний на стартах V и свои фризы в эпизодах итерации, смещение передачи от демонстрации в долях окна",
+      series: [
+        { label: "удержано, V", short: "", slot: 1, dash: 0, points: heldPoints(rows, "held_v") },
+        { label: "свой фриз", short: "", slot: 3, dash: 0, points: heldPoints(rows, "own") },
+        { label: "смещение curriculum (тики, /250)", short: "", slot: 2, dash: 0, points: rows.filter(function (r) { return isNum(r.curr_offset); }).map(function (r) { return [r.step, r.curr_offset / 250]; }) },
+      ].filter(function (s) { return s.points.length; }),
+      xName: "итерация",
+      xFmt: stepFmt,
+      yFmt: pct,
+      yTick: function (v) { return (v * 100).toFixed(0) + "%"; },
+      clamp: [0, 1],
+      alwaysLegend: true,
+      empty: "Итераций PPO пока нет.",
+    });
+  }
+
+  function ppoLearnerChart(metrics) {
+    var rows = metrics.ppo || [];
+    return lineChart({
+      title: "PPO: KL к стартовой политике (нат/решение) и норма весов новых каналов",
+      aria: "KL к стартовой политике и норма весов каналов состояния цели по итерациям",
+      series: [
+        { label: "KL к старту (нат/решение)", short: "", slot: 5, dash: 0, points: heldPoints(rows, "kl_ref") },
+        { label: "норма весов новых каналов", short: "", slot: 6, dash: 1, points: heldPoints(rows, "new_channels") },
+      ].filter(function (s) { return s.points.length; }),
+      xName: "итерация",
+      xFmt: stepFmt,
+      yFmt: function (v) { return num(v, 3); },
+      alwaysLegend: true,
+      empty: "Итераций PPO пока нет.",
+    });
+  }
+
   function hookPlayChart(metrics) {
     var rows = metrics.hook_play;
     function pts(field) {
@@ -1147,6 +1215,11 @@
         addChart(charts, curves, evalChart(m, "hook_auroc", "Хук: AUROC на валидации", "AUROC хука на валидации по шагам"));
         addChart(charts, curves, hookPlayChart(m));
         addChart(charts, curves, arenaChart(m));
+        if ((m.held && m.held.length) || (m.ppo && m.ppo.length)) {
+          addChart(charts, curves, heldChart(m));
+          addChart(charts, curves, ppoChart(m));
+          addChart(charts, curves, ppoLearnerChart(m));
+        }
         detailEl.appendChild(curves);
 
         // DAgger rounds

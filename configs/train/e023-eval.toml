@@ -1,0 +1,45 @@
+# E-027 (task 8.5b): the evaluation protocol of 8.5a (E-022) for the PPO bundles, on the re-tagged bank (bank-v2): only the bank, the training halls and
+# the evaluation seeds are read by `train es eval` / `breakdown`; the ES fields are inert here.
+#   ddnet-ai train es eval --config configs/train/e023-eval.toml --brain fly:<bundle> --starts 700 --games 400 --seed-base 9700000000 --out <json>
+#   ddnet-ai train es compare a.json b.json ; ddnet-ai train es breakdown --config configs/train/e023-eval.toml --starts 700 a.json b.json
+name = "e023-eval"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+run_dir = "~/aiddnet/data/runs/E-023/eval-dummy"
+bank = "~/aiddnet/data/runs/E-022/banks/bank-v2.bank"
+seed = 1
+pairs = 16
+generations = 400
+lr_rel = 0.15
+l2_anchor = 0.1
+post_weight = 1.0
+game_weight = 1.0
+max_hours = 1.8
+post_episodes = 8
+normal_games = 4
+train_arenas = ["clb-left", "pit", "platform"]
+escapable_only = true
+threads = 3
+
+[reward]
+credited = 0.5
+
+[model]
+kind = "fly"
+
+# sigma: the smallest scale of the `es scan` (a quarter of the first guess): the perturbations of the larger ones broke the fly (E-022).
+[space]
+sigma_a = 0.005
+sigma_b = 0.005
+sigma_theta = 0.0125
+sigma_enc = 0.0125
+sigma_dec = 0.0125
+
+[eval]
+every = 30
+starts = 400
+games = 400
+holdout_arenas = ["chillblock5-ruler"]
+seed_base = 9100000000

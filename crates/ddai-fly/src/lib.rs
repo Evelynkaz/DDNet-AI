@@ -33,6 +33,7 @@ mod kernel;
 pub mod model;
 pub mod optim;
 pub mod params;
+pub mod policy;
 pub mod proposer;
 pub mod recorder;
 #[doc(hidden)] // test/bench support only (deterministic PRNG for reproducible synthetic input traffic).
@@ -45,6 +46,7 @@ pub mod world_model;
 pub mod brain;
 pub mod brain_bc;
 pub mod brain_bc_batched;
+pub mod brain_policy_batched;
 pub mod two_view;
 
 #[doc(hidden)] // test/bench support only, not covered by semver — see its own doc comment.

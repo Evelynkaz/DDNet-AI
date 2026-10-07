@@ -1,0 +1,63 @@
+# E-027 (task 8.5b), the plain baseline arm (no curriculum), sampled like the curriculum arm (T = 0.2, hook T = 0.03) and with the same DAgger rounds: recurrent PPO on the held-block objective from the E-008 fly (d2-maskhook, seed 2) upgraded with the opponent-state
+# channels (`ddnet-ai train upgrade-bundle`), a KL anchor to it, planner labels as a BC term, the privileged critic.
+#   ddnet-ai train ppo run --config configs/train/e023-ppo-base-s2.toml
+# Post-freeze starts of the bank (tags of the 8.5a review: V the victim escapes under an idle blocker, B the idle blocker itself goes out, H
+# geometry holds) from the training halls plus full games for the first-freeze reward; opponents: the scripted bot and the run's own past selves.
+name = "e023-ppo-base-s2"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+scenarios_dir = "configs/scenarios"
+run_dir = "~/aiddnet/data/runs/E-023/e023-ppo-base-s2"
+bank = "~/aiddnet/data/runs/E-022/banks/bank-v2.bank"
+seed = 1
+iterations = 150
+max_hours = 1.6
+snapshot_every = 25
+train_arenas = ["clb-left", "pit", "platform"]
+threads = 3
+
+[rollout]
+post_episodes = 48
+game_episodes = 8
+start_mix = [0.45, 0.35, 0.2]
+temperature = 0.2
+temperature_hook = 0.03
+opponents = [["scripted", 0.8], ["past", 0.2]]
+
+[ppo]
+lr_scale = 0.15
+epochs = 2
+kl_coef = 0.3
+kl_target = 0.03
+critic_warmup_iters = 3
+bc_coef = 0.5
+bc_windows = 8
+
+[dagger]
+every = 10
+starts = 48
+mix = [0.6, 0.4, 0.0]
+round_weight = 6.0
+
+[reward]
+shaping = 0.5
+own_hazard = 0.15
+free_victim = 0.25
+
+[bc]
+teacher_dirs = ["~/aiddnet/data/datasets/teacher/e022-postfreeze", "~/aiddnet/data/datasets/teacher/round1-v2"]
+[bc.teacher_data]
+val_mod = 10
+round_weights = [[7, 6.0], [8, 6.0]]
+scenario_weight = 2.0
+[bc.loss]
+pos_weight = [3.0, 1.0, 6.0]
+
+[eval]
+every = 25
+starts = 220
+games = 100
+holdout_arenas = ["chillblock5-ruler"]
+seed_base = 9100000000

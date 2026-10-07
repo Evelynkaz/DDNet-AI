@@ -32,6 +32,12 @@ pub struct TeacherDataConfig {
     /// Multiplier of the steps of technique-scenario episodes (`scn:T*` arenas): they are short and rare
     /// next to full games, so they can be drawn more often.
     pub scenario_weight: f32,
+    /// Multiplier (task 8.5b) of the steps of the **opening** of a post-freeze episode: the decisions in the first `opening_ticks` ticks from the
+    /// freeze (`Episode::end_tick`) on, in the rounds listed in `opening_rounds`. What the planner does there (it throws the hook at the frozen
+    /// victim in 80% of its first decisions) decides the held block, and those few steps are otherwise 3% of the data. `1` = off.
+    pub opening_boost: f32,
+    pub opening_ticks: i32,
+    pub opening_rounds: Vec<u32>,
 }
 
 impl Default for TeacherDataConfig {
@@ -42,6 +48,9 @@ impl Default for TeacherDataConfig {
             default_round_weight: 1.0,
             noise_weight: 1.0,
             scenario_weight: 1.0,
+            opening_boost: 1.0,
+            opening_ticks: 12,
+            opening_rounds: Vec::new(),
         }
     }
 }
@@ -74,12 +83,16 @@ pub fn episode_to_seq(ep: &Episode, map: &Arc<MapEntry>, round: u32, cfg: &Teach
         .iter()
         .map(|s| {
             let frozen = s.me.flags & (char_flags::FROZEN | char_flags::DEEP_FROZEN | char_flags::LIVE_FROZEN) != 0;
+            let opening = cfg.opening_rounds.contains(&round)
+                && s.tick >= ep.end_tick
+                && s.tick <= ep.end_tick + cfg.opening_ticks;
+            let boost = if opening { cfg.opening_boost } else { 1.0 };
             let weight = if frozen {
                 0.0
             } else if s.noise() {
-                base * cfg.noise_weight
+                base * cfg.noise_weight * boost
             } else {
-                base
+                base * boost
             };
             SeqStep {
                 tick: s.tick,
@@ -224,5 +237,36 @@ mod tests {
         let s = episode_to_seq(&ep(9, 9, false), &room_map(), 2, &cfg, "room");
         assert!(s.steps.iter().all(|x| x.weight == 3.0 && !x.mask.aim));
         assert!(matches!(s.source, Source::Teacher { round: 2, .. }));
+    }
+
+    #[test]
+    fn the_opening_of_a_post_freeze_episode_is_boosted_only_in_the_listed_rounds() {
+        let cfg = TeacherDataConfig {
+            opening_boost: 30.0,
+            opening_ticks: 2,
+            opening_rounds: vec![7],
+            ..TeacherDataConfig::default()
+        };
+        // Steps at ticks 0, 2, 4, 6; the freeze at tick 2: the steps at ticks 2 and 4 are the opening.
+        let mut e = ep(9, 9, false);
+        e.end_tick = 2;
+        let w = |round: u32| -> Vec<f32> {
+            episode_to_seq(&e, &room_map(), round, &cfg, "room")
+                .steps
+                .iter()
+                .map(|x| x.weight)
+                .collect()
+        };
+        assert_eq!(w(7), vec![1.0, 30.0, 30.0, 1.0]);
+        assert_eq!(w(0), vec![1.0; 4], "a round that is not listed is untouched");
+        assert_eq!(
+            episode_to_seq(&e, &room_map(), 7, &TeacherDataConfig::default(), "room")
+                .steps
+                .iter()
+                .map(|x| x.weight)
+                .collect::<Vec<_>>(),
+            vec![1.0; 4],
+            "off by default"
+        );
     }
 }

@@ -1,0 +1,79 @@
+# E-027 (task 8.5b), the DAgger-heavy curriculum arm (sixth version: the planner labels the states the fly visits on V and B starts every 4 iterations
+# and the imitation of them weighs 4x the pilot's, because the PPO gradient alone did not find the hook opening of the planner (80% of its first decisions) in 10^6 decisions;
+# the fourth, with a light BC term, left the deterministic play unchanged); fourth version: one ladder per start class -- V from offset 104, B from 236 where an idle blocker survives
+# 97% of the B starts; third version: the hook head sampled at T = 0.03 -- at T = 0.3 its coin-flip exploration halved the held share
+# of the sampled play against the deterministic one (14% vs 26% on V starts, probe E-027); second version: V starts only, a finer ladder from offset 104 where an idle blocker already holds 78%,
+# because the probe `train ppo probe --brain idle` showed the first 56 ticks are the whole difficulty and B starts have no easy rung): recurrent PPO on the held-block objective from the E-008 fly (d2-maskhook, seed 2) upgraded with the opponent-state
+# channels (`ddnet-ai train upgrade-bundle`), a KL anchor to it, planner labels as a BC term, the privileged critic.
+#   ddnet-ai train ppo run --config configs/train/e023-ppo-cur6-s2.toml
+# Post-freeze starts of the bank (tags of the 8.5a review: V the victim escapes under an idle blocker, B the idle blocker itself goes out, H
+# geometry holds) from the training halls plus full games for the first-freeze reward; opponents: the scripted bot and the run's own past selves.
+name = "e023-ppo-cur6-s2"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+scenarios_dir = "configs/scenarios"
+run_dir = "~/aiddnet/data/runs/E-023/e023-ppo-cur6-s2"
+bank = "~/aiddnet/data/runs/E-022/banks/bank-v2.bank"
+seed = 1
+iterations = 600
+max_hours = 3.6
+snapshot_every = 25
+train_arenas = ["clb-left", "pit", "platform"]
+threads = 3
+
+[rollout]
+post_episodes = 48
+game_episodes = 8
+start_mix = [0.45, 0.35, 0.2]
+temperature = 0.2
+temperature_hook = 0.03
+opponents = [["scripted", 0.8], ["past", 0.2]]
+
+[ppo]
+lr_scale = 0.2
+epochs = 2
+kl_coef = 0.3
+kl_target = 0.06
+critic_warmup_iters = 3
+bc_coef = 2.0
+bc_windows = 24
+
+[curriculum]
+enabled = true
+demos = "~/aiddnet/data/runs/E-023/demos-train-v2.bin"
+start_offsets = [104, 236, 104]
+step = 12
+threshold = 0.5
+min_episodes = 24
+share = 0.5
+current_share = 0.6
+mix = [0.6, 0.4, 0.0]
+
+[dagger]
+every = 4
+starts = 64
+mix = [0.6, 0.4, 0.0]
+round_weight = 20.0
+
+[reward]
+shaping = 0.5
+own_hazard = 0.15
+free_victim = 0.25
+
+[bc]
+teacher_dirs = ["~/aiddnet/data/datasets/teacher/e022-postfreeze", "~/aiddnet/data/datasets/teacher/round1-v2"]
+[bc.teacher_data]
+val_mod = 10
+round_weights = [[7, 6.0], [8, 6.0]]
+scenario_weight = 2.0
+[bc.loss]
+pos_weight = [3.0, 1.0, 6.0]
+
+[eval]
+every = 25
+starts = 220
+games = 100
+holdout_arenas = ["chillblock5-ruler"]
+seed_base = 9100000000

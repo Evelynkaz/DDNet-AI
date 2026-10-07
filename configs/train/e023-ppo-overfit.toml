@@ -1,0 +1,35 @@
+# E-027 probe: can the PPO raise the held share on a FIXED handful of victim-escapable starts at all? (an overfitting test of the
+# pipeline: sampled episodes of 12 starts of class V only, no BC term, the own-hazard potential on)
+name = "e023-ppo-overfit"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+run_dir = "~/aiddnet/data/runs/E-023/overfit"
+bank = "~/aiddnet/data/runs/E-022/banks/bank-v2.bank"
+seed = 5
+iterations = 40
+train_arenas = ["clb-left", "pit", "platform"]
+threads = 3
+
+[rollout]
+post_episodes = 48
+game_episodes = 0
+start_mix = [1.0, 0.0, 0.0]
+start_subset = 12
+temperature = 0.3
+opponents = [["scripted", 1.0]]
+
+[ppo]
+lr_scale = 0.1
+epochs = 4
+kl_coef = 0.1
+kl_target = 0.0
+critic_warmup_iters = 2
+bc_coef = 0.0
+
+[eval]
+every = 0
+starts = 2
+games = 2
+holdout_arenas = []

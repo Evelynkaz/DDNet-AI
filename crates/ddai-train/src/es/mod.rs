@@ -386,19 +386,31 @@ pub struct EvalSpec {
 
 impl EvalSpec {
     pub fn new(cfg: &EsConfig, bank: &Bank) -> EvalSpec {
+        EvalSpec::from_params(
+            &EvalParams {
+                eval: &cfg.eval,
+                train_arenas: &cfg.train_arenas,
+                window_ticks: cfg.window_ticks,
+                burn_in_ticks: cfg.burn_in_ticks,
+            },
+            bank,
+        )
+    }
+
+    pub fn from_params(p: &EvalParams<'_>, bank: &Bank) -> EvalSpec {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         for s in &bank.starts {
             h.update(format!("{}|{}|{}|{}|{};", s.arena, s.seed, s.swap, s.reverse_order, s.end_tick).as_bytes());
         }
         EvalSpec {
-            seed_base: cfg.eval.seed_base,
-            starts: cfg.eval.starts,
-            games: cfg.eval.games,
-            train_arenas: cfg.train_arenas.clone(),
-            holdout_arenas: cfg.eval.holdout_arenas.clone(),
-            window_ticks: cfg.window_ticks,
-            burn_in_ticks: cfg.burn_in_ticks,
+            seed_base: p.eval.seed_base,
+            starts: p.eval.starts,
+            games: p.eval.games,
+            train_arenas: p.train_arenas.to_vec(),
+            holdout_arenas: p.eval.holdout_arenas.clone(),
+            window_ticks: p.window_ticks,
+            burn_in_ticks: p.burn_in_ticks,
             bank_starts: bank.starts.len(),
             bank_fingerprint: ddai_env::arena::hex(&h.finalize())[..16].to_string(),
         }
@@ -426,6 +438,15 @@ pub fn spread<T: Clone>(v: &[T], n: usize) -> Vec<T> {
     (0..n).map(|i| v[i * v.len() / n].clone()).collect()
 }
 
+/// What an evaluation point needs of a run's configuration (shared by the ES and the PPO of task 8.5b).
+#[derive(Debug, Clone, Copy)]
+pub struct EvalParams<'a> {
+    pub eval: &'a EvalConfig,
+    pub train_arenas: &'a [String],
+    pub window_ticks: i32,
+    pub burn_in_ticks: i32,
+}
+
 fn evaluate_with(
     env: &Env,
     pool: &rayon::ThreadPool,
@@ -434,28 +455,47 @@ fn evaluate_with(
     maker: &BrainMaker<'_>,
     generation: u64,
 ) -> Result<EvalPoint, String> {
-    let e = &cfg.eval;
+    let spec = EvalParams {
+        eval: &cfg.eval,
+        train_arenas: &cfg.train_arenas,
+        window_ticks: cfg.window_ticks,
+        burn_in_ticks: cfg.burn_in_ticks,
+    };
+    evaluate_spec(env, pool, &spec, bank, maker, generation)
+}
+
+/// The evaluation point of a brain: held share over post-freeze starts of the training halls' validation part and of the holdout halls, and
+/// the first-freeze rate over full games on both, all on the spec's fixed seeds.
+pub fn evaluate_spec(
+    env: &Env,
+    pool: &rayon::ThreadPool,
+    spec: &EvalParams<'_>,
+    bank: &Bank,
+    maker: &BrainMaker<'_>,
+    generation: u64,
+) -> Result<EvalPoint, String> {
+    let e = spec.eval;
     let rules = &bank.rules;
-    let train_val: Vec<&BankStart> = spread(&bank.select(&cfg.train_arenas, Some(true), false), e.starts);
+    let train_val: Vec<&BankStart> = spread(&bank.select(spec.train_arenas, Some(true), false), e.starts);
     let hold: Vec<&BankStart> = spread(&bank.select(&e.holdout_arenas, None, false), e.starts);
     let run_starts = |s: &[&BankStart]| -> Result<StartsSummary, String> {
-        let o = eval_starts(env, pool, s, rules, maker, cfg.window_ticks, cfg.burn_in_ticks)?;
+        let o = eval_starts(env, pool, s, rules, maker, spec.window_ticks, spec.burn_in_ticks)?;
         Ok(summarize_starts(s, &o))
     };
     let run_games = |arenas: &[String], seed: u64| -> Result<GamesSummary, String> {
-        let o = eval_games(env, pool, arenas, e.games, seed, rules, maker, cfg.window_ticks)?;
+        let o = eval_games(env, pool, arenas, e.games, seed, rules, maker, spec.window_ticks)?;
         Ok(summarize_games(&o))
     };
     Ok(EvalPoint {
         generation,
-        spec: Some(EvalSpec::new(cfg, bank)),
+        spec: Some(EvalSpec::from_params(spec, bank)),
         train_starts: run_starts(&train_val)?,
         holdout_starts: if hold.is_empty() {
             None
         } else {
             Some(run_starts(&hold)?)
         },
-        train_games: run_games(&cfg.train_arenas, e.seed_base)?,
+        train_games: run_games(spec.train_arenas, e.seed_base)?,
         holdout_games: if e.holdout_arenas.is_empty() || e.games == 0 {
             None
         } else {
@@ -464,7 +504,7 @@ fn evaluate_with(
     })
 }
 
-fn strip_items(v: &mut Value) {
+pub(crate) fn strip_items(v: &mut Value) {
     match v {
         Value::Object(m) => {
             m.retain(|k, _| !k.ends_with("_items"));
@@ -477,9 +517,9 @@ fn strip_items(v: &mut Value) {
     }
 }
 
-fn arena_line(point: &EvalPoint, label: &str, g: &GamesSummary) -> Value {
+pub(crate) fn arena_line(point: &EvalPoint, phase: &str, label: &str, g: &GamesSummary) -> Value {
     let rate = |r: &eval::Rate| json!([r.p, r.lo, r.hi]);
-    json!({"kind": "arena", "phase": "es", "step": point.generation, "eval": {
+    json!({"kind": "arena", "phase": phase, "step": point.generation, "eval": {
         "arena": label, "opponents": ["scripted"], "games": g.credited.n,
         "w": g.w, "l": g.l, "d": g.d, "t": g.t,
         "credited_win_rate": rate(&g.credited), "credited_w": g.credited.k,
@@ -487,7 +527,7 @@ fn arena_line(point: &EvalPoint, label: &str, g: &GamesSummary) -> Value {
     }})
 }
 
-fn unix_seconds() -> u64 {
+pub(crate) fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -849,10 +889,10 @@ pub fn run_es(cfg: &EsConfig, allow_config_change: bool, log: &mut dyn FnMut(&st
         }
         write_zstd_postcard(&state_path, state, 3).map_err(|e| e.to_string())?;
         run.append_metrics(&line).map_err(|e| e.to_string())?;
-        run.append_metrics(&arena_line(&point, "train-halls", &point.train_games))
+        run.append_metrics(&arena_line(&point, "es", "train-halls", &point.train_games))
             .map_err(|e| e.to_string())?;
         if let Some(h) = &point.holdout_games {
-            run.append_metrics(&arena_line(&point, &cfg.eval.holdout_arenas.join("+"), h))
+            run.append_metrics(&arena_line(&point, "es", &cfg.eval.holdout_arenas.join("+"), h))
                 .map_err(|e| e.to_string())?;
         }
         if new_best {

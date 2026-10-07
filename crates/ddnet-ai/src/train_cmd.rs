@@ -134,6 +134,8 @@ pub enum TrainCommand {
     },
     /// OpenAI-ES on the outcome of the held block, and its tools (task 8.5a): `bank`, `run`, `eval`, `compare`, `scan`.
     Es(crate::es_cmd::EsArgs),
+    /// Recurrent PPO on the held-block outcome from a BC checkpoint (task 8.5b).
+    Ppo(crate::ppo_cmd::PpoArgs),
     /// Writes a copy of a fly checkpoint whose encoder also reads the target opponent's state (frozen, freeze time left,
     /// velocity, hook), with ZERO weights for it: the copy plays bit for bit like the original (task 8.5a).
     UpgradeBundle {
@@ -252,6 +254,7 @@ pub fn run(args: TrainArgs) -> ExitCode {
             threads,
         ),
         TrainCommand::Es(a) => crate::es_cmd::run(a),
+        TrainCommand::Ppo(a) => crate::ppo_cmd::run(a),
         TrainCommand::UpgradeBundle {
             bundle,
             opponent_state,

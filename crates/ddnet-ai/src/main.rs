@@ -15,6 +15,7 @@ mod fly_watch;
 mod launch_cmd;
 mod map_cmd;
 mod play_cmd;
+mod ppo_cmd;
 mod proxy_cmd;
 mod rec_cmd;
 mod record_cmd;

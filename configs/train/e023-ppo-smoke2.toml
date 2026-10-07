@@ -1,0 +1,43 @@
+# E-027 (task 8.5b), smoke run: does the PPO move the held-block metrics in the right direction, and what does it cost per iteration?
+#   ddnet-ai train ppo run --config configs/train/e023-ppo-smoke.toml
+name = "e023-ppo-smoke2"
+flyg = "~/aiddnet/data/connectome/compiled/fly-S-v1.flyg"
+init_bundle = "~/aiddnet/data/runs/E-022/bundles/s2-upgraded.bundle"
+arenas_dir = "configs/arenas"
+map_dir = "~/aiddnet/data/maps"
+run_dir = "~/aiddnet/data/runs/E-023/smoke2"
+bank = "~/aiddnet/data/runs/E-022/banks/bank-v1.bank"
+scenarios_dir = "configs/scenarios"
+seed = 11
+iterations = 30
+train_arenas = ["clb-left", "pit", "platform"]
+threads = 3
+
+[rollout]
+post_episodes = 64
+game_episodes = 16
+escapable_share = 0.75
+opponents = [["scripted", 1.0]]
+
+[ppo]
+lr_scale = 0.4
+kl_target = 0.03
+critic_warmup_iters = 2
+bc_coef = 0.5
+bc_windows = 8
+
+[bc]
+teacher_dirs = ["~/aiddnet/data/datasets/teacher/e022-postfreeze", "~/aiddnet/data/datasets/teacher/round1-v2"]
+[bc.teacher_data]
+val_mod = 10
+round_weights = [[7, 6.0], [8, 6.0]]
+scenario_weight = 2.0
+[bc.loss]
+pos_weight = [3.0, 1.0, 6.0]
+
+[eval]
+every = 10
+starts = 150
+games = 80
+holdout_arenas = ["chillblock5-ruler"]
+seed_base = 9100000000

@@ -44,13 +44,13 @@ pub struct BcBatchOutput {
 }
 
 /// One window's encoded inputs, kept for the encoder's backward pass.
-struct Encoded {
-    features: Vec<RayGridFeatures>,
-    proprio: Vec<crate::encoder::ProprioceptionValues>,
-    inputs: Vec<Vec<f32>>,
+pub(crate) struct Encoded {
+    pub(crate) features: Vec<RayGridFeatures>,
+    pub(crate) proprio: Vec<crate::encoder::ProprioceptionValues>,
+    pub(crate) inputs: Vec<Vec<f32>>,
 }
 
-fn encode_window(encoder: &EncoderModel, params: &EncoderParams, observations: &[Observation]) -> Encoded {
+pub(crate) fn encode_window(encoder: &EncoderModel, params: &EncoderParams, observations: &[Observation]) -> Encoded {
     let cfg = encoder.ray_grid_config();
     let mut features = Vec::with_capacity(observations.len());
     let mut proprio = Vec::with_capacity(observations.len());

@@ -6228,3 +6228,31 @@ code[2*i+1] = VALUES[(random[i] % 2048) % 46]            // VALUES = "ABCDEFGHKL
 ### 39.7 Что делает сервер (20.1, `ConTimeout` / `CServer::SetTimedOut`) и чего это не позволяет
 
 `/timeout <код>` ищет **другого** игрока с тем же кодом, у которого соединение уже **в состоянии таймаута** (`HasErrored`: сервер не слышал его `conn_timeout` секунд, по умолчанию **100**). Нашёл — новое соединение занимает слот старого (`ResumeOldConnection`, `DelClientCallback(новый, "Timeout Protection used")`): остаётся **старый игрок со своим именем** (новый, `(1)Name`, удаляется; имя из нового `Cl_StartInfo` не применяется), персонаж, состояние. Не нашёл (старое ещё «живо» для сервера) — ничего не забирается, новое соединение лишь помечается защищённым с этим кодом, а **старое, помеченное защищённым ещё при его входе, не отбрасывается по таймауту, а держится до `conn_timeout_protection` (1000 с)**. Следствия и повтор — D-100, «Граница» и «Повтор»; e2e `crates/ddnet-ai/tests/e2e_timeout_takeover.rs` показывает оба случая на частном сервере с `conn_timeout 5`.
+
+## 40. Дообучение мухи рекуррентным PPO (задача 8.5b, D-106, `ddai-train::ppo`, `ddai-fly::{policy, brain_policy_batched}`)
+
+(Номер раздела — следующий свободный на момент написания; лид перенумерует при слиянии.)
+
+### 40.1 Конфиг прогона (`train ppo run --config`)
+
+TOML, у каждого поля есть умолчание, неизвестные поля отвергаются (`deny_unknown_fields`). Верхний уровень: `name`, `flyg`, `init_bundle` (чекпоинт E-008, обновлённый `train upgrade-bundle`), `arenas_dir`, `map_dir`, `scenarios_dir` (нужен
+для BC-датасетов со сценариями), `run_dir`, `bank` (банк стартов версии 2, §37.2), `seed`, `iterations`, `train_arenas` (только залы с тегом `train`), `snapshot_every`, `threads` (1…3), `max_hours`. Секции:
+`[rollout]` (`post_episodes`, `game_episodes`, `start_mix [V, B, H]`, `start_subset`, `opponents [[spec, вес]]` — `scripted` / `planner` / `fly:<бандл>` / `past`, `aim_kappa`, `temperature`, `temperature_hook` (`0` = как `temperature`), `window_ticks`, `burn_in_ticks`),
+`[ppo]` (γ, λ, клип, эпохи, окно `chunk`/`burn_in`, энтропия, `lr_scale`, `lr_new_channel_mult`, `kl_coef`/`kl_target`/`kl_coef_min`/`kl_coef_max`, `target_kl`, `bc_coef`/`bc_windows`, критик), `[reward]` (`held`, `self_freeze`, `credited`,
+`draw_or_timeout`, `shaping`, `free_victim`, `own_hazard`), `[bc]` (`teacher_dirs`, `teacher_data` — как у BC (§29) плюс `opening_boost`, `opening_ticks`, `opening_rounds`: множитель веса шагов первых `opening_ticks` тиков после фриза в перечисленных раундах, по умолчанию выключен; `loss`, `seed`), `[curriculum]` (`enabled`, `demos`, `start_offsets [V, B, H]`, `step`, `threshold`, `min_episodes`, `share`, `current_share`, `mix`),
+`[dagger]` (`every`, `starts`, `mix`, `round_weight`), `[eval]` (как у ES: `every` в итерациях, `starts`, `games`, `holdout_arenas`, `seed_base`). Возобновление прогона с изменённым конфигом отказывает (`record_ppo_config`; не сравниваются
+`iterations`, `threads`, `max_hours`, `run_dir`).
+
+### 40.2 Каталог запуска
+
+`config.toml`, `metrics.jsonl`, `status.json`, `checkpoints/{last,selected,final,step-NNNNN}.bundle` (обычные чекпоинты мухи, играются как любой другой; `selected` — по обучающим залам),
+`snapshots/it-NNNNN.bundle` (лига: прошлые «я»), `dagger/` (teacher-датасет размеченных планировщиком эпизодов, раунд 100, формат §23) и `state.bin` = `zstd(postcard(PpoState { iteration, theta, adam, critic, critic_adam,
+beta_kl, best_score, best_iter, snapshots, curriculum { offsets [V, B, H], moves [(итерация, класс, смещение)], pending [по классу] }, dagger_ids }))` с sha256 — всё, что нужно, чтобы продолжить побитно так же. Строки метрик: `train` (`phase = "ppo"`, `loss.{total,pg,value,bc}`, `grad_norm`),
+`ppo` (на итерацию: доли удержаний по классам V/B/H и полным играм, свои фризы, возврат, `curr_offset`/`curr_n`/`curr_held`, потери, `entropy[4]`, `kl_ref[5]`, `kl_old`, `beta_kl`, `clip_frac`, `explained_variance`, нормы весов новых
+каналов `new_g_norm`/`new_c_norm`/`new_max_abs` и градиента по ним, времена), `ppo_eval` (точка оценки: тот же `EvalPoint`, что у `es_eval`, плюс нормы новых каналов), `arena` (`phase = "ppo"`) и `selection`.
+
+### 40.3 Демонстрации (`train ppo demos`, `curriculum.demos`)
+
+`zstd(postcard(DemoSet { version = 1, fingerprint, window, demos: [Demo { arena, seed, swap, reverse_order, end_tick, held, actions: [LoggedAction] }] }))` с sha256 (как банк). Демонстрация — решения планировщика с тика фриза до конца окна
+в той же игре, что у старта банка; `fingerprint` — хэш списка стартов (арена, сид, раскладка, тик фриза): файл от другого банка пересоздаётся. Старт curriculum со смещением `o` проигрывает решения блокирующего до фриза, затем решения
+демонстрации до тика `end_tick + o`, дальше играет муха (прогрев на последних 50 тиках, как у обычного старта).

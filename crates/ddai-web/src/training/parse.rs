@@ -293,8 +293,42 @@ pub struct PhaseMark {
     pub end_step: u64,
 }
 
+/// One evaluation point of an outcome-training run (`kind = "ppo_eval"` of the PPO, `"es_eval"` of the ES; tasks 8.5a, 8.5b): the share of
+/// post-freeze starts where the block was held, on the training halls' validation starts and on the holdout halls, with the victim-escapable
+/// subset (`held_v`) and the fly's own freezes/deaths in the window, and the first-freeze rate over full games.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct HeldPoint {
+    pub step: u64,
+    pub train_held: Option<f64>,
+    pub train_held_v: Option<f64>,
+    pub train_own: Option<f64>,
+    pub holdout_held: Option<f64>,
+    pub holdout_held_v: Option<f64>,
+    pub holdout_own: Option<f64>,
+    pub first_train: Option<f64>,
+    pub first_holdout: Option<f64>,
+    /// Norm of the encoder weights of the opponent-state channels (PPO).
+    pub new_channels: Option<f64>,
+}
+
+/// One iteration of a PPO run (`kind = "ppo"`): the held share of its own (sampled) episodes and what the learner did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PpoPoint {
+    pub step: u64,
+    pub held_v: Option<f64>,
+    pub own: Option<f64>,
+    pub kl_ref: Option<f64>,
+    pub entropy: Option<f64>,
+    pub explained_variance: Option<f64>,
+    /// The reverse curriculum's level: ticks of the demonstration's play before the fly takes over.
+    pub curr_offset: Option<f64>,
+    pub new_channels: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Metrics {
+    pub held: Vec<HeldPoint>,
+    pub ppo: Vec<PpoPoint>,
     pub train: Vec<TrainPoint>,
     pub eval: Vec<EvalPoint>,
     pub arena: Vec<ArenaPoint>,
@@ -466,6 +500,7 @@ pub fn parse_metrics(bytes: &[u8], limits: &Limits) -> Metrics {
     let mut phases: Vec<(String, u64, u64)> = Vec::new();
     let cap = limits.max_records;
     let mut all_train: Vec<TrainPoint> = Vec::new();
+    let mut all_ppo: Vec<PpoPoint> = Vec::new();
 
     for line in bytes.split(|&b| b == b'\n') {
         if line.iter().all(u8::is_ascii_whitespace) {
@@ -546,10 +581,56 @@ pub fn parse_metrics(bytes: &[u8], limits: &Limits) -> Metrics {
                 cap,
             ),
             Some("selection") => m.selection = Some(selection_rec(&v)),
+            Some("ppo_eval" | "es_eval") => {
+                if let Some(step) = uint(&v, &["iteration"]).or_else(|| uint(&v, &["generation"])) {
+                    let nc = match (num(&v, &["new_g_norm"]), num(&v, &["new_c_norm"])) {
+                        (Some(g), Some(c)) => Some(g + c),
+                        _ => None,
+                    };
+                    push_capped(
+                        &mut m.held,
+                        HeldPoint {
+                            step,
+                            train_held: num(&v, &["train_starts", "held", "p"]),
+                            train_held_v: num(&v, &["train_starts", "held_victim_escapable", "p"]),
+                            train_own: num(&v, &["train_starts", "self_freeze", "p"]),
+                            holdout_held: num(&v, &["holdout_starts", "held", "p"]),
+                            holdout_held_v: num(&v, &["holdout_starts", "held_victim_escapable", "p"]),
+                            holdout_own: num(&v, &["holdout_starts", "self_freeze", "p"]),
+                            first_train: num(&v, &["train_games", "credited", "p"]),
+                            first_holdout: num(&v, &["holdout_games", "credited", "p"]),
+                            new_channels: nc,
+                        },
+                        cap,
+                    );
+                }
+            }
+            Some("ppo") => {
+                if let Some(step) = uint(&v, &["iteration"]) {
+                    let ent = at(&v, &["entropy"])
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(Value::as_f64).sum::<f64>());
+                    let nc = match (num(&v, &["new_g_norm"]), num(&v, &["new_c_norm"])) {
+                        (Some(g), Some(c)) => Some(g + c),
+                        _ => None,
+                    };
+                    all_ppo.push(PpoPoint {
+                        step,
+                        held_v: num(&v, &["post_held_v"]),
+                        own: num(&v, &["post_self_freeze"]),
+                        kl_ref: num(&v, &["kl_ref_total"]),
+                        entropy: ent,
+                        explained_variance: num(&v, &["explained_variance"]),
+                        curr_offset: num(&v, &["curr_offset"]),
+                        new_channels: nc,
+                    });
+                }
+            }
             _ => {}
         }
     }
 
+    m.ppo = thin(&all_ppo, limits.max_series_points);
     m.train_thinned = all_train.len() > limits.max_series_points;
     m.train = thin(&all_train, limits.max_series_points);
 
@@ -652,6 +733,39 @@ mod tests {
         assert!(wilson(0, 0).is_none() && wilson(5, 4).is_none());
         let all = wilson(7, 7).unwrap();
         assert!(all.hi <= 1.0 && all.lo > 0.5);
+    }
+
+    #[test]
+    fn outcome_training_lines_become_held_and_ppo_points() {
+        // The lines `ddai-train::ppo` writes (and the ES's `es_eval` of the same shape): an evaluation point and an iteration.
+        let rate = |p: f64| json!({"k": 1, "n": 10, "p": p, "lo": 0.0, "hi": 1.0});
+        let lines = [
+            json!({"kind": "ppo_eval", "iteration": 40, "train_starts": {"held": rate(0.31), "held_escapable": rate(0.1), "held_victim_escapable": rate(0.2), "self_freeze": rate(0.45)},
+                "holdout_starts": {"held": rate(0.5), "self_freeze": rate(0.4)}, "train_games": {"credited": rate(0.55)}, "holdout_games": {"credited": rate(0.6)},
+                "new_g_norm": 0.5, "new_c_norm": 0.25}),
+            json!({"kind": "es_eval", "generation": 30, "train_starts": {"held": rate(0.3)}}),
+            json!({"kind": "ppo", "iteration": 7, "post_held_v": 0.125, "post_self_freeze": null, "kl_ref_total": 0.02, "entropy": [0.4, 0.3, 0.6, 0.3],
+                "explained_variance": 0.8, "curr_offset": 176, "new_g_norm": 1.0, "new_c_norm": 0.5}),
+        ];
+        let text: String = lines.iter().map(|l| l.to_string() + "\n").collect();
+        let m = parse_metrics(text.as_bytes(), &limits());
+        assert_eq!(m.held.len(), 2);
+        assert_eq!(m.held[0].step, 40);
+        assert_eq!(m.held[0].train_held_v, Some(0.2));
+        assert_eq!(m.held[0].holdout_held_v, None, "an absent field stays absent");
+        assert_eq!(m.held[0].new_channels, Some(0.75));
+        assert_eq!(
+            (m.held[0].first_train, m.held[0].first_holdout),
+            (Some(0.55), Some(0.6))
+        );
+        assert_eq!(m.held[1].step, 30, "an ES line carries `generation`");
+        assert_eq!(m.ppo.len(), 1);
+        let p = &m.ppo[0];
+        assert_eq!(
+            (p.step, p.held_v, p.own, p.curr_offset),
+            (7, Some(0.125), None, Some(176.0))
+        );
+        assert!((p.entropy.unwrap() - 1.6).abs() < 1e-9 && p.new_channels == Some(1.5));
     }
 
     #[test]

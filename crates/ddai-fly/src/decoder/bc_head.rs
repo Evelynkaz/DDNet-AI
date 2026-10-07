@@ -63,16 +63,39 @@ pub fn decoder_bc_loss_and_grad(
     let clip_at = decoder.config.z_clip;
     let z = calib.z(dn_rates, clip_at);
     let logits = decoder_logits(decoder, &z, params);
-    let mut grads = decoder.zeros_gradients();
-    let mut grad_dn = vec![0.0f32; decoder.num_outputs];
     let (loss, d) = head_loss_and_grad(&logits, targets, cfg);
     if targets.weight == 0.0 {
-        return (loss, grads, grad_dn, logits);
+        return (
+            loss,
+            decoder.zeros_gradients(),
+            vec![0.0f32; decoder.num_outputs],
+            logits,
+        );
     }
+    let (grads, grad_dn) = decoder_logits_backward(decoder, dn_rates, calib, params, &d, &targets.mask);
+    (loss, grads, grad_dn, logits)
+}
+
+/// The backward half of [`decoder_bc_loss_and_grad`], for any loss on the head logits (task 8.5b: the PPO objective): given
+/// `d = dL/d(head logits)` of one decision, the decoder gradients and `dL/d(dn_rates)`. Heads whose `mask` flag is off are skipped
+/// (their entries of `d` must then be zero, as `head_loss_and_grad` leaves them).
+pub fn decoder_logits_backward(
+    decoder: &DecoderModel,
+    dn_rates: &[f32],
+    calib: &DnCalibration,
+    params: &DecoderParams,
+    d: &HeadLogits,
+    mask: &crate::bc::HeadMask,
+) -> (DecoderGradients, Vec<f32>) {
+    assert_eq!(dn_rates.len(), decoder.num_outputs);
+    let clip_at = decoder.config.z_clip;
+    let z = calib.z(dn_rates, clip_at);
+    let mut grads = decoder.zeros_gradients();
+    let mut grad_dn = vec![0.0f32; decoder.num_outputs];
     let mut grad_z = vec![0.0f32; z.len()];
 
     // direction: [left, stop, right] logits; left/right share weights and bias.
-    if targets.mask.dir {
+    if mask.dir {
         let (d_left, d_stop, d_right) = (d.dir[0], d.dir[1], d.dir[2]);
         grads.direction_lr_b += d_left + d_right;
         for (g, (&w, gw)) in decoder
@@ -104,7 +127,7 @@ pub fn decoder_bc_loss_and_grad(
             &mut grad_z,
         );
     }
-    if targets.mask.jump {
+    if mask.jump {
         pooled_backward(
             &decoder.jump,
             &params.jump_w,
@@ -115,7 +138,7 @@ pub fn decoder_bc_loss_and_grad(
             &mut grad_z,
         );
     }
-    if targets.mask.hook {
+    if mask.hook {
         pooled_backward(
             &decoder.hook,
             &params.hook_w,
@@ -126,7 +149,7 @@ pub fn decoder_bc_loss_and_grad(
             &mut grad_z,
         );
     }
-    if targets.mask.fire {
+    if mask.fire {
         pooled_backward(
             &decoder.fire,
             &params.fire_w,
@@ -137,7 +160,7 @@ pub fn decoder_bc_loss_and_grad(
             &mut grad_z,
         );
     }
-    if targets.mask.aim {
+    if mask.aim {
         let (d_c, d_s) = (d.aim_c, d.aim_s);
         for (pair, (&theta, gtheta)) in decoder
             .aim_pairs
@@ -171,7 +194,7 @@ pub fn decoder_bc_loss_and_grad(
         }
         grad_dn[i] = grad_z[i] / calib.sigma[i];
     }
-    (loss, grads, grad_dn, logits)
+    (grads, grad_dn)
 }
 
 #[cfg(test)]

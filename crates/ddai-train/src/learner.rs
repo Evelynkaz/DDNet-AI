@@ -499,6 +499,31 @@ impl FlyLearner {
         &self.cfg
     }
 
+    /// The models and parameters of this fly as a policy network (task 8.5b, `ddai_fly::brain_policy_batched`).
+    pub(crate) fn policy_net(&self) -> ddai_fly::brain_policy_batched::PolicyNet<'_> {
+        ddai_fly::brain_policy_batched::PolicyNet {
+            model: &self.model,
+            encoder: &self.encoder,
+            encoder_params: &self.enc_params,
+            decoder: &self.decoder,
+            decoder_params: &self.dec_params,
+            calib: &self.calib,
+        }
+    }
+
+    /// The resting membrane state (the start of every window of a fresh episode).
+    pub(crate) fn rest_state(&self) -> &[f32] {
+        &self.v_rest
+    }
+
+    pub(crate) fn encoder(&self) -> &EncoderModel {
+        &self.encoder
+    }
+
+    pub(crate) fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
     /// The bundle of the current parameters.
     pub fn to_bundle(&self, meta: BundleMeta) -> FlyBundle {
         FlyBundle {
@@ -531,7 +556,7 @@ impl FlyLearner {
 
     /// Adds the three gradient groups of a step into the flat vector (the layout of
     /// [`Learner::params`]).
-    fn add_parts_grads(
+    pub(crate) fn add_parts_grads(
         &self,
         fly: &ParamGradients,
         encoder: &EncoderGradients,

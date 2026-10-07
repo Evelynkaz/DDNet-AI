@@ -1116,7 +1116,7 @@ pub fn add_l1_penalty(grads: &mut DecoderGradients, params: &DecoderParams, weig
 }
 
 mod bc_head;
-pub use bc_head::{decoder_bc_loss_and_grad, decoder_logits};
+pub use bc_head::{decoder_bc_loss_and_grad, decoder_logits, decoder_logits_backward};
 
 #[cfg(test)]
 mod tests;
