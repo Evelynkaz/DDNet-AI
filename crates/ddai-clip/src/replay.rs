@@ -258,8 +258,8 @@ fn views(f: &Frame) -> Vec<CharacterView> {
         .collect()
 }
 
-/// Feeds `frame` to the world the way the bot did.
-fn feed(lw: &mut LiveWorld, clip: &Clip, frame: &Frame) {
+/// Feeds `frame` to the world the way the bot did (public for the offline tools that read a clip's frames as worlds, task 3.15).
+pub fn feed(lw: &mut LiveWorld, clip: &Clip, frame: &Frame) {
     let characters = views(frame);
     let projectiles: Vec<_> = frame.projectiles.iter().map(|p| p.to_view()).collect();
     let switches: Vec<(i32, objects::SwitchState)> = frame.switches.iter().map(|s| s.to_net()).collect();

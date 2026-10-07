@@ -18,6 +18,7 @@ use crate::clock::{Clock, StepClock, WallClock};
 use crate::hybrid::config::{HybridConfig, HybridMode};
 use crate::hybrid::proposer::{NoProposer, ProposalOutcome, Proposer};
 use crate::hybrid::search::{DecisionInput, DecisionTelemetry, HybridSearch, SOURCE_KINDS, Source, WorkCounters};
+use crate::hybrid::window::{PredictedInput, WindowCtx, WindowModel, input_from_prediction};
 use crate::physics_adapter::{PhysicsWorld, from_ddnet_input};
 use crate::plan_world::PlanWorld;
 use crate::types::{PlayerInput, empty_input};
@@ -198,6 +199,9 @@ pub struct HybridBrain {
     /// decision. Cleared at the start of every decision (watched or not), set only when the proposer was consulted: a
     /// viewer that subscribes later never gets an older decision's frame labelled with the current verdict.
     viz_fresh: bool,
+    /// Task 3.15 (`HybridConfig::window_model`): the learned predictor of the victim's inputs through the lag window, and its reused output buffer.
+    window: Option<Box<dyn WindowModel>>,
+    window_buf: Vec<Option<PredictedInput>>,
 }
 
 impl HybridBrain {
@@ -253,7 +257,14 @@ impl HybridBrain {
             spare_ids: Vec::new(),
             travel_goal: None,
             viz_fresh: false,
+            window: None,
+            window_buf: Vec::new(),
         })
+    }
+
+    /// Task 3.15: hands the brain the lag-window model that `HybridConfig::window_model` switches on (without the switch it is never asked).
+    pub fn set_window_model(&mut self, model: Box<dyn WindowModel>) {
+        self.window = Some(model);
     }
 
     /// A hybrid without proposals (`NoProposer`), fixed-work mode.
@@ -384,6 +395,11 @@ impl HybridBrain {
         inputs
     }
 
+    /// Task 3.15: the decision's planning world (the snapshot rolled through the lag window), read-only, for tests and diagnostics.
+    pub fn debug_world(&self) -> Option<&ddai_physics::world::World<f32>> {
+        self.search.as_ref().map(|s| s.world().inner())
+    }
+
     /// Task 3.7b: the engine's context of the decision just made, for `debug_oracle`.
     pub fn debug_ctx(&self) -> Option<std::sync::Arc<crate::hybrid::engine::Ctx>> {
         self.search.as_ref()?.debug_ctx()
@@ -472,22 +488,42 @@ impl HybridBrain {
         let target_input = enemy_input_from_tee(&target);
         world.set_held_input(self_id, in_flight.first().map_or(self.prev, from_ddnet_input));
         let mut roll_ticks = 0u64;
+        // Task 3.15 (`window_model`): the learned model predicts the victim's inputs for the window ticks (and sees every decision, so its history is complete).
+        let lag = in_flight.len();
+        self.window_buf.clear();
+        if self.cfg.window_model
+            && let Some(model) = self.window.as_mut()
+        {
+            self.window_buf.resize(lag, None);
+            model.predict(
+                &WindowCtx {
+                    world: search.world_mut().inner(),
+                    self_id,
+                    victim_id: target_id,
+                    in_flight,
+                },
+                &mut self.window_buf,
+            );
+            search.charge_units(model.work_units());
+        }
         // Task 3.14 (`lag_mirror`): the victim through the lag window plays what the opponent model predicted for each tick, when it has a prediction.
         let tick0 = search.world_mut().inner().tick;
         let victim_inputs: Vec<Option<PlayerInput>> = if search.config().lag_mirror {
-            (0..in_flight.len())
+            (0..lag)
                 .map(|k| search.predicted_victim_input(target_id, tick0 + k as i32))
                 .collect()
         } else {
             Vec::new()
         };
         let world = search.world_mut();
+        let mut victim_fire = world.inner().cores.get(target_id as u8).map_or(0, |c| c.input.fire);
         for (k, wire) in in_flight.iter().enumerate() {
             world.set_input(self_id, from_ddnet_input(wire));
-            world.set_input(
-                target_id,
-                victim_inputs.get(k).copied().flatten().unwrap_or(target_input),
-            );
+            let victim = match self.window_buf.get(k).copied().flatten() {
+                Some(p) => input_from_prediction(&p, &target_input, &mut victim_fire),
+                None => victim_inputs.get(k).copied().flatten().unwrap_or(target_input),
+            };
+            world.set_input(target_id, victim);
             world.step();
             roll_ticks += 1;
         }
@@ -531,6 +567,9 @@ impl Brain for HybridBrain {
         self.spare_vels.clear();
         self.spare_ids.clear();
         self.travel_goal = None;
+        if let Some(w) = self.window.as_mut() {
+            w.reset();
+        }
     }
 
     fn decide(&mut self, obs: &Observation) -> Action {

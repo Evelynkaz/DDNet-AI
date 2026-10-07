@@ -1,0 +1,36 @@
+# work-clock: default-rate
+# Task 3.15 (E-028), PRE-REGISTERED (exploratory part: the proxy lags 4/x and 5/x), seed set D, the proxy lags (same seeds 15001..15200). Arm "base". The criteria are written in docs/EXPERIMENTS.md (E-028, "Предрегистрация") and committed BEFORE this config was run.
+#   opp_arena --config configs/arena/e028-eval-base-dx.toml --threads 3 --jsonl ~/aiddnet/data/runs/E-028/base-dx.jsonl
+name = "e028-eval-base-dx"
+base_seed = 15001
+games = 200
+
+[[condition]]
+name = "base lag 4/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "base lag 4/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "base lag 4/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "base lag 4/3"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 4 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "base lag 5/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 5 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "base lag 5/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 5 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]

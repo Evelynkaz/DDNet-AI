@@ -1,0 +1,21 @@
+# work-clock: default-rate
+# Task 3.15 (E-028), EXPLORATORY head ablation on a fresh seed set E (16001..16200), arm "hookpress": the model m1 with only some heads used (the others predict hold), lags 3/0 3/1 3/2.
+#   opp_arena --config configs/arena/e028-abl-hookpress-e.toml --threads 3 --jsonl ~/aiddnet/data/runs/E-028/hookpress-e.jsonl
+name = "e028-abl-hookpress-e"
+base_seed = 16001
+games = 200
+
+[[condition]]
+name = "hookpress lag 3/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { window_model = "~/aiddnet/data/runs/E-028/m1.oppnet", window_heads = "hook,press" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "hookpress lag 3/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { window_model = "~/aiddnet/data/runs/E-028/m1.oppnet", window_heads = "hook,press" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "hookpress lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3, hybrid = { window_model = "~/aiddnet/data/runs/E-028/m1.oppnet", window_heads = "hook,press" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]

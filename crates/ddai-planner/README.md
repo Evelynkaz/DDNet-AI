@@ -1089,6 +1089,14 @@ load average, не больше 4, D-080). Постоянный пул (`engine`
 Инструменты: арена `joni-duel` (`configs/arenas/joni-duel.toml`), `cargo run --release -p ddai-env --example duel_stats -- --config <toml> [--trace] [--dump N] [--jsonl файл]` (на 30 с игры: удары молотом, захваты и удержания хука, смены
 направления, где и как случилась первая заморозка, при `--trace` — за сколько тиков до заморозки решение гибрида пометило свой план «небезопасным»), `docs/research/e026/compare.py` (парное сравнение плеч по JSONL).
 
+### Модель окна лага (задача 3.15, E-028, D-107) — выключена по умолчанию
+
+`hybrid::window`: трейт `WindowModel` (`predict(&WindowCtx, &mut [Option<PredictedInput>])`, `work_units`, `reset`) и `input_from_prediction`. `HybridConfig::window_model = true`
+плюс `HybridBrain::set_window_model(..)` — окно лага крутится с вводом соперника, который вернула модель (направление, прыжок, хук, свежее нажатие огня как переход счётчика к следующему
+нечётному, прицел), вместо «держит то, что показывает снапшот»; без ключа, без модели или без окна — побитно как раньше. Модель вызывается на **каждом** решении от точного мира
+(и при пустом окне: у неё своя история), её цена — `HybridSearch::charge_units` → часы работы и `work.units` телеметрии. Сеть, которая это реализует, — крейт `ddai-oppnet`;
+планировщик от него не зависит. Тесты: `tests/window_model.rs` (модель играет соперника в окне; при выключенном ключе её не спрашивают и ничего не меняется; пустое окно; цена в счётчиках; `reset`).
+
 ### Телеметрия (`Brain::telemetry`, JSON)
 
 `{"brain","proposer","workers","totals":{решения, extended, danger_flagged, shielded, shield_incomplete, out_of_time,

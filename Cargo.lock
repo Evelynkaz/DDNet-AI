@@ -1103,13 +1103,16 @@ name = "ddai-env"
 version = "0.1.0"
 dependencies = [
  "ddai-brain",
+ "ddai-clip",
  "ddai-controls",
  "ddai-fly",
  "ddai-jsmath",
  "ddai-map",
  "ddai-nav",
+ "ddai-oppnet",
  "ddai-physics",
  "ddai-planner",
+ "ddai-world",
  "rayon",
  "serde",
  "serde_json",
@@ -1192,6 +1195,25 @@ dependencies = [
  "pre-rfc3243-libtw2-warn",
  "proptest",
  "thiserror",
+]
+
+[[package]]
+name = "ddai-oppnet"
+version = "0.1.0"
+dependencies = [
+ "allocation-counter",
+ "ddai-clip",
+ "ddai-jsmath",
+ "ddai-map",
+ "ddai-physics",
+ "ddai-planner",
+ "postcard",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "zstd",
 ]
 
 [[package]]

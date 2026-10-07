@@ -19,6 +19,7 @@
 //! * [`engine`]: candidate scoring on worker worlds, serial or on a persistent worker pool.
 //! * [`search`]: the decision procedure (pool of candidates, two-stage robust choice, adaptive
 //!   budget, shield) and its telemetry.
+//! * [`window`]: the lag-window model, a learned prediction of the victim's inputs (task 3.15, opt-in).
 //! * [`work`]: the work clock (deadline mode counted in physics ticks: reproducible, load-independent).
 //! * [`brain`]: [`HybridBrain`], the `ddai_brain::Brain` implementation.
 
@@ -30,6 +31,7 @@ pub mod proposer;
 pub mod search;
 pub mod techniques;
 pub mod threat;
+pub mod window;
 pub mod work;
 
 pub use brain::HybridBrain;
@@ -39,6 +41,7 @@ pub use proposer::{
 };
 pub use search::{DecisionTelemetry, WorkCounters};
 pub use techniques::Tech;
+pub use window::{PredictedInput, WindowCtx, WindowModel};
 pub use work::WORK_US_PER_TEE_TICK;
 
 /// Marker offset for an *absolute* aim angle inside a [`crate::planner::PlanStep`]. The planner

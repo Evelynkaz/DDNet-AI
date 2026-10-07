@@ -7,7 +7,8 @@
 //! * [`run`]: rayon batches, reproducible at any thread count;
 //! * [`report`]: W:L:D:T with Wilson 95% intervals, the run record, the Russian markdown table;
 //! * [`scenario`]: technique scenarios (T1-T18) with fixed start states and success predicates;
-//! * [`output`]: JSONL / summary files for a whole run config.
+//! * [`output`]: JSONL / summary files for a whole run config;
+//! * [`oppdata`]: a game recorded as a dataset record of the opponent-input predictor (task 3.15).
 
 pub mod arena;
 pub mod brains;
@@ -15,6 +16,7 @@ pub mod config;
 pub mod game;
 pub mod models;
 pub mod observe;
+pub mod oppdata;
 pub mod output;
 pub mod report;
 pub mod run;

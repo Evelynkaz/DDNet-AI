@@ -271,6 +271,10 @@ pub struct HybridConfig {
     /// [`HybridConfig::mirror`], newest first) instead of "it keeps the input its snapshot shows". Needs `mirror`; with no lag, or no prediction for a tick, the
     /// victim holds its input as before.
     pub lag_mirror: bool,
+    /// Task 3.15 (E-028, opt-in): the roll through the input-lag window plays the victim by what the learned window model
+    /// ([`crate::hybrid::window::WindowModel`], set with `HybridBrain::set_window_model`) predicts for each tick, instead of "it keeps the input its snapshot
+    /// shows". Without a model, or with no lag, nothing changes. It takes precedence over `lag_mirror` for the ticks it predicts.
+    pub window_model: bool,
 }
 
 /// How far (tiles) a wall may be for `wall_throws` to offer the wall swings.
@@ -324,6 +328,7 @@ impl Default for HybridConfig {
             wall_throws: false,
             mirror_planner: None,
             lag_mirror: false,
+            window_model: false,
         }
     }
 }

@@ -547,6 +547,9 @@ pub struct HybridSearch {
     /// Task 3.14 (`HybridConfig::lag_mirror`): the opponent model's recent plans, oldest first: (victim, world tick of its step 0, the victim's
     /// input at each plan step). The brain reads them to play the victim through the lag window of the next decisions.
     mirror_hist: Vec<(i32, i32, Vec<PlayerInput>)>,
+    /// Task 3.15: work (tee-tick equivalents) the brain did before `decide` that the tick counter does not see (the lag-window model's call);
+    /// charged to the work clock and the telemetry's `units` by the next `decide`.
+    pre_units: u64,
     /// The victim that has kept its direction neutral and its hook in for `.1` decisions in a row (an idle or camping opponent,
     /// for which "it keeps its input" is the right model and the opponent model has nothing to add).
     passive: (i32, u32),
@@ -632,6 +635,7 @@ impl HybridSearch {
             dec_units: 0,
             mirror_inputs: Vec::new(),
             mirror_hist: Vec::new(),
+            pre_units: 0,
             passive: (-1, 0),
             last_proposal_ms: 0.0,
             saved_red,
@@ -684,6 +688,11 @@ impl HybridSearch {
         &mut self.world
     }
 
+    /// Read-only view of the decision's planning world.
+    pub fn world(&self) -> &PhysicsWorld {
+        &self.world
+    }
+
     /// Gives the proposer back (the brain rebuilds the search when the map changes).
     pub fn into_proposer(mut self) -> Box<dyn Proposer> {
         std::mem::replace(&mut self.proposer, Box::new(crate::hybrid::proposer::NoProposer))
@@ -718,6 +727,11 @@ impl HybridSearch {
             return None;
         }
         predicted_input_at(&self.mirror_hist, &self.planner.step_ticks, victim, tick)
+    }
+
+    /// Task 3.15: charges `units` tee-ticks of work done outside the search (the lag-window model) to the next decision.
+    pub fn charge_units(&mut self, units: u64) {
+        self.pre_units += units;
     }
 
     /// New episode: forgets the warm plan and hidden state, reseeds every random source.
@@ -1256,7 +1270,8 @@ impl HybridSearch {
         let timed = matches!(self.cfg.mode, HybridMode::Deadline { .. });
         self.timed = timed;
         self.rollout_ms = 0.0;
-        self.dec_units = 0;
+        let pre_units = std::mem::take(&mut self.pre_units);
+        self.dec_units = pre_units;
         self.diag_ready = false;
         let now = |c: &dyn Clock| if timed { c.now_ms() } else { 0.0 };
         let mut tel = DecisionTelemetry {
@@ -1269,6 +1284,7 @@ impl HybridSearch {
         if let Some(m) = &self.meter {
             m.set_scale(self.world.all_tees().len());
             m.add(inp.roll_ticks);
+            m.add_units(pre_units);
         }
         tel.budget_ms = match self.cfg.mode {
             HybridMode::Deadline { budget_ms } => budget_ms,

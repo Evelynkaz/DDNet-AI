@@ -1,0 +1,16 @@
+# work-clock: default-rate
+# Task 3.15 (E-028): games of our hybrid (main defaults, 4 ms of WORK, no window model) against live-v2 at several lags, recorded by `opp_record` as the dataset of the opponent-input predictor.
+# Seeds: train 50001.., val 60001.., test 70001.. (none of them used by E-017/E-019/E-020/E-026, whose seeds are 1..4000 and 7001/11001).
+name = "e028-data-probe"
+base_seed = 50001
+games = 8
+
+[[condition]]
+name = "joni 3/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "clb-left 3/0"
+arena = "clb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]

@@ -22,6 +22,8 @@ ddai-controls = { path = "../ddai-controls" }
 ddai-fly = { path = "../ddai-fly" }
 ddai-jsmath = { path = "../ddai-jsmath" }
 ddai-map = { path = "../ddai-map" }
+# Task 3.15: the learned lag-window model of the hybrid (`window_model = "<bundle>"`), and the example recorder/evaluator.
+ddai-oppnet = { path = "../ddai-oppnet" }
 # Task 4.2: the wayblock tables (hall, spots, band) for the WB hold scenarios.
 ddai-nav = { path = "../ddai-nav" }
 ddai-physics = { path = "../ddai-physics" }
@@ -40,3 +42,6 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3.14"
+# Task 3.15: the `opp_clips` example reads the live clips as worlds.
+ddai-clip = { path = "../ddai-clip" }
+ddai-world = { path = "../ddai-world" }

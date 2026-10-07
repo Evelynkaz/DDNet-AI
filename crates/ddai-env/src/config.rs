@@ -466,6 +466,17 @@ pub struct HybridSpec {
     /// `PlannerConfig::duel_win_bonus` (default 0): once per rollout, the first tick the victim is frozen or dead is worth this.
     #[serde(default)]
     pub duel_win_bonus: Option<f64>,
+    /// Task 3.15 (E-028): path of a trained opponent-input model (`ddai-oppnet` bundle, `~/` allowed). Switches `HybridConfig::window_model` on: the
+    /// roll through the input-lag window plays the victim by the model's prediction. Default off.
+    #[serde(default)]
+    pub window_model: Option<String>,
+    /// Confidence gate of the window model, in logits (default 0 = off): the direction, jump, hook and press heads that are less sure than this predict what the
+    /// snapshot shows (hold). The aim change is a regression, not a decision: it is never gated.
+    #[serde(default)]
+    pub window_gate: Option<f64>,
+    /// Head ablation of the window model: the comma-separated heads it may use (`dir`, `jump`, `hook`, `press`, `aim`; default all); the others predict hold.
+    #[serde(default)]
+    pub window_heads: Option<String>,
 }
 
 impl HybridSpec {
@@ -746,6 +757,9 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         if let Some(v) = h.duel_win_bonus {
             cfg.planner.duel_win_bonus = v;
         }
+        if h.window_model.is_some() {
+            cfg.window_model = true;
+        }
         if let Some(v) = h.polish {
             cfg.polish = v;
         }
@@ -918,7 +932,23 @@ pub fn builtin_brain(spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
         "hybrid" => {
             let (cfg, clock) = hybrid_config(spec)?;
             let proposer = builtin_proposer(spec.hybrid.as_ref().map_or("none", HybridSpec::proposer_name))?;
-            let brain = HybridBrain::new(cfg, clock, proposer).map_err(EnvError::new)?;
+            let mut brain = HybridBrain::new(cfg, clock, proposer).map_err(EnvError::new)?;
+            if let Some(path) = spec.hybrid.as_ref().and_then(|h| h.window_model.as_deref()) {
+                let path = match path.strip_prefix("~/") {
+                    Some(rest) => std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest),
+                    None => std::path::PathBuf::from(path),
+                };
+                let gate = spec.hybrid.as_ref().and_then(|h| h.window_gate).unwrap_or(0.0);
+                let heads = match spec.hybrid.as_ref().and_then(|h| h.window_heads.as_deref()) {
+                    Some(list) => ddai_oppnet::predictor::parse_heads(list).map_err(EnvError::new)?,
+                    None => ddai_oppnet::predictor::HEAD_ALL,
+                };
+                let model = ddai_oppnet::OppPredictor::load(&path)
+                    .map_err(EnvError::new)?
+                    .with_gate(gate as f32)
+                    .with_heads(heads);
+                brain.set_window_model(Box::new(model));
+            }
             Ok(Box::new(brain))
         }
         other => Err(EnvError::new(format!(
@@ -983,6 +1013,31 @@ players = [
         assert_eq!(rate(""), Some(ddai_planner::hybrid::WORK_US_PER_TEE_TICK));
         assert_eq!(rate(", step_ms = 0.0022").map(f64::to_bits), Some(2.2f64.to_bits()));
         assert_eq!(rate(", step_ms = 0.00125").map(f64::to_bits), Some(1.25f64.to_bits()));
+    }
+
+    /// Task 3.15 (E-028): `window_model = "<bundle>"` switches `HybridConfig::window_model` on and the brain factory loads the model; without it nothing changes,
+    /// and a model file that is missing or broken is an error (never a silent fall back to the hold model).
+    #[test]
+    fn window_model_switch_and_loading() {
+        let spec = |hybrid: &str| {
+            let text = format!(
+                "name = \"t\"\n[[condition]]\nname = \"c\"\narena = \"a\"\nplayers = [{{ brain = \"hybrid\", clock = \"work\", hybrid = {{ {hybrid} }} }}, {{ brain = \"scripted\" }}]\n"
+            );
+            RunConfig::parse(&text).unwrap().condition[0].players[0].clone()
+        };
+        assert!(
+            !hybrid_config(&spec("workers = 1")).unwrap().0.window_model,
+            "default off"
+        );
+        let on = spec("window_model = \"~/nowhere/m.oppnet\", window_gate = 1.5");
+        assert!(hybrid_config(&on).unwrap().0.window_model);
+        assert_eq!(on.hybrid.as_ref().unwrap().window_gate, Some(1.5));
+        let err = builtin_brain(&on)
+            .err()
+            .expect("a missing model file is an error")
+            .to_string();
+        assert!(err.contains("m.oppnet"), "{err}");
+        assert!(builtin_brain(&spec("workers = 1")).is_ok());
     }
 
     /// Task 3.7a (D-080): search threads now go with the work clock (the helpers only speculate), and the proposer's

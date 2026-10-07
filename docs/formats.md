@@ -6256,3 +6256,13 @@ beta_kl, best_score, best_iter, snapshots, curriculum { offsets [V, B, H], moves
 `zstd(postcard(DemoSet { version = 1, fingerprint, window, demos: [Demo { arena, seed, swap, reverse_order, end_tick, held, actions: [LoggedAction] }] }))` с sha256 (как банк). Демонстрация — решения планировщика с тика фриза до конца окна
 в той же игре, что у старта банка; `fingerprint` — хэш списка стартов (арена, сид, раскладка, тик фриза): файл от другого банка пересоздаётся. Старт curriculum со смещением `o` проигрывает решения блокирующего до фриза, затем решения
 демонстрации до тика `end_tick + o`, дальше играет муха (прогрев на последних 50 тиках, как у обычного старта).
+
+## 41. Предсказатель ввода соперника: набор партий `*.opp` и модель `*.oppnet` (задача 3.15, D-107, `ddai-oppnet::{blob, data, bundle}`)
+
+Оба файла — один контейнер: `sha256(postcard-байты)` (32 байта) `++ zstd(postcard-байты)` (уровень 3, контрольная сумма zstd), пишется атомарно (временный файл + переименование); читатель проверяет хэш. В git не попадают (`.gitignore`, `tools/ci/no-weights.sh`).
+
+**`*.opp`** — `Vec<GameRec>`: `{ arena, seed, lag: [наш, соперника], swap, decide_every, tick0, ticks: Vec<TickRec> }`; `TickRec { frames: [TeeFrame; 2], applied: [InputRec; 2], rays: [f32; 16] }` — слот 0 мы, слот 1 моделируемый соперник; `ticks[j]` — мир на тике `tick0 + j` и ввод, применённый шагом, который к нему привёл (шаг тика `tick0 + j − 1`); лучи — вокруг слота 1. `TeeFrame` — только наблюдаемое в снапшоте
+(поза, скорость, угол, направление, прыжки, состояние хука, заморозка, давность удара, «на земле»), `InputRec` — применённый ввод (направление, прыжок, хук, счётчик огня, прицел).
+
+**`*.oppnet`** — `OppBundle { format_version = 1, feature_version, layout: [K_HIST, STRIDE, FD, N_RAYS, IF_SLOTS, IF_DIM, HORIZON], net: Mlp { n_in, h1, h2, n_out, params: Vec<f32> }, seed, epochs, val_loss, notes }`; раскладка не совпадает с раскладкой сборки, размеры не подходят или есть нефинитный вес — файл не загружается.
+Порядок параметров: `[W1 (n_in × h1, «входом вперёд»)] [b1] [W2 (h1 × h2)] [b2] [W3 (h2 × n_out)] [b3]`.
