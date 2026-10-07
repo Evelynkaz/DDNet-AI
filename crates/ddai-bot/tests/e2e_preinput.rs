@@ -1,4 +1,4 @@
-//! Task 3.20 e2e (D-115): the server's pre-inputs against a **private** DDNet 20.1 server that this test starts itself (UDP 127.0.0.1:8445, econ
+//! Task 3.20 e2e (D-112): the server's pre-inputs against a **private** DDNet 20.1 server that this test starts itself (UDP 127.0.0.1:8445, econ
 //! 127.0.0.1:8446, `sv_register 0`, `sv_preinput 1`, its own scratch directory and econ password; stopped afterwards), with two real clients: a scripted
 //! opponent (walks, jumps, hooks) and an observer that does what the bot does with them -- a `LiveWorld` fed with the snapshots and
 //! `LiveWorld::on_pre_input` fed with the `Sv_PreInput` messages. `#[ignore]`d and guarded by `DDAI_E2E=1`:
@@ -12,7 +12,7 @@
 //!    histogram is printed).
 //! 2. **The prediction error.** At every snapshot `S` the observer predicts the opponent's position for `S + 2` and `S + 4` twice, without and with
 //!    the pre-inputs, and compares both with the position the snapshot of that tick confirms. The error with pre-inputs must not exceed the one without,
-//!    and the share of exact (< 1 px) predictions must not fall; both are printed (this is the measurement for the default of D-115).
+//!    and the share of exact (< 1 px) predictions must not fall; both are printed (this is the measurement for the default of D-112).
 //! 3. **`sv_preinput 0`** (the control): no message arrives, so the prediction is the old one by construction.
 
 mod support;

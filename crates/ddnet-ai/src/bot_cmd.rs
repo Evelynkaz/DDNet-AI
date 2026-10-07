@@ -209,7 +209,7 @@ pub struct BotOpts {
     /// The file's sha256 is logged at the start; a file that cannot be loaded refuses the start.
     #[arg(long, value_name = "FILE", value_parser = parse_path_or_empty)]
     pub window_model: Option<PathBuf>,
-    /// The server's pre-inputs (task 3.20, D-115; `on` or `off`, **off** by default). A DDNet >= 19.4 server sends us the other tees' REAL inputs a
+    /// The server's pre-inputs (task 3.20, D-112; `on` or `off`, **off** by default). A DDNet >= 19.4 server sends us the other tees' REAL inputs a
     /// little before their ticks (`Sv_PreInput`; we announce 20010, a bot that announces 19000 gets none). They are always counted and stored
     /// (STATUS `preinput_stats`, a log line every 10 s); with `on` they also play in the prediction, over the window model's and over "hold". The
     /// marker `<data-dir>/bot/preinput.off` switches the use off while it exists (re-read once a second). Receive-only: nothing is sent.

@@ -1,4 +1,4 @@
-//! Task 3.20 (D-115): the server's pre-inputs inside the whole bot pipeline, offline.
+//! Task 3.20 (D-112): the server's pre-inputs inside the whole bot pipeline, offline.
 //!
 //! Synthetic snapshots through [`ddai_bot::Bot`] with a probing brain that records the exact world it is handed. The opponent stands still in every
 //! snapshot; the "server" tells the bot ahead of time that it walks left. With the pre-inputs played the brain's predicted opponent walks left, without

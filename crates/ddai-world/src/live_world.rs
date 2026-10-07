@@ -268,7 +268,7 @@ pub struct LiveWorld {
     /// Reused by the `frozen_last_tick` derivation (`m_FrozenLastTick`): the tile indices of one anti-skip walk.
     walk_scratch: Vec<i32>,
     seed: u64,
-    /// Task 3.20 (D-115): the other tees' real inputs the server sent ahead of their ticks ([`crate::preinput`]); always stored (receive-only,
+    /// Task 3.20 (D-112): the other tees' real inputs the server sent ahead of their ticks ([`crate::preinput`]); always stored (receive-only,
     /// no effect on anything), played in [`LiveWorld::predict`] only after [`LiveWorld::set_preinput`]`(true)`.
     pre: Box<crate::preinput::PreInputStore>,
     pre_on: bool,
@@ -920,7 +920,7 @@ impl LiveWorld {
         &self.scratch
     }
 
-    /// Task 3.20 (D-115): switches the use of the server's pre-inputs in the predictions on or off (default off; storing them never stops).
+    /// Task 3.20 (D-112): switches the use of the server's pre-inputs in the predictions on or off (default off; storing them never stops).
     pub fn set_preinput(&mut self, on: bool) {
         self.pre_on = on;
     }
@@ -1052,7 +1052,7 @@ impl LiveWorld {
                 } else {
                     self.held_input[id].unwrap_or_default()
                 };
-                // Task 3.20 (D-115): the owner's real input for this tick, when the server told us -- over the window model's and over hold.
+                // Task 3.20 (D-112): the owner's real input for this tick, when the server told us -- over the window model's and over hold.
                 let input = if use_pre
                     && id as i32 != own_id
                     && self.pre.newest(id as i32) >= 0

@@ -209,7 +209,7 @@ pub struct BotConfig {
     /// Task 3.17 (D-111, opt-in, `--window-model` / `window_model` in the settings): the learned model of the opponent's inputs in the lag
     /// window ([`crate::oppnet`]). `None` (the default): the bot decides exactly as before. Only the hybrid brain uses it.
     pub window_model: Option<crate::oppnet::WindowModelConfig>,
-    /// Task 3.20 (D-115, opt-in, `--preinput on`): play the other tees' real inputs the server sends ahead of their ticks (`Sv_PreInput`) in the
+    /// Task 3.20 (D-112, opt-in, `--preinput on`): play the other tees' real inputs the server sends ahead of their ticks (`Sv_PreInput`) in the
     /// prediction. Off by default; the messages are counted and stored either way (receive-only).
     pub preinput: bool,
     /// The marker file `<data-dir>/bot/preinput.off`: while it exists the pre-inputs are not played. `None`: no marker.
@@ -1044,7 +1044,7 @@ impl Bot {
         self.window_model = model;
     }
 
-    /// Task 3.20 (D-115): whether the pre-inputs are played (`On`), not asked for (`Off`) or switched off by the marker (`Killed`).
+    /// Task 3.20 (D-112): whether the pre-inputs are played (`On`), not asked for (`Off`) or switched off by the marker (`Killed`).
     pub fn set_preinput(&mut self, mode: PreInputMode) {
         self.preinput = mode;
         if let Some(live) = self.live.as_mut() {

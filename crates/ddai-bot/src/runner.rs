@@ -241,7 +241,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     if let Some(why) = duel_switch.state() {
         tracing::info!("duel detection: off ({})", why.name());
     }
-    // Task 3.20 (D-115): the server's pre-inputs are played with `--preinput on` unless the marker `bot/preinput.off` exists (re-read once a second).
+    // Task 3.20 (D-112): the server's pre-inputs are played with `--preinput on` unless the marker `bot/preinput.off` exists (re-read once a second).
     let mut pre_switch = SelfKillSwitch::new(!cfg.bot.preinput, cfg.bot.preinput_marker.clone(), Instant::now());
     let pre_mode = |sw: &SelfKillSwitch| match (cfg.bot.preinput, sw.state()) {
         (false, _) => crate::bot::PreInputMode::Off,
@@ -251,7 +251,7 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
     bot.set_preinput(pre_mode(&pre_switch));
     if cfg.bot.preinput {
         tracing::info!(
-            "pre-inputs: {} (--preinput; task 3.20, D-115): the other tees' real inputs the server sends ahead of their ticks play in the prediction; the marker {:?} switches it off",
+            "pre-inputs: {} (--preinput; task 3.20, D-112): the other tees' real inputs the server sends ahead of their ticks play in the prediction; the marker {:?} switches it off",
             bot.preinput_status().0.name(),
             cfg.bot.preinput_marker
         );

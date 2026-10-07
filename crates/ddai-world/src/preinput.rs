@@ -1,4 +1,4 @@
-//! Server pre-inputs (`Sv_PreInput`, task 3.20, D-115): the other tees' REAL inputs, sent by a DDNet >= 19.4 server before the tick they are used on.
+//! Server pre-inputs (`Sv_PreInput`, task 3.20, D-112): the other tees' REAL inputs, sent by a DDNet >= 19.4 server before the tick they are used on.
 //!
 //! **What the server does** (`engine/server/server.cpp:1934-1980`, `game/server/gamecontext.cpp:1530`): when a client's input arrives for
 //! `IntendedTick <= Tick() + 4 * TickSpeed + 1` and the input differs from the client's previous pre-input in anything but the aim, the server sends
@@ -336,7 +336,7 @@ impl Roll {
         input.hook = msg.hook;
         // `fire` is deliberately NOT taken from the message: the server fires when the input ARRIVES (`OnClientDirectInput` -> `FireWeapon`,
         // `server.cpp:1989`), earlier than the intended tick, so a swing may already be in the snapshot and replaying it would add a phantom one.
-        // The assumed fire stays (D-115).
+        // The assumed fire stays (D-112).
         if at == tick {
             // The aim is the message's only on its own tick.
             input.target_x = msg.target_x;

@@ -289,7 +289,7 @@ pub struct StatusMessage {
     pub window_model: String,
     /// Additive since task 3.17: the guard's numbers (see [`crate::oppnet::WindowGuardStatus`]); `null` without a model.
     pub window_guard: Option<serde_json::Value>,
-    /// Additive since task 3.20 (D-115): the server's pre-inputs. `"off"` (the default: counted, not played), `"on"` (played in the prediction) or
+    /// Additive since task 3.20 (D-112): the server's pre-inputs. `"off"` (the default: counted, not played), `"on"` (played in the prediction) or
     /// `"killed"` (asked for, but the marker `bot/preinput.off` exists).
     pub preinput: String,
     /// Additive since task 3.20: the counters (`received`, `stored`, `ahead`, `behind`, `stale`, `invalid`, `duplicate`, `used`, `distrusted`,

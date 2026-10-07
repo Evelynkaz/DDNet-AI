@@ -307,7 +307,7 @@ E-009, systemd-юнит бота и его установка — `deploy/README
 - **Тесты.** `tests/window_model.rs` (тождественность «выкл» / маркер, влияние на мир мозга, предохранитель, маркер, журнал без ников, 0 аллокаций), юнит-тесты `oppnet`, `ddai-oppnet::live`, `ddai-world` (`tests/live_bot_api.rs`), равенство признаков `ddai-env/tests/live_features.rs`, e2e на приватном сервере со скриптовым соперником
   `crates/ddai-bot/tests/e2e_window_model.rs` (`DDAI_E2E=1 cargo test -p ddai-bot --test e2e_window_model -- --ignored --nocapture --test-threads=1`).
 
-## Предварительные вводы сервера: `--preinput on|off` (задача 3.20, D-115)
+## Предварительные вводы сервера: `--preinput on|off` (задача 3.20, D-112)
 
 Выключено по умолчанию. Сообщения `Sv_PreInput` приходят в `SessionEvent::ExGameMessage`, `Bot::on_pre_input` кладёт их в `LiveWorld` (хранение и счёт — всегда); `--preinput on` включает проигрыш в предсказании (`LiveWorld::set_preinput`): чужие персонажи играют настоящие вводы на тиках, о которых сервер успел сообщить, дальше — модель окна 3.17 или последний настоящий ввод.
 Маркер `<data-dir>/bot/preinput.off` выключает проигрыш (раз в секунду). STATUS: `preinput`, `preinput_stats` (`docs/formats.md` §45). Тесты: `tests/preinput.rs` (выкл. = побитно прежнее, проигрыш, свой id, 0 аллокаций), e2e `tests/e2e_preinput.rs` (приватный сервер: сообщения приходят, ошибка предсказания с ними и без). Механизм и измерения — `docs/research/preinput.md`.

@@ -6354,7 +6354,7 @@ beta_kl, best_score, best_iter, snapshots, curriculum { offsets [V, B, H], moves
 **Разбор.** `ddnet-ai oppnet-live report <файл>… [--detail] [--no-rotated]` читает журнал (и его `.1`…`.9`, если есть), печатает Markdown: таблицы по `k` и по `w` — точность направления, хука, направления+хука («держит → модель», %), средняя ошибка прицела (рад), события прыжка (всего / угадано / ложных), смены состояния предохранителя; без отсчётов — код выхода 1.
 Метрика та же, что у `opp_clips` (§6 `docs/research/opponent-predictor.md`): доля тиков, где направление равно показанному снапшотом.
 
-## 45. Предварительные вводы сервера: STATUS, журнал, ключ, маркер (задача 3.20, D-115, `ddai-world::preinput`, `ddai-bot::{bot, runner, bridge}`)
+## 45. Предварительные вводы сервера: STATUS, журнал, ключ, маркер (задача 3.20, D-112, `ddai-world::preinput`, `ddai-bot::{bot, runner, bridge}`)
 
 **Сообщение** (`Sv_PreInput`, `preinput@netmsg.ddnet.org`): `direction`, `target_x`, `target_y`, `jump`, `fire`, `hook`, `wanted_weapon`, `next_weapon`, `prev_weapon`, `owner` (0..=127), `intended_tick` (0..=1879048191); поле вне диапазона отвергает всё сообщение (как в DDNet). Хранится в кольце по 200 на владельца по `intended_tick % 200`; новейшее сообщение владельца — `newest`.
 
