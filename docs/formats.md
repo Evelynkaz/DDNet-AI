@@ -6424,7 +6424,7 @@ beta_kl, best_score, best_iter, snapshots, curriculum { offsets [V, B, H], moves
 
 `train upgrade-readout --bundle B --out O --readout linear-dn|mlp-dn-<H>|mlp-enc-<H> [--seed S]`; `tools/e031/{gen_configs.sh, bc_arms.sh, eval.sh, summary.sh, offline_table.py, thr_grid.sh, dagger_round.sh}`; конфиги `configs/train/e031-ro-*.toml`; зонд `train probe-hook` дополнен MLP на DN текущего кадра.
 
-## 48. Лаг ввода: ручки `hybrid_budget_ms` / `prediction_margin_ms`, ряды `slack` / `ready` / `horizon shares`, запись `a` трассы, `lag_model` арены (задача 3.16, D-112, `ddai-bot::{timing_knobs, latency, trace, bridge}`, `ddai-env::{sim, config}`)
+## 48. Лаг ввода: ручки `hybrid_budget_ms` / `prediction_margin_ms`, ряды `slack` / `ready` / `horizon shares`, запись `a` трассы, `lag_model` арены (задача 3.16, D-115, `ddai-bot::{timing_knobs, latency, trace, bridge}`, `ddai-env::{sim, config}`)
 
 Всё аддитивно: без новых ключей и флагов поведение и вывод прежние.
 

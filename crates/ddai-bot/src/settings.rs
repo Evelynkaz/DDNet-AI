@@ -59,19 +59,33 @@ pub struct Settings {
 /// a perfectly parsable TOML value of the wrong kind, and a typed field would turn it into a serde error, which moves the whole file aside
 /// (`.bad-<ts>`) and loses every other setting. Here any TOML value reads; [`crate::timing_knobs::resolve`] judges it (whole number in range, or ignored
 /// with a warning).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RawKnob {
     /// A TOML integer (any sign and size that fits an `i64`).
     Int(i64),
-    /// Anything else (a float, a string, a table, ...), kept as the text TOML shows for it, for the warning.
-    Other(String),
+    /// Anything else (a float, a string, a table, ...), kept as the TOML value itself so that a save writes back exactly what was read (review F9:
+    /// kept as text it gained a layer of quoting on every save).
+    Other(toml::Value),
 }
+
+/// `toml::Value` has no `Eq` (floats); values compare by the text TOML shows for them.
+impl PartialEq for RawKnob {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RawKnob::Int(a), RawKnob::Int(b)) => a == b,
+            (RawKnob::Other(a), RawKnob::Other(b)) => a.to_string() == b.to_string(),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RawKnob {}
 
 impl<'de> Deserialize<'de> for RawKnob {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Ok(match toml::Value::deserialize(d)? {
             toml::Value::Integer(i) => RawKnob::Int(i),
-            other => RawKnob::Other(other.to_string()),
+            other => RawKnob::Other(other),
         })
     }
 }
@@ -80,7 +94,7 @@ impl Serialize for RawKnob {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
             RawKnob::Int(i) => s.serialize_i64(*i),
-            RawKnob::Other(text) => s.serialize_str(text),
+            RawKnob::Other(value) => value.serialize(s),
         }
     }
 }
@@ -410,15 +424,37 @@ mod tests {
                 );
             }
         }
-        // And it round-trips through a save (the console commands save the whole struct).
-        let path = dir.path().join("rt.toml");
-        std::fs::write(&path, "prediction_margin_ms = 4.5\nhybrid_budget_ms = 3\n").unwrap();
-        update(&path, |s| s.low = Some(true)).unwrap();
-        let Loaded::Ok(s) = load(&path) else {
-            panic!("corrupt after a save")
-        };
-        assert_eq!(s.hybrid_budget_ms, Some(RawKnob::Int(3)));
-        assert!(matches!(s.prediction_margin_ms, Some(RawKnob::Other(_))));
+        // And it round-trips through any number of saves exactly (the console commands save the whole struct; review F9: a value that was kept as text
+        // gained a layer of quoting on every save).
+        for (i, text) in ["4.5", "\"5\"", "[1, 2]", "true"].into_iter().enumerate() {
+            let path = dir.path().join(format!("rt{i}.toml"));
+            std::fs::write(&path, format!("prediction_margin_ms = {text}\nhybrid_budget_ms = 3\n")).unwrap();
+            let Loaded::Ok(first) = load(&path) else {
+                panic!("corrupt")
+            };
+            for n in 0..3 {
+                update(&path, |s| s.low = Some(n % 2 == 0)).unwrap();
+            }
+            let Loaded::Ok(s) = load(&path) else {
+                panic!("corrupt after a save")
+            };
+            assert_eq!(s.hybrid_budget_ms, Some(RawKnob::Int(3)));
+            assert!(matches!(s.prediction_margin_ms, Some(RawKnob::Other(_))), "{text}");
+            assert_eq!(
+                s.prediction_margin_ms, first.prediction_margin_ms,
+                "{text}: changed by three saves"
+            );
+            // Scalars come back as the same text (an array is laid out over several lines by the serializer; its value is compared above).
+            if !text.starts_with('[') {
+                let file = std::fs::read_to_string(&path).unwrap();
+                let line = file.lines().find(|l| l.starts_with("prediction_margin_ms")).unwrap();
+                assert_eq!(
+                    line.split_once('=').unwrap().1.trim().replace(' ', ""),
+                    text.replace(' ', ""),
+                    "{text}: the file line"
+                );
+            }
+        }
     }
 
     #[test]

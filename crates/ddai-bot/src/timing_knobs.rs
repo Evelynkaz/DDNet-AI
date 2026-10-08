@@ -238,7 +238,7 @@ mod tests {
         }
         // A good flag still wins over (and silences nothing about) a bad file value; the file value does not matter then.
         let settings = Settings {
-            hybrid_budget_ms: Some(RawKnob::Other("3.5".into())),
+            hybrid_budget_ms: Some(RawKnob::Other(toml::Value::Float(3.5))),
             ..Settings::default()
         };
         let k = resolve(Some(2), None, &settings);
