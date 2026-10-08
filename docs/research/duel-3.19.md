@@ -275,4 +275,3 @@ target/release/examples/duel_stats --config configs/arena/d115-screen.toml --gam
 # тесты
 cargo test -p ddai-env --test duel; cargo test -p ddai-planner --lib hybrid::reflex; cargo test -p ddai-bot --test duel_wb --test clips
 ```
-
