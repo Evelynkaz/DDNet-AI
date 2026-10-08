@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# What ddnet-ai-bot.service does, for the local e2e (tasks 5.12, 5.13, 5.15; the same `--finish`, `--wb-smart` and `--no-selfkill=` words
+# What ddnet-ai-bot.service does, for the local e2e (tasks 5.12, 5.13, 5.15, 3.20b; the same `--finish`, `--wb-smart`, `--no-selfkill=` and `--preinput` words
 # as the unit): the bot with the validated environment the helper wrote, then the unit's ExecStopPost hook (`ddnet-ai launch exited`) with systemd's own EXIT_CODE / EXIT_STATUS variables. SIGTERM goes on to the bot.
 set -u
 : "${E2E_DIR:?}" "${E2E_BIN:?}"
@@ -12,7 +12,7 @@ source "$E2E_DIR/etc/bot-launch.env"
 # shellcheck disable=SC2086
 "$E2E_BIN" play --server "$BOT_SERVER" --name "$BOT_NAME" --brain "$BOT_BRAIN" --duration "$BOT_DURATION" \
   --hybrid-mirror "$BOT_HYBRID_MIRROR" --finish "${BOT_FINISH:-off}" \
-  --wb-smart "$BOT_WB_SMART" --no-selfkill="$BOT_NO_SELFKILL" --window-model="${BOT_WINDOW_MODEL:-}" \
+  --wb-smart "$BOT_WB_SMART" --no-selfkill="$BOT_NO_SELFKILL" --window-model="${BOT_WINDOW_MODEL:-}" --preinput "${BOT_PREINPUT:-off}" \
   $BOT_FLY_ARGS --no-console --web-names --data-dir "$DATA" \
   --live-servers "$DATA/live-servers.toml" --report "$DATA/bot/last-report.json" &
 child=$!

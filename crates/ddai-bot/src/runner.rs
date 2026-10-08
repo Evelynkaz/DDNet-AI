@@ -502,6 +502,11 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
                     invalid = c.invalid,
                     used = c.used,
                     distrusted = c.distrusted,
+                    distrusted_reckoned = c.distrusted_reckoned,
+                    checked = c.checked,
+                    checked_reckoned = c.checked_reckoned,
+                    decisions = c.decisions,
+                    decisions_real = c.decisions_real,
                     lead = ?c.lead,
                     known_ahead = ?c.known_ahead,
                     "pre-inputs (lead = intended tick - latest snapshot tick, bins -4..=11)"
@@ -895,6 +900,8 @@ fn preinput_stats(c: &ddai_world::preinput::PreInputCounts) -> serde_json::Value
     serde_json::json!({
         "received": c.received, "stored": c.stored, "ahead": c.ahead, "behind": c.behind, "stale": c.stale,
         "invalid": c.invalid, "duplicate": c.duplicate, "used": c.used, "distrusted": c.distrusted,
+        "distrusted_reckoned": c.distrusted_reckoned, "checked": c.checked, "checked_reckoned": c.checked_reckoned,
+        "decisions": c.decisions, "decisions_real": c.decisions_real,
         "lead_from": ddai_world::preinput::LEAD_MIN, "lead": c.lead.to_vec(), "known_ahead": c.known_ahead.to_vec(),
     })
 }

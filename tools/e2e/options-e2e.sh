@@ -14,6 +14,9 @@
 # `launch-options.spec.ts` then clicks through the card and checks that both flags reached the bot: the env file, the bot's own log lines
 # («wb smart: on», «self-kill: off (flag)»), its STATUS (`/api/bot/status`) and the «Бот» card.
 #
+# Since tasks 3.17 and 3.20b the same stack also drives the toggles «Предсказатель соперника», «Настоящие ходы соперника от сервера» and the
+# «ВБ (эксперимент)» value of «Дожим»; the unit's words `--window-model=`, `--preinput` and `--finish` are run-bot.sh's.
+#
 # Usage: tools/e2e/options-e2e.sh            (builds target/debug/ddnet-ai with the feature, runs Playwright, stops everything)
 #        DDAI_BIN=/path/ddnet-ai tools/e2e/options-e2e.sh       (use an existing build; it MUST have the loopback-favourites feature)
 #        CARGO_TARGET_DIR=/path ...                            (the build and the binary it finds follow it)

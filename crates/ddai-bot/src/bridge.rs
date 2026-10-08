@@ -292,8 +292,12 @@ pub struct StatusMessage {
     /// Additive since task 3.20 (D-112): the server's pre-inputs. `"off"` (the default: counted, not played), `"on"` (played in the prediction) or
     /// `"killed"` (asked for, but the marker `bot/preinput.off` exists).
     pub preinput: String,
-    /// Additive since task 3.20: the counters (`received`, `stored`, `ahead`, `behind`, `stale`, `invalid`, `duplicate`, `used`, `distrusted`,
-    /// and `lead`, a histogram of `intended_tick - latest snapshot tick` from `lead_from` upwards); counted whatever the mode.
+    /// Additive since task 3.20: the counters (`received`, `stored`, `ahead`, `behind`, `stale`, `invalid`, `duplicate`, `used`, `distrusted`, and
+    /// `lead` / `known_ahead`, histograms from `lead_from` upwards: `intended_tick - latest snapshot tick` of each message, and `newest message tick -
+    /// snapshot tick` per other tee at each snapshot); counted whatever the mode. Additive since task 3.20b: `checked` and `distrusted_reckoned` /
+    /// `checked_reckoned` (the trust checks, and the part of them that were dead-reckoned characters; both kinds are checked for direction, hook and jump) and
+    /// `decisions` / `decisions_real` (predictions for a target while the pre-inputs are played, and those in which the target's newest message
+    /// reached past the snapshot: the A/B metric).
     pub preinput_stats: serde_json::Value,
 }
 

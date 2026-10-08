@@ -289,8 +289,8 @@ async fn the_smart_wayblock_and_the_duel_switch_reach_the_request_as_closed_valu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_finishing_switch_reaches_the_request_as_one_of_three_words_and_the_pure_fly_takes_only_off() {
-    // Task 5.13 (D-097).
+async fn the_finishing_switch_reaches_the_request_as_one_of_four_words_and_the_pure_fly_takes_only_off() {
+    // Task 5.13 (D-097); `wb` since task 3.18 (D-114).
     let server = deployed().await;
     let l = login(&server);
     let with = |brain: &str, finish: serde_json::Value| {
@@ -312,8 +312,19 @@ async fn the_finishing_switch_reaches_the_request_as_one_of_three_words_and_the_
         assert_eq!((req.brain.is_some(), req.finish), (true, Some(want)), "{brain} {word}");
         fs::remove_file(request_file(&server)).unwrap();
     }
+    // `wb` (task 3.18): both hybrid brains, on a server of its own (the site takes at most 6 requests a minute).
+    let wb_server = deployed().await;
+    let wb_login = login(&wb_server);
+    for brain in ["hybrid", "hybrid-fly"] {
+        let r = post(&wb_server, &wb_login, &with(brain, serde_json::json!("wb")));
+        assert_eq!(r.status, 202, "{brain} wb: {r:?}");
+        let req =
+            parse_request(&fs::read(request_file(&wb_server)).unwrap()).expect("the helper's own parser accepts it");
+        assert_eq!(req.finish, Some(Finish::Wb), "{brain}");
+        fs::remove_file(request_file(&wb_server)).unwrap();
+    }
     // The pure fly with finishing on: refused up front, nothing written.
-    for word in ["target", "full"] {
+    for word in ["target", "wb", "full"] {
         let r = post(&server, &l, &with("fly", serde_json::json!(word)));
         assert_eq!(
             (r.status, r.json()["error"].as_str()),
@@ -321,11 +332,15 @@ async fn the_finishing_switch_reaches_the_request_as_one_of_three_words_and_the_
             "{word}"
         );
     }
-    // Anything outside the three words, and a finishing on a stop: refused, nothing written (the injection attempts included).
+    // Anything outside the four words, and a finishing on a stop: refused, nothing written (the injection attempts included).
     for bad in [
         serde_json::json!("on"),
         serde_json::json!("Target"),
         serde_json::json!("TARGET"),
+        serde_json::json!("WB"),
+        serde_json::json!("wb "),
+        serde_json::json!("wb --wb left"),
+        serde_json::json!("wb\nBOT_SERVER=\"203.0.113.5:8308\""),
         serde_json::json!(true),
         serde_json::json!(1),
         serde_json::json!("target --report /etc/passwd"),
@@ -509,6 +524,98 @@ async fn the_page_gets_the_predictor_of_the_helpers_status_and_an_old_status_has
     assert!(j["status"].get("window_model").is_none(), "{j}");
     // A value that is not a boolean makes the whole status unreadable, never a mode of its own.
     fs::write(&status, r#"{"v":1,"state":"started","at":5,"window_model":"yes"}"#).unwrap();
+    assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_preinput_toggle_reaches_the_request_as_a_boolean_for_the_hybrids_only() {
+    // Task 3.20b (D-112): no file to check (unlike the window model), a boolean and nothing else.
+    let with = |brain: &str, val: serde_json::Value| {
+        let mut body = start_body();
+        body["brain"] = serde_json::json!(brain);
+        body["preinput"] = val;
+        body
+    };
+    // Both hybrid brains carry `preinput: true` into the request, the helper's own parser accepts it, and it names no path.
+    for brain in ["hybrid", "hybrid-fly"] {
+        let server = deployed().await;
+        let l = login(&server);
+        let r = post(&server, &l, &with(brain, serde_json::json!(true)));
+        assert_eq!(r.status, 202, "{brain}: {r:?}");
+        let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
+        let req = parse_request(text.as_bytes()).expect("the helper's own parser accepts it");
+        assert_eq!(req.preinput, Some(true), "{brain}");
+        assert!(text.contains(r#""preinput":true"#), "{text}");
+    }
+    // `false` is accepted too and stays `false`; an absent field stays absent (an old helper's strict schema never sees an unchanged request's key).
+    let server = deployed().await;
+    let l = login(&server);
+    let r = post(&server, &l, &with("hybrid", serde_json::json!(false)));
+    assert_eq!(r.status, 202, "{r:?}");
+    let req = parse_request(&fs::read(request_file(&server)).unwrap()).unwrap();
+    assert_eq!(req.preinput, Some(false));
+    fs::remove_file(request_file(&server)).unwrap();
+    let r = post(&server, &l, &start_body());
+    assert_eq!(r.status, 202, "{r:?}");
+    let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
+    assert!(!text.contains("preinput"), "{text}");
+    fs::remove_file(request_file(&server)).unwrap();
+    // The pure fly: refused with its own code, nothing written.
+    let r = post(&server, &l, &with("fly", serde_json::json!(true)));
+    assert_eq!(
+        (r.status, r.json()["error"].as_str()),
+        (400, Some("preinput_hybrid_only")),
+        "{r:?}"
+    );
+    // Nothing but a JSON boolean; a stop carries none. Refused, nothing written.
+    for bad in [
+        serde_json::json!("true"),
+        serde_json::json!("on"),
+        serde_json::json!("off"),
+        serde_json::json!("/etc/passwd"),
+        serde_json::json!("on\nBOT_NAME=\"evil\""),
+        serde_json::json!(1),
+        serde_json::json!(""),
+        serde_json::json!(["x"]),
+    ] {
+        let r = post(&server, &l, &with("hybrid", bad.clone()));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{bad}"
+        );
+    }
+    let r = post(&server, &l, &serde_json::json!({"action":"stop","preinput":false}));
+    assert_eq!((r.status, r.json()["error"].as_str()), (400, Some("bad_request")));
+    assert!(
+        files_in(&launch_dir(&server)).is_empty(),
+        "a refused call writes nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_page_gets_the_preinput_of_the_helpers_status_and_an_old_status_has_none() {
+    let server = deployed().await;
+    let l = login(&server);
+    let status = server.config.status_dir.join("status.json");
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"request_id":"0123456789abcdef","brain":"hybrid","server":"local","duration":"15m","sparring":0,"finish":"wb","preinput":true}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["preinput"].as_bool(), Some(true));
+    assert_eq!(j["status"]["finish"], "wb");
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"brain":"hybrid","server":"local","duration":"15m","sparring":0}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["state"], "started");
+    assert!(j["status"].get("preinput").is_none(), "{j}");
+    // A value that is not a boolean makes the whole status unreadable, never a mode of its own.
+    fs::write(&status, r#"{"v":1,"state":"started","at":5,"preinput":"on"}"#).unwrap();
     assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null);
 }
 
@@ -795,7 +902,7 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         assert!(r.header("content-type").is_some_and(|c| c.starts_with(ctype)), "{path}");
         assert!(!r.body.is_empty());
     }
-    // Task 5.13: the «Бот» card has a row for the finishing mode, and the launch card's script offers the three words.
+    // Task 5.13: the «Бот» card has a row for the finishing mode, and the launch card's script offers the four words.
     assert!(html.contains(r#"id="bs-finish""#));
     let js = String::from_utf8_lossy(&send(server.addr, Req::new("GET", "/launch.js")).body).into_owned();
     for needle in [
@@ -821,9 +928,32 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         "window_model_missing",
         "window_model_hybrid_only",
         "body.window_model",
+        // Task 3.20b: the pre-input toggle, its honest hint, the `wb` value of the finishing control and its refusal.
+        "Настоящие ходы соперника от сервера (эксперимент)",
+        "Помогает, только если сервер присылает эти ходы заранее",
+        "при запасе по умолчанию (меньше тика) решение не узнаёт ничего нового",
+        "preinput_hybrid_only",
+        "body.preinput",
+        "ВБ (эксперимент)",
+        "заранее объявленной планки (+4,0 п.п.) это не берёт",
+        "Эксперимент для игры на ВБ, не для дуэли",
     ] {
         assert!(js.contains(needle), "launch.js lacks {needle}");
     }
     assert!(html.contains(r#"id="bs-wbsmart""#));
     assert!(html.contains(r#"id="bs-windowmodel""#));
+    assert!(html.contains(r#"id="bs-preinput""#));
+    // The «Бот» card's script knows the modes of the pre-inputs and the `known_ahead` share it prints.
+    let app = String::from_utf8_lossy(&send(server.addr, Req::new("GET", "/app.js")).body).into_owned();
+    for needle in [
+        "Ходы от сервера",
+        "PREINPUT_LABELS",
+        "вперёд снапшота ≥ 1 тик (все соперники)",
+        "дошло до решений (по цели)",
+    ] {
+        assert!(
+            app.contains(needle) || html.contains(needle),
+            "app.js / index.html lack {needle}"
+        );
+    }
 }

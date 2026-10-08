@@ -107,7 +107,7 @@ test("the card: «Дожим» is off by default, offers «цель» (recommend
   const finish = field(page, "Дожим");
   await expect(finish).toBeVisible();
   await expect(finish).toHaveValue("off");
-  expect(await finish.locator("option").allTextContents()).toEqual(["выкл", "цель (рекомендуется)", "полный (не рекомендуется)"]);
+  expect(await finish.locator("option").allTextContents()).toEqual(["выкл", "цель (рекомендуется)", "ВБ (эксперимент)", "полный (не рекомендуется)"]);
   const hint = card(page).locator(".lc-finish-hint");
   await expect(hint).toContainText("Дожим выключен");
   await expect(hint).not.toHaveClass(/lc-finish-warn/);

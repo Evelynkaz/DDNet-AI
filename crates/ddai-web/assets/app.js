@@ -518,7 +518,43 @@
     var WB_SMART_LABELS = { on: "вкл", off: "выкл" };
     // Task 3.17 (D-111): the opponent-input predictor of the bot (`window_model` of the status); «hold» = the online guard benched it (it still runs in the shadow).
     var WINDOW_MODEL_LABELS = { off: "выкл", on: "вкл", hold: "выкл (предохранитель: хуже «держит»)", killed: "выкл (флажок)" };
+    // Task 3.20b (D-112): the server's pre-inputs (`preinput` of the status); «off» still counts them, only the prediction does not use them.
+    var PREINPUT_LABELS = { off: "выкл (только счёт)", on: "вкл", killed: "выкл (флажок)" };
     var FINISH_LABELS = { off: "выкл", target: "цель", wb: "цель + удержание ВБ", full: "полный (не рекомендуется)" };
+    // «Ходы от сервера»: the mode, how many arrived, the share of (snapshot, opponent) pairs whose newest message reaches at least one tick past the snapshot
+    // (`known_ahead` bins above 0; the bin of tick 0 is at index -lead_from; it pools ALL opponents present), and, with the mode on, the share of decisions
+    // the pre-inputs reached (`decisions_real` of `decisions`; TARGET only).
+    function preinputText(s) {
+      if (!Object.prototype.hasOwnProperty.call(PREINPUT_LABELS, s.preinput)) {
+        return "—";
+      }
+      var out = PREINPUT_LABELS[s.preinput];
+      var st = s.preinput_stats;
+      if (!st || typeof st.received !== "number") {
+        return out;
+      }
+      out += " · пришло " + st.received;
+      if (Array.isArray(st.known_ahead) && typeof st.lead_from === "number") {
+        var total = 0;
+        var ahead = 0;
+        for (var i = 0; i < st.known_ahead.length; i++) {
+          total += st.known_ahead[i];
+          if (i + st.lead_from > 0) {
+            ahead += st.known_ahead[i];
+          }
+        }
+        if (total > 0) {
+          out += " · вперёд снапшота ≥ 1 тик (все соперники): " + Math.round((100 * ahead) / total) + "%";
+        }
+      }
+      if (s.preinput === "on" && typeof st.decisions === "number" && st.decisions > 0) {
+        out += " · дошло до решений (по цели) " + Math.round((100 * st.decisions_real) / st.decisions) + "%";
+      }
+      if (typeof st.checked === "number" && st.checked > 0 && s.preinput === "on") {
+        out += " · не верим " + st.distrusted + " из " + st.checked;
+      }
+      return out;
+    }
     var APPLIED_TEXT = {
       applied: "применено к работающему боту (бот перечитал тот же файл)",
       mismatch: "ВНИМАНИЕ: бот перечитал другой файл списков, не тот, что правит сайт (проверьте --relations у бота и сайта): бот может не щадить ваших друзей",
@@ -649,7 +685,7 @@
                 ? "бот не запущен: сейчас на сайте показ (муха на арене), настоящей игры нет"
                 : "бот не запущен (нет живого статуса)";
         setText("bot-conn-text", why);
-        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-wbsmart", "bs-windowmodel", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
+        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-wbsmart", "bs-windowmodel", "bs-preinput", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
           setText(id, "—");
         });
         el("bs-selfkill").classList.remove("kv-warn");
@@ -677,6 +713,7 @@
         wm += " · вело окно " + s.window_guard.used + " из " + s.window_guard.predicted;
       }
       setText("bs-windowmodel", wm);
+      setText("bs-preinput", preinputText(s));
       // A status without the field (an older bot) shows «—», never «вкл».
       setText("bs-selfkill", Object.prototype.hasOwnProperty.call(SELFKILL_LABELS, s.selfkill) ? SELFKILL_LABELS[s.selfkill] : "—");
       el("bs-selfkill").classList.toggle("kv-warn", s.selfkill === "off");

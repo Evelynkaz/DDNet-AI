@@ -18,11 +18,13 @@
   var BRAIN_LABEL = { hybrid: "Гибрид", "hybrid-fly": "Гибрид + муха", fly: "Муха" };
   var DURATION_LABEL = { "15m": "15 мин", "60m": "1 час", unlimited: "До остановки" };
   // Task 5.13 (D-097): the finishing switch. «цель» is the recommended live A/B; «полный» is offered behind a clear «не рекомендуется».
-  var FINISH_LABEL = { off: "выкл", target: "цель", full: "полный" };
+  var FINISH_LABEL = { off: "выкл", target: "цель", wb: "ВБ", full: "полный" };
   var FINISH_HINT = {
     off: "Дожим выключен: замороженную цель бот отпускает, как раньше.",
     target:
       "Рекомендуется для живой проверки. Бот держит замороженную цель, пока её не удержали, не запечатали или она не погибла. На арене в толпе удержанных блоков на 32% больше, первые заморозки те же. Включайте на одном запуске и сравнивайте с выключенным.",
+    wb:
+      "Эксперимент для игры на ВБ, не для дуэли (задача 3.18): к «цели» добавляется удержание жертвы в зале ВБ. Роль верхней полки качает замороженную жертву к фриз-стене зала, а замороженную цель не бросает, пока её добивают. На арене удержанных блоков на 3,6 п.п. больше (36,1% → 39,7%), но заранее объявленной планки (+4,0 п.п.) это не берёт; вживую не проверено. Качели работают только в зале ВБ и в роли верхней полки, в остальном это «цель».",
     full:
       "Не рекомендуется: к «цели» добавляется подтягивание замороженной жертвы к фризу в оценке гибрида. В ревью прирост на дуэли не подтвердился. Нужен только для сравнения.",
   };
@@ -42,6 +44,12 @@
   var MODEL_HINT = {
     off: "Предсказатель выключен: в окне лага соперник «держит то, что показывает снапшот».",
     on: "Эксперимент: маленькая сеть предсказывает ввод соперника в окне лага (3.15). В арене помогала на дальних тиках окна, на живых клипах при окне 2 пользы не видно; предохранитель сам отключает её, если она хуже «держит» (карточка «Бот», строка «Предсказатель»). Журнал — data/bot/oppnet-live.jsonl. Вне дуэли 1 на 1 не работает. Выключить на ходу: файл data/bot/window-model.off.",
+  };
+
+  // Task 3.20b (D-112): the server's pre-inputs played in the prediction (an experiment, hybrid brains only).
+  var PREINPUT_HINT = {
+    off: "Выключено: ходы соперника сервер присылает, бот их считает (карточка «Бот», строка «Ходы от сервера»), но в предсказании не использует.",
+    on: "Эксперимент: в предсказании соперник ходит так, как сервер заранее прислал его настоящий ввод. Помогает, только если сервер присылает эти ходы заранее: у соперников с запасом предсказания в 2–3 тика и больше; при запасе по умолчанию (меньше тика) решение не узнаёт ничего нового. Сколько раз это было на самом деле, видно в карточке «Бот» (доля снапшотов, где ход известен хотя бы на тик вперёд). Бот только принимает, серверу ничего не отправляет. Выключить на ходу: файл data/bot/preinput.off.",
   };
 
   // What a refusal or an ending means, in words for the owner. The helper only ever sends these codes.
@@ -73,6 +81,7 @@
     window_model_missing: "Файл предсказателя соперника (data/bot/models/opp-m1.oppnet) не найден: положите его туда.",
     window_model_hybrid_only: "Предсказатель соперника бывает только у гибридных мозгов: для «Мухи» его нет.",
     window_model_bad_path: "Путь к файлу предсказателя недопустим.",
+    preinput_hybrid_only: "Настоящие ходы соперника от сервера бывают только у гибридных мозгов: для «Мухи» их нет.",
     bundle_bad_path: "Путь к bundle в конфиге недопустим.",
     config_bad: "Конфиг запуска не читается.",
     config_untrusted: "Конфиг запуска доступен на запись не только root: отказ.",
@@ -110,6 +119,7 @@
     window_model_missing: "Файл предсказателя соперника (data/bot/models/opp-m1.oppnet) не найден: положите его туда.",
     window_model_hybrid_only: "Предсказатель соперника бывает только у гибридных мозгов: для «Мухи» его нет.",
     window_model_bad_path: "Путь к файлу предсказателя недопустим.",
+    preinput_hybrid_only: "Настоящие ходы соперника от сервера бывают только у гибридных мозгов: для «Мухи» их нет.",
     rate_limited: "Слишком часто: подождите несколько секунд (не больше 6 запросов в минуту).",
     pending: "Предыдущий запрос ещё не обработан.",
     launcher_unavailable: "Запуск с сайта не установлен на сервере (нет каталога data/launch).",
@@ -223,6 +233,7 @@
       ui.finish = select([
         { value: "off", text: "выкл" },
         { value: "target", text: "цель (рекомендуется)" },
+        { value: "wb", text: "ВБ (эксперимент)" },
         { value: "full", text: "полный (не рекомендуется)" },
       ]);
       // Task 5.15: two more switches, both off by default and sent only when on. Neither is brain-specific, so both stay shown for the fly.
@@ -239,6 +250,11 @@
         { value: "off", text: "выкл" },
         { value: "on", text: "вкл (эксперимент)" },
       ]);
+      // Task 3.20b: the server's real opponent inputs, off by default and sent only when on; the hybrid brains only (the control is hidden for the fly).
+      ui.preinput = select([
+        { value: "off", text: "выкл" },
+        { value: "on", text: "вкл (эксперимент)" },
+      ]);
       var form = el("div", "lc-form");
       form.appendChild(field("Сервер", ui.server));
       form.appendChild(field("Мозг", ui.brain));
@@ -251,6 +267,8 @@
       form.appendChild(field("Без самоубийств (дуэль)", ui.noSelfkill));
       ui.windowModelField = field("Предсказатель соперника (эксперимент)", ui.windowModel);
       form.appendChild(ui.windowModelField);
+      ui.preinputField = field("Настоящие ходы соперника от сервера (эксперимент)", ui.preinput);
+      form.appendChild(ui.preinputField);
       form.appendChild(field("Длительность", ui.duration));
       ui.sparringField = field("Спарринг (только локальный сервер)", ui.sparring);
       form.appendChild(ui.sparringField);
@@ -263,6 +281,8 @@
       card.appendChild(ui.selfkillHint);
       ui.modelHint = el("p", "hint lc-opt-hint lc-model-hint");
       card.appendChild(ui.modelHint);
+      ui.preinputHint = el("p", "hint lc-opt-hint lc-preinput-hint");
+      card.appendChild(ui.preinputHint);
       ui.bundle = el("p", "hint lc-bundle");
       card.appendChild(ui.bundle);
 
@@ -299,6 +319,7 @@
       ui.wbSmart.addEventListener("change", syncOptions);
       ui.noSelfkill.addEventListener("change", syncOptions);
       ui.windowModel.addEventListener("change", syncMirror);
+      ui.preinput.addEventListener("change", syncMirror);
       syncMirror();
       syncOptions();
       ui.start.addEventListener("click", onStart);
@@ -330,6 +351,10 @@
       ui.modelHint.textContent = present
         ? MODEL_HINT[ui.windowModel.value] || ""
         : "Файл предсказателя не найден: положите его в data/bot/models/opp-m1.oppnet (в git его нет).";
+      // The pre-inputs sit in the hybrid's prediction too: not offered to the pure fly.
+      ui.preinputField.hidden = fly;
+      ui.preinputHint.hidden = fly;
+      ui.preinputHint.textContent = PREINPUT_HINT[ui.preinput.value] || "";
     }
 
     // The hints of the two switches that every brain has; the duel switch turns its hint into a warning while it is on.
@@ -427,6 +452,9 @@
       if (status.window_model === true) {
         parts.push("предсказатель соперника");
       }
+      if (status.preinput === true) {
+        parts.push("ходы соперника от сервера");
+      }
       if (status.bundle && status.brain && status.brain !== "hybrid") {
         parts.push("муха " + status.bundle);
       }
@@ -500,7 +528,7 @@
       ui.start.classList.toggle("is-loading", busy && ui.start === pressed);
       ui.stop.classList.toggle("is-loading", busy && ui.stop === pressed);
       ui.watch.hidden = !live;
-      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel].forEach(function (c) {
+      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput].forEach(function (c) {
         c.disabled = busy || !enabled;
       });
       syncSparring();
@@ -576,7 +604,7 @@
         body.mirror = ui.mirror.value === "off" ? "off" : "on";
         // Only a mode that is on is sent: «off» is the absence of the field, so an older (or rolled-back) helper, whose strict request format
         // does not know `finish`, still takes every default start.
-        if (ui.finish.value === "target" || ui.finish.value === "full") {
+        if (ui.finish.value === "target" || ui.finish.value === "wb" || ui.finish.value === "full") {
           body.finish = ui.finish.value;
         }
       }
@@ -590,6 +618,10 @@
       // Task 3.17: the predictor is sent only when on and never for the pure fly (the helper refuses that anyway).
       if (ui.windowModel.value === "on" && ui.brain.value !== "fly") {
         body.window_model = true;
+      }
+      // Task 3.20b: the same for the server's pre-inputs: sent only when on, never for the pure fly (the helper refuses that anyway).
+      if (ui.preinput.value === "on" && ui.brain.value !== "fly") {
+        body.preinput = true;
       }
       if (body.server !== "local") {
         var ok = window.confirm(

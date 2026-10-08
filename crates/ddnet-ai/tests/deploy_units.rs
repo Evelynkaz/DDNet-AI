@@ -337,3 +337,42 @@ fn the_launcher_installer_refuses_a_binary_without_the_window_model_flag() {
         assert!(check < first_use, "the binary check must come before `{later}`");
     }
 }
+
+#[test]
+fn the_bot_unit_passes_the_preinput_switch_as_two_words_and_it_is_off_by_default() {
+    // Task 3.20b (D-112): `--preinput ${BOT_PREINPUT}` (on|off), the form of `--wb-smart`; the helper always writes the line.
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    let env = values(&s, "Environment");
+    assert!(env.contains(&"BOT_PREINPUT=off"), "{env:?}");
+    let exec = values(&s, "ExecStart");
+    assert_eq!(exec.len(), 1);
+    assert!(exec[0].contains(" --preinput ${BOT_PREINPUT} "), "{}", exec[0]);
+    // Never split by `$VAR`, never the equals form (the bot's flag takes a separate value), never hard-coded on.
+    assert!(
+        !exec[0].contains("$BOT_PREINPUT") && !exec[0].contains("--preinput=") && !exec[0].contains("--preinput on"),
+        "{}",
+        exec[0]
+    );
+    // The earlier switches are untouched, and the finishing word stays one `${BOT_FINISH}` (it takes `wb` without a unit change).
+    assert!(exec[0].contains(" --finish ${BOT_FINISH} "), "{}", exec[0]);
+    assert!(exec[0].contains(" --window-model=${BOT_WINDOW_MODEL} "), "{}", exec[0]);
+}
+
+#[test]
+fn the_launcher_installer_refuses_a_binary_without_the_preinput_flag() {
+    let script = fs::read_to_string(deploy().join("install-launcher.sh")).unwrap();
+    let check = script
+        .find("grep -q -- '--preinput' <<<\"$play_help\"")
+        .expect("install-launcher.sh checks the binary for --preinput");
+    assert!(
+        script[check..]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("run deploy/install.sh first")
+    );
+    for later in ["daemon-reload", "install -o root -g root -m 0644"] {
+        let first_use = script.rfind(later).unwrap();
+        assert!(check < first_use, "the binary check must come before `{later}`");
+    }
+}

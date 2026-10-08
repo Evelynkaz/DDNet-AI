@@ -328,9 +328,9 @@ fn the_finishing_mode_is_written_from_a_closed_list_for_the_local_server_the_all
     assert!(rig.env_file().contains("BOT_FINISH=\"off\"\n"), "{}", rig.env_file());
     assert_eq!(rig.status()["finish"], "off", "{}", rig.status());
 
-    // The local server, both hybrid brains, all three words.
+    // The local server, both hybrid brains, all four words (`wb`: task 3.18, D-114).
     for brain in ["hybrid", "hybrid-fly"] {
-        for word in ["off", "target", "full"] {
+        for word in ["off", "target", "wb", "full"] {
             let rig = Rig::new();
             let mut body = start("local");
             body["brain"] = json!(brain);
@@ -393,6 +393,12 @@ fn a_bad_finishing_value_is_refused_and_changes_nothing_not_even_an_injection() 
         json!("on"),
         json!("Target"),
         json!("TARGET"),
+        json!("WB"),
+        json!("Wb"),
+        json!("wb "),
+        json!("wb\n"),
+        json!("wb --wb left"),
+        json!("target,wb"),
         json!("target "),
         json!("target\n"),
         json!("off; rm -rf /"),
@@ -436,7 +442,7 @@ fn a_bad_finishing_value_is_refused_and_changes_nothing_not_even_an_injection() 
 
 #[test]
 fn the_pure_fly_takes_no_finishing_but_off() {
-    for word in ["target", "full"] {
+    for word in ["target", "wb", "full"] {
         let rig = Rig::new();
         let mut body = start("local");
         body["brain"] = json!("fly");
@@ -762,6 +768,102 @@ fn the_opponent_predictor_is_refused_without_its_file_for_the_pure_fly_and_for_a
     }
     let rig = Rig::new();
     let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop","window_model":false}));
+    assert!(out.status.success());
+    assert_eq!(reason(&rig.status()), "bad_request");
+}
+
+#[test]
+fn the_preinput_switch_is_written_always_as_on_or_off_for_the_hybrids_and_survives_to_the_exit_status() {
+    // Task 3.20b (D-112). No field (an old request) and `false`: the line is there and says off, so no value left in a unit's environment leaks in.
+    for body in [start("local"), {
+        let mut b = start("local");
+        b["preinput"] = json!(false);
+        b
+    }] {
+        let rig = Rig::new();
+        assert!(rig.send(&body).status.success());
+        assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+        assert!(rig.env_file().contains("BOT_PREINPUT=\"off\"\n"), "{}", rig.env_file());
+        assert_eq!(rig.status()["preinput"].as_bool(), Some(false));
+    }
+    // On: both hybrid brains, with `wb` finishing alongside (independent lines); the helper's own words, nothing from the request.
+    for brain in ["hybrid", "hybrid-fly"] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["brain"] = json!(brain);
+        body["preinput"] = json!(true);
+        body["finish"] = json!("wb");
+        assert!(rig.send(&body).status.success());
+        let st = rig.status();
+        assert_eq!(st["state"], "started", "{brain}: {st}");
+        assert_eq!(
+            (st["preinput"].as_bool(), st["finish"].as_str()),
+            (Some(true), Some("wb")),
+            "{st}"
+        );
+        let env = rig.env_file();
+        assert!(
+            env.contains("BOT_PREINPUT=\"on\"\n")
+                && env.contains("BOT_FINISH=\"wb\"\n")
+                && env.contains("BOT_WINDOW_MODEL=\"\"\n"),
+            "{brain}: {env}"
+        );
+        assert_eq!(rig.actions().last().unwrap(), "start ddnet-ai-bot.service");
+        for line in env.lines().filter(|l| !l.starts_with('#')) {
+            assert!(line.contains("=\""), "{line}");
+        }
+        // It survives to the status the exit hook writes (read from the helper's memory, not from the request).
+        assert!(rig.exited("exited", "0").status.success());
+        let st = rig.status();
+        assert_eq!(
+            (st["preinput"].as_bool(), st["finish"].as_str()),
+            (Some(true), Some("wb")),
+            "{st}"
+        );
+    }
+}
+
+#[test]
+fn the_preinput_switch_is_refused_for_the_pure_fly_and_for_any_value_but_a_boolean() {
+    // The pure fly is not offered the pre-inputs: refused with its own code, nothing started; `false` is fine.
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["brain"] = json!("fly");
+    body["preinput"] = json!(true);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(reason(&rig.status()), "preinput_hybrid_only", "{}", rig.status());
+    assert!(rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists());
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["brain"] = json!("fly");
+    body["preinput"] = json!(false);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    // Nothing but a JSON boolean, and a stop carries none: no word, no path, no injection.
+    for bad in [
+        json!("true"),
+        json!("on"),
+        json!("off"),
+        json!("/etc/passwd"),
+        json!("on\nBOT_SERVER=\"203.0.113.5:8308\""),
+        json!("$(id)"),
+        json!(1),
+        json!(""),
+        json!(["x"]),
+        json!({"on": true}),
+    ] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["preinput"] = bad.clone();
+        assert!(rig.send(&body).status.success());
+        assert_eq!(reason(&rig.status()), "bad_request", "{bad}: {}", rig.status());
+        assert!(
+            rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists(),
+            "{bad}"
+        );
+    }
+    let rig = Rig::new();
+    let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop","preinput":false}));
     assert!(out.status.success());
     assert_eq!(reason(&rig.status()), "bad_request");
 }

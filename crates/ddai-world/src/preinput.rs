@@ -76,8 +76,20 @@ pub struct PreInputCounts {
     pub behind: u64,
     /// Steps of predictions in which a pre-input drove a character (one per character per step).
     pub used: u64,
-    /// Characters whose state at the snapshot disagreed with the pre-input (direction): not trusted.
+    /// Characters whose state at the snapshot disagreed with the pre-input (direction, hook key, jump key): not trusted for the rest of that roll.
+    /// `distrusted_reckoned` is the part of it that were dead-reckoned characters (a resting tee: the server resyncs the wire core on any
+    /// difference, `character.cpp:953-968`, so a reckoned core's bits are as reliable as an exact one's and are checked the same way).
     pub distrusted: u64,
+    pub distrusted_reckoned: u64,
+    /// Trust checks made (one per roll and owner that had a message to check); `checked_reckoned` of them for dead-reckoned characters. The two
+    /// `distrusted*` counters over these are the rates.
+    pub checked: u64,
+    pub checked_reckoned: u64,
+    /// Predictions made for a decision about a target while the pre-inputs are played (`decisions`) and those of them in which the server had told
+    /// us the target's input for at least one rolled step, i.e. its newest message reaches past the snapshot (`decisions_real`; the held last input
+    /// beyond the newest message does not count): the share of decisions the pre-inputs actually reached, the A/B metric.
+    pub decisions: u64,
+    pub decisions_real: u64,
     /// `lead` of the stored messages, bins `LEAD_MIN..=LEAD_MAX` (the ends hold everything beyond).
     pub lead: [u64; LEAD_BINS],
     /// At each snapshot, for each other tee we have messages of: `newest message tick - snapshot tick`, same bins. This is what a decision
@@ -97,6 +109,11 @@ impl Default for PreInputCounts {
             behind: 0,
             used: 0,
             distrusted: 0,
+            distrusted_reckoned: 0,
+            checked: 0,
+            checked_reckoned: 0,
+            decisions: 0,
+            decisions_real: 0,
             lead: [0; LEAD_BINS],
             known_ahead: [0; LEAD_BINS],
         }
@@ -248,12 +265,24 @@ impl PreInputStore {
         }
     }
 
+    /// One prediction for a decision about a target was made with the pre-inputs played; `target_real`: a step of the target was a real pre-input.
+    pub(crate) fn note_decision(&mut self, target_real: bool) {
+        self.counts.decisions += 1;
+        self.counts.decisions_real += u64::from(target_real);
+    }
+
     pub(crate) fn note_used(&mut self, n: u64) {
         self.counts.used += n;
     }
 
-    pub(crate) fn note_distrusted(&mut self) {
-        self.counts.distrusted += 1;
+    /// One trust check of a roll was made, and its verdict (`reckoned`: the character's core was dead-reckoned to the snapshot tick).
+    pub(crate) fn note_checked(&mut self, reckoned: bool, ok: bool) {
+        self.counts.checked += 1;
+        self.counts.checked_reckoned += u64::from(reckoned);
+        if !ok {
+            self.counts.distrusted += 1;
+            self.counts.distrusted_reckoned += u64::from(reckoned);
+        }
     }
 }
 
@@ -269,6 +298,11 @@ pub struct Step {
     /// What the snapshot shows of the hook and the jump key (`Some(held)`), or `None` when it cannot tell (frozen, or the jump flags are ambiguous).
     pub snapshot_hook: Option<bool>,
     pub snapshot_jump: Option<bool>,
+    /// The character's core at the snapshot was dead-reckoned from an older wire core (`m_Tick` set and below the snapshot tick,
+    /// `evolve_character_core`). Only for the counters: the server resyncs the wire core whenever the real core differs from the evolved one
+    /// (`character.cpp:953-968`, `jumped` and `hook_state` included), so a reckoned core's hook and jump bits are as good a witness as an exact
+    /// core's and are checked like them (review F11 retracted the F10 skip).
+    pub reckoned: bool,
     /// The assumed input is the window model's prediction (it plays past the newest message), not hold (the last real input does).
     pub assumed_is_model: bool,
 }
@@ -277,13 +311,21 @@ pub struct Step {
 pub struct Roll {
     /// The owner's state at the snapshot was checked: trusted or not.
     trusted: [Option<bool>; MAX_CLIENTS],
+    /// Owners that had at least one step in this roll for a tick the server has told us about (`tick <= newest`), played from a real pre-input.
+    real: [bool; MAX_CLIENTS],
 }
 
 impl Roll {
     pub fn new() -> Roll {
         Roll {
             trusted: [None; MAX_CLIENTS],
+            real: [false; MAX_CLIENTS],
         }
+    }
+
+    /// Which owners had a step of this roll played for a tick the server has told us about.
+    pub fn real_all(&self) -> [bool; MAX_CLIENTS] {
+        self.real
     }
 
     /// The input of `owner` for the step into `tick`, or `None` when the store knows nothing for it (then the assumed input plays).
@@ -298,6 +340,7 @@ impl Roll {
             snapshot_dir,
             snapshot_hook,
             snapshot_jump,
+            reckoned,
             assumed_is_model,
         } = *step;
         let o = usize::try_from(owner).ok().filter(|&o| o < MAX_CLIENTS)?;
@@ -315,16 +358,15 @@ impl Roll {
                 // `Sv_PreInput` is neither vital nor repeated (the server sends changes only), so a lost message leaves a stale state behind: the
                 // state at the snapshot must agree on the direction and, when the snapshot can tell, on the hook and the jump key too.
                 Some((_, m)) => {
-                    m.direction.clamp(-1, 1) == snapshot_dir
-                        && snapshot_hook.is_none_or(|h| h == (m.hook != 0))
-                        && snapshot_jump.is_none_or(|j| j == (m.jump != 0))
+                    let dir_ok = m.direction.clamp(-1, 1) == snapshot_dir;
+                    let keys_ok = snapshot_hook.is_none_or(|h| h == (m.hook != 0))
+                        && snapshot_jump.is_none_or(|j| j == (m.jump != 0));
+                    dir_ok && keys_ok
                 }
                 // Nothing at or before the snapshot: the first message is a change from the unknown; trust what it says from its tick on.
                 None => true,
             };
-            if !ok {
-                store.note_distrusted();
-            }
+            store.note_checked(reckoned, ok);
             self.trusted[o] = Some(ok);
         }
         if self.trusted[o] == Some(false) {
@@ -343,6 +385,7 @@ impl Roll {
             input.target_y = msg.target_y;
         }
         store.note_used(1);
+        self.real[o] |= tick <= newest;
         Some(input)
     }
 }
@@ -365,6 +408,7 @@ mod tests {
             snapshot_dir,
             snapshot_hook: None,
             snapshot_jump: None,
+            reckoned: false,
             assumed_is_model,
         }
     }
@@ -533,5 +577,65 @@ mod tests {
         assert!(r.input(&mut s, &step(2, None, Some(true)), &assumed).is_some());
         let mut r = Roll::new();
         assert!(r.input(&mut s, &step(1, None, None), &assumed).is_some());
+    }
+
+    #[test]
+    fn a_reckoned_character_is_checked_like_an_exact_one_and_counted_apart() {
+        // Review F11: the server resyncs the wire core on any difference, so a dead-reckoned core's hook and jump bits are as reliable as an exact
+        // core's: a stale "down" (a lost release) distrusts a reckoned character too. The counters tell the two apart.
+        let mut s = PreInputStore::new();
+        s.insert(1, 95, msg(0, 1, 0), Some(94));
+        let mut j = msg(0, 0, 0);
+        j.jump = 1;
+        s.insert(2, 95, j, Some(94));
+        s.insert(3, 95, msg(1, 0, 0), Some(94));
+        s.insert(4, 95, msg(0, 0, 0), Some(94));
+        for o in 1..=4 {
+            s.insert(o, 102, *s.exact(o, 95).unwrap(), Some(100));
+        }
+        let assumed = PlayerInput::default();
+        let step = |owner, reckoned, snapshot_dir| Step {
+            snapshot_hook: Some(false),
+            snapshot_jump: Some(false),
+            reckoned,
+            ..st(owner, 102, 100, snapshot_dir, false)
+        };
+        let mut r = Roll::new();
+        assert!(
+            r.input(&mut s, &step(1, true, 0), &assumed).is_none(),
+            "stale hook, reckoned"
+        );
+        assert!(
+            r.input(&mut s, &step(2, true, 0), &assumed).is_none(),
+            "stale jump, reckoned"
+        );
+        assert!(
+            r.input(&mut s, &step(3, true, -1), &assumed).is_none(),
+            "direction, reckoned"
+        );
+        let c = s.counts();
+        assert_eq!(
+            (c.checked, c.checked_reckoned, c.distrusted, c.distrusted_reckoned),
+            (3, 3, 3, 3)
+        );
+        // The same data for an exact character: distrusted the same way, counted as exact.
+        let mut r = Roll::new();
+        assert!(r.input(&mut s, &step(1, false, 0), &assumed).is_none());
+        assert!(r.input(&mut s, &step(2, false, 0), &assumed).is_none());
+        let c = s.counts();
+        assert_eq!(
+            (c.checked, c.checked_reckoned, c.distrusted, c.distrusted_reckoned),
+            (5, 3, 5, 3)
+        );
+        // A reckoned character whose bits agree is trusted and counted as a check, not a distrust.
+        assert!(r.input(&mut s, &step(4, true, 0), &assumed).is_some());
+        let c = s.counts();
+        assert_eq!(
+            (c.checked, c.checked_reckoned, c.distrusted, c.distrusted_reckoned),
+            (6, 4, 5, 3)
+        );
+        // Once per roll and owner: a second step of the same owner checks nothing again.
+        assert!(r.input(&mut s, &step(1, false, 0), &assumed).is_none());
+        assert_eq!(s.counts().checked, 6);
     }
 }

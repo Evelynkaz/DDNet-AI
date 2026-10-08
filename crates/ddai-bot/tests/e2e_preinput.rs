@@ -237,6 +237,10 @@ fn report(tag: &str, o: &Outcome) {
         )
     );
     eprintln!(
+        "[{tag}] trust checks {} (dead-reckoned {}), distrusted {} (dead-reckoned {})",
+        o.counts.checked, o.counts.checked_reckoned, o.counts.distrusted, o.counts.distrusted_reckoned
+    );
+    eprintln!(
         "[{tag}] lead (intended tick - latest snapshot tick, bins {}..={}): {:?}",
         ddai_world::preinput::LEAD_MIN,
         ddai_world::preinput::LEAD_MAX,

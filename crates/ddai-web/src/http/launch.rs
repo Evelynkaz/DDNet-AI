@@ -186,6 +186,7 @@ struct LaunchForm {
     wb_smart: Option<WbSmart>,
     no_selfkill: Option<bool>,
     window_model: Option<bool>,
+    preinput: Option<bool>,
 }
 
 fn new_id() -> String {
@@ -214,6 +215,7 @@ fn build_request(
                 || form.wb_smart.is_some()
                 || form.no_selfkill.is_some()
                 || form.window_model.is_some()
+                || form.preinput.is_some()
             {
                 return Err("bad_request");
             }
@@ -231,6 +233,7 @@ fn build_request(
                 wb_smart: None,
                 no_selfkill: None,
                 window_model: None,
+                preinput: None,
             })
         }
         Action::Start => {
@@ -265,6 +268,10 @@ fn build_request(
                     return Err("window_model_missing");
                 }
             }
+            // Task 3.20b (D-112): the server's pre-inputs are played in the hybrid's prediction; the pure fly is not offered them (same code as the helper).
+            if form.preinput == Some(true) && brain == Brain::Fly {
+                return Err("preinput_hybrid_only");
+            }
             Ok(LaunchRequest {
                 v: PROTOCOL_VERSION,
                 id,
@@ -280,6 +287,7 @@ fn build_request(
                 wb_smart: form.wb_smart,
                 no_selfkill: form.no_selfkill,
                 window_model: form.window_model,
+                preinput: form.preinput,
             })
         }
     }
@@ -488,7 +496,12 @@ mod tests {
             serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true, true))
         };
         for brain in ["hybrid", "hybrid-fly"] {
-            for (word, want) in [("off", Finish::Off), ("target", Finish::Target), ("full", Finish::Full)] {
+            for (word, want) in [
+                ("off", Finish::Off),
+                ("target", Finish::Target),
+                ("wb", Finish::Wb),
+                ("full", Finish::Full),
+            ] {
                 let req = start(brain, serde_json::json!(word)).unwrap().unwrap();
                 assert_eq!(req.finish, Some(want), "{brain} {word}");
             }
@@ -504,7 +517,7 @@ mod tests {
             Some(Finish::Off)
         );
         assert_eq!(start("fly", serde_json::Value::Null).unwrap().unwrap().finish, None);
-        for word in ["target", "full"] {
+        for word in ["target", "wb", "full"] {
             assert_eq!(
                 start("fly", serde_json::json!(word)).unwrap().unwrap_err(),
                 "finish_hybrid_only",
@@ -512,7 +525,18 @@ mod tests {
             );
         }
         // Anything outside the list never reaches `build_request`.
-        for bad in ["on", "Target", "TARGET", "target ", "maybe", "", "target --x"] {
+        for bad in [
+            "on",
+            "Target",
+            "TARGET",
+            "target ",
+            "WB",
+            "wb ",
+            "maybe",
+            "",
+            "target --x",
+            "wb --wb left",
+        ] {
             assert!(start("hybrid", serde_json::json!(bad)).is_err(), "{bad:?}");
         }
         // A stop carries no finishing.
@@ -620,6 +644,50 @@ mod tests {
         // A stop carries nothing.
         let stop =
             serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","window_model":false})).unwrap();
+        assert_eq!(build_request(stop, &ready, true, true).unwrap_err(), "bad_request");
+    }
+
+    #[test]
+    fn the_preinput_toggle_is_a_boolean_for_the_hybrids_only() {
+        // Task 3.20b (D-112). No file to check: the switch names nothing but itself.
+        let ready: Vec<String> = Vec::new();
+        let start = |brain: &str, val: serde_json::Value| {
+            let mut v = serde_json::json!({"action":"start","brain":brain,"server":"local","duration":"15m"});
+            if !val.is_null() {
+                v["preinput"] = val;
+            }
+            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true, false))
+        };
+        for brain in ["hybrid", "hybrid-fly"] {
+            for want in [false, true] {
+                let req = start(brain, serde_json::json!(want)).unwrap().unwrap();
+                assert_eq!(req.preinput, Some(want), "{brain} {want}");
+            }
+            let bare = start(brain, serde_json::Value::Null).unwrap().unwrap();
+            assert_eq!(bare.preinput, None, "absent stays absent");
+        }
+        // The pure fly: `false` is harmless, `true` is refused with its own code.
+        assert_eq!(
+            start("fly", serde_json::json!(true)).unwrap().unwrap_err(),
+            "preinput_hybrid_only"
+        );
+        assert_eq!(
+            start("fly", serde_json::json!(false)).unwrap().unwrap().preinput,
+            Some(false)
+        );
+        // Nothing but a JSON boolean ever gets as far as `build_request`: no word, no path.
+        for bad in [
+            serde_json::json!("true"),
+            serde_json::json!("on"),
+            serde_json::json!("off"),
+            serde_json::json!("/etc/passwd"),
+            serde_json::json!(1),
+            serde_json::json!(""),
+        ] {
+            assert!(start("hybrid", bad.clone()).is_err(), "{bad}");
+        }
+        // A stop carries nothing.
+        let stop = serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","preinput":false})).unwrap();
         assert_eq!(build_request(stop, &ready, true, true).unwrap_err(), "bad_request");
     }
 }

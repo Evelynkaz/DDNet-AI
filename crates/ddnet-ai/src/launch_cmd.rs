@@ -40,8 +40,8 @@ use ddai_client::socks5::{ProxyCheck, RelayHost, Socks5Error, Timeouts};
 use ddai_web::launch::{
     Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_REQUEST_BYTES,
     MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, State as RunState, WbSmart,
-    bundle_run_name, no_selfkill_flag_value, parse_request, read_regular_nofollow, read_regular_nofollow_with_mtime,
-    request_is_fresh, unix_now, write_atomic,
+    bundle_run_name, no_selfkill_flag_value, parse_request, preinput_flag_value, read_regular_nofollow,
+    read_regular_nofollow_with_mtime, request_is_fresh, unix_now, write_atomic,
 };
 use ddai_web::serverbrowser::{
     BLOCKED_FILE, BlockedEntry, BlockedFile, MAX_PROXY_CHECK_BYTES, PROXY_CHECK_REQUEST_FILE, PROXY_CHECK_RESULT_FILE,
@@ -187,6 +187,9 @@ struct LaunchInfo {
     /// The opponent-input predictor of the launch (task 3.17); older state files have none, which is `false`.
     #[serde(default)]
     window_model: bool,
+    /// The server's pre-inputs played in the prediction (task 3.20b); older state files have none, which is `false`.
+    #[serde(default)]
+    preinput: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +328,8 @@ struct Plan {
     no_selfkill: bool,
     /// The opponent-input model file (task 3.17, D-111) when the request asked for the predictor; hybrid brains only.
     window_model: Option<PathBuf>,
+    /// The server's pre-inputs in the prediction (task 3.20b, D-112): `false` unless the request says otherwise; hybrid brains only.
+    preinput: bool,
 }
 
 fn valid_nick(nick: &str) -> bool {
@@ -499,6 +504,11 @@ fn decide(
     if brain == Brain::Fly && window_model_asked {
         return Err(Refuse("window_model_hybrid_only"));
     }
+    // Task 3.20b (D-112): the pre-inputs play in the hybrid's prediction; the pure fly is not offered them. The web refuses the same request first.
+    let preinput = req.preinput.unwrap_or_default();
+    if brain == Brain::Fly && preinput {
+        return Err(Refuse("preinput_hybrid_only"));
+    }
     let target = resolve_server(selector, cat.live, cat.favs, cat.rules)?;
     if sparring > 0 && target.public {
         return Err(Refuse("sparring_local_only"));
@@ -539,6 +549,7 @@ fn decide(
         wb_smart: req.wb_smart.unwrap_or_default(),
         no_selfkill: req.no_selfkill.unwrap_or_default(),
         window_model,
+        preinput,
     })
 }
 
@@ -584,6 +595,8 @@ fn render_env(id: &str, plan: &Plan) -> Result<String, Refuse> {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     out += &env_line("BOT_WINDOW_MODEL", &model)?;
+    // Always written (`on` or `off`): the unit passes `--preinput ${BOT_PREINPUT}`, so a stale value can never leak into a run.
+    out += &env_line("BOT_PREINPUT", preinput_flag_value(plan.preinput))?;
     Ok(out)
 }
 
@@ -825,6 +838,7 @@ fn status_of(info: &LaunchInfo, state: RunState, now: u64) -> LaunchStatus {
     status.wb_smart = Some(info.wb_smart);
     status.no_selfkill = Some(info.no_selfkill);
     status.window_model = Some(info.window_model);
+    status.preinput = Some(info.preinput);
     status
 }
 
@@ -1041,6 +1055,7 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         wb_smart: plan.wb_smart,
         no_selfkill: plan.no_selfkill,
         window_model: plan.window_model.is_some(),
+        preinput: plan.preinput,
     };
     let fail = |code: &str| {
         let mut status = status_of(&info, RunState::Error, now);
@@ -1105,14 +1120,15 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         }
     }
     eprintln!(
-        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {}, window-model {})",
+        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {}, window-model {}, preinput {})",
         plan.brain,
         !plan.target.public,
         plan.sparring,
         plan.finish.flag_value(),
         plan.wb_smart.flag_value(),
         no_selfkill_flag_value(plan.no_selfkill),
-        plan.window_model.is_some()
+        plan.window_model.is_some(),
+        plan.preinput
     );
     ExitCode::SUCCESS
 }
@@ -1395,6 +1411,7 @@ mod tests {
             wb_smart: None,
             no_selfkill: None,
             window_model: None,
+            preinput: None,
         }
     }
 
@@ -1694,9 +1711,14 @@ mod tests {
         let plan = plan_for(Brain::Hybrid, None, "local").unwrap();
         assert_eq!(plan.finish, Finish::Off);
         assert!(env_of(&plan).contains("BOT_FINISH=\"off\"\n"), "{}", env_of(&plan));
-        // The hybrid brains take all three words.
+        // The hybrid brains take all four words (`wb`: task 3.18, D-114).
         for brain in [Brain::Hybrid, Brain::HybridFly] {
-            for (finish, word) in [(Finish::Off, "off"), (Finish::Target, "target"), (Finish::Full, "full")] {
+            for (finish, word) in [
+                (Finish::Off, "off"),
+                (Finish::Target, "target"),
+                (Finish::Wb, "wb"),
+                (Finish::Full, "full"),
+            ] {
                 let plan = plan_for(brain, Some(finish), "local").unwrap();
                 assert_eq!(plan.finish, finish);
                 assert!(
@@ -1705,10 +1727,10 @@ mod tests {
                 );
             }
         }
-        // The pure fly: `off` (or nothing) passes, `target` and `full` are refused with their own code, nothing is planned.
+        // The pure fly: `off` (or nothing) passes, `target`, `wb` and `full` are refused with their own code, nothing is planned.
         assert!(plan_for(Brain::Fly, None, "local").is_ok());
         assert!(plan_for(Brain::Fly, Some(Finish::Off), "local").is_ok());
-        for finish in [Finish::Target, Finish::Full] {
+        for finish in [Finish::Target, Finish::Wb, Finish::Full] {
             assert_eq!(
                 plan_for(Brain::Fly, Some(finish), "local").unwrap_err(),
                 Refuse("finish_hybrid_only")
@@ -1738,6 +1760,7 @@ mod tests {
             wb_smart: WbSmart::Off,
             no_selfkill: false,
             window_model: false,
+            preinput: false,
         };
         assert_eq!(status_of(&info, RunState::Started, 5).finish, Some(Finish::Target));
         let mut old = serde_json::to_value(&info).unwrap();
@@ -1795,6 +1818,7 @@ mod tests {
             wb_smart: WbSmart::On,
             no_selfkill: true,
             window_model: false,
+            preinput: false,
         };
         let status = status_of(&info, RunState::Started, 5);
         assert_eq!((status.wb_smart, status.no_selfkill), (Some(WbSmart::On), Some(true)));
@@ -1874,12 +1898,72 @@ mod tests {
             wb_smart: WbSmart::Off,
             no_selfkill: false,
             window_model: true,
+            preinput: false,
         };
         assert_eq!(status_of(&info, RunState::Started, 5).window_model, Some(true));
         let mut old = serde_json::to_value(&info).unwrap();
         old.as_object_mut().unwrap().remove("window_model");
         let old: LaunchInfo = serde_json::from_value(old).unwrap();
         assert!(!old.window_model);
+    }
+
+    #[test]
+    fn the_preinput_switch_is_off_unless_asked_is_written_always_and_the_pure_fly_refuses_it() {
+        // Task 3.20b (D-112).
+        let plan_for = |brain: Brain, pre: Option<bool>| {
+            let mut r = req("local");
+            r.brain = Some(brain);
+            r.preinput = pre;
+            decide_with(&r, &LiveServers::default(), Some(&State::default()), 0, 1000)
+        };
+        let env_of = |plan: &Plan| render_env("0123456789abcdef", plan).unwrap();
+        // No field (an old request) and `false`: the line is written explicitly as `off`, so a stale value in the environment never leaks in.
+        for pre in [None, Some(false)] {
+            let plan = plan_for(Brain::Hybrid, pre).unwrap();
+            assert!(!plan.preinput);
+            let env = env_of(&plan);
+            assert!(env.contains("BOT_PREINPUT=\"off\"\n"), "{env}");
+        }
+        // On: both hybrids; the other lines are unchanged.
+        for brain in [Brain::Hybrid, Brain::HybridFly] {
+            let plan = plan_for(brain, Some(true)).unwrap();
+            assert!(plan.preinput);
+            let env = env_of(&plan);
+            assert!(
+                env.contains("BOT_PREINPUT=\"on\"\n")
+                    && env.contains("BOT_FINISH=\"off\"\n")
+                    && env.contains("BOT_WINDOW_MODEL=\"\"\n"),
+                "{env}"
+            );
+        }
+        // The pure fly is not offered the pre-inputs: refused, `false` is fine.
+        assert_eq!(
+            plan_for(Brain::Fly, Some(true)).unwrap_err(),
+            Refuse("preinput_hybrid_only")
+        );
+        assert!(plan_for(Brain::Fly, Some(false)).is_ok());
+        // The status the site reads names it; a launch remembered before the field existed reads as false.
+        let info = LaunchInfo {
+            id: "0123456789abcdef".to_string(),
+            brain: Brain::Hybrid,
+            server: "local".to_string(),
+            duration: DurationChoice::M15,
+            sparring: 0,
+            public: false,
+            favourite: false,
+            bundle: None,
+            finish: Finish::Wb,
+            wb_smart: WbSmart::Off,
+            no_selfkill: false,
+            window_model: false,
+            preinput: true,
+        };
+        let status = status_of(&info, RunState::Started, 5);
+        assert_eq!((status.preinput, status.finish), (Some(true), Some(Finish::Wb)));
+        let mut old = serde_json::to_value(&info).unwrap();
+        old.as_object_mut().unwrap().remove("preinput");
+        let old: LaunchInfo = serde_json::from_value(old).unwrap();
+        assert!(!old.preinput);
     }
 
     #[test]

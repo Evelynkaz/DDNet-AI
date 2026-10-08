@@ -16,6 +16,11 @@
 //      own log says «wb smart: on» and «self-kill: off (flag)», its STATUS (`/api/bot/status`) says `wb_smart: on` and `selfkill: off`, and
 //      the «Бот» and «Запуск» cards show it; then the defaults (nothing new in the log, STATUS off / on), then the duel switch alone.
 //
+//   3. (task 3.17) «Предсказатель соперника (эксперимент)»: off by default, hidden for the pure fly, sent as `window_model: true` only when on;
+//   4. (task 3.20b) «Дожим» offers «ВБ (эксперимент)» (`finish: "wb"`) and «Настоящие ходы соперника от сервера (эксперимент)» sends `preinput: true`
+//      only when on, both with honest hints and hidden / refused for the pure fly; the real run with both on (env `BOT_FINISH="wb"` and
+//      `BOT_PREINPUT="on"`, the bot's log lines, STATUS, the «Бот» card rows «Дожим» and «Ходы от сервера»), then the defaults.
+//
 // Needs the env of options-e2e.sh (else it skips). Screenshots: <scratch dir of the run>/screenshots/5.15-*.png (never in git).
 
 import { test, expect, type Dialog, type Page } from "@playwright/test";
@@ -187,7 +192,10 @@ test("the card: «Умный ВБ» and «Без самоубийств (дуэ�
   await page.screenshot({ path: path.join(SHOTS, "5.15-card-phone.png"), fullPage: true });
 });
 
-async function startOnPrivateServer(page: Page, opts: { wb: "off" | "on"; duel: "off" | "on" }) {
+async function startOnPrivateServer(
+  page: Page,
+  opts: { wb: "off" | "on"; duel: "off" | "on"; finish?: "off" | "target" | "wb" | "full"; preinput?: "off" | "on" },
+) {
   await openBotTab(page);
   await expect(field(page, "Сервер")).toBeVisible();
   await expect(card(page).locator(".lc-start")).toBeEnabled({ timeout: 30_000 });
@@ -197,6 +205,8 @@ async function startOnPrivateServer(page: Page, opts: { wb: "off" | "on"; duel: 
   await field(page, "Длительность").selectOption("15m");
   await field(page, "Умный ВБ").selectOption(opts.wb);
   await field(page, "Без самоубийств \\(дуэль\\)").selectOption(opts.duel);
+  if (opts.finish) await field(page, "Дожим").selectOption(opts.finish);
+  if (opts.preinput) await field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)").selectOption(opts.preinput);
   // The site takes at most 6 requests a minute (4 starts and 4 stops come close): when the page says «Слишком часто», wait and click again.
   const accept = (d: Dialog) => void d.accept();
   page.on("dialog", accept);
@@ -353,4 +363,123 @@ test("the card: «Предсказатель соперника (экспери�
   await card(page).locator(".lc-start").click();
   await expect.poll(() => posted.length).toBe(3);
   expect(Object.keys(posted[2])).not.toContain("window_model");
+});
+
+test("the card: «Дожим» offers «ВБ (эксперимент)» with an honest hint, and «Настоящие ходы соперника от сервера (эксперимент)» is off by default, hidden for the pure fly, says what it needs, and both are sent only when on", async ({ page }) => {
+  test.setTimeout(120_000);
+  await login(page);
+  // Task 3.20b (D-112) and the `wb` value of task 3.18 (D-114). The POST is answered here: nothing may start.
+  const posted: any[] = [];
+  await page.route("**/api/bot/launch", async (route) => {
+    if (route.request().method() === "POST") {
+      posted.push(JSON.parse(route.request().postData() ?? "{}"));
+      await route.fulfill({ status: 429, contentType: "application/json", body: JSON.stringify({ error: "rate_limited" }) });
+    } else {
+      await route.continue();
+    }
+  });
+  await openBotTab(page);
+  await expect(card(page).locator(".lc-state-text")).toHaveText("Бот остановлен", { timeout: 20_000 });
+  await field(page, "Мозг").selectOption("hybrid");
+  await field(page, "Сервер").selectOption("local");
+
+  // «Дожим»: the new value, in the list after «цель», with a hint that says what it is and that it is below the bar.
+  const finish = field(page, "Дожим");
+  const finishHint = card(page).locator(".lc-finish-hint");
+  expect(await finish.locator("option").allTextContents()).toEqual(["выкл", "цель (рекомендуется)", "ВБ (эксперимент)", "полный (не рекомендуется)"]);
+  expect(await finish.locator("option").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value))).toEqual(["off", "target", "wb", "full"]);
+  await finish.selectOption("wb");
+  await expect(finishHint).toContainText("Эксперимент для игры на ВБ, не для дуэли");
+  await expect(finishHint).toContainText("36,1% → 39,7%");
+  await expect(finishHint).toContainText("планки (+4,0 п.п.)");
+  await expect(finishHint).toContainText("вживую не проверено");
+  await expect(finishHint).not.toHaveClass(/lc-finish-warn/);
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(posted[0]).toMatchObject({ action: "start", brain: "hybrid", server: "local", finish: "wb" });
+  await finish.selectOption("off");
+
+  // The pre-inputs: off by default, a hint for each state, hidden for the pure fly.
+  const pre = field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)");
+  const hint = card(page).locator(".lc-preinput-hint");
+  await expect(pre).toBeVisible();
+  await expect(pre).toHaveValue("off");
+  expect(await pre.locator("option").allTextContents()).toEqual(["выкл", "вкл (эксперимент)"]);
+  await expect(hint).toContainText("в предсказании не использует");
+  await pre.selectOption("on");
+  await expect(hint).toContainText("Помогает, только если сервер присылает эти ходы заранее");
+  await expect(hint).toContainText("при запасе по умолчанию (меньше тика) решение не узнаёт ничего нового");
+  await expect(hint).toContainText("серверу ничего не отправляет");
+  await page.screenshot({ path: path.join(SHOTS, "3.20b-card-on.png"), fullPage: true });
+  await noHorizontalScroll(page);
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(2);
+  expect(posted[1]).toMatchObject({ action: "start", brain: "hybrid", server: "local", preinput: true });
+  expect(Object.keys(posted[1])).not.toContain("finish");
+  expect(Object.keys(posted[1])).not.toContain("window_model");
+  // Off sends no field at all; the pure fly hides the control and never sends it, even if it was on.
+  await pre.selectOption("off");
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(3);
+  expect(Object.keys(posted[2])).not.toContain("preinput");
+  await pre.selectOption("on");
+  await field(page, "Мозг").selectOption("fly");
+  await expect(pre).toBeHidden();
+  await expect(hint).toBeHidden();
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(4);
+  expect(Object.keys(posted[3])).not.toContain("preinput");
+  // Phone width: nothing scrolls sideways with the new hints.
+  await field(page, "Мозг").selectOption("hybrid");
+  await finish.selectOption("wb");
+  await page.setViewportSize({ width: 360, height: 740 });
+  await noHorizontalScroll(page);
+  await page.screenshot({ path: path.join(SHOTS, "3.20b-card-phone.png"), fullPage: true });
+});
+
+test("the real run on the private server: `--finish wb` and `--preinput on` reach the bot (env, log lines, STATUS, both cards), then the defaults", async ({ page }) => {
+  test.setTimeout(600_000);
+  await login(page);
+  expect(muhaIds()).toHaveLength(0);
+  const startsBefore = readFileSync(path.join(DIR, "systemctl.log"), "utf8")
+    .split("\n")
+    .filter((l) => l.startsWith("start ddnet-ai-bot")).length;
+
+  // 1. both on
+  ageHelperState(900);
+  await startOnPrivateServer(page, { wb: "off", duel: "off", finish: "wb", preinput: "on" });
+  expect(muhaIds()).toHaveLength(1);
+  expect(envFile()).toContain('BOT_FINISH="wb"');
+  expect(envFile()).toContain('BOT_PREINPUT="on"');
+  await expect.poll(() => botLog(), { timeout: 30_000 }).toContain("finish blocks: wb (--finish; D-097)");
+  await expect.poll(() => botLog(), { timeout: 30_000 }).toContain("pre-inputs: on (--preinput");
+  await expect.poll(async () => (await botStatus(page))?.preinput, { timeout: 30_000 }).toBe("on");
+  expect((await botStatus(page)).finish).toBe("wb");
+  const st = JSON.parse(readFileSync(path.join(DIR, "status", "status.json"), "utf8"));
+  expect([st.finish, st.preinput]).toEqual(["wb", true]);
+  await expect(card(page).locator(".lc-detail")).toContainText("дожим: ВБ");
+  await expect(card(page).locator(".lc-detail")).toContainText("ходы соперника от сервера");
+  await expect(page.locator("#bs-finish")).toHaveText("цель + удержание ВБ", { timeout: 15_000 });
+  await expect(page.locator("#bs-preinput")).toContainText("вкл", { timeout: 15_000 });
+  await expect(page.locator("#bs-preinput")).toContainText("пришло");
+  await page.screenshot({ path: path.join(SHOTS, "3.20b-bot-on.png"), fullPage: true });
+  await stopFromPage(page);
+
+  // 2. the defaults: the env says off, the bot counts without playing, the row says so.
+  ageHelperState(900);
+  await startOnPrivateServer(page, { wb: "off", duel: "off", finish: "off", preinput: "off" });
+  expect(envFile()).toContain('BOT_FINISH="off"');
+  expect(envFile()).toContain('BOT_PREINPUT="off"');
+  await expect.poll(async () => (await botStatus(page))?.preinput, { timeout: 30_000 }).toBe("off");
+  expect((await botStatus(page)).finish).toBe("off");
+  await expect(page.locator("#bs-preinput")).toContainText("выкл (только счёт)", { timeout: 15_000 });
+  await expect(card(page).locator(".lc-detail")).not.toContainText("ходы соперника от сервера");
+  expect(count(botLog(), "pre-inputs: on (--preinput")).toBe(1); // the first run's line only
+  expect(count(botLog(), "finish blocks: wb (--finish; D-097)")).toBe(1);
+  await stopFromPage(page);
+
+  const starts = readFileSync(path.join(DIR, "systemctl.log"), "utf8")
+    .split("\n")
+    .filter((l) => l.startsWith("start ddnet-ai-bot"));
+  expect(starts).toHaveLength(startsBefore + 2);
 });

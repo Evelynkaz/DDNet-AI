@@ -215,7 +215,8 @@ joni-right 108 → 121, 57 → 56, 98 → 88 (**−10**, p односторон�
 
 **Где.** Сервер выбирает владелец (joniTee ≤ 15 мин напрямую; GER-блок-сервер через прокси; Swarfey через hproxy). На бан или кик — остановиться, записать в `docs/STATUS.md`, обхода нет.
 
-**Запуск.** Сайт («Запуск») значения `wb` ещё не знает (закрытый список помощника — `off|target|full`). Поэтому — с командной строки при остановленном юните, флагами юнита (`systemctl cat ddnet-ai-bot`: `--server --name --brain --duration --hybrid-mirror --finish --wb-smart --no-selfkill= --window-model= $BOT_FLY_ARGS --no-console --web-names --data-dir --report`) с подставленными значениями базовой сессии; отличается только `--finish` (плюс `--wb left`):
+**Запуск.** С сайта (задача 3.20b): карточка «Запуск», «Дожим» → «ВБ (эксперимент)» (закрытый список помощника — `off|target|wb|full`; гибрид и гибрид + муха, чистой мухе отказ `finish_hybrid_only`; подсказка называет арену +3,6 п.п. и невзятую планку). Сторону ВБ (`--wb left`) и прочие ключи сайт не задаёт: для сессии с фиксированной стороной, как 2026-10-07, остаётся командная строка
+(вместе с оговоркой, что значения `--no-selfkill=` и `--window-model=` должны совпадать в обеих сессиях). Командная строка — при остановленном юните, флагами юнита (`systemctl cat ddnet-ai-bot`: `--server --name --brain --duration --hybrid-mirror --finish --wb-smart --no-selfkill= --window-model= --preinput $BOT_FLY_ARGS --no-console --web-names --data-dir --report`) с подставленными значениями базовой сессии; отличается только `--finish` (плюс `--wb left`):
 
 ```
 DDAI_DIAG_BLOCK_CLIPS=1 MALLOC_MMAP_THRESHOLD_=131072 ~/aiddnet/bin/ddnet-ai play --server <адрес> --name <имя> --brain hybrid --duration 15m \

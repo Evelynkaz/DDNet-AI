@@ -274,6 +274,12 @@ pub struct LiveWorld {
     pre_on: bool,
     /// Each character's DDRace team at the last snapshot (a change forgets its pre-inputs: the server stops sending them to us).
     pre_team: [i32; MAX_CLIENTS],
+    /// Whether each character's core at the last snapshot was dead-reckoned from an older wire core (`m_Tick` set and below the snapshot tick). The
+    /// hook state and jump bit of such a core are the wire's as of its older tick, so they are no witness of the owner's keys now (the pre-input
+    /// trust check, review F10).
+    reckoned: [bool; MAX_CLIENTS],
+    /// The owners that had a step for a tick the server told us about (a real pre-input played) in the last roll of [`LiveWorld::predict_impl`] (the decision metric).
+    roll_real: [bool; MAX_CLIENTS],
     /// The pre-2.4c reconstruction: `prev_pos` snapped to the current position. Only for A/B measurements.
     snap_prev_pos: bool,
     /// The pre-2.4d reconstruction: `last_refill_jumps` never set. Only for A/B measurements.
@@ -327,6 +333,8 @@ impl LiveWorld {
             pre: Box::default(),
             pre_on: false,
             pre_team: [0; MAX_CLIENTS],
+            reckoned: [false; MAX_CLIENTS],
+            roll_real: [false; MAX_CLIENTS],
             snap_prev_pos: false,
             skip_refill_jumps: false,
         }
@@ -428,6 +436,8 @@ impl LiveWorld {
             }
             present[id as usize] = true;
             let (core, evolved_prev) = evolve_character_core_with_prev(&cv.character, tick, &collision);
+            // `evolved_prev` is `Some` exactly when the loop ran (`m_Tick` set and below the snapshot tick), i.e. the core is dead-reckoned.
+            self.reckoned[id as usize] = evolved_prev.is_some();
             // Review round 3, finding F10: the *own* tee is seeded from the real applied input
             // when the caller can supply one, never from `derive_held_input`'s always-`fire: 0`
             // guess (see `upsert_character`'s own doc comment on why that guess, while a fine
@@ -916,6 +926,14 @@ impl LiveWorld {
         victim: Option<(i32, &[PlayerInput])>,
     ) -> &World<f32> {
         self.predict_impl(to_tick, own_inputs_in_flight, Some(keep), victim);
+        // Task 3.20b: the decision metric -- did the pre-inputs reach the target this prediction is for.
+        if self.pre_on
+            && let Some(t) = target_id
+                .and_then(|t| usize::try_from(t).ok())
+                .filter(|&t| t < MAX_CLIENTS)
+        {
+            self.pre.note_decision(self.roll_real[t]);
+        }
         fill_observation_from(&self.map, self.own_id, &self.scratch, target_id, obs);
         &self.scratch
     }
@@ -985,6 +1003,7 @@ impl LiveWorld {
         keep: Option<&[bool; MAX_CLIENTS]>,
         victim: Option<(i32, &[PlayerInput])>,
     ) -> &World<f32> {
+        self.roll_real = [false; MAX_CLIENTS];
         self.scratch.restore_from(&self.world);
         // 2.4b review round 1, F1: the server destroys a projectile whose owner is dead
         // (`server/entities/projectile.cpp:125-129`, `marked_for_destroy` in the physics port), but
@@ -1079,6 +1098,7 @@ impl LiveWorld {
                             snapshot_dir: snap_dir,
                             snapshot_hook: snap_hook,
                             snapshot_jump: snap_jump,
+                            reckoned: self.reckoned[id],
                             assumed_is_model: is_model,
                         },
                         &input,
@@ -1095,6 +1115,7 @@ impl LiveWorld {
             }
             self.scratch.step(&self.tick_inputs_scratch);
         }
+        self.roll_real = roll.real_all();
         &self.scratch
     }
 

@@ -102,7 +102,7 @@ impl Mirror {
     }
 }
 
-/// The finishing switch (task 5.13, D-097; `ddnet-ai play --finish`): a closed list, so the helper writes only one of three words to the
+/// The finishing switch (task 5.13, D-097; `ddnet-ai play --finish`): a closed list, so the helper writes only one of four words to the
 /// unit's environment. `Off` is the default and what a request without the field means.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Finish {
@@ -113,6 +113,10 @@ pub enum Finish {
     /// The bot keeps a frozen target until it is held, sealed or dead (the recommended live A/B).
     #[serde(rename = "target")]
     Target,
+    /// `target` plus the wayblock hold (task 3.18, D-114): inside the held hall the hybrid throws a frozen victim toward the hall's freeze wall.
+    /// Opt-in and an experiment (the arena gain stayed below the bar announced in advance); for wayblock play, not the duel.
+    #[serde(rename = "wb")]
+    Wb,
     /// `target` plus the hybrid's drag shaping for a frozen victim (did not hold up in review: not recommended).
     #[serde(rename = "full")]
     Full,
@@ -124,6 +128,7 @@ impl Finish {
         match self {
             Finish::Off => "off",
             Finish::Target => "target",
+            Finish::Wb => "wb",
             Finish::Full => "full",
         }
     }
@@ -161,6 +166,12 @@ impl WbSmart {
 /// cannot take an empty argument from the unit's environment, so the unit passes the one-argument form `--no-selfkill=${BOT_NO_SELFKILL}`.
 pub fn no_selfkill_flag_value(on: bool) -> &'static str {
     if on { "true" } else { "false" }
+}
+
+/// The value of `ddnet-ai play --preinput <value>` (the server's pre-inputs in the prediction, task 3.20b, D-112) for the request's `preinput`
+/// flag: always `on` or `off`, so the unit passes it as the two-word form `--preinput ${BOT_PREINPUT}` like `--wb-smart`.
+pub fn preinput_flag_value(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +232,11 @@ pub struct LaunchRequest {
     /// file: the helper uses [`DEFAULT_WINDOW_MODEL_REL`] under the data directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_model: Option<bool>,
+    /// The server's pre-inputs played in the prediction (task 3.20b, D-112; `ddnet-ai play --preinput on`): a JSON boolean, `false` when absent.
+    /// Only the hybrid brains take it (the helper refuses `preinput_hybrid_only` for the pure fly). It names no file and no value but the boolean:
+    /// the helper writes `on` or `off` to the unit's environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preinput: Option<bool>,
 }
 
 /// Whether a request made at `ts` (and written to a file last modified at `mtime`), seen at `now`, is fresh: neither older than
@@ -273,7 +289,8 @@ pub fn parse_request(bytes: &[u8]) -> Result<LaunchRequest, ParseError> {
         && req.finish.is_none()
         && req.wb_smart.is_none()
         && req.no_selfkill.is_none()
-        && req.window_model.is_none();
+        && req.window_model.is_none()
+        && req.preinput.is_none();
     match req.action {
         Action::Start if !complete => Err(ParseError::Invalid),
         Action::Stop if !empty => Err(ParseError::Invalid),
@@ -333,6 +350,9 @@ pub struct LaunchStatus {
     /// The opponent-input predictor of the launch (task 3.17); none in the status of a launch made before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_model: Option<bool>,
+    /// The server's pre-inputs played in the prediction, for the launch (task 3.20b); none in the status of a launch made before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preinput: Option<bool>,
 }
 
 impl LaunchStatus {
@@ -353,6 +373,7 @@ impl LaunchStatus {
             wb_smart: None,
             no_selfkill: None,
             window_model: None,
+            preinput: None,
         }
     }
 }
@@ -504,6 +525,7 @@ mod tests {
         for (word, want, flag) in [
             ("off", Finish::Off, "off"),
             ("target", Finish::Target, "target"),
+            ("wb", Finish::Wb, "wb"),
             ("full", Finish::Full, "full"),
         ] {
             let mut v = start_json();
@@ -515,13 +537,19 @@ mod tests {
             let back = parse_request(&serde_json::to_vec(&r).unwrap()).unwrap();
             assert_eq!(back, r);
         }
-        assert!(!Finish::Off.is_on() && Finish::Target.is_on() && Finish::Full.is_on());
+        assert!(!Finish::Off.is_on() && Finish::Target.is_on() && Finish::Wb.is_on() && Finish::Full.is_on());
         // An absent field is not written (old helpers' strict schema never sees an unknown key from an unchanged request).
         let text = String::from_utf8(serde_json::to_vec(&old).unwrap()).unwrap();
         assert!(!text.contains("finish"), "{text}");
-        // Nothing but the three words, in lower case: no aliases, no `on`, no injection.
+        // Nothing but the four words, in lower case: no aliases, no `on`, no injection.
         for bad in [
             serde_json::json!("on"),
+            serde_json::json!("WB"),
+            serde_json::json!("Wb"),
+            serde_json::json!("wb "),
+            serde_json::json!("wb\n"),
+            serde_json::json!("wb --wb left"),
+            serde_json::json!("target,wb"),
             serde_json::json!("Target"),
             serde_json::json!("TARGET"),
             serde_json::json!("target "),
@@ -665,6 +693,50 @@ mod tests {
         // A stop carries nothing.
         let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
         stop["window_model"] = serde_json::json!(false);
+        assert_eq!(parse(&stop), Err(ParseError::Invalid));
+    }
+
+    #[test]
+    fn the_preinput_field_is_an_additive_json_boolean_and_absent_means_off() {
+        // Task 3.20b (D-112). An old request parses and means off; an absent field is not written.
+        let old = parse(&start_json()).unwrap();
+        assert_eq!(old.preinput, None);
+        assert!(!old.preinput.unwrap_or_default());
+        let text = String::from_utf8(serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(!text.contains("preinput"), "{text}");
+        for want in [false, true] {
+            let mut v = start_json();
+            v["preinput"] = serde_json::json!(want);
+            let r = parse(&v).unwrap();
+            assert_eq!(r.preinput, Some(want));
+            assert_eq!(
+                parse_request(&serde_json::to_vec(&r).unwrap()).unwrap(),
+                r,
+                "round trip"
+            );
+            assert_eq!(preinput_flag_value(want), if want { "on" } else { "off" });
+        }
+        // Nothing but a JSON boolean: no word, no path, no number.
+        for bad in [
+            serde_json::json!("true"),
+            serde_json::json!("on"),
+            serde_json::json!("off"),
+            serde_json::json!("on --report /etc/passwd"),
+            serde_json::json!("on\"\nBOT_SERVER=\"1.2.3.4:5\""),
+            serde_json::json!("/etc/passwd"),
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(["x"]),
+            serde_json::json!({"on": true}),
+        ] {
+            let mut v = start_json();
+            v["preinput"] = bad.clone();
+            assert_eq!(parse(&v), Err(ParseError::Invalid), "preinput={bad}");
+        }
+        // A stop carries nothing.
+        let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
+        stop["preinput"] = serde_json::json!(false);
         assert_eq!(parse(&stop), Err(ParseError::Invalid));
     }
 
