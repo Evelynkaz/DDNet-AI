@@ -151,6 +151,34 @@ fn the_direction_head_learns_a_synthetic_rule_and_metrics_are_logged() {
     assert!(run.checkpoint("last.bundle").exists() && run.checkpoint("step-00000120.bundle").exists());
 }
 
+/// Task 8.8: a control that also reads the five opponent-state channels (the equal-parameter controls of the FlyGM pilot must see what the fly's
+/// encoder sees) trains through the same trainer, its checkpoint stores the longer input, and the playing template accepts it.
+#[test]
+fn a_control_that_reads_the_opponent_state_channels_trains_and_its_checkpoint_loads() {
+    use ddai_controls::ControlTemplate;
+    use ddai_controls::features::{input_dim_with_opponent_state, reads_opponent_state};
+    let cfg = RayGridConfig::default();
+    let d = input_dim_with_opponent_state(&cfg);
+    let dir = tempfile::tempdir().unwrap();
+    let run = RunDir::create(dir.path()).unwrap();
+    let l: Box<dyn Learner> = Box::new(ControlLearner::new(Box::new(Mlp::new(d, 3, 1)), cfg, 5e-3));
+    let mut t = Trainer::new(
+        l,
+        self::cfg(2),
+        corpus(1, 20),
+        Corpus::new(Vec::new()),
+        Some(run.clone()),
+    )
+    .unwrap();
+    let before = t.learner().params();
+    t.train_phase("bc", 0, 20, 20, &[], 0).unwrap();
+    assert_ne!(t.learner().params(), before);
+    let b = load_control_bundle(&run.checkpoint("last.bundle")).unwrap();
+    assert_eq!(b.input_dim, d);
+    assert_eq!(reads_opponent_state(&b.ray_grid, b.input_dim), Some(true));
+    ControlTemplate::load(&run.checkpoint("last.bundle")).expect("the playing template accepts the longer input");
+}
+
 #[test]
 fn a_step_does_not_depend_on_the_thread_count() {
     let train = |threads| {

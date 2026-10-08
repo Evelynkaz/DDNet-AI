@@ -9,6 +9,7 @@ use ddai_flyg::{Flyg, NeuronRole};
 use crate::activation::softplus;
 use crate::config::FlyConfig;
 use crate::error::FlyError;
+use crate::gm::{GmConfig, GmModel, GmParams};
 use crate::params::FlyParams;
 
 /// A loaded `.flyg` graph plus hyper-parameters plus trainable parameters, with every derived
@@ -56,6 +57,13 @@ pub struct FlyModel {
     /// falls back to `flyg().edges.pre_index` (`u32`) in that case, decided once per call, not
     /// once per CSR row (see [`FlyModel::narrow_pre_index`]'s doc comment).
     narrow_pre_index: Option<Vec<u16>>,
+
+    /// The FlyGM-style neuron model (task 8.8) when this fly has one. `None` is the rate model of
+    /// FLY.md section 4 (the default, every checkpoint before 8.8): then nothing in this struct or in
+    /// [`crate::state::FlyState`] behaves differently from before. With `Some`, the arrays above stay
+    /// (they hold the unused rate placeholder `params`; the graph, the input and output indices
+    /// are shared) and the state, the forward pass and the backward pass are the `Gm` ones.
+    gm: Option<GmModel>,
 }
 
 impl FlyModel {
@@ -112,9 +120,53 @@ impl FlyModel {
             bias: vec![0.0; n],
             decay: vec![0.0; n],
             narrow_pre_index,
+            gm: None,
         };
         model.recompute();
         Ok(model)
+    }
+
+    /// Turns this fly into a `Gm` fly (task 8.8): same graph, same input and output neurons, the
+    /// state and the dynamics of [`crate::gm`]. `params` of `None` draws the default initialisation
+    /// from `init_seed`. The rate `params` this model was built with stay as an inert placeholder.
+    pub fn with_gm(mut self, config: GmConfig, params: Option<GmParams>, init_seed: u64) -> Result<Self, FlyError> {
+        self.gm = Some(GmModel::build(
+            &self.flyg,
+            &self.config,
+            &self.input_neuron_indices,
+            &self.output_neuron_indices,
+            config,
+            params,
+            init_seed,
+        )?);
+        Ok(self)
+    }
+
+    /// The `Gm` neuron model, if this fly has one.
+    pub fn gm(&self) -> Option<&GmModel> {
+        self.gm.as_ref()
+    }
+
+    /// Replaces the `Gm` parameters (`Err` if this is a rate fly or the shape is wrong).
+    pub fn set_gm_params(&mut self, params: GmParams) -> Result<(), FlyError> {
+        match self.gm.as_mut() {
+            Some(g) => g.set_params(params),
+            None => Err(FlyError::InvalidConfig("set_gm_params on a rate fly".to_string())),
+        }
+    }
+
+    /// Length of the state vector: `num_neurons` for the rate model, `num_neurons * D` for `Gm`.
+    pub fn state_len(&self) -> usize {
+        self.gm.as_ref().map_or(self.flyg.neurons.len(), GmModel::state_len)
+    }
+
+    /// Panics if this is a `Gm` fly: for the code paths that only know the rate model (the batched
+    /// trainer, the rate backward pass, ES), so they can never silently run on the placeholder weights.
+    pub fn assert_rate(&self, what: &str) {
+        assert!(
+            self.gm.is_none(),
+            "{what} supports only the rate neuron model, not Gm (task 8.8)"
+        );
     }
 
     /// Replaces the trainable parameters and recomputes `weights`/`bias`/`decay`

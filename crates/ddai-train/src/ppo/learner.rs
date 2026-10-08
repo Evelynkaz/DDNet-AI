@@ -254,6 +254,12 @@ impl PpoLearner {
         seed: u64,
         bc: Option<BcData>,
     ) -> Result<PpoLearner, String> {
+        if !base.neuron_model.is_rate() {
+            return Err(format!(
+                "PPO (the batched actor and its BPTT) supports the rate model only; this checkpoint has the {} neuron model (task 8.8)",
+                base.neuron_model.label()
+            ));
+        }
         let train_cfg = FlyTrainConfig {
             l2_a: params.l2_a,
             ..FlyTrainConfig::default()

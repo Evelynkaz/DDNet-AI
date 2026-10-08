@@ -19,6 +19,7 @@ use crate::bc::{HeadLogits, LossConfig, StepLoss, StepTargets};
 use crate::decoder::decoder_logits;
 use crate::decoder::{DecoderGradients, DecoderModel, DecoderParams, DnCalibration, decoder_bc_loss_and_grad};
 use crate::encoder::{EncoderGradients, EncoderModel, EncoderParams, RayGridFeatures, compute_proprioception_values};
+use crate::gm::{GmParams, GmRecorder, GmScratch, gm_backward};
 use crate::model::FlyModel;
 use crate::optim::{ActivityRegularizerConfig, ParamGradients, activity_regularizer_rate_grad};
 use crate::recorder::TrajectoryRecorder;
@@ -50,6 +51,8 @@ pub struct BcStepOutput {
     pub weight_sum: f32,
     pub encoder: EncoderGradients,
     pub fly: ParamGradients,
+    /// The `Gm` neuron model's gradient (task 8.8); `None` for the rate model (then `fly` is the connectome's).
+    pub gm: Option<GmParams>,
     pub decoder: DecoderGradients,
     pub final_v: Vec<f32>,
     /// One entry per decision (also for burn-in decisions).
@@ -59,6 +62,9 @@ pub struct BcStepOutput {
 /// Per-thread scratch reused across windows.
 pub struct BcWorkspace {
     recorder: TrajectoryRecorder,
+    /// The `Gm` model's recorder and scratch (task 8.8); the rate recorder is then empty.
+    gm_rec: Option<GmRecorder>,
+    gm_scratch: Option<GmScratch>,
     bptt: BpttScratch,
     features: RayGridFeatures,
     input_buf: Vec<f32>,
@@ -69,8 +75,15 @@ impl BcWorkspace {
     /// `max_decisions`: the longest window this workspace will be asked to run.
     pub fn new(model: &FlyModel, encoder: &EncoderModel, max_decisions: usize) -> Self {
         let substeps = model.config().substeps_per_decision as usize;
+        let gm = model.gm();
         BcWorkspace {
-            recorder: TrajectoryRecorder::new(model.num_neurons(), max_decisions * substeps),
+            recorder: if gm.is_some() {
+                TrajectoryRecorder::new(0, 0)
+            } else {
+                TrajectoryRecorder::new(model.num_neurons(), max_decisions * substeps)
+            },
+            gm_rec: gm.map(|g| GmRecorder::new(g, max_decisions)),
+            gm_scratch: gm.map(GmScratch::new),
             bptt: BpttScratch::new(model),
             features: RayGridFeatures::new(encoder.ray_grid_config()),
             input_buf: vec![0.0; encoder.num_inputs()],
@@ -100,7 +113,7 @@ pub fn brain_bc_step(
         t_decisions,
         "brain_bc_step: observations/targets mismatch"
     );
-    assert_eq!(seq.v_init.len(), model.num_neurons(), "brain_bc_step: v_init length");
+    assert_eq!(seq.v_init.len(), model.state_len(), "brain_bc_step: v_init length");
     assert!(
         t_decisions <= ws.max_decisions,
         "brain_bc_step: window longer than the workspace"
@@ -108,6 +121,13 @@ pub fn brain_bc_step(
     let substeps = model.config().substeps_per_decision as usize;
 
     ws.recorder.reset();
+    if let Some(r) = ws.gm_rec.as_mut() {
+        r.reset();
+        assert!(
+            cfg.activity.weight == 0.0,
+            "the activity regulariser is defined for the rate model only (task 8.8)"
+        );
+    }
     let mut state = FlyState::new(model);
     state.set_v(model, &seq.v_init);
 
@@ -123,7 +143,10 @@ pub fn brain_bc_step(
         let an = compute_proprioception_values(&obs.self_state, encoder.ray_grid_config());
         ws.features.compute(obs, encoder.ray_grid_config());
         encoder.forward(&ws.features, &an, encoder_params, &mut ws.input_buf);
-        let out = state.step_decision_recording(model, &ws.input_buf, &mut ws.recorder);
+        let out = match ws.gm_rec.as_mut() {
+            Some(gm_rec) => state.step_decision_recording_gm(model, &ws.input_buf, gm_rec),
+            None => state.step_decision_recording(model, &ws.input_buf, &mut ws.recorder),
+        };
         dn_per_decision.push(out.dn_rates.to_vec());
         type_means.push(out.per_type_mean_rate.to_vec());
         if decoder.reads_encoder() {
@@ -187,17 +210,34 @@ pub fn brain_bc_step(
             grad,
         })
         .collect();
-    let bptt = backward(
-        model,
-        index,
-        &ws.recorder,
-        &seq.v_init,
-        t_decisions,
-        &grad_dn_refs,
-        &extra,
-        false,
-        &mut ws.bptt,
-    );
+    let (fly_grads, gm_grads, grad_inputs) = match (model.gm(), ws.gm_rec.as_ref(), ws.gm_scratch.as_mut()) {
+        (Some(gm), Some(rec), Some(scratch)) => {
+            let out = gm_backward(gm, rec, t_decisions, &grad_dn_refs, scratch);
+            (ParamGradients::default(), Some(out.grads), out.grad_inputs)
+        }
+        _ => {
+            let bptt = backward(
+                model,
+                index,
+                &ws.recorder,
+                &seq.v_init,
+                t_decisions,
+                &grad_dn_refs,
+                &extra,
+                false,
+                &mut ws.bptt,
+            );
+            (
+                ParamGradients {
+                    a: bptt.grad_a,
+                    b: bptt.grad_b,
+                    theta: bptt.grad_theta,
+                },
+                None,
+                bptt.grad_inputs,
+            )
+        }
+    };
 
     let mut encoder_grads = encoder.zero_grads();
     for t in 0..t_decisions {
@@ -205,7 +245,7 @@ pub fn brain_bc_step(
             &features[t],
             &proprio[t],
             encoder_params,
-            &bptt.grad_inputs[t],
+            &grad_inputs[t],
             &mut encoder_grads,
         );
     }
@@ -215,11 +255,8 @@ pub fn brain_bc_step(
         activity_loss,
         weight_sum,
         encoder: encoder_grads,
-        fly: ParamGradients {
-            a: bptt.grad_a,
-            b: bptt.grad_b,
-            theta: bptt.grad_theta,
-        },
+        fly: fly_grads,
+        gm: gm_grads,
         decoder: decoder_grads,
         final_v,
         logits,
@@ -246,11 +283,7 @@ pub fn brain_readout_step(
         seq.observations.len(),
         "brain_readout_step: observations/targets mismatch"
     );
-    assert_eq!(
-        seq.v_init.len(),
-        model.num_neurons(),
-        "brain_readout_step: v_init length"
-    );
+    assert_eq!(seq.v_init.len(), model.state_len(), "brain_readout_step: v_init length");
     let mut state = FlyState::new(model);
     state.set_v(model, &seq.v_init);
     let mut loss = StepLoss::default();
@@ -290,7 +323,12 @@ pub fn brain_readout_step(
         activity_loss: 0.0,
         weight_sum,
         encoder: encoder.zero_grads(),
-        fly: ParamGradients::zeros_like(model.params()),
+        fly: if model.gm().is_some() {
+            ParamGradients::default() // the rate model's connectome parameters do not exist for a Gm fly
+        } else {
+            ParamGradients::zeros_like(model.params())
+        },
+        gm: None,
         decoder: decoder_grads,
         final_v: state.v().to_vec(),
         logits,

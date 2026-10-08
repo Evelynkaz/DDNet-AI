@@ -122,6 +122,7 @@ pub struct BatchedPlan {
 impl BatchedPlan {
     /// Builds the plan with [`DEFAULT_CHUNK_COST`].
     pub fn new(model: &FlyModel) -> Self {
+        model.assert_rate("the batched trainer");
         Self::with_chunk_cost(model, DEFAULT_CHUNK_COST)
     }
 

@@ -4,6 +4,7 @@
 //! `tests/no_alloc.rs`).
 
 use crate::activation::activation;
+use crate::gm::GmRecorder;
 use crate::kernel::{PreIndex, gather_accumulate};
 use crate::model::FlyModel;
 use crate::recorder::TrajectoryRecorder;
@@ -74,6 +75,9 @@ pub struct FlyState {
     /// zeros, so calling `reset_to_rest` before ever warming up resets to the all-zero state (a
     /// documented, deliberate default, not an error).
     rest_v: Vec<f32>,
+    /// The `Gm` neuron model's second state buffer (task 8.8): a step writes the next state here and the two are swapped.
+    /// Empty for the rate model, as are `r_buf`, `v_inf_buf` and `r_before_last_buf` for `Gm`.
+    gm_next: Vec<f32>,
 }
 
 impl FlyState {
@@ -84,6 +88,20 @@ impl FlyState {
         let n = model.num_neurons();
         let num_outputs = model.num_outputs();
         let num_types = model.num_types();
+        if model.gm().is_some() {
+            let len = model.state_len();
+            return FlyState {
+                v: vec![0.0; len],
+                r_buf: Vec::new(),
+                v_inf_buf: Vec::new(),
+                r_before_last_buf: Vec::new(),
+                dn_out_buf: vec![0.0; num_outputs],
+                type_sum_buf: vec![0.0; num_types],
+                type_mean_buf: vec![0.0; num_types],
+                rest_v: vec![0.0; len],
+                gm_next: vec![0.0; len],
+            };
+        }
         FlyState {
             v: vec![0.0; n],
             r_buf: vec![0.0; n], // f(0.0) == 0.0, so the invariant already holds here.
@@ -93,6 +111,7 @@ impl FlyState {
             type_sum_buf: vec![0.0; num_types],
             type_mean_buf: vec![0.0; num_types],
             rest_v: vec![0.0; n],
+            gm_next: Vec::new(),
         }
     }
 
@@ -113,7 +132,9 @@ impl FlyState {
             "set_v: length must match the model's neuron count"
         );
         self.v.copy_from_slice(v);
-        self.refresh_r_buf_from_v(model.config().r_max);
+        if model.gm().is_none() {
+            self.refresh_r_buf_from_v(model.config().r_max);
+        }
     }
 
     fn refresh_r_buf_from_v(&mut self, r_max: f32) {
@@ -157,12 +178,67 @@ impl FlyState {
         self.step_decision_impl(model, inputs, Some(recorder))
     }
 
+    /// The `Gm` neuron model's decision (task 8.8), also recording the window's trajectory for
+    /// its backward pass ([`crate::gm::gm_backward`]). Panics on a rate fly.
+    pub fn step_decision_recording_gm(
+        &mut self,
+        model: &FlyModel,
+        inputs: &[f32],
+        recorder: &mut GmRecorder,
+    ) -> DecisionOutput<'_> {
+        self.step_gm(model, inputs, Some(recorder))
+    }
+
+    /// One decision of the `Gm` model: `steps` message-passing steps, then the DN readout.
+    /// Allocation-free (`tests/no_alloc_gm.rs`).
+    fn step_gm(
+        &mut self,
+        model: &FlyModel,
+        inputs: &[f32],
+        mut recorder: Option<&mut GmRecorder>,
+    ) -> DecisionOutput<'_> {
+        let gm = model.gm().expect("step_gm needs a Gm fly");
+        assert_eq!(
+            inputs.len(),
+            model.num_inputs(),
+            "step_decision: inputs.len() ({}) must equal model.num_inputs() ({})",
+            inputs.len(),
+            model.num_inputs()
+        );
+        for _ in 0..gm.config().steps {
+            match recorder.as_deref_mut() {
+                Some(r) => {
+                    let mut views = r.next_step();
+                    gm.step_once(&mut self.v, &mut self.gm_next, inputs, Some(&mut views));
+                }
+                None => gm.step_once(&mut self.v, &mut self.gm_next, inputs, None),
+            }
+            std::mem::swap(&mut self.v, &mut self.gm_next);
+        }
+        gm.read_out(&self.v, &mut self.dn_out_buf);
+        if let Some(r) = recorder {
+            r.record_decision(gm, inputs, &self.v);
+        }
+        gm.type_activity(&self.v, &mut self.type_sum_buf, &mut self.type_mean_buf);
+        DecisionOutput {
+            dn_rates: &self.dn_out_buf,
+            per_type_mean_rate: &self.type_mean_buf,
+        }
+    }
+
     fn step_decision_impl(
         &mut self,
         model: &FlyModel,
         inputs: &[f32],
         mut recorder: Option<&mut TrajectoryRecorder>,
     ) -> DecisionOutput<'_> {
+        if model.gm().is_some() {
+            assert!(
+                recorder.is_none(),
+                "a Gm fly records into a GmRecorder (step_decision_recording_gm), not a TrajectoryRecorder"
+            );
+            return self.step_gm(model, inputs, None);
+        }
         assert_eq!(
             inputs.len(),
             model.num_inputs(),
@@ -288,7 +364,9 @@ impl FlyState {
     /// `r_buf` to match (the struct doc comment's invariant).
     pub fn reset_to_rest(&mut self, model: &FlyModel) {
         self.v.copy_from_slice(&self.rest_v);
-        self.refresh_r_buf_from_v(model.config().r_max);
+        if model.gm().is_none() {
+            self.refresh_r_buf_from_v(model.config().r_max);
+        }
     }
 }
 

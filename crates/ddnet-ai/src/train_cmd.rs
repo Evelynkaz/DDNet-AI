@@ -769,6 +769,20 @@ fn inspect_cmd(bundle: &std::path::Path, flyg: Option<&std::path::Path>) -> Resu
             a.type_name, a.channel, b.encoder_params.g[p], b.encoder_params.c[p]
         );
     }
+    if let ddai_fly::bundle::NeuronModel::Gm { config, params } = &b.neuron_model {
+        println!(
+            "neuron model {} ({} parameters; the rate model's a/b/theta below are an inert placeholder)",
+            config.label(),
+            params.len()
+        );
+        const NAMES: [&str; 11] = ["eta", "w1m", "w1e", "b1", "w2", "b2", "wh", "bg", "inj", "ro_w", "ro_b"];
+        for (name, f) in NAMES.iter().zip(params.fields()) {
+            let rms = (f.iter().map(|x| x * x).sum::<f32>() / f.len().max(1) as f32).sqrt();
+            let max = f.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+            println!("gm {name:<5} n {:<6} rms {rms:.3} max|.| {max:.3}", f.len());
+        }
+        return Ok(());
+    }
     let a_mean = b.fly_params.a.iter().sum::<f32>() / b.fly_params.a.len() as f32;
     println!(
         "fly: a mean {a_mean:.3} (init 2.2), b range {:.2}..{:.2}, theta range {:.2}..{:.2}",

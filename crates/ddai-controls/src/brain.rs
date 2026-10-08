@@ -18,7 +18,7 @@ use ddai_fly::encoder::{RayGridConfig, RayGridFeatures};
 use ddai_fly::rng::SplitMix64;
 
 use crate::bundle::load_control_bundle;
-use crate::features::{extract, input_dim};
+use crate::features::{extract_with, input_dim, input_dim_with_opponent_state, reads_opponent_state};
 use crate::net::SeqNet;
 
 pub struct ControlBrain {
@@ -26,6 +26,8 @@ pub struct ControlBrain {
     ray_grid: RayGridConfig,
     state: Vec<f32>,
     scratch: RayGridFeatures,
+    /// Whether the net also reads the opponent-state channels (its input is `OPPONENT_STATE_DIM` longer).
+    opponent_state: bool,
     x: Vec<f32>,
     name: String,
     last_latency: Duration,
@@ -44,11 +46,14 @@ impl ControlBrain {
     /// `Sampled` draws every head from its probabilities (seeded from the reset context, so a game
     /// stays reproducible); `Argmax` takes the most likely value.
     pub fn with_selection(net: Arc<dyn SeqNet>, ray_grid: RayGridConfig, selection: ActionSelection) -> Self {
-        assert_eq!(
-            net.input_dim(),
-            input_dim(&ray_grid),
-            "control net / ray grid input size mismatch"
-        );
+        let opponent_state = reads_opponent_state(&ray_grid, net.input_dim()).unwrap_or_else(|| {
+            panic!(
+                "control net / ray grid input size mismatch: {} is neither {} nor {} (with the opponent-state channels)",
+                net.input_dim(),
+                input_dim(&ray_grid),
+                input_dim_with_opponent_state(&ray_grid)
+            )
+        });
         let name = format!("{}-h{}", net.kind().name(), net.hidden());
         ControlBrain {
             state: vec![0.0; net.state_size()],
@@ -56,6 +61,7 @@ impl ControlBrain {
             x: Vec::with_capacity(net.input_dim()),
             net,
             ray_grid,
+            opponent_state,
             name,
             last_latency: Duration::ZERO,
             selection,
@@ -90,7 +96,7 @@ impl Brain for ControlBrain {
 
     fn decide(&mut self, obs: &Observation) -> Action {
         let t0 = Instant::now();
-        extract(obs, &self.ray_grid, &mut self.scratch, &mut self.x);
+        extract_with(obs, &self.ray_grid, &mut self.scratch, self.opponent_state, &mut self.x);
         let l = self.net.step(&mut self.state, &self.x);
         self.last_logits = Some(l);
         let p = l.dir_probs();
@@ -174,12 +180,13 @@ impl ControlTemplate {
     pub fn load(path: &Path) -> Result<Self, BundleError> {
         let b = load_control_bundle(path)?;
         let net: Arc<dyn SeqNet> = Arc::from(b.build()?);
-        if net.input_dim() != input_dim(&b.ray_grid) {
+        if reads_opponent_state(&b.ray_grid, net.input_dim()).is_none() {
             return Err(BundleError(format!(
-                "{}: stored input size {} does not match its ray grid ({})",
+                "{}: stored input size {} does not match its ray grid ({} or, with the opponent-state channels, {})",
                 path.display(),
                 net.input_dim(),
-                input_dim(&b.ray_grid)
+                input_dim(&b.ray_grid),
+                input_dim_with_opponent_state(&b.ray_grid)
             )));
         }
         Ok(ControlTemplate {
@@ -286,6 +293,43 @@ mod tests {
             assert_eq!(first, again, "reset must restore the initial state");
             assert!(b.last_latency() > Duration::ZERO);
         }
+    }
+
+    #[test]
+    fn a_control_that_reads_the_opponent_state_sees_a_frozen_target() {
+        use crate::features::input_dim_with_opponent_state;
+        let cfg = RayGridConfig::default();
+        // Weights on the five extra inputs only: the net's hook logit is `frozen * 6 - 3`, nothing else matters.
+        let d = input_dim_with_opponent_state(&cfg);
+        let mut m = Mlp::new(d, 2, 1);
+        let n = m.params().len();
+        for v in &mut m.params_mut()[..n] {
+            *v = 0.0;
+        }
+        let p = m.params_mut();
+        // hidden unit 0 = tanh(5 * frozen), the first of the five extra inputs sits at index d - 5.
+        p[d - 5] = 5.0;
+        let head = 2 * d + 2;
+        // hook logit is output 4: weight from hidden unit 0 is at head + 4 * 2 + 0, bias after the 16 weights.
+        p[head + 4 * 2] = 6.0;
+        p[head + 16 + 4] = -3.0;
+        let tpl = ControlTemplate::new(Arc::new(m), cfg, BundleMeta::default());
+        let mut free = room_obs();
+        let mut frozen = room_obs();
+        free.others[0].is_frozen = false;
+        frozen.others[0].is_frozen = true;
+        frozen.others[0].freeze_ticks_remaining = 100;
+        let mut b = tpl.instantiate();
+        reset(&mut b, &free);
+        assert!(!b.decide(&free).hook, "a free target: hook off");
+        reset(&mut b, &frozen);
+        assert!(b.decide(&frozen).hook, "a frozen target: hook on");
+        // A control without the extra channels has no way to tell.
+        let blind = ControlTemplate::new(Arc::new(Mlp::new(input_dim(&cfg), 2, 1)), cfg, BundleMeta::default());
+        let (mut x, mut y) = (blind.instantiate(), blind.instantiate());
+        reset(&mut x, &free);
+        reset(&mut y, &frozen);
+        assert_eq!(x.decide(&free).hook, y.decide(&frozen).hook);
     }
 
     #[test]

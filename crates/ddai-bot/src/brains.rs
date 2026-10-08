@@ -256,6 +256,10 @@ fn load_bundle_template(opts: &BrainOptions) -> Result<ddai_fly::bundle::FlyBrai
     template
         .require_fly_readout("live bot")
         .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
+    // The Gm neuron model (task 8.8) is a pilot measured in the arena only: not played live until the owner confirms it.
+    template
+        .require_rate("live bot")
+        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
     Ok(template)
 }
 
@@ -388,6 +392,46 @@ mod tests {
             let o = opts_for(readout);
             assert!(make_brain(BrainKind::Fly, &o).is_ok(), "{readout:?} fly");
             assert!(make_brain(BrainKind::Hybrid, &o).is_ok(), "{readout:?} hybrid");
+        }
+    }
+
+    /// 8.8 review F3: a `Gm` neuron-model checkpoint (a pilot that is measured in the arena only) is refused by the live loader, in the plain fly and
+    /// in the hybrid; the same bundle with the rate model is fine.
+    #[test]
+    fn a_gm_fly_is_refused_by_the_live_loader_and_the_hybrid() {
+        use ddai_fly::bc::HookView;
+        use ddai_fly::bundle::{NeuronModel, load_bundle, save_bundle};
+        use ddai_fly::gm::GmConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let (path, flyg_path) = ddai_fly::brain_fixtures::write_tiny_fly_bundle(dir.path(), HookView::Shared);
+        let rate = load_bundle(&path).unwrap();
+        let model = rate
+            .build_model(ddai_flyg::load(&flyg_path).unwrap())
+            .unwrap()
+            .with_gm(GmConfig::default(), None, 3)
+            .unwrap();
+        let mut gm = rate.clone();
+        gm.neuron_model = NeuronModel::Gm {
+            config: GmConfig::default(),
+            params: model.gm().unwrap().params().clone(),
+        };
+        let gm_path = dir.path().join("gm.bundle");
+        save_bundle(&gm_path, &gm).unwrap();
+        let opts_of = |p: &std::path::Path| BrainOptions {
+            fly_bundle: Some(p.to_path_buf()),
+            fly_flyg: flyg_path.clone(),
+            ..BrainOptions::default()
+        };
+        for kind in [BrainKind::Fly, BrainKind::Hybrid] {
+            let e = make_brain(kind, &opts_of(&gm_path))
+                .err()
+                .expect("a Gm fly must be refused")
+                .to_string();
+            assert!(e.contains("Gm neuron model"), "{kind:?}: {e}");
+            assert!(
+                make_brain(kind, &opts_of(&path)).is_ok(),
+                "{kind:?}: the rate fly plays"
+            );
         }
     }
 

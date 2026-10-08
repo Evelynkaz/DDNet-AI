@@ -29,6 +29,7 @@ pub mod demo_brain;
 pub mod encoder;
 mod error;
 pub mod flat_adam;
+pub mod gm;
 pub mod hook_wide;
 mod kernel;
 pub mod model;

@@ -63,6 +63,12 @@ pub struct ParamSpace {
 
 impl ParamSpace {
     pub fn new(base: &FlyBundle, cfg: &SpaceConfig) -> Result<ParamSpace, String> {
+        if !base.neuron_model.is_rate() {
+            return Err(format!(
+                "ES searches the rate model's parameters; this checkpoint has the {} neuron model (task 8.8)",
+                base.neuron_model.label()
+            ));
+        }
         for g in &cfg.groups {
             if !GROUPS.contains(&g.as_str()) {
                 return Err(format!("unknown parameter group {g:?} (known: {GROUPS:?})"));
