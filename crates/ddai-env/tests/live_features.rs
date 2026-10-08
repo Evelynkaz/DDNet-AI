@@ -187,6 +187,9 @@ struct Outcome {
     differing: std::collections::BTreeMap<&'static str, (u32, i32)>,
     feature_mismatch: u32,
     ray_mismatch: u32,
+    /// Task 3.21: the v2 frame features, and the v2 network's logits (history ring, both rays, in-flight inputs) built from the two worlds.
+    v2_feature_mismatch: u32,
+    v2_logit_mismatch: u32,
     frozen_frames: u32,
     attack_frames: u32,
     hooked_frames: u32,
@@ -212,6 +215,17 @@ fn run(seed: u64, ours: &Script, theirs: &Script, stride: i32, reckoned: bool) -
         },
     ];
     let mut live = LiveWorld::new(Arc::clone(&arena.map), 0, seed);
+    let v2net = |s: u64| {
+        use ddai_oppnet::net::Mlp;
+        use ddai_oppnet::v2::feature::{INPUT_DIM, OUT_DIM};
+        use ddai_oppnet::v2::predictor::{Bundle, Decode, Predictor};
+        Predictor::new(
+            Bundle::new(Mlp::new(INPUT_DIM, 32, 16, OUT_DIM, s), Decode::default(), s, 1, 0.0, "t".into()),
+            "t",
+        )
+        .unwrap()
+    };
+    let (mut pa, mut pl) = (v2net(seed), v2net(seed));
     let mut recks = [Reck::default(), Reck::default()];
     let mut out = Outcome {
         dead_reckoned: 0,
@@ -220,6 +234,8 @@ fn run(seed: u64, ours: &Script, theirs: &Script, stride: i32, reckoned: bool) -
         differing: Default::default(),
         feature_mismatch: 0,
         ray_mismatch: 0,
+        v2_feature_mismatch: 0,
+        v2_logit_mismatch: 0,
         frozen_frames: 0,
         attack_frames: 0,
         hooked_frames: 0,
@@ -279,6 +295,30 @@ fn run(seed: u64, ours: &Script, theirs: &Script, stride: i32, reckoned: bool) -
         rays(w, ao.pos, &mut ra);
         rays(lw, lo.pos, &mut rl);
         out.ray_mismatch += u32::from(ra.map(f32::to_bits) != rl.map(f32::to_bits));
+        // Task 3.21: the v2 frame features, then the whole v2 prediction (history ring, rays around both tees, our in-flight inputs, window 2).
+        {
+            use ddai_oppnet::v2::feature::{FD as FD2, frame_features as ff2};
+            use ddai_planner::hybrid::window::{WindowCtx, WindowModel};
+            let (mut a2, mut l2) = ([0.0f32; FD2], [0.0f32; FD2]);
+            ff2(&am, &ao, &mut a2);
+            ff2(&lm, &lo, &mut l2);
+            out.v2_feature_mismatch += u32::from(a2.map(f32::to_bits) != l2.map(f32::to_bits));
+            let inflight = [ddai_physics::core::PlayerInput::default(); 2];
+            let (mut oa, mut ol) = ([None; 2], [None; 2]);
+            for (p, world, o) in [(&mut pa, w, &mut oa), (&mut pl, lw, &mut ol)] {
+                p.predict(
+                    &WindowCtx {
+                        world,
+                        self_id: 0,
+                        victim_id: 1,
+                        in_flight: &inflight,
+                    },
+                    o,
+                );
+            }
+            let same = pa.logits().iter().zip(pl.logits()).all(|(x, y)| x.to_bits() == y.to_bits());
+            out.v2_logit_mismatch += u32::from(!same || oa != ol);
+        }
         true
     })
     .unwrap();
@@ -337,6 +377,8 @@ fn the_world_a_snapshot_rebuilds_gives_the_arena_features() {
         }
         assert_eq!(o.feature_mismatch, 0);
         assert_eq!(o.ray_mismatch, 0);
+        assert_eq!(o.v2_feature_mismatch, 0);
+        assert_eq!(o.v2_logit_mismatch, 0, "the v2 network sees the same input from the arena world and from the rebuilt one");
         assert!(
             o.hooked_frames > 2 && o.attack_frames > 3 && (reckoned || o.frozen_frames > 3),
             "the scripts exercise the hook, the hammer and (in the exact-core runs) the freeze"

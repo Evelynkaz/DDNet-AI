@@ -1,0 +1,21 @@
+# work-clock: default-rate
+# Task 3.21 (E-036), PRE-REGISTERED confirmation, seed set F (230001..230600), arm "m2". Criteria: docs/EXPERIMENTS.md E-036 (committed before this config was run).
+#   opp_arena --config configs/arena/e036-final-m2.toml --threads 3 --jsonl ~/aiddnet/data/runs/E-036/final-m2.jsonl
+name = "e036-final-m2"
+base_seed = 230001
+games = 600
+
+[[condition]]
+name = "m2 lag 2/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2, hybrid = { window_model = "~/aiddnet/data/runs/E-036/models/m2.oppnet" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "m2 lag 2/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2, hybrid = { window_model = "~/aiddnet/data/runs/E-036/models/m2.oppnet" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "m2 lag 2/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2, hybrid = { window_model = "~/aiddnet/data/runs/E-036/models/m2.oppnet" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]

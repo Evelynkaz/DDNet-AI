@@ -492,11 +492,11 @@ pub fn evaluate(m: &Mlp, c: &Corpus, samples: &[SampleRef], dec: &Decode) -> Met
                         let lh = l.hook >> k & 1 != 0;
                         let c = &mut met.hook[k];
                         c.n += 1;
-                        c.model += u64::from((o[4] > dec.hook) == lh);
+                        c.model += u64::from(super::predictor::decode_hook(o[4], dec, snap_hook) == lh);
                         c.hold_snap += u64::from(snap_hook == lh);
                         if let Some(p) = prev {
                             c.n_true += 1;
-                            c.model_true += u64::from((o[4] > dec.hook) == lh);
+                            c.model_true += u64::from(super::predictor::decode_hook(o[4], dec, snap_hook) == lh);
                             c.hold_true += u64::from(p.hook == lh);
                         }
                     }

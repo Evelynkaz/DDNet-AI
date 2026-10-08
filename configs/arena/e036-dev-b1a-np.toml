@@ -1,0 +1,20 @@
+# work-clock: default-rate
+# Task 3.21 (E-036): arena arm "b1a-nopress" at the live lag cells 2/0, 2/1, 2/2 (joni-duel vs live-v2), seeds 210001.. ; the base arm is e036-remeasure-base.toml (seeds 210001..) / e036-final-base.toml.
+name = "e036-dev-b1a-np"
+base_seed = 210001
+games = 200
+
+[[condition]]
+name = "b1a-nopress lag 2/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2, hybrid = { window_model = "~/aiddnet/data/runs/E-036/models/b1a.oppnet", window_decode = "press=100" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "b1a-nopress lag 2/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2, hybrid = { window_model = "~/aiddnet/data/runs/E-036/models/b1a.oppnet", window_decode = "press=100" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "b1a-nopress lag 2/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2, hybrid = { window_model = "~/aiddnet/data/runs/E-036/models/b1a.oppnet", window_decode = "press=100" } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]

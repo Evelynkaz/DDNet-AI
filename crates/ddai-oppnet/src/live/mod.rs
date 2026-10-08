@@ -25,6 +25,7 @@ use ddai_physics::world::World;
 use ddai_planner::hybrid::window::{PredictedInput, WindowCtx, WindowModel};
 
 use crate::any::AnyPredictor;
+use crate::v2::feature::KnownTick;
 use crate::feature::{HORIZON, IF_SLOTS, wrap_angle};
 use crate::frame::TeeFrame;
 use guard::{Guard, GuardConfig, GuardState, GuardStatus, Transition};
@@ -328,6 +329,8 @@ pub struct LiveOpp {
     /// The previous snapshot's `jumped` bits of the target and its tick, for the jump events.
     prev_jumped: Option<(i32, u8)>,
     out: [Option<PredictedInput>; HORIZON],
+    /// The opponent's real inputs for the first ticks of the next window (server pre-inputs), set by [`LiveOpp::set_known`]; used by the next window only.
+    known: [Option<KnownTick>; crate::v2::feature::HORIZON],
     transitions: Vec<Transition>,
     log: Vec<u8>,
     counts: LiveCounts,
@@ -347,10 +350,21 @@ impl LiveOpp {
             pending: [Pending::EMPTY; PENDING],
             prev_jumped: None,
             out: [None; HORIZON],
+            known: [None; crate::v2::feature::HORIZON],
             transitions: Vec::with_capacity(4),
             log: Vec::with_capacity(1 << 16),
             counts: LiveCounts::default(),
         })
+    }
+
+    /// Task 3.21: the opponent's real inputs for the first ticks of the **next** window (the server's pre-inputs the world trusts): `known[k]` for window tick
+    /// `k`. A v2 model reads them as input and predicts only the rest; a v1 model ignores them. Call it right before [`LiveOpp::window`]; the next window uses
+    /// them and forgets them.
+    pub fn set_known(&mut self, known: &[Option<WireInput>]) {
+        self.known = [None; crate::v2::feature::HORIZON];
+        for (slot, k) in self.known.iter_mut().zip(known) {
+            *slot = k.map(|w| KnownTick::from_rec(&crate::frame::InputRec::from_wire(&w)));
+        }
     }
 
     /// Another regime gate (the default is [`RegimeGate::default`]; [`RegimeGate::off`] for measurements).
@@ -546,6 +560,7 @@ impl LiveOpp {
             return WindowUse::Hold;
         }
         self.out = [None; HORIZON];
+        self.pred.set_known(&std::mem::take(&mut self.known));
         self.pred.predict(
             &WindowCtx {
                 world,

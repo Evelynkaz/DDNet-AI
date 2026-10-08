@@ -17,7 +17,9 @@ pub use crate::feature::{aim_of, inflight_features, is_press, wrap_angle};
 pub const FEATURE_VERSION: u32 = 2;
 /// Ticks between two history frames (the snapshot rate of the live bot).
 pub const STRIDE: usize = 2;
-pub const K_HIST: usize = 8;
+/// History frames. Two: the abundant arena data and the clips both showed no use for more (`docs/research/opponent-predictor-v2.md`: one frame trained to the same
+/// or a lower validation loss than eight, a wider network to a higher one).
+pub const K_HIST: usize = 2;
 /// Window ticks predicted.
 pub const HORIZON: usize = 4;
 /// Numbers per history frame: the 29 of [`crate::feature::frame_features`] plus 4.
@@ -188,7 +190,7 @@ mod tests {
     #[test]
     fn dimensions_add_up() {
         assert_eq!(FD, 33);
-        assert_eq!(INPUT_DIM, 8 * 33 + 32 + 24 + 5 + 28);
+        assert_eq!(INPUT_DIM, 2 * 33 + 32 + 24 + 5 + 28);
         assert_eq!(OUT_DIM, 28);
     }
 

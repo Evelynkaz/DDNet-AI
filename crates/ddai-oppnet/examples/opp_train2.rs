@@ -30,9 +30,12 @@ struct Args {
     cfg: TrainCfg,
     known_p: [f32; 5],
     clip_lag: usize,
+    hist_keep: usize,
     notes: String,
     /// The fire threshold set by hand (otherwise tuned on the validation set).
     press_thr: Option<f32>,
+    /// Decoding overrides applied after tuning (`press=100,jump=100`).
+    decode: String,
     /// Hold out whole clip files of the training clips: every `fold_mod`-th game with index % fold_mod == fold goes to the validation set instead.
     fold: Option<(usize, usize)>,
 }
@@ -49,8 +52,10 @@ fn parse() -> Result<Args, String> {
         cfg: TrainCfg::default(),
         known_p: [1.0, 0.0, 0.0, 0.0, 0.0],
         clip_lag: 2,
+        hist_keep: ddai_oppnet::v2::feature::K_HIST,
         notes: String::new(),
         press_thr: None,
+        decode: String::new(),
         fold: None,
     };
     let mut it = std::env::args().skip(1);
@@ -100,8 +105,10 @@ fn parse() -> Result<Args, String> {
                 a.known_p.copy_from_slice(&p);
             }
             "--clip-lag" => a.clip_lag = u(v()?)?,
+            "--hist-keep" => a.hist_keep = u(v()?)?,
             "--notes" => a.notes = v()?,
             "--press-thr" => a.press_thr = Some(f(v()?)?),
+            "--decode" => a.decode = v()?,
             "--fold" => {
                 let s = v()?;
                 let (i, n) = s.split_once('/').ok_or("--fold i/n")?;
@@ -163,6 +170,17 @@ fn tune(m: &Mlp, c: &Corpus, samples: &[SampleRef], press_thr: Option<f32>) -> D
         f1,
         thr
     );
+    println!("fire precision / recall over k = 0, 1 by logit threshold:");
+    for t in [-2.0f32, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0] {
+        let pos = press.iter().filter(|x| x.0 > t).count();
+        let tp = press.iter().filter(|x| x.0 > t && x.1).count();
+        let ev = press.iter().filter(|x| x.1).count();
+        println!(
+            "  logit > {t:>4}: predicted {pos:>6}, precision {:.3}, recall {:.3}",
+            tp as f64 / pos.max(1) as f64,
+            tp as f64 / ev.max(1) as f64
+        );
+    }
     let mut d = Decode {
         press: press_thr.unwrap_or(thr),
         ..base
@@ -192,14 +210,14 @@ fn tune(m: &Mlp, c: &Corpus, samples: &[SampleRef], press_thr: Option<f32>) -> D
         }
     }
     d.dir_margin = best.1;
-    let mut best = (acc(&d, 1), d.hook);
-    for t in [-1.0f32, -0.5, 0.5, 1.0, 1.5] {
-        let a = acc(&Decode { hook: t, ..d }, 1);
+    let mut best = (acc(&d, 1), d.hook_margin);
+    for t in [0.5f32, 1.0, 1.5, 2.0, 3.0, 5.0] {
+        let a = acc(&Decode { hook_margin: t, ..d }, 1);
         if a > best.0 + 1e-9 {
             best = (a, t);
         }
     }
-    d.hook = best.1;
+    d.hook_margin = best.1;
     let mut best = (acc(&d, 2), d.jump);
     for t in [-1.0f32, -0.5, 0.5, 1.0, 1.5, 2.0] {
         let a = acc(&Decode { jump: t, ..d }, 2);
@@ -258,10 +276,12 @@ fn main() -> Result<(), String> {
     let cfg_train = CorpusCfg {
         clip_lag: a.clip_lag,
         known_p: a.known_p,
+        hist_keep: a.hist_keep,
     };
     let cfg_val = CorpusCfg {
         clip_lag: a.clip_lag,
         known_p: [1.0, 0.0, 0.0, 0.0, 0.0],
+        hist_keep: a.hist_keep,
     };
     let c_train = Corpus::new(tr_arena, tr_clips, cfg_train);
     let c_val = Corpus::new(va_arena, va_clips, cfg_val.clone());
@@ -283,7 +303,13 @@ fn main() -> Result<(), String> {
     );
     let (net, val) = train(&c_train, &c_val, &a.cfg, init.as_ref(), &mut |l| println!("{l}"))?;
     let samples = c_val.samples();
-    let decode = tune(&net, &c_val, &samples, a.press_thr);
+    // The thresholds are tuned for the real opponent when there are clips to tune on, else on the arena.
+    let clip_samples: Vec<SampleRef> = samples.iter().copied().filter(|r| r.src == 1).collect();
+    let tune_on = if clip_samples.is_empty() { &samples } else { &clip_samples };
+    println!("tuning the decoding on {} {} samples", tune_on.len(), if clip_samples.is_empty() { "arena" } else { "clip" });
+    let mut decode = tune(&net, &c_val, tune_on, a.press_thr);
+    ddai_oppnet::v2::predictor::apply_decode_overrides(&mut decode, &a.decode)?;
+    println!("decoding used: {decode:?}");
     let bundle = Bundle::new(
         net.clone(),
         decode,

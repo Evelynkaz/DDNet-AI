@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use super::data::GameRec;
 use super::feature::{
-    FD, HORIZON, IF_DIM, IF_SLOTS, INPUT_DIM, KnownTick, Label, STRIDE, assemble, frame_features, inflight_features,
+    FD, HORIZON, IF_DIM, IF_SLOTS, INPUT_DIM, K_HIST, KnownTick, Label, STRIDE, assemble, frame_features, inflight_features,
     label_tick,
 };
 use crate::clipdata::{ClipGame, labels_at};
@@ -20,6 +20,8 @@ pub struct CorpusCfg {
     pub clip_lag: usize,
     /// Probabilities of `n = 0 ..= 4` known ticks in an arena sample (the pre-input simulation); must sum to 1.
     pub known_p: [f32; 5],
+    /// Ablation: only the newest `hist_keep` history frames are read, the older slots repeat the oldest kept one (default [`K_HIST`]).
+    pub hist_keep: usize,
 }
 
 impl Default for CorpusCfg {
@@ -27,6 +29,7 @@ impl Default for CorpusCfg {
         CorpusCfg {
             clip_lag: 2,
             known_p: [1.0, 0.0, 0.0, 0.0, 0.0],
+            hist_keep: K_HIST,
         }
     }
 }
@@ -191,7 +194,7 @@ impl Corpus {
             }
             assemble(
                 x,
-                |j| &feats[i.saturating_sub(j * STRIDE)],
+                |j| &feats[i.saturating_sub(j.min(self.cfg.hist_keep.max(1) - 1) * STRIDE)],
                 &g.ticks[i].rays[1],
                 &g.ticks[i].rays[0],
                 &inflight[..n_if],
@@ -211,7 +214,7 @@ impl Corpus {
             }
             assemble(
                 x,
-                |j| &feats[i.saturating_sub(j)],
+                |j| &feats[i.saturating_sub(j.min(self.cfg.hist_keep.max(1) - 1))],
                 &t.rays[1],
                 &t.rays[0],
                 &inflight[..n_if],

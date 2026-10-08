@@ -25,6 +25,8 @@ pub struct Decode {
     /// A jump is predicted when its logit is above this.
     pub jump: f32,
     pub hook: f32,
+    /// The hook differs from what the snapshot shows only when its logit is more than this away from `hook` (`0`: the logit alone decides).
+    pub hook_margin: f32,
     /// A fire press is predicted when its logit is above this.
     pub press: f32,
     /// The direction differs from what the snapshot shows only when its logit beats the shown direction's by this much (`0`: argmax).
@@ -36,9 +38,25 @@ impl Default for Decode {
         Decode {
             jump: 0.0,
             hook: 0.0,
+            hook_margin: 0.0,
             press: 0.0,
             dir_margin: 0.0,
         }
+    }
+}
+
+/// The hook level of a hook logit: above `d.hook` plus the margin it is out, below `d.hook` minus the margin it is in, in between whatever the snapshot shows.
+pub fn decode_hook(logit: f32, d: &Decode, hold_hook: bool) -> bool {
+    if d.hook_margin > 0.0 {
+        if logit > d.hook + d.hook_margin {
+            true
+        } else if logit < d.hook - d.hook_margin {
+            false
+        } else {
+            hold_hook
+        }
+    } else {
+        logit > d.hook
     }
 }
 
@@ -56,11 +74,12 @@ pub fn apply_decode_overrides(d: &mut Decode, list: &str) -> Result<(), String> 
             "press" => d.press = v,
             "jump" => d.jump = v,
             "hook" => d.hook = v,
+            "hook_margin" if v >= 0.0 => d.hook_margin = v,
             "dir_margin" if v >= 0.0 => d.dir_margin = v,
-            "dir_margin" => return Err("window_decode: dir_margin must not be negative".into()),
+            "dir_margin" | "hook_margin" => return Err(format!("window_decode: {k} must not be negative")),
             other => {
                 return Err(format!(
-                    "window_decode: unknown key {other:?} (press, jump, hook, dir_margin)"
+                    "window_decode: unknown key {other:?} (press, jump, hook, hook_margin, dir_margin)"
                 ));
             }
         }
@@ -120,7 +139,7 @@ impl Bundle {
             );
         }
         let d = &self.decode;
-        if ![d.jump, d.hook, d.press, d.dir_margin].iter().all(|v| v.is_finite()) || d.dir_margin < 0.0 {
+        if ![d.jump, d.hook, d.hook_margin, d.press, d.dir_margin].iter().all(|v| v.is_finite()) || d.dir_margin < 0.0 || d.hook_margin < 0.0 {
             return Err(
                 "opponent model: a decoding threshold is not a finite number (or the direction margin is negative)"
                     .into(),
@@ -240,13 +259,13 @@ pub fn decode_dir(o: &[f32], margin: f32, hold_dir: u8) -> u8 {
 }
 
 /// One tick of a prediction from the logits.
-pub fn decode_tick(out: &[f32], k: usize, d: &Decode, hold_dir: u8, base_angle: f64) -> PredictedInput {
+pub fn decode_tick(out: &[f32], k: usize, d: &Decode, hold_dir: u8, hold_hook: bool, base_angle: f64) -> PredictedInput {
     let o = &out[k * HEAD_DIM..(k + 1) * HEAD_DIM];
     let dir = decode_dir(o, d.dir_margin, hold_dir);
     PredictedInput {
         direction: i32::from(dir) - 1,
         jump: o[3] > d.jump,
-        hook: o[4] > d.hook,
+        hook: decode_hook(o[4], d, hold_hook),
         press: o[5] > d.press,
         aim: wrap_angle(base_angle + f64::from(o[6])),
     }
@@ -312,8 +331,9 @@ impl WindowModel for Predictor {
         debug_assert_eq!(self.scratch.out.len(), OUT_DIM);
         let base = f64::from(opp.angle);
         let hold_dir = (i32::from(opp.direction) + 1) as u8;
+        let hold_hook = opp.hook_state > 0;
         for (k, slot) in out.iter_mut().enumerate().take(HORIZON) {
-            *slot = Some(decode_tick(&self.scratch.out, k, &self.decode, hold_dir, base));
+            *slot = Some(decode_tick(&self.scratch.out, k, &self.decode, hold_dir, hold_hook, base));
         }
     }
 
@@ -444,7 +464,7 @@ mod tests {
         out[5] = -1.0; // press logit
         out[3] = 0.4;
         let d0 = Decode::default();
-        let p = decode_tick(&out, 0, &d0, 1, 0.0);
+        let p = decode_tick(&out, 0, &d0, 1, false, 0.0);
         assert_eq!((p.direction, p.jump, p.hook, p.press), (-1, true, false, false));
         let d = Decode {
             press: -1.5,
@@ -452,13 +472,26 @@ mod tests {
             dir_margin: 1.5,
             ..d0
         };
-        let p = decode_tick(&out, 0, &d, 1, 0.0);
+        let p = decode_tick(&out, 0, &d, 1, false, 0.0);
         assert_eq!(
             (p.direction, p.jump, p.press),
             (0, false, true),
             "margin 1.5 > 1.0 keeps hold; press above -1.5; jump below 0.5"
         );
-        assert!((decode_tick(&out, 0, &d, 1, 6.0).aim - wrap_angle(6.0)).abs() < 1e-12);
+        assert!((decode_tick(&out, 0, &d, 1, false, 6.0).aim - wrap_angle(6.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_hook_margin_keeps_what_the_snapshot_shows_between_the_thresholds() {
+        let d = Decode {
+            hook_margin: 1.0,
+            ..Decode::default()
+        };
+        assert!(decode_hook(1.5, &d, false), "above the margin: out");
+        assert!(!decode_hook(-1.5, &d, true), "below it: in");
+        assert!(decode_hook(0.5, &d, true) && !decode_hook(0.5, &d, false), "in between: hold");
+        let plain = Decode::default();
+        assert!(decode_hook(0.1, &plain, false) && !decode_hook(-0.1, &plain, true), "no margin: the logit decides");
     }
 
     #[test]
@@ -466,11 +499,12 @@ mod tests {
         let mut d = Decode {
             jump: 1.0,
             hook: 2.0,
+            hook_margin: 0.5,
             press: 3.0,
             dir_margin: 4.0,
         };
-        apply_decode_overrides(&mut d, "press=-1.5, dir_margin=0").unwrap();
-        assert_eq!((d.jump, d.hook, d.press, d.dir_margin), (1.0, 2.0, -1.5, 0.0));
+        apply_decode_overrides(&mut d, "press=-1.5, dir_margin=0, hook_margin=1").unwrap();
+        assert_eq!((d.jump, d.hook, d.press, d.dir_margin, d.hook_margin), (1.0, 2.0, -1.5, 0.0, 1.0));
         assert!(apply_decode_overrides(&mut d, "press").is_err());
         assert!(apply_decode_overrides(&mut d, "foot=1").is_err());
         assert!(apply_decode_overrides(&mut d, "press=nan").is_err());
