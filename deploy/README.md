@@ -286,20 +286,20 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
 2. **Запись сервера** в `~/aiddnet/data/live-servers.toml` (правит владелец или техлид по его слову):
    ```toml
    [[server]]
-   address = "45.141.57.35:8308"
+   address = "198.51.100.10:8308"
    nick = "Muha"
    ready = true            # D-067: без него клиент откажется подключаться
    proxy = "swarfey"       # новое: имя файла secrets/swarfey-proxy.toml
    ```
    Файл прокси сам хранит `for_server` (адрес сервера, для которого его выдали): если он есть, прокси годится только для него, и запись другого сервера с `proxy = "swarfey"` бот отвергнет.
    Без строки `proxy` бот пойдёт напрямую и получит тот же бан, а с `proxy`, но без файла или с правами шире 0600, **не пойдёт вообще** (отказ до первой датаграммы, прямого запасного пути нет).
-3. **Фильтр cgroup: какой drop-in нужен, зависит от ключа `relay` файла прокси** (D-088, поправка 2.6b, `docs/formats.md` §33.9). Важно в обоих вариантах: `45.141.57.35` (Swarfey) **никогда не разрешается**, и ошибка в коде не пустит бота к нему напрямую.
+3. **Фильтр cgroup: какой drop-in нужен, зависит от ключа `relay` файла прокси** (D-088, поправка 2.6b, `docs/formats.md` §33.9). Важно в обоих вариантах: `198.51.100.10` (Swarfey) **никогда не разрешается**, и ошибка в коде не пустит бота к нему напрямую.
 
    **а) `relay` не задан или `"proxy-host-only"` (по умолчанию).** Ретранслятор на самом прокси: бот шлёт только на IP прокси (адрес из ответа прокси бот не слушается), поэтому в drop-in нужен `IPAddressAllow=<IP прокси>` (посмотреть: `getent hosts <host из файла>`; DNS-заглушка systemd-resolved 127.0.0.53 уже входит в loopback). Если IP прокси сменится, фильтр молча отрежет трафик (бот уйдёт по таймауту): проще записать IP в `host` файла и в drop-in вместе.
    ```
    [Service]
    ExecStart=
-   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 45.141.57.35:8308 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 198.51.100.10:8308 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
    IPAddressAllow=<IP прокси>
    ```
 
@@ -307,10 +307,10 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
    ```
    [Service]
    ExecStart=
-   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 45.141.57.35:8308 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 198.51.100.10:8308 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
    IPAddressAllow=
    IPAddressDeny=
-   IPAddressDeny=45.141.57.35
+   IPAddressDeny=198.51.100.10
    IPAddressDeny=::/0
    IPAddressDeny=10.0.0.0/8
    IPAddressDeny=172.16.0.0/12
@@ -321,8 +321,8 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
    IPAddressDeny=fe80::/10
    ```
    Строки после адреса сервера (ревью 2.6b, F3): `::/0` закрывает весь IPv6 для IPv4-сервера (клиент и так отвергает IPv6-ретранслятор для него, а прокси должен быть доступен по IPv4; для IPv6-сервера эту строку не писать), остальные — частные диапазоны, которые клиент тоже отвергает (заодно закрывают адрес метаданных облака). Лаунчер (`ddnet-ai launch apply`) пишет ровно этот набор сам. Проверено `tools/e2e/ipfilter_probe.sh`, сценарий S8.
-   Три строки именно в таком порядке и все три нужны (проверено на systemd 255.4 этой машины скриптом `tools/e2e/ipfilter_probe.sh`, таблица в `docs/formats.md` §33.9): **allow сильнее deny**, если совпали оба, поэтому прежний `IPAddressAllow=127.0.0.0/8 ::1` из юнита надо сбросить (иначе запрет сервера мёртв: S2), и `IPAddressAllow=any` писать нельзя (S7); `IPAddressDeny=any` из юнита тоже надо сбросить, иначе наружу ничего не выходит (S3). Адрес в `IPAddressDeny=` — **каждый IP сервера**: если у игрового сервера несколько адресов (имя разрешается в несколько), по строке (или через пробел) на каждый; IPv6-адрес сервера тоже. v4-mapped форма (`::ffff:45.141.57.35`) попадает под запрет IPv4-адреса. Цена: в этом режиме боту доступен весь остальной интернет и сеть VPS (loopback и DNS-заглушка, как и раньше, да), поэтому режим включается только для прокси, у которого ретранслятор на другой машине, и только после `proxy-check`.
-   Перед первым запуском проверить, что фильтр на месте и работает: `sudo systemctl daemon-reload && systemctl show ddnet-ai-bot -p IPAddressAllow -p IPAddressDeny` (в `IPAddressAllow` пусто, в `IPAddressDeny` только IP сервера, systemd показывает их как `45.141.57.35/32`; проверено на пробном юните с таким drop-in), а сам механизм (на самом systemd, на одноразовом юните, без игрового сервера) воспроизводит `tools/e2e/ipfilter_probe.sh`.
+   Три строки именно в таком порядке и все три нужны (проверено на systemd 255.4 этой машины скриптом `tools/e2e/ipfilter_probe.sh`, таблица в `docs/formats.md` §33.9): **allow сильнее deny**, если совпали оба, поэтому прежний `IPAddressAllow=127.0.0.0/8 ::1` из юнита надо сбросить (иначе запрет сервера мёртв: S2), и `IPAddressAllow=any` писать нельзя (S7); `IPAddressDeny=any` из юнита тоже надо сбросить, иначе наружу ничего не выходит (S3). Адрес в `IPAddressDeny=` — **каждый IP сервера**: если у игрового сервера несколько адресов (имя разрешается в несколько), по строке (или через пробел) на каждый; IPv6-адрес сервера тоже. v4-mapped форма (`::ffff:198.51.100.10`) попадает под запрет IPv4-адреса. Цена: в этом режиме боту доступен весь остальной интернет и сеть VPS (loopback и DNS-заглушка, как и раньше, да), поэтому режим включается только для прокси, у которого ретранслятор на другой машине, и только после `proxy-check`.
+   Перед первым запуском проверить, что фильтр на месте и работает: `sudo systemctl daemon-reload && systemctl show ddnet-ai-bot -p IPAddressAllow -p IPAddressDeny` (в `IPAddressAllow` пусто, в `IPAddressDeny` только IP сервера, systemd показывает их как `198.51.100.10/32`; проверено на пробном юните с таким drop-in), а сам механизм (на самом systemd, на одноразовом юните, без игрового сервера) воспроизводит `tools/e2e/ipfilter_probe.sh`.
    Запись в `~/aiddnet/data/secrets/swarfey-proxy.toml` (правит владелец или техлид по его слову): `relay = "public"`. Опционально `session_pick = 4` и `{session}` в `user` (формат имени задаёт поставщик прокси; клиент подставит 8 знаков `[a-z0-9]`): бот перед входом опробует до 4 сессий, оставит с лучшим RTT и запишет в журнал только RTT. Лаунчер (`ddnet-ai launch apply`) пишет этот drop-in сам для прокси с `relay = "public"`.
 4. **Первый запуск короткий и при владельце** (D-068, 10–15 минут), `journalctl -u ddnet-ai-bot -f` открыт. В журнале: `UDP goes through a SOCKS5 proxy`, `socks5: UDP association established` (с именем `swarfey` и портом ретранслятора, но без адреса и учётных данных). Потеря TCP-соединения с прокси бот видит как обрыв: `the proxy's TCP control connection closed`, переподключается тем же путём (новое соединение с прокси на каждую попытку, лимиты те же: 5 за 20 с, два захода до входа, не больше 3 обрывов в игре за 600 с, D-058).
 5. **Откат:** убрать drop-in (`sudo systemctl revert ddnet-ai-bot`) и вернуть `ready = false` или убрать `proxy`. Если Swarfey кикнет или забанит — стоп без обхода (CLAUDE.md, D-016), запись в `docs/STATUS.md`.

@@ -4224,7 +4224,7 @@ jumpmiss.py`) дала **2-3-тиковые нажатия: 97 из 97 обна�
 
 ```toml
 [[server]]
-address = "45.141.57.35:8308"
+address = "198.51.100.10:8308"
 nick = "Muha"
 purpose = "observer-recording"
 ```
@@ -4236,7 +4236,7 @@ purpose = "observer-recording"
 адрес»). `record_cmd::run` вызывает эту проверку **до** первого сетевого действия — отказ печатает
 причину и завершает процесс кодом ошибки, не открывая сокет вовсе.
 
-Единственная запись в файле на сейчас — Swarfey (D-027: `45.141.57.35:8308`, ник «Muha», цель
+Пример записи — сервер Swarfey (D-027; адрес в примерах заменён документационным `198.51.100.10:8308`, ник «Muha», цель
 «observer-recording»), создана этой задачей вручную (не тестовым кодом) **строго для того, чтобы
 файл существовал** — сама задача 8.4a ни разу не подключается ни к чему, кроме `127.0.0.1`; первый
 живой сеанс против Swarfey делает оркестратор отдельно, после ревью.
@@ -5194,7 +5194,7 @@ BotRec  { target, brain (0 hybrid 1 planner 2 scripted 3 idle 4 fly), flags (BIT
 `ddai_client::server_list` — **только чтение** мастер-списка (`master{1..4}.ddnet.org/ddnet/15/servers.json`): разбор адресов (`tw-0.6+udp` в приоритете), счёт игроков (имена игроков **не хранятся**), блок-серверы
 по `block|blmap|copy (love|the) box|love box` в названии, карте или режиме. `ddnet-ai servers [--block]` печатает таблицу (метки `READY` / `listed` — из `live-servers.toml`) и ничего не подключает.
 
-**Ворота `live_servers::check` для любого адреса (`play`, `record`, `--server auto`, драйвер клиента) отказывают записи без `ready = true` с ошибкой `NotReady`, называющей флаг** (правка ревью F1: прежде `ready` читал только `auto`, и явный `--server 45.141.57.35:8308` прошёл бы). Запись Swarfey в файле владельца без `ready` — отказ.
+**Ворота `live_servers::check` для любого адреса (`play`, `record`, `--server auto`, драйвер клиента) отказывают записи без `ready = true` с ошибкой `NotReady`, называющей флаг** (правка ревью F1: прежде `ready` читал только `auto`, и явный `--server 198.51.100.10:8308` прошёл бы). Запись Swarfey в файле владельца без `ready` — отказ.
 
 `--server auto` (сознательное отличие от TS, где выбирался самый населённый публичный блок-сервер; **мастер-список запрашивается только если есть хоть одна `ready`-запись**, правка F4): кандидаты — **локальный сервер** и записи `live-servers.toml` с `ready = true` и нашим ником; из них — самый
 населённый блок-сервер по мастер-списку (не с паролем, не полный, ≥ 2 игроков), иначе локальный. Поле `ready` (новое, по умолчанию `false`) ставит владелец, когда IP или прокси готовы (D-052, D-053); Адрес не из кандидатов вернуть нельзя (тест перебирает все строки фикстуры). Фикстура `crates/ddai-client/tests/fixtures/master-servers.json` — форма ответа мастера, записи
@@ -5677,7 +5677,7 @@ scenario v3), F17 (`died_this_tick` дважды), F18/F19 (статическа
 
 ```toml
 [[server]]
-address = "45.141.57.35:8308"
+address = "198.51.100.10:8308"
 nick = "Muha"
 purpose = "play"
 ready = true          # по-прежнему обязателен для не-loopback сервера (D-067)
@@ -6026,7 +6026,7 @@ JSON: `{"v":1, "skipped":n, "game":{"w","h"}|null, "images":[…], "env":[…], 
 ### 36.1 Избранное `~/aiddnet/data/launch/favourites.json` (пишет **только веб**, `0644`, не в git, ≤ 64 КиБ, ≤ 64 записей)
 
 ```json
-{"v":1,"favourites":[{"address":"45.141.57.35:8308","name":"Swarfey's | 24/7 Linear","nick":"Muha","connection":"proxy:hproxy","consent_at":1791200000,"notes":"админ разрешил в Discord","added_at":1791200000,"reopened_at":0}]}
+{"v":1,"favourites":[{"address":"198.51.100.10:8308","name":"Swarfey's | 24/7 Linear","nick":"Muha","connection":"proxy:hproxy","consent_at":1791200000,"notes":"админ разрешил в Discord","added_at":1791200000,"reopened_at":0}]}
 ```
 
 - Строгая схема (`deny_unknown_fields`): ни одного лишнего ключа на любом уровне, `v` = 1. **Один плохой элемент отвергает файл целиком** (`favourites_invalid`; симлинк, не обычный файл, слишком большой — `favourites_unreadable`); никакой «частичной» веры.
@@ -6042,7 +6042,7 @@ JSON: `{"v":1, "skipped":n, "game":{"w","h"}|null, "images":[…], "env":[…], 
 ### 36.2 Кэш мастер-списка `~/aiddnet/data/servers/master.json` и `refresh.json` (пишет `ddnet-ai servers-cache`, `0644`; веб только читает)
 
 ```json
-{"v":1,"fetched_at":1791241428,"master":1,"servers":[{"address":"45.141.57.35:8308","name":"…","map":"Copy Love Box","game_type":"DDFightNet fng","location":"eu:it","passworded":false,"players":2,"clients":3,"max_clients":64,"v06":true,"block":true}]}
+{"v":1,"fetched_at":1791241428,"master":1,"servers":[{"address":"198.51.100.10:8308","name":"…","map":"Copy Love Box","game_type":"DDFightNet fng","location":"eu:it","passworded":false,"players":2,"clients":3,"max_clients":64,"v06":true,"block":true}]}
 {"v":1,"at":1791241428,"ok":false,"reason":"no_master"}
 ```
 
@@ -6056,7 +6056,7 @@ JSON: `{"v":1, "skipped":n, "game":{"w","h"}|null, "images":[…], "env":[…], 
 ### 36.3 Список закрытых серверов `/run/ddnet-ai/blocked.json` (пишет root-помощник рядом со `status.json`, `0644`, ≤ 64 КиБ)
 
 ```json
-{"v":1,"at":1791241500,"blocked":[{"address":"45.141.57.35:8308","at":1791241400,"code":3}]}
+{"v":1,"at":1791241500,"blocked":[{"address":"198.51.100.10:8308","at":1791241400,"code":3}]}
 ```
 
 Адрес, секунды Unix кика/бана и код выхода бота (3 — кик/бан, 4 — не вошёл). Без текста причины. **Информационный**: закрывает сервер только память помощника (`launch-state.json`, §34.4); сайт по этому файлу рисует «закрыт после кика/бана» (избранное закрыто, если есть запись с тем же адресом или тем же IP и `reopened_at` ≤ `at`). Пишется при каждом запуске, остановке и выходе бота.

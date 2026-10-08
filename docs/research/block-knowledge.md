@@ -568,7 +568,7 @@ Kill protection — 20 мин (`sv_kill_protection 20`, для race). На оф�
 
 ### 5.1 Что известно наверняка
 
-- **Сервер.** В мастер-листе (снимок 2026-09-27): «! Swarfey's blocker server | 24/7 Copy Love Box», 45.141.57.35:8308,
+- **Сервер.** В мастер-листе (снимок 2026-09-27): «! Swarfey's blocker server | 24/7 Copy Love Box»,
   game_type `DDFightNet fng`, версия `0.6.4, 18.5`, **`client_score_kind: points`**, 64 слота, карта `23f188bb…`.
 - **Версия.** «0.6.4, 18.5» — это ровно `GAME_VERSION` тега DDNet 18.5 от 2024-09-01
   ([version.h](https://github.com/ddnet/ddnet/blob/18.5/src/game/version.h#L11)). Ванильный 18.5 всегда сообщает счёт
