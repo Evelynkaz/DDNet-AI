@@ -547,6 +547,7 @@ fn arena_eval_rules(
         games: Some(games),
         rules: None,
         players,
+        duel: None,
     };
     let rc = RunConfig {
         name: "eval".into(),

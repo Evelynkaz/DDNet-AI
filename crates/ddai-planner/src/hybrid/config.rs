@@ -304,6 +304,8 @@ pub struct HybridConfig {
     /// victim lies frozen off the freeze with freeze left: leap over it and hook it from the far side, or walk up and hook-pull it toward the freeze. Never a hammer: a hammer hit unfreezes the tee it hits.
     /// `0` = off. Each one costs a rollout.
     pub approach_plans: usize,
+    /// Task 3.19 (D-116): the reflex hammer and the hammer-safe envelope on top of the decision ([`crate::hybrid::reflex`]). All off by default.
+    pub reflex: crate::hybrid::reflex::ReflexConfig,
 }
 
 /// The longest plan the hybrid can be asked for (`frozen_steps`).
@@ -368,6 +370,7 @@ impl Default for HybridConfig {
             frozen_budget_ms: None,
             frozen_no_extension: true,
             approach_plans: 0,
+            reflex: crate::hybrid::reflex::ReflexConfig::default(),
         }
     }
 }
@@ -467,6 +470,7 @@ impl HybridConfig {
         if self.anchors > 36 {
             return Err("hybrid: anchors above the ray count".into());
         }
+        self.reflex.validate()?;
         Ok(())
     }
 }

@@ -895,6 +895,7 @@ fn the_summary_counts_a_held_win_only_when_it_was_credited() {
             games: None,
             rules: None,
             players: vec![PlayerSpec::simple("idle"), PlayerSpec::simple("idle")],
+            duel: None,
         },
         arena: "corridor".into(),
         games: vec![r],

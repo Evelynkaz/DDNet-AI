@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use ddai_env::arena::Arena;
 use ddai_env::config::{PlayerSpec, RunConfig, builtin_brain, lag_models_of};
-use ddai_env::game::play_game_modeled;
+use ddai_env::game::play_game_duel_watched;
 use ddai_env::observe;
 use ddai_env::run::{layout_of, load_arenas};
 use ddai_env::sim::PlayerSetup;
@@ -33,6 +33,8 @@ struct Args {
     trace: bool,
     /// Print the last 60 ticks before the end of the first N lost games.
     dump: usize,
+    /// Task 3.19: print a one-line-per-event story (hits, freezes, thaws) of the first N games of each condition.
+    story: usize,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -44,6 +46,7 @@ fn parse_args() -> Result<Args, String> {
         jsonl: None,
         trace: false,
         dump: 0,
+        story: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -56,6 +59,7 @@ fn parse_args() -> Result<Args, String> {
             "--jsonl" => a.jsonl = Some(PathBuf::from(v()?)),
             "--trace" => a.trace = true,
             "--dump" => a.dump = v()?.parse().map_err(|e| format!("--dump: {e}"))?,
+            "--story" => a.story = v()?.parse().map_err(|e| format!("--story: {e}"))?,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -83,11 +87,32 @@ struct Side {
     hook_presses: u32,
     /// Slot 0 only: the decisions' verdicts of the last 40 ticks before the end -- (tick, chosen plan flagged unsafe, danger reasons, chosen label).
     verdicts: Vec<(i32, bool, String, String)>,
+    /// `--story`: the events of the whole game, one line each.
+    story: Vec<String>,
     /// `--dump`: one line per tick for the last 60 ticks before the game was decided (both tees, inputs, hooks, events).
     track: Vec<String>,
     /// First freeze: tick, position, hooked by the other tee, hit by its hammer within 20 ticks, vertical speed the tick before.
     freeze: Option<(i32, f32, f32, bool, bool, f32)>,
+    /// Task 3.19: jump key presses (a rising edge of the jump key while free), those with the other tee free and within a hammer's reach (64 px),
+    /// and executed jumps (a rising edge of `jumped & 1`: what the clip statistics count for the opponent).
+    jumps: u32,
+    jumps_near: u32,
+    jumps_exec: u32,
+    /// Task 3.19: "opportunity" frames -- every second tick of play where both tees are alive and free, the hammer of this side is ready
+    /// (`reload_timer == 0`) and the other tee is within [`OPP_RADIUS`] (centre to centre) -- and those followed by a swing of this side within 4 ticks.
+    opps: u32,
+    opp_swings: u32,
+    /// Task 3.19: ticks of play (after the countdown) up to the end of the game.
+    play_ticks: u32,
+    /// Task 3.19: a hybrid's decisions and the candidates it scored in them (from its telemetry; 0 for other brains).
+    decisions: u64,
+    candidates: u64,
+    /// Task 3.19: ticks of play on which both tees were alive and free (the clip statistics of the post-mortem count "free frames" only).
+    free_ticks: u32,
 }
+
+/// The distance (px, centre to centre) of a hammer "opportunity" frame: the clip statistics of the 2026-10-07 post-mortem use 56 px.
+const OPP_RADIUS: f32 = 56.0;
 
 fn play(
     cfg: &RunConfig,
@@ -96,6 +121,7 @@ fn play(
     g: u32,
     trace: bool,
     dump: bool,
+    story: bool,
 ) -> Result<Row, String> {
     let cond = &cfg.condition[cond_i];
     let arena = &arenas[&cond.arena];
@@ -123,10 +149,21 @@ fn play(
     let mut was_out = [false; 2];
     let mut first = true;
     let mut decided = false;
-    let rep = play_game_modeled(arena, &rules, seed, layout_of(arena, g), players, lag_models_of(&slots), &mut |sim, tick| {
+    // Task 3.19: per tick, the swings of both sides (to look 4 ticks ahead from an opportunity frame) and the opportunity frames themselves.
+    let mut fires_at: Vec<[bool; 2]> = Vec::new();
+    let mut opp_frames: Vec<(i32, [bool; 2])> = Vec::new();
+    let mut prev_jump = [0i32; 2];
+    let mut prev_jumped = [0i32; 2];
+    let mut story_free = [true; 2];
+    let fight_start = cond.duel.as_ref().filter(|d| d.rounds).map_or(0, |d| d.countdown_ticks);
+    let rep = play_game_duel_watched(arena, &rules, cond.duel.as_ref(), seed, layout_of(arena, g), players, lag_models_of(&slots), &mut |sim, tick| {
         if first {
             sim.record_events = true;
             first = false;
+        }
+        if tick <= fight_start {
+            // The countdown: nobody can act (the world is frozen for both), nothing is counted.
+            return true;
         }
         if trace
             && !decided
@@ -167,15 +204,95 @@ fn play(
                 sides[0].track.remove(0);
             }
         }
+        let mut fired = [false; 2];
         for e in &sim.last_events {
             match *e {
                 WorldEvent::HammerHit { from, to } if (0..2).contains(&from) && (0..2).contains(&to) => {
                     sides[from as usize].hammer_hits += 1;
                     last_hit_on[to as usize] = tick;
                 }
-                WorldEvent::HammerFire { from, .. } if (0..2).contains(&from) => sides[from as usize].hammer_fires += 1,
+                WorldEvent::HammerFire { from, .. } if (0..2).contains(&from) => {
+                    sides[from as usize].hammer_fires += 1;
+                    fired[from as usize] = true;
+                }
                 _ => {}
             }
+        }
+        fires_at.push(fired);
+        if story {
+            let t = tick - fight_start;
+            let hx = |i: usize| w.cores.get(i as u8).map_or(0.0, |c| c.pos.x);
+            let hy = |i: usize| w.cores.get(i as u8).map_or(0.0, |c| c.pos.y);
+            for e in &sim.last_events {
+                match *e {
+                    WorldEvent::HammerHit { from, to } if (0..2).contains(&from) && (0..2).contains(&to) => {
+                        let (a, b) = (if from == 0 { "us" } else { "him" }, if to == 0 { "us" } else { "him" });
+                        sides[0].story.push(format!(
+                            "t{t}: {a} hammer {b} (at {:.0},{:.0} vy {:.1})",
+                            hx(to as usize),
+                            hy(to as usize),
+                            w.cores.get(to as u8).map_or(0.0, |c| c.vel.y)
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            for (i, was_free) in story_free.iter_mut().enumerate() {
+                let free = w.characters[i].as_ref().is_some_and(|c| c.alive && c.freeze_time == 0);
+                let frozen = w.characters[i].as_ref().is_some_and(|c| c.alive && c.freeze_time > 0);
+                if frozen && *was_free {
+                    sides[0].story.push(format!(
+                        "t{t}: {} FROZEN at ({:.0},{:.0}) vy {:.1}{}",
+                        if i == 0 { "us" } else { "him" },
+                        hx(i),
+                        hy(i),
+                        w.cores.get(i as u8).map_or(0.0, |c| c.vel.y),
+                        if w.cores.get(i as u8).is_some_and(|c| c.is_in_freeze) { " in a freeze tile" } else { "" }
+                    ));
+                }
+                if free && !*was_free {
+                    sides[0].story.push(format!("t{t}: {} free again", if i == 0 { "us" } else { "him" }));
+                }
+                *was_free = free;
+            }
+        }
+        // Opportunity frames: the state the step just produced is the state the next decision (tick + 0) sees; sampled every second tick.
+        if let (Some(h0), Some(h1)) = (w.characters[0].as_ref(), w.characters[1].as_ref())
+            && h0.alive
+            && h1.alive
+            && h0.freeze_time == 0
+            && h1.freeze_time == 0
+        {
+            sides[0].free_ticks += 1;
+            sides[1].free_ticks += 1;
+        }
+        if tick % 2 == 0
+            && let (Some(c0), Some(c1)) = (w.cores.get(0), w.cores.get(1))
+            && let (Some(h0), Some(h1)) = (w.characters[0].as_ref(), w.characters[1].as_ref())
+            && h0.alive
+            && h1.alive
+            && h0.freeze_time == 0
+            && h1.freeze_time == 0
+        {
+            let d = ((c0.pos.x - c1.pos.x).powi(2) + (c0.pos.y - c1.pos.y).powi(2)).sqrt();
+            let ready = [h0.reload_timer == 0, h1.reload_timer == 0];
+            let opp = [ready[0] && d <= OPP_RADIUS, ready[1] && d <= OPP_RADIUS];
+            if opp[0] || opp[1] {
+                opp_frames.push((tick, opp));
+            }
+            for i in 0..2usize {
+                let c = if i == 0 { c0 } else { c1 };
+                if c.input.jump != 0 && prev_jump[i] == 0 {
+                    sides[i].jumps += 1;
+                    sides[i].jumps_near += u32::from(d <= 64.0);
+                }
+                prev_jump[i] = c.input.jump;
+                sides[i].jumps_exec += u32::from(c.jumped & 1 != 0 && prev_jumped[i] & 1 == 0);
+                prev_jumped[i] = c.jumped;
+            }
+        } else {
+            prev_jump = [0; 2];
+            prev_jumped = [0; 2];
         }
         for i in 0..2usize {
             let o = 1 - i;
@@ -217,6 +334,43 @@ fn play(
             sides[i].holds.push(hold_run[i]);
         }
     }
+    // `fires_at[k]` holds the swings of the step that ended at tick `fight_start + 1 + k`.
+    let fire_in = |i: usize, from: i32, to: i32| -> bool {
+        (from..=to).any(|t| {
+            usize::try_from(t - fight_start - 1)
+                .ok()
+                .and_then(|k| fires_at.get(k))
+                .is_some_and(|f| f[i])
+        })
+    };
+    for (t, opp) in &opp_frames {
+        for i in 0..2usize {
+            if opp[i] {
+                sides[i].opps += 1;
+                sides[i].opp_swings += u32::from(fire_in(i, t + 1, t + 4));
+            }
+        }
+    }
+    let play_ticks = u32::try_from(rep.end_tick - rep.fight_start).unwrap_or(0);
+    for (i, s) in sides.iter_mut().enumerate() {
+        s.play_ticks = play_ticks;
+        if let Some(t) = rep
+            .players
+            .get(i)
+            .and_then(|p| p.telemetry.as_ref())
+            .and_then(|t| t.get("totals"))
+        {
+            s.decisions = t.get("decisions").and_then(Value::as_u64).unwrap_or(0);
+            s.candidates = t
+                .get("evaluated")
+                .and_then(Value::as_object)
+                .map_or(0, |m| m.values().filter_map(Value::as_u64).sum());
+        }
+    }
+    if story {
+        let end = format!("t{play_ticks}: result {:?} (credited {})", rep.result, rep.credited);
+        sides[0].story.push(end);
+    }
     let line = json!({
         "condition": cond.name, "game": g, "result": format!("{:?}", rep.result), "credited": rep.credited, "held": rep.held, "held_block": rep.held_block, "end_tick": rep.end_tick,
         "spawns": rep.spawns,
@@ -225,10 +379,11 @@ fn play(
         "sides": sides.iter().map(|s| json!({
             "hammer_hits": s.hammer_hits, "hammer_fires": s.hammer_fires, "holds": s.holds, "dir_changes": s.dir_changes,
             "hook_ticks": s.hook_ticks, "hook_presses": s.hook_presses, "forced_ends": s.forced_ends, "freeze": s.freeze,
+            "jumps": s.jumps, "jumps_near": s.jumps_near, "jumps_exec": s.jumps_exec, "decisions": s.decisions, "candidates": s.candidates, "free_ticks": s.free_ticks, "opps": s.opps, "opp_swings": s.opp_swings,
             "verdicts": s.verdicts,
         })).collect::<Vec<_>>(),
     });
-    Ok((cond.name.clone(), line, sides, rep.end_tick))
+    Ok((cond.name.clone(), line, sides, rep.end_tick - rep.fight_start))
 }
 
 fn median(v: &mut [u32]) -> f64 {
@@ -307,7 +462,7 @@ fn main() -> Result<(), String> {
         let res: Vec<Result<Row, String>> = pool.install(|| {
             (0..n)
                 .into_par_iter()
-                .map(|g| play(&cfg, &arenas, ci, g, a.trace, a.dump > 0))
+                .map(|g| play(&cfg, &arenas, ci, g, a.trace, a.dump > 0, g < a.story as u32))
                 .collect()
         });
         let mut rows = Vec::new();
@@ -342,6 +497,12 @@ fn main() -> Result<(), String> {
         );
         if a.trace {
             foresight(&rows);
+        }
+        for r in rows.iter().take(a.story) {
+            println!("--- story of game {} ({})", r.1["game"], r.1["result"]);
+            for l in &r.2[0].story {
+                println!("    {l}");
+            }
         }
         let mut shown = 0;
         for r in &rows {
@@ -428,6 +589,33 @@ fn main() -> Result<(), String> {
             let mut ys: Vec<f32> = freezes.iter().map(|f| f.2).collect();
             ys.sort_by(f32::total_cmp);
             let ymed = ys.get(ys.len() / 2).copied().unwrap_or(f32::NAN);
+            let jumps: u32 = rows.iter().map(|r| r.2[i].jumps).sum();
+            let jumps_near: u32 = rows.iter().map(|r| r.2[i].jumps_near).sum();
+            let jumps_exec: u32 = rows.iter().map(|r| r.2[i].jumps_exec).sum();
+            let free: f64 = rows.iter().map(|r| f64::from(r.2[i].free_ticks)).sum();
+            let (decisions, candidates): (u64, u64) = (
+                rows.iter().map(|r| r.2[i].decisions).sum(),
+                rows.iter().map(|r| r.2[i].candidates).sum(),
+            );
+            let opps: u32 = rows.iter().map(|r| r.2[i].opps).sum();
+            let opp_swings: u32 = rows.iter().map(|r| r.2[i].opp_swings).sum();
+            println!(
+                "  {who:13} jump key presses/1250t {:.1} (executed {:.1}; presses within 64 px of a free other tee {:.1}) | hammer opportunities (ready, other free, <= 56 px) per 30 s {:.1}, swing within 4 ticks {:.1}% ({opp_swings} of {opps}) | candidates per decision {:.1}",
+                f64::from(jumps) / ticks * 1250.0,
+                f64::from(jumps_exec) / ticks * 1250.0,
+                f64::from(jumps_near) / ticks * 1250.0,
+                per30(f64::from(opps) * 2.0),
+                100.0 * f64::from(opp_swings) / f64::from(opps.max(1)),
+                candidates as f64 / decisions.max(1) as f64,
+            );
+            println!(
+                "  {who:13} per 30 s of play with both tees free ({:.0}% of the play): hammer hits {:.2} (swings {:.2}), jump key presses/1250t {:.1}, executed {:.1}",
+                100.0 * free / ticks,
+                f64::from(hits) / free * 1500.0,
+                f64::from(fires) / free * 1500.0,
+                f64::from(jumps) / free * 1250.0,
+                f64::from(jumps_exec) / free * 1250.0,
+            );
             println!(
                 "  {who:13} hammer hits/30s {:.2} (fires {:.2}) | hook on other: eps/30s {:.2}, held ticks/30s {:.1}, median hold {med:.0}, <=4 ticks {:.0}% | hook presses/30s {:.2} | holds ended with the button still down {:.0}% | dir changes/30s {:.1} | first freeze: {} ({} hooked-by-other, {} hit<=20t, {} rising), median y {ymed:.0}",
                 per30(f64::from(hits)),

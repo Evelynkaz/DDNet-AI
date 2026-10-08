@@ -14,7 +14,8 @@ use rayon::prelude::*;
 use crate::EnvError;
 use crate::arena::{Arena, load_arena_defs};
 use crate::config::{BrainFactory, Condition, PlayerSpec, Rules, RunConfig, lag_models_of};
-use crate::game::{GameReport, Layout, play_game_modeled};
+use crate::duel::DuelSpec;
+use crate::game::{GameReport, Layout, play_game_duel_watched};
 use crate::sim::PlayerSetup;
 
 /// Builds the players of one game from the condition's slot specs.
@@ -60,9 +61,23 @@ pub fn play_indexed(
     base_seed: u64,
     g: u32,
 ) -> Result<GameReport, EnvError> {
-    play_game_modeled(
+    play_indexed_duel(arena, rules, None, slots, factory, base_seed, g)
+}
+
+/// [`play_indexed`] with the duel options of the condition (task 3.19); `None` is exactly [`play_indexed`].
+pub fn play_indexed_duel(
+    arena: &Arena,
+    rules: &Rules,
+    duel: Option<&DuelSpec>,
+    slots: &[PlayerSpec],
+    factory: &BrainFactory,
+    base_seed: u64,
+    g: u32,
+) -> Result<GameReport, EnvError> {
+    play_game_duel_watched(
         arena,
         rules,
+        duel,
         base_seed.wrapping_add(u64::from(g)),
         layout_of(arena, g),
         setups(slots, factory, arena)?,
@@ -119,7 +134,7 @@ pub fn run_condition(
     let results: Vec<Result<GameReport, EnvError>> = pool.install(|| {
         (0..games)
             .into_par_iter()
-            .map(|g| play_indexed(arena, rules, &slots, factory, cfg.base_seed, g))
+            .map(|g| play_indexed_duel(arena, rules, cond.duel.as_ref(), &slots, factory, cfg.base_seed, g))
             .collect()
     });
     let games = results.into_iter().collect::<Result<Vec<_>, _>>()?;

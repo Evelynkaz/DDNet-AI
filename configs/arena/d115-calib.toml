@@ -1,0 +1,27 @@
+# work-clock: default-rate
+# Task 3.19 (D-116, E-034): calibrating the work clock to the live search. Live: 14.2 candidates per decision (5 clips of 2026-10-07, wall clock 4 ms, load 18-30; 10-20 on the
+# clips of 06.10), the arena at the default 1.25 us per tee-tick: 28. Live view + round rules, lag 2/1, today's box.
+name = "d115 calibration: work-clock rate vs live candidates"
+base_seed = 19101
+games = 100
+
+[[condition]]
+name = "work 1.5 us"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.0015, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "work 1.8 us"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.0018, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "work 2.1 us"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.0021, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]

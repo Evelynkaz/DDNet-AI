@@ -323,6 +323,16 @@ pub enum BotEvent {
     DuelEnded {
         tick: i32,
     },
+    /// Task 3.19 (D-116): every 30 s of a detected duel, what we did in the window: hammer presses and jump presses sent, and the hammer hits seen in
+    /// the snapshots (by us / on us: the clips' rule, a swing with the other tee in its reach). The live protocol's "hits per 30 s" and "jumps".
+    DuelWindow {
+        tick: i32,
+        ticks: i32,
+        hammer_presses: u64,
+        jump_presses: u64,
+        hits_by_us: u64,
+        hits_on_us: u64,
+    },
     Block {
         tick: i32,
         victim: String,
@@ -418,6 +428,8 @@ pub struct BotStats {
     pub idle_decisions: u64,
     pub hooks_fired: u64,
     pub hammer_fires: u64,
+    /// Task 3.19: jump key presses sent (a rising edge of the key).
+    pub jump_presses: u64,
     pub self_kills: u64,
     pub vetoed_hooks: u64,
     /// Fire presses withheld because the hammer would have hit a spared tee.
@@ -459,6 +471,59 @@ pub enum StopReason {
     /// We had been playing and are now a spectator again: a moderator, a vote or the server moved us.
     /// That is a moderation signal (D-016): the bot stays a spectator and stops, it does not rejoin.
     MovedToSpectators,
+}
+
+/// Task 3.19: the length of a [`BotEvent::DuelWindow`] (30 s).
+pub const DUEL_WINDOW_TICKS: i32 = 1500;
+
+/// The counters at the start of the current duel window.
+#[derive(Debug, Clone, Copy, Default)]
+struct DuelWindow {
+    start: Option<i32>,
+    hammer_presses: u64,
+    jump_presses: u64,
+    hits_by_us: u64,
+    hits_on_us: u64,
+}
+
+impl DuelWindow {
+    /// One decision at `tick`: `now` are the running counters. Starts a window, or closes one that has run `DUEL_WINDOW_TICKS` and returns it.
+    fn step(&mut self, tick: i32, now: [u64; 4]) -> Option<BotEvent> {
+        let Some(start) = self.start else {
+            *self = DuelWindow {
+                start: Some(tick),
+                hammer_presses: now[0],
+                jump_presses: now[1],
+                hits_by_us: now[2],
+                hits_on_us: now[3],
+            };
+            return None;
+        };
+        if tick < start {
+            // A tick reset: start over.
+            self.start = None;
+            return None;
+        }
+        if tick - start < DUEL_WINDOW_TICKS {
+            return None;
+        }
+        let ev = BotEvent::DuelWindow {
+            tick,
+            ticks: tick - start,
+            hammer_presses: now[0].saturating_sub(self.hammer_presses),
+            jump_presses: now[1].saturating_sub(self.jump_presses),
+            hits_by_us: now[2].saturating_sub(self.hits_by_us),
+            hits_on_us: now[3].saturating_sub(self.hits_on_us),
+        };
+        *self = DuelWindow {
+            start: Some(tick),
+            hammer_presses: now[0],
+            jump_presses: now[1],
+            hits_by_us: now[2],
+            hits_on_us: now[3],
+        };
+        Some(ev)
+    }
 }
 
 impl StopReason {
@@ -525,6 +590,8 @@ pub struct Bot {
     duel_detect_on: bool,
     /// The map the duel evidence belongs to (name, sha256): another map drops it ([`Bot::on_map_loaded`]).
     duel_map: Option<(String, [u8; 32])>,
+    /// Task 3.19: the 30 s window of the duel journal ([`BotEvent::DuelWindow`]).
+    duel_window: DuelWindow,
     /// Since when the bot has been away with duel evidence carried over (a reconnect, a map reload): checked at the next snapshot.
     duel_carry_since: Option<Instant>,
     /// Task 4.12: a kill awaited by the fallback must be forgotten at the next step (the switch went on in the middle of a decision).
@@ -627,6 +694,7 @@ impl Bot {
             duel: DuelDetector::new(),
             duel_detect_on: cfg.duel_detect,
             duel_map: None,
+            duel_window: DuelWindow::default(),
             duel_carry_since: None,
             cancel_fallback: false,
             spawns: Vec::new(),
@@ -882,6 +950,7 @@ impl Bot {
         if self.duel_map.as_ref() != Some(&this_map) {
             self.duel.reset();
             self.duel_map = Some(this_map);
+            self.sync_duel_hook();
         }
         self.clipper.set_map(&self.map_ident.name, self.map_ident.sha256);
     }
@@ -1003,6 +1072,12 @@ impl Bot {
         if Self::apply_selfkill_gate(eff, &mut self.no_selfkill, &mut self.unstick, &mut self.hooks) {
             self.cancel_fallback = true;
         }
+        self.sync_duel_hook();
+    }
+
+    /// Task 3.19 (D-116): tells the navigator whether a duel is detected, so that the wayblock is not held in one (`wbHolding`'s `duel` argument).
+    fn sync_duel_hook(&mut self) {
+        self.hooks.navigator.set_duel(self.duel.active().is_some());
     }
 
     /// Sets the effective "no self-kill" where it acts; `true` when it went on (a `Cl_Kill` sent before is no longer awaited).
@@ -1380,9 +1455,20 @@ impl Bot {
             own_id,
             bot,
             walk_label: &self.walk_label,
+            duel: self.duel.active().is_some(),
         });
         if let Some(note) = self.hooks.navigator.take_cross_fail() {
             self.clipper.cross_fail(&note, own_id, &self.players);
+        }
+        // Task 3.19: the duel journal, a line per 30 s of a detected duel.
+        if self.duel.active().is_some() {
+            let (by, on) = self.clipper.hammer_hits();
+            let now = [self.stats.hammer_fires, self.stats.jump_presses, by, on];
+            if let Some(ev) = self.duel_window.step(snap.tick, now) {
+                push_event(&mut self.events, ev);
+            }
+        } else {
+            self.duel_window = DuelWindow::default();
         }
         self.report_saved_clips();
     }
@@ -1512,8 +1598,14 @@ impl Bot {
             .then(|| duel.update(tick, own_id, snap.teams.as_ref(), players))
             .flatten()
         {
-            Some(DuelChange::Started(why)) => push_event(events, BotEvent::DuelStarted { tick, why }),
-            Some(DuelChange::Ended) => push_event(events, BotEvent::DuelEnded { tick }),
+            Some(DuelChange::Started(why)) => {
+                push_event(events, BotEvent::DuelStarted { tick, why });
+                hooks.navigator.set_duel(true);
+            }
+            Some(DuelChange::Ended) => {
+                push_event(events, BotEvent::DuelEnded { tick });
+                hooks.navigator.set_duel(false);
+            }
             None => {}
         }
         if Self::apply_selfkill_gate(
@@ -1962,6 +2054,7 @@ impl Bot {
                 spare_ids: spare_ids.as_slice(),
                 travel_goal,
                 wb,
+                duel: duel.active().is_some(),
             });
             // Task 3.17 (D-111): with the window model on, the target plays the model's inputs in the roll to `to_tick` (hold otherwise).
             let predicted = match (window_model.as_mut(), target_id) {
@@ -2018,6 +2111,9 @@ impl Bot {
         }
         if info.fire_pressed && own.holding_hammer() {
             stats.hammer_fires += 1;
+        }
+        if info.jump_rising {
+            stats.jump_presses += 1;
         }
         *last_aim = (input.target_x, input.target_y);
         *last_sent = player_input_from_net(input);
@@ -2433,6 +2529,39 @@ impl WanderEnv for WanderEnvImpl<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// Task 3.19: the duel journal closes a window every 30 s with the counters' differences, starts over after a tick reset and never reports a
+    /// negative difference.
+    #[test]
+    fn the_duel_window_reports_the_differences_every_thirty_seconds() {
+        use super::{BotEvent, DUEL_WINDOW_TICKS, DuelWindow};
+        let mut w = DuelWindow::default();
+        assert!(
+            w.step(1000, [5, 7, 1, 2]).is_none(),
+            "the first decision opens the window"
+        );
+        assert!(w.step(1000 + DUEL_WINDOW_TICKS - 2, [9, 9, 3, 4]).is_none());
+        let Some(BotEvent::DuelWindow {
+            ticks,
+            hammer_presses,
+            jump_presses,
+            hits_by_us,
+            hits_on_us,
+            ..
+        }) = w.step(1000 + DUEL_WINDOW_TICKS, [15, 19, 6, 5])
+        else {
+            panic!("the window closes");
+        };
+        assert_eq!(
+            (ticks, hammer_presses, jump_presses, hits_by_us, hits_on_us),
+            (DUEL_WINDOW_TICKS, 10, 12, 5, 3)
+        );
+        // The next window starts from the closing counters.
+        assert!(w.step(1000 + DUEL_WINDOW_TICKS + 10, [16, 20, 6, 5]).is_none());
+        // A tick reset (time went back) drops the window; the next decision opens a new one.
+        assert!(w.step(5, [20, 20, 6, 5]).is_none());
+        assert!(w.step(10, [21, 21, 6, 5]).is_none());
+    }
+
     use super::*;
 
     fn tee_at(id: i32, x: f32, vx: f32) -> Tee {

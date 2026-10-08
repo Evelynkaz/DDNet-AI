@@ -7,6 +7,9 @@
 //!   only an incident in the **second half** of the buffer counts, and the most severe is saved.
 //! * **Cross-fail** clip: when the navigator's notes say "...; trying again from the spawn" or "no way
 //!   through ...", with a 60 s cooldown (3000 ticks).
+//! * **Duel round-loss clips** (task 3.19, D-116): in a detected F-DDrace duel the bot saves a clip at the start of every round it ended frozen or dead in
+//!   (`duel-loss-<tick>.clip`), with **no** cooldown. They are not "automatic" in the sense of [`parse_auto_name`] (no severity suffix), so the pruning above
+//!   never touches them; their own bound is [`prune_duel`] ([`DUEL_KEEP`] files, [`DUEL_MAX_BYTES`] bytes), and the bot caps one session at [`DUEL_SESSION_MAX`].
 //! * **Pruning**: at most [`KEEP_AUTO`] = 24 automatic clips in all and [`KEEP_PER_KIND`] = 16 of a kind,
 //!   newest first; `manual-*` is never touched. The TS pattern `^(.*)-\d+-s(\d+)\.json$` never matched
 //!   `cross-fail-<tick>.json`, so those piled up for ever; here `cross-fail` clips are named like every
@@ -33,6 +36,13 @@ pub const SEVERITY: i32 = 250;
 pub const SEVERITY_FREEZE: i32 = 180;
 /// The extension of a clip file.
 pub const EXTENSION: &str = "clip";
+/// Task 3.19: the kind and the file name prefix of a duel round-loss clip.
+pub const DUEL_KIND: &str = "duel-loss";
+/// Task 3.19: the duel clips kept on disk at most (the oldest go first), and their total size.
+pub const DUEL_KEEP: usize = 60;
+pub const DUEL_MAX_BYTES: u64 = 12 << 20;
+/// Task 3.19: the duel clips one session of the bot saves at most (a clip is about 50 KB; a 20-round duel is 1 MB).
+pub const DUEL_SESSION_MAX: usize = 40;
 
 /// `~/aiddnet/data/bot/clips`; `None` when `HOME` is unset (never a relative path).
 pub fn default_clip_dir() -> Option<PathBuf> {
@@ -48,6 +58,44 @@ pub fn threshold(kind: &str) -> i32 {
         "self-freeze" | "chased-into-freeze" | "goto-into-freeze" => SEVERITY_FREEZE,
         _ => SEVERITY,
     }
+}
+
+/// Task 3.19: `duel-loss-<tick>` (no severity suffix: not an automatic clip for [`prune`]).
+pub fn duel_name(tick: i32) -> String {
+    format!("{DUEL_KIND}-{tick}")
+}
+
+/// Task 3.19: deletes the oldest `duel-loss-*` clips of `dir` beyond [`DUEL_KEEP`] files or [`DUEL_MAX_BYTES`] bytes. Returns the deleted paths.
+pub fn prune_duel(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files: Vec<(SystemTime, PathBuf, u64)> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let is_duel = path.extension().and_then(|e| e.to_str()) == Some(EXTENSION)
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.starts_with(&format!("{DUEL_KIND}-")));
+        if !is_duel {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        files.push((meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), path, meta.len()));
+    }
+    // Newest first; keep while both bounds hold.
+    files.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let (mut kept, mut bytes) = (0usize, 0u64);
+    let mut removed = Vec::new();
+    for (_, path, len) in files {
+        if kept < DUEL_KEEP && bytes + len <= DUEL_MAX_BYTES {
+            kept += 1;
+            bytes += len;
+            continue;
+        }
+        std::fs::remove_file(&path)?;
+        removed.push(path);
+    }
+    Ok(removed)
 }
 
 /// Characters outside `[a-zA-Z0-9_-]` become `_` (`writeClip`).
@@ -330,6 +378,60 @@ mod tests {
         assert!(!a.cross_ready(500 + CROSS_COOLDOWN_TICKS - 1) && a.cross_ready(500 + CROSS_COOLDOWN_TICKS));
         a.enabled = false;
         assert!(!a.ready(10_000_000) && !a.cross_ready(10_000_000) && !(0..60).any(|_| a.frame()));
+    }
+
+    #[test]
+    fn duel_clips_are_not_automatic_and_are_pruned_by_count_and_by_size_oldest_first() {
+        assert_eq!(
+            parse_auto_name(&duel_name(71936)),
+            None,
+            "the autoclip pruning never sees a duel clip"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, age_s: u64, len: usize| {
+            let p = dir.path().join(format!("{name}.{EXTENSION}"));
+            std::fs::write(&p, vec![b'x'; len]).unwrap();
+            let t = SystemTime::now() - Duration::from_secs(age_s);
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+            p
+        };
+        // 70 small duel clips (age 100 + i): the 60 newest stay.
+        for i in 0..70 {
+            write(&duel_name(1000 + i), 100 + i as u64, 10);
+        }
+        let other = write("self-freeze-5-s200", 5000, 10);
+        let manual = write("manual-5", 9000, 10);
+        let gone = prune_duel(dir.path()).unwrap();
+        assert_eq!(gone.len(), 10, "{gone:?}");
+        assert!(
+            gone.iter()
+                .all(|p| p.file_stem().unwrap().to_str().unwrap().starts_with("duel-loss-"))
+        );
+        assert!(other.exists() && manual.exists(), "other clips are not its business");
+        // The size bound: three 5 MiB clips do not fit in 12 MiB together, the oldest goes.
+        let dir2 = tempfile::tempdir().unwrap();
+        for (i, age) in [(0, 300u64), (1, 200), (2, 100)] {
+            let p = dir2.path().join(format!("{}.{EXTENSION}", duel_name(i)));
+            std::fs::write(&p, vec![b'x'; 5 << 20]).unwrap();
+            let t = SystemTime::now() - Duration::from_secs(age);
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        }
+        let gone = prune_duel(dir2.path()).unwrap();
+        assert_eq!(gone.len(), 1);
+        assert!(
+            gone[0].to_str().unwrap().contains("duel-loss-0"),
+            "the oldest: {gone:?}"
+        );
     }
 
     #[test]

@@ -578,6 +578,35 @@ pub struct HybridSpec {
     /// field of this table, so the search budget **and** the decision cap move together exactly as they do in the bot. Deadline mode only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_budget_ms: Option<u32>,
+    // --- Task 3.19 (D-116): the reflex hammer and the hammer-safe envelope (`HybridConfig::reflex`). All default off.
+    /// The reflex hammer: swing when the other tee is free and a swing along the aim at its predicted position would hit and our hammer is ready.
+    #[serde(default)]
+    pub reflex_hammer: Option<bool>,
+    /// Pixels added to the swing's hit radius (default 0).
+    #[serde(default)]
+    pub reflex_slack_px: Option<f64>,
+    /// The reflex swings only when the hit throws the other tee into a freeze or death tile (default false).
+    #[serde(default)]
+    pub reflex_hazard_only: Option<bool>,
+    /// Ticks since our last swing the reflex waits for, on top of the reload timer (default 0; 16 is what a live world, which does not know the reload, needs).
+    #[serde(default)]
+    pub reflex_lockout_ticks: Option<i64>,
+    /// The hammer-safe envelope: drop the jump (the hook climb) that a worst-case hit would carry into a freeze tile.
+    #[serde(default)]
+    pub envelope: Option<bool>,
+    /// The other tee is a threat within this many px (default 110), when its hammer is at most `envelope_ready_ticks` (default 8) from ready.
+    #[serde(default)]
+    pub envelope_threat_px: Option<f64>,
+    #[serde(default)]
+    pub envelope_ready_ticks: Option<i64>,
+    /// The worst-case kick of a hit, px/tick (default 11), and the margin under the freeze tile, px (default 16).
+    #[serde(default)]
+    pub envelope_kick: Option<f64>,
+    #[serde(default)]
+    pub envelope_margin_px: Option<f64>,
+    /// Also drop the hook of a climb toward a tee above (default false).
+    #[serde(default)]
+    pub envelope_hook_climb: Option<bool>,
 }
 
 impl HybridSpec {
@@ -885,6 +914,36 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         if h.window_model.is_some() {
             cfg.window_model = true;
         }
+        if let Some(v) = h.reflex_hammer {
+            cfg.reflex.hammer = v;
+        }
+        if let Some(v) = h.reflex_slack_px {
+            cfg.reflex.slack_px = v;
+        }
+        if let Some(v) = h.reflex_hazard_only {
+            cfg.reflex.hazard_only = v;
+        }
+        if let Some(v) = h.reflex_lockout_ticks {
+            cfg.reflex.lockout_ticks = v;
+        }
+        if let Some(v) = h.envelope {
+            cfg.reflex.envelope = v;
+        }
+        if let Some(v) = h.envelope_threat_px {
+            cfg.reflex.threat_px = v;
+        }
+        if let Some(v) = h.envelope_ready_ticks {
+            cfg.reflex.ready_ticks = v;
+        }
+        if let Some(v) = h.envelope_kick {
+            cfg.reflex.kick = v;
+        }
+        if let Some(v) = h.envelope_margin_px {
+            cfg.reflex.margin_px = v;
+        }
+        if let Some(v) = h.envelope_hook_climb {
+            cfg.reflex.hook_climb = v;
+        }
         if let Some(v) = h.polish {
             cfg.polish = v;
         }
@@ -947,6 +1006,9 @@ pub struct Condition {
     pub rules: Option<RulesOverride>,
     /// Slot 0 is the focal player (A); the rest are its opponents.
     pub players: Vec<PlayerSpec>,
+    /// Task 3.19 (D-116, opt-in): the F-DDrace duel options -- the minigame's round rules and the live view of a brain (`[condition.duel]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duel: Option<crate::duel::DuelSpec>,
 }
 
 impl Condition {
@@ -1014,6 +1076,10 @@ impl RunConfig {
                     m.validate(slot.lag)
                         .map_err(|e| EnvError::new(format!("condition {:?}: lag_model: {e}", c.name)))?;
                 }
+            }
+            if let Some(d) = &c.duel {
+                d.validate(c.slots().len())
+                    .map_err(|e| EnvError::new(format!("condition {:?}: {e}", c.name)))?;
             }
         }
         Ok(())

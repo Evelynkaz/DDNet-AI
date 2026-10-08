@@ -64,6 +64,12 @@ pub struct BotOpts {
     /// against people: the way back if the first live session shows it hurts.
     #[arg(long, default_value = "on", value_parser = parse_on_off, action = clap::ArgAction::Set)]
     pub hybrid_mirror: bool,
+    /// The hybrid's duel rules (task 3.19, D-116): `off` (the default), `reflex` (swing the hammer when the opponent is free, in reach and the hit would throw it into a
+    /// freeze), `reflex-all` (swing at every chance: worse than nothing in the arena), `envelope` (no jump or hook climb that a worst-case hammer hit would carry into a
+    /// freeze ceiling) or `both`. They act only in a detected F-DDrace duel. **None passed its go bars** (docs/research/duel-3.19.md): tools for a live measurement.
+    /// `duel_hammer = "<mode>"` in `settings.toml` does the same (the flag wins). Off until the arena numbers (docs/research/duel-3.19.md) and a live session say otherwise.
+    #[arg(long, default_value = "off", value_parser = parse_duel_hammer)]
+    pub duel_hammer: String,
     /// Finish blocks (task 3.10, E-021, D-097): `off` (the default), `target` keeps a frozen current target until it is held (the bot's target
     /// logic only: the part with consistent evidence, the live A/B candidate), `full` adds the hybrid's drag-back shaping for a frozen victim
     /// (a duel gain that did not hold up in review: not recommended), `wb` (task 3.18, D-114) is `target` plus the wayblock hold: in the held
@@ -325,6 +331,15 @@ fn parse_live_timing(s: &str) -> Result<LiveTiming, String> {
     Ok(t)
 }
 
+fn parse_duel_hammer(s: &str) -> Result<String, String> {
+    match ddai_bot::brains::duel_hammer(s) {
+        Some(_) => Ok(s.to_ascii_lowercase()),
+        None => Err(format!(
+            "expected `off`, `reflex`, `reflex-all`, `envelope` or `both`, got {s:?}"
+        )),
+    }
+}
+
 fn parse_finish(s: &str) -> Result<FinishMode, String> {
     match s.to_ascii_lowercase().as_str() {
         "off" => Ok(FinishMode::Off),
@@ -555,6 +570,36 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
     brain.hybrid_budget_ms = knobs.hybrid_budget_ms;
     for line in knobs.start_lines(kind == BrainKind::Hybrid) {
         eprintln!("{line} (task 3.16)");
+    }
+    let duel_hammer = if flag_given("--duel-hammer") {
+        o.duel_hammer.clone()
+    } else {
+        // A settings value of the wrong kind or an unknown name never keeps the bot from starting nor moves the file aside: warn, run with `off` (3.16 F1).
+        match settings.duel_hammer_mode() {
+            Ok(Some(m)) if ddai_bot::brains::duel_hammer(&m).is_some() => m,
+            Ok(Some(m)) => {
+                eprintln!(
+                    "duel_hammer {m:?} in the settings file is not off|reflex|reflex-all|envelope|both: ignored, off"
+                );
+                "off".to_string()
+            }
+            Ok(None) => o.duel_hammer.clone(),
+            Err(why) => {
+                eprintln!("{why}: ignored, off");
+                "off".to_string()
+            }
+        }
+    };
+    brain.reflex = ddai_bot::brains::duel_hammer(&duel_hammer).unwrap_or_default();
+    if duel_hammer != "off" {
+        eprintln!(
+            "duel hammer: {duel_hammer} ({}; D-116): the hybrid's reflex hammer / hammer-safe envelope, only in a detected duel",
+            if flag_given("--duel-hammer") {
+                "--duel-hammer"
+            } else {
+                "settings.toml"
+            }
+        );
     }
     if o.finish.target_logic() {
         // One line at start (the journal of a launch from the site shows that `--finish` reached the bot; STATUS carries it too).
@@ -1225,6 +1270,20 @@ mod search_threads_tests {
         for m in [FinishMode::Off, FinishMode::Target, FinishMode::Wb, FinishMode::Full] {
             assert_eq!(parse_finish(m.name()).unwrap(), m, "the name round-trips");
         }
+    }
+
+    #[test]
+    fn duel_hammer_is_off_by_default_and_takes_a_mode() {
+        let get = |extra: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(extra);
+            Cli::try_parse_from(v).map(|c| c.bot.duel_hammer)
+        };
+        assert_eq!(get(&[]).unwrap(), "off");
+        assert_eq!(get(&["--duel-hammer", "reflex"]).unwrap(), "reflex");
+        assert_eq!(get(&["--duel-hammer", "BOTH"]).unwrap(), "both");
+        assert!(get(&["--duel-hammer", "sometimes"]).is_err());
+        assert!(get(&["--duel-hammer"]).is_err(), "a value is required");
     }
 
     #[test]

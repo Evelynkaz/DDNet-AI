@@ -31,6 +31,7 @@ use serde::Serialize;
 use crate::EnvError;
 use crate::arena::{Arena, tile_center};
 use crate::config::Rules;
+use crate::duel::DuelSpec;
 use crate::observe;
 use crate::sim::{HoldTarget, PlayerSetup, Sim, default_target};
 use crate::stats::{GameResult, percentile_u32};
@@ -72,8 +73,8 @@ pub struct PlayerReport {
     pub lag_cost_hist: Vec<u32>,
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
+fn is_zero<T: Default + PartialEq>(n: &T) -> bool {
+    *n == T::default()
 }
 
 /// Wall-clock decision times; the only non-deterministic part of a [`GameReport`].
@@ -133,6 +134,9 @@ pub struct GameReport {
     pub a_ticks: u32,
     /// Opponent onsets *not* credited to the focal player before the game was decided (1vN only).
     pub bystander_outs: u32,
+    /// Task 3.19: the tick the duel countdown ended (the round was played from here); 0 outside the duel rules.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub fight_start: i32,
     pub players: Vec<PlayerReport>,
     pub timing: Timing,
     /// Raw decision times per player, for pooling into batch-level percentiles.
@@ -258,6 +262,46 @@ pub fn play_game_modeled(
     lag_models: Vec<Option<crate::sim::LagModel>>,
     observe: &mut dyn FnMut(&mut Sim, i32) -> bool,
 ) -> Result<GameReport, EnvError> {
+    play_game_core(arena, rules, &[], lag_models, seed, layout, players, observe)
+}
+
+/// [`play_game_modeled`] with the duel options of a condition (task 3.19): `None` is exactly [`play_game_modeled`]; with a [`DuelSpec`] the
+/// slots in `live_view` decide through the live view ([`crate::liveview`]), and with `rounds` the F-DDrace round rules replace the
+/// first-freeze rule ([`crate::duel::play_duel_watched`]).
+#[allow(clippy::too_many_arguments)]
+pub fn play_game_duel_watched(
+    arena: &Arena,
+    rules: &Rules,
+    duel: Option<&DuelSpec>,
+    seed: u64,
+    layout: Layout,
+    players: Vec<PlayerSetup>,
+    lag_models: Vec<Option<crate::sim::LagModel>>,
+    observe: &mut dyn FnMut(&mut Sim, i32) -> bool,
+) -> Result<GameReport, EnvError> {
+    match duel {
+        Some(d) if d.rounds => {
+            crate::duel::play_duel_watched(arena, rules, d, seed, layout, players, lag_models, observe)
+        }
+        Some(d) => {
+            d.validate(players.len())?;
+            play_game_core(arena, rules, &d.live_view, lag_models, seed, layout, players, observe)
+        }
+        None => play_game_core(arena, rules, &[], lag_models, seed, layout, players, observe),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn play_game_core(
+    arena: &Arena,
+    rules: &Rules,
+    live_view: &[usize],
+    lag_models: Vec<Option<crate::sim::LagModel>>,
+    seed: u64,
+    layout: Layout,
+    players: Vec<PlayerSetup>,
+    observe: &mut dyn FnMut(&mut Sim, i32) -> bool,
+) -> Result<GameReport, EnvError> {
     let n = players.len();
     if n < 2 {
         return Err(EnvError::new("a game needs at least two players"));
@@ -293,6 +337,9 @@ pub fn play_game_modeled(
         .then(|| std::rc::Rc::new(HoldTarget::new(arena.map.clone())));
     let mut sim = Sim::new(pw, arena.map.clone(), players, rules.decide_every, seed);
     sim.set_lag_models(lag_models);
+    for &slot in live_view {
+        sim.enable_live_view(slot, seed);
+    }
     let mut last_touch: Vec<Touch> = vec![None; n];
     let mut was_out = vec![false; n];
 
@@ -486,6 +533,7 @@ pub fn play_game_modeled(
         a_hall_ticks,
         a_ticks,
         bystander_outs,
+        fight_start: 0,
         players: reports,
         timing: Timing {
             decide_us_p50: p50,

@@ -19,6 +19,7 @@
 //! * [`engine`]: candidate scoring on worker worlds, serial or on a persistent worker pool.
 //! * [`search`]: the decision procedure (pool of candidates, two-stage robust choice, adaptive
 //!   budget, shield) and its telemetry.
+//! * [`reflex`]: the reflex hammer and the hammer-safe envelope on top of the decision (task 3.19, off by default).
 //! * [`window`]: the lag-window model, a learned prediction of the victim's inputs (task 3.15, opt-in).
 //! * [`work`]: the work clock (deadline mode counted in physics ticks: reproducible, load-independent).
 //! * [`brain`]: [`HybridBrain`], the `ddai_brain::Brain` implementation.
@@ -28,6 +29,7 @@ pub mod brain;
 pub mod config;
 pub mod engine;
 pub mod proposer;
+pub mod reflex;
 pub mod search;
 pub mod techniques;
 pub mod threat;
@@ -42,6 +44,7 @@ pub use config::{
 pub use proposer::{
     ActionDistribution, NoProposer, ProposalOutcome, ProposeCtx, Proposer, ScriptedProposer, plans_from_distribution,
 };
+pub use reflex::ReflexConfig;
 pub use search::{DecisionTelemetry, WorkCounters};
 pub use techniques::Tech;
 pub use window::{PredictedInput, WindowCtx, WindowModel};

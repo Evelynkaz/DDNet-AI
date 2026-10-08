@@ -28,6 +28,9 @@ ddai-oppnet = { path = "../ddai-oppnet" }
 ddai-nav = { path = "../ddai-nav" }
 ddai-physics = { path = "../ddai-physics" }
 ddai-planner = { path = "../ddai-planner" }
+# Task 3.19: the live-view arena mode feeds a brain through `LiveWorld` from server-style snapshots (`liveview`).
+ddai-net = { path = "../ddai-net" }
+ddai-world = { path = "../ddai-world" }
 # Games are independent, so a batch is one `par_iter` over game indices (per-game seeds, results
 # collected in index order => identical output at any thread count).
 rayon = "1.10"
@@ -44,5 +47,3 @@ sha2 = "0.10"
 tempfile = "3.14"
 # Task 3.15: the `opp_clips` example reads the live clips as worlds.
 ddai-clip = { path = "../ddai-clip" }
-ddai-world = { path = "../ddai-world" }
-ddai-net = { path = "../ddai-net" }

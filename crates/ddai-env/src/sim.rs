@@ -15,6 +15,7 @@ use ddai_planner::types::WorldEvent;
 use sha1::{Digest, Sha1};
 
 use crate::arena::hex;
+use crate::liveview::{LiveSeat, ServerView};
 use crate::observe;
 
 /// One player: a brain plus its client's input lag.
@@ -347,6 +348,10 @@ pub struct Sim {
     /// Task 3.16: per player, the input-lag model that replaces the fixed `lag` (`None`: the fixed lag, as always), and the seed its jitter draws from.
     pub lag_models: Vec<Option<LagModel>>,
     seed: u64,
+    /// Task 3.19: the server's snapshot machinery, present when any player has a live view ([`Sim::enable_live_view`]).
+    server: Option<ServerView>,
+    /// Task 3.19: per player, the live view of its brain (`None` = the true world, as before).
+    seats: Vec<Option<LiveSeat>>,
 }
 
 impl Sim {
@@ -381,6 +386,8 @@ impl Sim {
             last_events: Vec::new(),
             lag_models: vec![None; n],
             seed,
+            server: None,
+            seats: (0..n).map(|_| None).collect(),
         }
     }
 
@@ -388,6 +395,40 @@ impl Sim {
     pub fn set_lag_models(&mut self, mut models: Vec<Option<LagModel>>) {
         models.resize(self.players.len(), None);
         self.lag_models = models;
+    }
+
+    /// Task 3.19 (D-116): from now on slot `slot`'s brain sees the world as the live bot does ([`crate::liveview`]): a `LiveWorld` rebuilt from the
+    /// snapshots a server would send, rolled to the tick its input will act in; no true opponent input, reload timer or unquantised state.
+    pub fn enable_live_view(&mut self, slot: usize, seed: u64) {
+        if slot >= self.players.len() {
+            return;
+        }
+        if self.server.is_none() {
+            let mut sv = ServerView::new();
+            sv.after_tick(self.pw.inner());
+            self.server = Some(sv);
+        }
+        self.seats[slot] = Some(LiveSeat::new(
+            self.map.clone(),
+            self.ids[slot],
+            &self.ids,
+            seed.wrapping_add(0x5EA7 * (slot as u64 + 1)),
+        ));
+    }
+
+    /// The `LiveWorld` slot `slot`'s brain decides on (diagnostics and tests), when it has a live view.
+    pub fn live_world(&self, slot: usize) -> Option<&ddai_world::LiveWorld> {
+        self.seats.get(slot)?.as_ref().map(LiveSeat::live)
+    }
+
+    /// The observation slot `slot`'s brain was last asked about through its live view (the predicted world at `tick + lag`).
+    pub fn live_observation(&self, slot: usize) -> Option<&ddai_brain::Observation> {
+        self.seats.get(slot)?.as_ref().map(LiveSeat::observation)
+    }
+
+    /// Whether slot `slot` decides through a live view.
+    pub fn has_live_view(&self, slot: usize) -> bool {
+        self.seats.get(slot).is_some_and(Option::is_some)
     }
 
     pub fn tick(&self) -> i32 {
@@ -407,38 +448,75 @@ impl Sim {
                 let mut applied_lag = modelled.map_or(self.players[i].lag, |(_, planned)| planned);
                 let wire = if observe::is_alive(self.pw.inner(), id) {
                     let target_id = target(self.pw.inner(), i, &self.ids);
-                    let action = match observe::observation(self.pw.inner(), &self.map, id, &self.ids, target_id) {
-                        Some(obs) => {
-                            let lag = applied_lag;
-                            let in_flight = if lag > 0 {
-                                in_flight_inputs(self.current[i], &self.pending[i], tick, lag)
-                            } else {
-                                Vec::new()
-                            };
-                            let view = WorldView {
-                                world: self.pw.inner(),
-                                self_id: id,
-                                lag_ticks: lag,
-                                in_flight: &in_flight,
-                            };
-                            let deadline = self.lag_models[i]
-                                .as_ref()
-                                .zip(modelled)
-                                .and_then(|(m, (phase, _))| m.deadline_for(phase));
-                            self.players[i].brain.set_decision_deadline_ms(deadline);
-                            let t0 = Instant::now();
-                            let a = self.players[i].brain.decide_in(&obs, Some(&view));
-                            self.decide_us[i].push(u32::try_from(t0.elapsed().as_micros()).unwrap_or(u32::MAX));
-                            if let (Some(m), Some((phase, planned))) = (self.lag_models[i].as_mut(), modelled.take()) {
-                                let cost_ms = self.players[i]
-                                    .brain
-                                    .last_plan()
-                                    .map_or(0.0, |p| f64::from(p.decision_us) / 1000.0);
-                                applied_lag = m.land(phase, planned, cost_ms);
+                    let action = if let (Some(seat), Some(server)) = (self.seats[i].as_mut(), self.server.as_ref()) {
+                        // The live view: the opponent must be there to be a target, as in the bot (no target, no brain call).
+                        match target_id.filter(|&t| observe::is_alive(self.pw.inner(), t)) {
+                            Some(_) => {
+                                let deadline = self.lag_models[i]
+                                    .as_ref()
+                                    .zip(modelled)
+                                    .and_then(|(m, (phase, _))| m.deadline_for(phase));
+                                self.players[i].brain.set_decision_deadline_ms(deadline);
+                                let t0 = Instant::now();
+                                let a = seat.decide(
+                                    self.players[i].brain.as_mut(),
+                                    server,
+                                    self.pw.inner(),
+                                    self.current[i],
+                                    &self.pending[i],
+                                    applied_lag,
+                                    target_id,
+                                );
+                                self.decide_us[i].push(u32::try_from(t0.elapsed().as_micros()).unwrap_or(u32::MAX));
+                                if let (Some(m), Some((phase, planned))) =
+                                    (self.lag_models[i].as_mut(), modelled.take())
+                                {
+                                    let cost_ms = self.players[i]
+                                        .brain
+                                        .last_plan()
+                                        .map_or(0.0, |p| f64::from(p.decision_us) / 1000.0);
+                                    applied_lag = m.land(phase, planned, cost_ms);
+                                }
+                                a
                             }
-                            a
+                            None => Action::neutral(),
                         }
-                        None => Action::neutral(),
+                    } else {
+                        match observe::observation(self.pw.inner(), &self.map, id, &self.ids, target_id) {
+                            Some(obs) => {
+                                let lag = applied_lag;
+                                let in_flight = if lag > 0 {
+                                    in_flight_inputs(self.current[i], &self.pending[i], tick, lag)
+                                } else {
+                                    Vec::new()
+                                };
+                                let view = WorldView {
+                                    world: self.pw.inner(),
+                                    self_id: id,
+                                    lag_ticks: lag,
+                                    in_flight: &in_flight,
+                                };
+                                let deadline = self.lag_models[i]
+                                    .as_ref()
+                                    .zip(modelled)
+                                    .and_then(|(m, (phase, _))| m.deadline_for(phase));
+                                self.players[i].brain.set_decision_deadline_ms(deadline);
+                                let t0 = Instant::now();
+                                let a = self.players[i].brain.decide_in(&obs, Some(&view));
+                                self.decide_us[i].push(u32::try_from(t0.elapsed().as_micros()).unwrap_or(u32::MAX));
+                                if let (Some(m), Some((phase, planned))) =
+                                    (self.lag_models[i].as_mut(), modelled.take())
+                                {
+                                    let cost_ms = self.players[i]
+                                        .brain
+                                        .last_plan()
+                                        .map_or(0.0, |p| f64::from(p.decision_us) / 1000.0);
+                                    applied_lag = m.land(phase, planned, cost_ms);
+                                }
+                                a
+                            }
+                            None => Action::neutral(),
+                        }
                     };
                     wire_from_action(&action, self.last_sent[i].fire)
                 } else {
@@ -478,6 +556,9 @@ impl Sim {
             self.pw.set_input(self.ids[i], from_ddnet_input(&self.current[i]));
         }
         let events = self.pw.step();
+        if let Some(server) = self.server.as_mut() {
+            server.after_tick(self.pw.inner());
+        }
         if self.record_events {
             self.last_events.clone_from(&events);
         }

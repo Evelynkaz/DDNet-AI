@@ -803,6 +803,22 @@ fn log_event(e: &BotEvent) {
         ),
         BotEvent::DuelEvidence { tick, len } => tracing::info!(tick, "duel evidence: owner command (len {len})"),
         BotEvent::DuelEnded { tick } => tracing::info!(tick, "duel: the 1vs1 is over: self-kill as configured again"),
+        BotEvent::DuelWindow {
+            tick,
+            ticks,
+            hammer_presses,
+            jump_presses,
+            hits_by_us,
+            hits_on_us,
+        } => tracing::info!(
+            tick,
+            ticks,
+            hammer_presses,
+            jump_presses,
+            hits_by_us,
+            hits_on_us,
+            "duel window: hammer presses {hammer_presses}, jump presses {jump_presses}, hammer hits by us {hits_by_us} / on us {hits_on_us} in {ticks} ticks"
+        ),
         BotEvent::Block { tick, victim } => tracing::info!(tick, victim, "block"),
         BotEvent::BlockedBy { tick, by } => tracing::info!(tick, by, "blocked by"),
         BotEvent::BlockHeld { tick, victim, died } => tracing::info!(tick, victim, died, "block held"),

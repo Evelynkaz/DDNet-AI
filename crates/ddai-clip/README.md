@@ -20,3 +20,5 @@ cargo test -p ddai-clip      # формат, кольцо без аллокац�
 ```
 
 Проверка на настоящем сервере — `DDAI_E2E=1 cargo test -p ddai-bot --test e2e_commands -- --ignored --nocapture --test-threads=1`.
+
+Задача 3.19 (D-116): клипы раундов дуэли `duel-loss-<тик>.clip` (`store::{duel_name, prune_duel, DUEL_KEEP, DUEL_MAX_BYTES, DUEL_SESSION_MAX}`) — не «автоматические» в смысле `parse_auto_name` (нет суффикса важности), их чистка отдельная.

@@ -206,6 +206,19 @@ pub struct HybridBrain {
     window_buf: Vec<Option<PredictedInput>>,
     /// Task 3.16: the one-shot deadline of the next decision ([`Brain::set_decision_deadline_ms`]).
     deadline_ms: Option<f64>,
+    /// Task 3.19: what the reflex hammer and the hammer-safe envelope did (counted only when one of them is on).
+    reflex: ReflexTotals,
+    /// Task 3.19: the bot's `LiveContext::duel` of the last decision.
+    live_duel: bool,
+}
+
+/// Task 3.19: decisions on which the reflex hammer swung (`swings`, of which `aimed` had to turn the aim) and the envelope dropped a jump / a hook.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReflexTotals {
+    pub swings: u64,
+    pub aimed: u64,
+    pub jump_vetoes: u64,
+    pub hook_vetoes: u64,
 }
 
 impl HybridBrain {
@@ -265,6 +278,8 @@ impl HybridBrain {
             window: None,
             window_buf: Vec::new(),
             deadline_ms: None,
+            reflex: ReflexTotals::default(),
+            live_duel: false,
         })
     }
 
@@ -535,7 +550,18 @@ impl HybridBrain {
             world.step();
             roll_ticks += 1;
         }
-        let (out, tel) = search.decide(
+        // Task 3.19: the tees the input acts on (after the lag window), for the reflex hammer and the envelope.
+        let reflex_on =
+            (self.cfg.reflex.hammer || self.cfg.reflex.envelope) && (self.live_duel || !self.cfg.reflex.duel_only);
+        let acting = if reflex_on {
+            let w = search.world_mut();
+            w.get_tee(self_id)
+                .zip(w.get_tee(target_id))
+                .map(|(a, b)| (a, b, w.tick()))
+        } else {
+            None
+        };
+        let (mut out, tel) = search.decide(
             &self.clock,
             &DecisionInput {
                 obs,
@@ -547,6 +573,40 @@ impl HybridBrain {
                 deadline_ms,
             },
         );
+        if let Some((me, victim, now)) = acting
+            && !tel.shielded
+        {
+            // The envelope first (it may drop the jump or the hook the swing would otherwise ride), then the swing.
+            let veto = crate::hybrid::reflex::envelope(
+                &self.cfg.reflex,
+                search.world_mut().collision(),
+                &me,
+                &victim,
+                &mut out,
+            );
+            self.reflex.jump_vetoes += u64::from(veto.jump);
+            self.reflex.hook_vetoes += u64::from(veto.hook);
+            let launching = out.hook != 0 && me.hook_state == 0;
+            match crate::hybrid::reflex::reflex_swing(
+                &self.cfg.reflex,
+                search.world_mut().collision(),
+                &crate::hybrid::reflex::SwingAt {
+                    now,
+                    me: &me,
+                    victim: &victim,
+                    prev_fire: self.prev.fire,
+                    launching_hook: launching,
+                },
+                &mut out,
+            ) {
+                crate::hybrid::reflex::Swing::No => {}
+                crate::hybrid::reflex::Swing::Fire => self.reflex.swings += 1,
+                crate::hybrid::reflex::Swing::FireAimed => {
+                    self.reflex.swings += 1;
+                    self.reflex.aimed += 1;
+                }
+            }
+        }
         self.totals.add(&tel);
         self.stats.decisions += 1;
         self.stats.searched += 1;
@@ -588,6 +648,7 @@ impl Brain for HybridBrain {
     fn reset(&mut self, ctx: &ResetContext) {
         self.prev = empty_input();
         self.totals = Totals::default();
+        self.reflex = ReflexTotals::default();
         self.stats = PlannerStats::default();
         self.last = None;
         if let Some(p) = self.proposer.as_mut() {
@@ -648,6 +709,7 @@ impl Brain for HybridBrain {
         self.spare_ids.extend_from_slice(ctx.spare_ids);
         self.set_travel_goal(ctx.travel_goal.as_ref().map(to64));
         self.wb_wall_dir = if self.cfg.wb_hold { ctx.wb.wall_dir } else { 0 };
+        self.live_duel = ctx.duel;
     }
 
     fn name(&self) -> &str {
@@ -699,13 +761,22 @@ impl Brain for HybridBrain {
             .last
             .as_ref()
             .map_or("null".to_string(), DecisionTelemetry::to_json);
+        let reflex = if self.cfg.reflex.hammer || self.cfg.reflex.envelope {
+            format!(
+                ",\"reflex\":{{\"swings\":{},\"aimed\":{},\"jump_vetoes\":{},\"hook_vetoes\":{}}}",
+                self.reflex.swings, self.reflex.aimed, self.reflex.jump_vetoes, self.reflex.hook_vetoes
+            )
+        } else {
+            String::new()
+        };
         Some(format!(
-            "{{\"brain\":\"{}\",\"proposer\":\"{}\",\"workers\":{},\"totals\":{},\"last\":{}}}",
+            "{{\"brain\":\"{}\",\"proposer\":\"{}\",\"workers\":{},\"totals\":{},\"last\":{}{}}}",
             self.name,
             self.search.as_ref().map_or("none", HybridSearch::proposer_name),
             self.cfg.workers,
             self.totals.to_json(),
-            last
+            last,
+            reflex
         ))
     }
 }

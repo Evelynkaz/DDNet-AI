@@ -1,0 +1,28 @@
+# work-clock: default-rate
+# Task 3.19 (D-116, E-034): is the live hammer gap a slow search? The live hybrid scores ~14 candidates per decision (clips of 2026-10-07, load average 18-30,
+# wall-clock budget 4 ms); the arena's work clock (1.25 us per tee-tick) gives it ~2x that. The same live-view duel at three work-clock rates.
+#   cargo run --release -p ddai-env --example duel_stats -- --config configs/arena/d115-clock.toml --threads 3 --games 60
+name = "d115 clock: candidates per decision vs hammer rate"
+base_seed = 19001
+games = 60
+
+[[condition]]
+name = "work 1.25 us (default)"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "work 2.5 us"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.0025, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "work 4 us"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.004, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]

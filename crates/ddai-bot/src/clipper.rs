@@ -47,6 +47,12 @@ use crate::tees::{HOOK_GRABBED, Tee, TeeSet, dist};
 /// Frames recorded after our own tee is gone (a death), so `death` can see it vanish.
 pub const TAIL_FRAMES: u8 = 6;
 
+/// Two round ends closer than this are one (a round is at least the 150-tick countdown long).
+pub const DUEL_ROUND_GAP_TICKS: i32 = 100;
+
+/// A duel round-loss clip needs at least this many frames in the ring (the autoclip's 50 would drop the early rounds of a session).
+pub const DUEL_MIN_FRAMES: usize = 20;
+
 /// Where clips go and whether the autoclip runs.
 #[derive(Debug, Clone)]
 pub struct ClipConfig {
@@ -97,6 +103,8 @@ enum Job {
     Scan(Box<Clip>),
     /// The ring as a clip, saved because a navigation crossing failed (`note`).
     Cross(Box<Clip>, String),
+    /// Task 3.19: the ring as a clip, saved because the bot ended a duel round frozen (no cooldown; bounded by the caller and by `store::prune_duel`).
+    Duel(Box<Clip>),
 }
 
 /// The state of the automatic saving: the cooldowns and the directory. Lives on the worker thread (or
@@ -130,6 +138,32 @@ impl AutoState {
                     severity: inc.severity,
                     note: inc.note,
                     tick: inc.tick,
+                })
+            }
+            Job::Duel(mut clip) => {
+                let tick = clip.frames.last()?.tick;
+                clip.header.reason = ClipReason {
+                    kind: store::DUEL_KIND.to_string(),
+                    severity: 0,
+                    tick,
+                    note: "a duel round ended with us frozen".to_string(),
+                };
+                let path = match store::save(&self.dir, &clip, &store::duel_name(tick)) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not write the duel clip");
+                        return None;
+                    }
+                };
+                if let Err(e) = store::prune_duel(&self.dir) {
+                    tracing::warn!(error = %e, "pruning the duel clips failed");
+                }
+                Some(SavedClip {
+                    path,
+                    kind: store::DUEL_KIND.to_string(),
+                    severity: 0,
+                    note: "round lost".to_string(),
+                    tick,
                 })
             }
             Job::Cross(mut clip, note) => {
@@ -227,6 +261,8 @@ pub struct FrameInput<'a> {
     pub bot: BotRec,
     /// The navigation's walk label ("" when not walking).
     pub walk_label: &'a str,
+    /// Task 3.19: an F-DDrace duel is detected ([`crate::duel`]): a round that ends with us frozen is saved as a clip, whatever the cooldown.
+    pub duel: bool,
 }
 
 /// The recorder, the event derivation and the automatic saving.
@@ -254,6 +290,16 @@ pub struct Clipper {
     sent_scratch: Vec<SentRec>,
     /// Clips that reached the disk since the last [`Clipper::take_saved`].
     saved: Vec<SavedClip>,
+    /// Task 3.19: our tee was frozen in the last frame it was alive in (a round ends with the respawn of both tees).
+    own_frozen_last: bool,
+    /// The round-loss clips this run has had (capped at [`store::DUEL_SESSION_MAX`]; a new duel does not reset it) and the tick of the last round end clipped.
+    duel_saved: usize,
+    last_duel_clip_tick: i32,
+    /// A round-loss clip the worker was too busy to take: offered again at the next frame.
+    duel_pending: Option<Box<Clip>>,
+    /// Task 3.19: the hammer hits the snapshots showed, by us and on us (the clips' rule: a swing with the other tee in its reach); for the duel journal.
+    hits_by_own: u64,
+    hits_on_own: u64,
 }
 
 impl Clipper {
@@ -296,6 +342,12 @@ impl Clipper {
             brain: String::new(),
             sent_scratch: Vec::with_capacity(8),
             saved: Vec::new(),
+            own_frozen_last: false,
+            duel_saved: 0,
+            last_duel_clip_tick: i32::MIN / 2,
+            duel_pending: None,
+            hits_by_own: 0,
+            hits_on_own: 0,
         }
     }
 
@@ -309,6 +361,11 @@ impl Clipper {
 
     pub fn frames(&self) -> usize {
         self.rec.len()
+    }
+
+    /// Task 3.19: the hammer hits seen so far, by us and on us (counted from the recorded frames' events).
+    pub fn hammer_hits(&self) -> (u64, u64) {
+        (self.hits_by_own, self.hits_on_own)
     }
 
     pub fn autoclip_enabled(&self) -> bool {
@@ -327,6 +384,9 @@ impl Clipper {
         self.tail_left = 0;
         self.last_tick = None;
         self.before_last_tick = None;
+        self.own_frozen_last = false;
+        self.duel_pending = None;
+        self.last_duel_clip_tick = i32::MIN / 2;
     }
 
     /// Something the bot did or heard that belongs in the next frame (`SV_KILLMSG`, our `Cl_Kill`).
@@ -352,7 +412,9 @@ impl Clipper {
     fn collect_saved(&mut self) {
         if let Saver::Thread(w) = &self.saver {
             while let Ok(s) = w.saved.try_recv() {
-                self.last_saved_tick = self.last_saved_tick.max(s.tick);
+                if s.kind != store::DUEL_KIND {
+                    self.last_saved_tick = self.last_saved_tick.max(s.tick);
+                }
                 self.saved.push(s);
             }
         }
@@ -360,6 +422,8 @@ impl Clipper {
 
     /// Waits for the worker to finish what it was given and keeps its results (the run is over).
     pub fn finish(&mut self) {
+        // A duel round-loss clip still waiting for the worker goes first.
+        self.flush();
         if let Saver::Thread(w) = std::mem::replace(&mut self.saver, Saver::Off) {
             let Worker {
                 jobs, saved, handle, ..
@@ -417,6 +481,18 @@ impl Clipper {
         let mut evs = [ClipEvent::Respawn { id: 0 }; MAX_EVENTS];
         let mut n_ev = 0;
         let respawn = own_alive && !self.own_was_alive && self.last_tick.is_some();
+        // Task 3.19: a duel round ends with both tees killed and respawned in the same server step (`KillParticipants`), so a snapshot without our tee need
+        // not exist: the round end is our `Kill` message (the 07.10 clips: two of four round ends show no dead frame) or, when the tee did go missing, its
+        // return. The one that ends it frozen is the loser (or it is a draw): that round is clipped. Rounds are at least a countdown (150 ticks) apart, so a
+        // second signal of the same round (the message, then the respawn) is no second clip.
+        let own_killed = self
+            .pending
+            .iter()
+            .any(|e| matches!(e, ClipEvent::Kill { victim, .. } if *victim == f.own_id));
+        let lost_round = (respawn || own_killed)
+            && f.duel
+            && self.own_frozen_last
+            && tick.saturating_sub(self.last_duel_clip_tick) > DUEL_ROUND_GAP_TICKS;
         {
             let mut push = |e: ClipEvent| {
                 if n_ev < MAX_EVENTS {
@@ -472,14 +548,69 @@ impl Clipper {
             b.add_sent(*r);
         }
         for e in &evs[..n_ev] {
+            if let ClipEvent::HammerHit { from, to } = *e {
+                self.hits_by_own += u64::from(from == f.own_id);
+                self.hits_on_own += u64::from(to == f.own_id);
+            }
             b.add_event(*e);
         }
         b.set_bot(bot);
         b.finish();
         self.before_last_tick = self.last_tick;
         self.last_tick = Some(tick);
+        if own_alive {
+            self.own_frozen_last = own.is_some_and(|t| t.frozen);
+        }
+        if lost_round {
+            self.last_duel_clip_tick = tick;
+            self.queue_duel_clip(f.own_id, f.players);
+        }
+        self.offer_duel_clip();
 
         self.autoscan(tick, f.own_id, f.players);
+    }
+
+    /// Task 3.19: the ring, as the clip of the duel round we just lost. At most [`store::DUEL_SESSION_MAX`] per duel; no cooldown.
+    fn queue_duel_clip(&mut self, own_id: i32, players: &PlayerTable) {
+        if matches!(self.saver, Saver::Off) || !self.cfg.autoclip || self.duel_saved >= store::DUEL_SESSION_MAX {
+            return;
+        }
+        if self.rec.len() < DUEL_MIN_FRAMES {
+            return;
+        }
+        if let Some(clip) = self.rec.to_clip(self.meta(own_id, players, store::DUEL_KIND), None) {
+            self.duel_pending = Some(Box::new(clip));
+        }
+    }
+
+    /// Hands a waiting round-loss clip to the saver; a busy worker keeps it for the next frame (a duel clip is never dropped for a scan).
+    fn offer_duel_clip(&mut self) {
+        let Some(clip) = self.duel_pending.take() else {
+            return;
+        };
+        match &mut self.saver {
+            Saver::Off => {}
+            Saver::Inline(state) => {
+                self.duel_saved += 1;
+                if let Some(s) = state.handle(Job::Duel(clip)) {
+                    self.saved.push(s);
+                }
+            }
+            Saver::Thread(w) => {
+                if w.busy.swap(true, Ordering::AcqRel) {
+                    self.duel_pending = Some(clip);
+                    return;
+                }
+                match w.jobs.try_send(Job::Duel(clip)) {
+                    Ok(()) => self.duel_saved += 1,
+                    Err(mpsc::TrySendError::Full(Job::Duel(c)) | mpsc::TrySendError::Disconnected(Job::Duel(c))) => {
+                        w.busy.store(false, Ordering::Release);
+                        self.duel_pending = Some(c);
+                    }
+                    Err(_) => w.busy.store(false, Ordering::Release),
+                }
+            }
+        }
     }
 
     /// The sent inputs for the ticks `(from, to]` (the last [`ddai_clip::MAX_SENT`] of them).
@@ -546,11 +677,15 @@ impl Clipper {
     /// Waits (at most 5 s) until the worker has nothing queued: tests that need a deterministic order,
     /// and the end of a run.
     pub fn flush(&mut self) {
-        if let Saver::Thread(w) = &self.saver {
-            let t0 = Instant::now();
-            while w.busy.load(Ordering::Acquire) && t0.elapsed() < Duration::from_secs(5) {
-                thread::sleep(Duration::from_millis(1));
+        let t0 = Instant::now();
+        loop {
+            // A round-loss clip the worker was too busy for goes out as soon as it can.
+            self.offer_duel_clip();
+            let busy = matches!(&self.saver, Saver::Thread(w) if w.busy.load(Ordering::Acquire));
+            if !(busy || self.duel_pending.is_some()) || t0.elapsed() >= Duration::from_secs(5) {
+                break;
             }
+            thread::sleep(Duration::from_millis(1));
         }
         self.collect_saved();
     }

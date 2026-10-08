@@ -11,6 +11,7 @@ use ddai_bot::clipper::ClipConfig;
 use ddai_bot::hooks::{Hooks, Navigator};
 use ddai_bot::{Bot, BotEvent, BrainKind, Relations};
 use ddai_clip::{Clip, ClipEvent};
+use ddai_net::tuning::TeamsState;
 use support::*;
 
 fn clip_cfg(dir: &Path, autoclip: bool, async_save: bool) -> ddai_bot::BotConfig {
@@ -502,5 +503,198 @@ fn the_frames_say_what_the_brain_decided_and_how_long_it_took() {
                 "{kind:?}: the plan summary (candidates, searched) reaches the clip"
             );
         }
+    });
+}
+
+// ---- Task 3.19 (D-116): a clip for every duel round we end frozen -------------------------------------------------------------------------
+
+const INVITE: &str = "You have been invited to a fight by 'p1', type '/1vs1 p0' to join";
+
+fn duel_team(on: bool) -> Option<TeamsState> {
+    let mut t = TeamsState {
+        teams: [0; 128],
+        received: 128,
+    };
+    if on {
+        t.teams[0] = 7;
+        t.teams[1] = 7;
+    }
+    Some(t)
+}
+
+fn step(bot: &mut Bot, sc: &mut Scenario) {
+    let snap = sc.snapshot();
+    let out = bot.on_snapshot(&snap);
+    if let Some(input) = out.input {
+        bot.on_input_sent(snap.pred_tick + 1, &input);
+    }
+    sc.tick += 2;
+}
+
+/// One round: `free` frames, `frozen` frames frozen, then both tees "die" for 3 frames and come back (the respawn of a round's end).
+fn round(bot: &mut Bot, sc: &mut Scenario, free: usize, frozen: usize) {
+    sc.tee_mut(0).frozen = false;
+    for _ in 0..free {
+        step(bot, sc);
+    }
+    sc.tee_mut(0).frozen = frozen > 0;
+    for _ in 0..frozen {
+        step(bot, sc);
+    }
+    let (a, b) = (sc.tees.remove(0), sc.tees.remove(0));
+    for _ in 0..3 {
+        step(bot, sc);
+    }
+    sc.tees.insert(0, b);
+    sc.tees.insert(0, a);
+    sc.tee_mut(0).frozen = false;
+    step(bot, sc);
+}
+
+/// One round as F-DDrace ends it: `KillParticipants` kills and respawns both tees in the same server step, so **no snapshot without our tee** arrives;
+/// the kill messages (ours and his) come with the first snapshot of the next round (review 3.19 F1: two of the four round ends of the 07.10 clips look so).
+fn round_without_a_dead_frame(bot: &mut Bot, sc: &mut Scenario, free: usize, frozen: usize) {
+    sc.tee_mut(0).frozen = false;
+    for _ in 0..free {
+        step(bot, sc);
+    }
+    sc.tee_mut(0).frozen = frozen > 0;
+    for _ in 0..frozen {
+        step(bot, sc);
+    }
+    bot.on_kill_message(1, 0, 0);
+    bot.on_kill_message(1, 1, -3);
+    sc.tee_mut(0).frozen = true; // the spawn freeze of the next countdown
+    step(bot, sc);
+    sc.tee_mut(0).frozen = false;
+}
+
+fn duel_clips(dir: &Path) -> Vec<(String, Clip)> {
+    read_all(dir)
+        .into_iter()
+        .filter(|(n, _)| n.starts_with("duel-loss-"))
+        .collect()
+}
+
+#[test]
+fn every_duel_round_that_ends_with_us_frozen_is_clipped_whatever_the_cooldown() {
+    big_stack(|| {
+        for async_save in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut bot, mut sc) = bot_in(dir.path(), true, async_save, Hooks::default());
+            sc.teams = duel_team(true);
+            bot.on_chat_line(-1, INVITE);
+            // Three rounds in well under the 45 s cooldown: lost, won (we end free), lost.
+            round(&mut bot, &mut sc, 30, 10);
+            round(&mut bot, &mut sc, 30, 0);
+            round(&mut bot, &mut sc, 30, 8);
+            bot.flush_clips();
+            let clips = duel_clips(dir.path());
+            assert_eq!(
+                clips.len(),
+                2,
+                "async {async_save}: {:?}",
+                clips.iter().map(|c| &c.0).collect::<Vec<_>>()
+            );
+            for (_, c) in &clips {
+                assert_eq!(c.header.reason.kind, "duel-loss");
+                assert!(c.frames.len() >= 20 && c.frames.last().unwrap().own_alive);
+                assert!(
+                    events_of(c).contains(&ClipEvent::Respawn { id: 0 }),
+                    "the clip ends on the respawn"
+                );
+            }
+            let evs: Vec<BotEvent> = bot.drain_events().collect();
+            assert_eq!(
+                evs.iter()
+                    .filter(|e| matches!(e, BotEvent::ClipSaved { kind, .. } if kind == "duel-loss"))
+                    .count(),
+                2,
+                "{evs:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn outside_a_duel_a_frozen_round_end_is_no_duel_clip_and_a_session_is_capped() {
+    big_stack(|| {
+        // No duel evidence: the same rounds save no duel clip.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut bot, mut sc) = bot_in(dir.path(), true, false, Hooks::default());
+        round(&mut bot, &mut sc, 30, 10);
+        round(&mut bot, &mut sc, 30, 10);
+        assert!(duel_clips(dir.path()).is_empty());
+        // In a duel: one clip per lost round up to the cap, no more.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut bot, mut sc) = bot_in(dir.path(), true, false, Hooks::default());
+        sc.teams = duel_team(true);
+        bot.on_chat_line(-1, INVITE);
+        for _ in 0..ddai_clip::store::DUEL_SESSION_MAX + 5 {
+            round(&mut bot, &mut sc, 70, 4);
+        }
+        assert_eq!(duel_clips(dir.path()).len(), ddai_clip::store::DUEL_SESSION_MAX);
+        // With the autoclip off nothing is written.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut bot, mut sc) = bot_in(dir.path(), false, false, Hooks::default());
+        sc.teams = duel_team(true);
+        bot.on_chat_line(-1, INVITE);
+        round(&mut bot, &mut sc, 30, 10);
+        assert!(duel_clips(dir.path()).is_empty());
+    });
+}
+
+#[test]
+fn a_round_that_ends_without_a_snapshot_lacking_our_tee_is_clipped_too_once() {
+    big_stack(|| {
+        for async_save in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut bot, mut sc) = bot_in(dir.path(), true, async_save, Hooks::default());
+            sc.teams = duel_team(true);
+            bot.on_chat_line(-1, INVITE);
+            // Lost, won (we end free), lost: two clips, none per message and none for the round we won.
+            round_without_a_dead_frame(&mut bot, &mut sc, 30, 10);
+            round_without_a_dead_frame(&mut bot, &mut sc, 30, 0);
+            round_without_a_dead_frame(&mut bot, &mut sc, 30, 8);
+            bot.flush_clips();
+            let clips = duel_clips(dir.path());
+            assert_eq!(
+                clips.len(),
+                2,
+                "async {async_save}: {:?}",
+                clips.iter().map(|c| &c.0).collect::<Vec<_>>()
+            );
+            for (_, c) in &clips {
+                assert!(
+                    events_of(c)
+                        .iter()
+                        .any(|e| matches!(e, ClipEvent::Kill { victim: 0, .. })),
+                    "the clip holds the round's end"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn the_cap_of_round_clips_is_per_run_not_per_duel() {
+    big_stack(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut bot, mut sc) = bot_in(dir.path(), true, false, Hooks::default());
+        let n = ddai_clip::store::DUEL_SESSION_MAX;
+        for k in 0..2 {
+            // Two duels, one after the other (the team leaves and a new one forms): together they get the cap, not twice of it.
+            sc.teams = duel_team(true);
+            bot.on_chat_line(-1, INVITE);
+            for _ in 0..n / 2 + 5 {
+                round(&mut bot, &mut sc, 70, 4);
+            }
+            sc.teams = duel_team(false);
+            for _ in 0..400 {
+                step(&mut bot, &mut sc);
+            }
+            let _ = k;
+        }
+        assert_eq!(duel_clips(dir.path()).len(), n);
     });
 }

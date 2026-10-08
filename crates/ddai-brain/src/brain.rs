@@ -73,6 +73,9 @@ pub struct LiveContext<'a> {
     pub travel_goal: Option<Vec2<f32>>,
     /// Wayblock hints (task 4.2): what the bot's wayblock mode tells the planner this decision.
     pub wb: WbHints,
+    /// Task 3.19: the bot has detected an F-DDrace `/1vs1` duel (one opponent, a closed box). A brain with duel-only rules (the hybrid's reflex hammer,
+    /// `ReflexConfig::duel_only`) acts on them only while this holds. The arena's live view sets it (every arena duel is one).
+    pub duel: bool,
 }
 
 /// What the wayblock mode (`bot.ts` `wbBand` / `wbPlanOverrides`, task 4.2) asks of a search brain this

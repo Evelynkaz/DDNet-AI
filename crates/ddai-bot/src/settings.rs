@@ -53,6 +53,11 @@ pub struct Settings {
     /// Absent: adaptive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prediction_margin_ms: Option<RawKnob>,
+    /// Task 3.19 (D-116): `off | reflex | reflex-all | envelope | both` (`--duel-hammer`; the flag wins): the hybrid's reflex hammer and hammer-safe
+    /// envelope, which act only in a detected duel. Absent = off. Any TOML value reads (a number is a perfectly parsable value of the wrong kind and must not
+    /// move the whole file aside, 3.16 F1); [`Settings::duel_hammer_mode`] judges it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duel_hammer: Option<RawKnob>,
 }
 
 /// A number-valued key of the settings file that must never make the file unreadable (task 3.16, F1): a hand edit such as `-1`, `3.5` or `"5"` is
@@ -99,6 +104,19 @@ impl Serialize for RawKnob {
     }
 }
 
+impl Settings {
+    /// The `duel_hammer` key as a mode name (task 3.19): `Ok(None)` when absent, `Err(why)` when the value is not a string (a number, a table, ...), which the
+    /// caller warns about and treats as `off`; whether the name is one of the modes is [`crate::brains::duel_hammer`]'s to say.
+    pub fn duel_hammer_mode(&self) -> Result<Option<String>, String> {
+        match &self.duel_hammer {
+            None => Ok(None),
+            Some(RawKnob::Other(toml::Value::String(s))) => Ok(Some(s.to_ascii_lowercase())),
+            Some(RawKnob::Int(i)) => Err(format!("duel_hammer = {i} is not a string")),
+            Some(RawKnob::Other(v)) => Err(format!("duel_hammer = {v} is not a string")),
+        }
+    }
+}
+
 /// `~/aiddnet/data/bot/settings.toml`.
 pub fn default_path() -> PathBuf {
     match std::env::var_os("HOME") {
@@ -121,6 +139,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "window_model",
     "hybrid_budget_ms",
     "prediction_margin_ms",
+    "duel_hammer",
 ];
 
 /// The top-level keys of the file at `path` that [`Settings`] does not know (a typo such as `owner-chat`), sorted. An unreadable or
@@ -198,8 +217,10 @@ pub fn owner_chat_off(
     }
 }
 
-/// What loading found.
+/// What loading found. One value per start of the bot, never in a collection: the size gap between the variants (the settings grow with every knob) costs
+/// nothing, and boxing `Settings` would change every `Loaded::Ok(s)` pattern of the callers and tests for no gain.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Loaded {
     /// The file's settings (or the defaults when there is no file).
     Ok(Settings),
@@ -337,6 +358,34 @@ mod tests {
         assert!(unknown_keys(&dir.path().join("missing.toml")).is_empty());
     }
 
+    /// Review 3.19 F4: a `duel_hammer` of the wrong kind is a perfectly parsable TOML value; it must not move the whole file aside (3.16 F1) and it
+    /// round-trips as written.
+    #[test]
+    fn a_duel_hammer_of_the_wrong_kind_reads_and_is_judged_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        for (text, want) in [
+            ("duel_hammer = \"Both\"\n", Ok(Some("both".to_string()))),
+            ("duel_hammer = 1\n", Err(())),
+            ("duel_hammer = 2.5\n", Err(())),
+            ("duel_hammer = [\"reflex\"]\n", Err(())),
+            ("brain = \"hybrid\"\n", Ok(None)),
+        ] {
+            std::fs::write(&path, format!("clan = \"X\"\n{text}")).unwrap();
+            let Loaded::Ok(s) = load(&path) else {
+                panic!("{text:?}: the file must stay readable");
+            };
+            assert_eq!(s.clan.as_deref(), Some("X"), "{text:?}: the other settings survive");
+            assert_eq!(s.duel_hammer_mode().map_err(|_| ()), want, "{text:?}");
+            assert!(!dir.path().join("settings.toml.bad").exists());
+        }
+        // A save writes back exactly what was read.
+        std::fs::write(&path, "duel_hammer = 1\n").unwrap();
+        let Loaded::Ok(s) = load(&path) else { panic!() };
+        save(&path, &s).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("duel_hammer = 1"));
+    }
+
     #[test]
     fn the_known_keys_are_the_structs_fields() {
         let full = Settings {
@@ -352,6 +401,7 @@ mod tests {
             window_model: Some(PathBuf::from("a")),
             hybrid_budget_ms: Some(RawKnob::Int(4)),
             prediction_margin_ms: Some(RawKnob::Int(10)),
+            duel_hammer: Some(RawKnob::Other(toml::Value::String("both".into()))),
         };
         let table: toml::Table = toml::to_string(&full).unwrap().parse().unwrap();
         let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
@@ -379,6 +429,7 @@ mod tests {
             window_model: Some(PathBuf::from("/x/m1.oppnet")),
             hybrid_budget_ms: Some(RawKnob::Int(3)),
             prediction_margin_ms: Some(RawKnob::Int(0)),
+            duel_hammer: Some(RawKnob::Other(toml::Value::String("reflex".into()))),
         };
         save(&path, &s).unwrap();
         assert_eq!(load(&path), Loaded::Ok(s));

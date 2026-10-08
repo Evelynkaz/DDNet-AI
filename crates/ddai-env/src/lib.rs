@@ -8,12 +8,16 @@
 //! * [`report`]: W:L:D:T with Wilson 95% intervals, the run record, the Russian markdown table;
 //! * [`scenario`]: technique scenarios (T1-T18) with fixed start states and success predicates;
 //! * [`output`]: JSONL / summary files for a whole run config;
+//! * [`liveview`], [`duel`]: the F-DDrace 1vs1 duel box (task 3.19): a brain that sees the world as the live bot does (`LiveWorld` from server-style
+//!   snapshots) and the round rules of the minigame (countdown, a stationary frozen tee on the ground loses, a mutual freeze is a draw);
 //! * [`oppdata`]: a game recorded as a dataset record of the opponent-input predictor (task 3.15).
 
 pub mod arena;
 pub mod brains;
 pub mod config;
+pub mod duel;
 pub mod game;
+pub mod liveview;
 pub mod models;
 pub mod observe;
 pub mod oppdata;

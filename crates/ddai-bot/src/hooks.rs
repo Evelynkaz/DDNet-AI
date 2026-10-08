@@ -92,6 +92,9 @@ pub trait Navigator {
     /// `--no-selfkill` (D-102): from now on no route or trek may contain a respawn (kill) step and the navigation never asks for a kill.
     /// Called at the start and whenever the switch changes.
     fn set_no_selfkill(&mut self, _off: bool) {}
+    /// Task 3.19 (D-116): an F-DDrace `/1vs1` duel was detected ([`crate::duel`]) or is over. In a duel the wayblock is not held (`wbHolding`'s `duel`
+    /// argument): the bot fights the one opponent. Called whenever the detector's answer may have changed.
+    fn set_duel(&mut self, _on: bool) {}
     /// `--selfkill-policy smart` (task 4.12, D-108): plan a route on foot first, a respawn (kill) step only when no such route exists.
     /// Called once, at the start.
     fn set_kill_last(&mut self, _on: bool) {}

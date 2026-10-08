@@ -292,6 +292,8 @@ struct Core {
     kill_wanted: bool,
     /// `--no-selfkill` (D-102): no route or trek with a respawn (kill) step, no kill asked for.
     no_selfkill: bool,
+    /// Task 3.19: a duel is on (`DuelDetector::active`): the wayblock is not held.
+    duel: bool,
     /// Task 4.12 (`--selfkill-policy smart`): a respawn step only when no route on foot exists.
     kill_last: bool,
     /// The last `crossing()` / `planned_freeze()` of the running walk, for the clip frame.
@@ -359,6 +361,7 @@ impl Core {
             dull_since: -1,
             kill_wanted: false,
             no_selfkill: false,
+            duel: false,
             kill_last: false,
             clip_crossing: false,
             clip_planned: false,
@@ -511,7 +514,7 @@ impl Core {
     /// `wbHolding()`.
     fn wb_holding(&self) -> bool {
         self.wb
-            .holding(self.now_ms(), self.fights(), self.home.is_some(), false)
+            .holding(self.now_ms(), self.fights(), self.home.is_some(), self.duel)
             .is_some()
     }
 
@@ -1758,6 +1761,9 @@ struct TrekHook(Shared2);
 struct RouteHook(Shared2);
 
 impl Navigator for NavHook {
+    fn set_duel(&mut self, on: bool) {
+        self.0.borrow_mut().duel = on;
+    }
     fn set_no_selfkill(&mut self, off: bool) {
         let mut c = self.0.borrow_mut();
         c.no_selfkill = off;
@@ -2862,6 +2868,33 @@ mod tests {
             f.core.wb_walk = false;
             f.core.update_wb_route2(&ctx);
             assert!(!f.core.nav.as_ref().unwrap().wall_route);
+        });
+    }
+
+    /// Task 3.19 (D-116): `wbHolding()` passes the duel flag to `WayBlock::holding` (it was hard-coded `false`): in a detected duel the wayblock is not
+    /// held, so the target picker's leash and the wayblock's walks stand down; when the duel is over it is held again.
+    #[test]
+    fn a_detected_duel_stops_the_wayblock_hold() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let rel = Relations::new();
+            let mut f = CoreFx::on(map, "Copy Love Box", &rel);
+            let spawn = ddai_nav::route::spawn_tiles(&f.env.map)[0];
+            let (sx, sy) = ((spawn.0 / 32.0) as i32, (spawn.1 / 32.0) as i32);
+            f.env.tees.set_for_test(tee_at(0, sx, sy));
+            f.env.tees.set_for_test(tee_at(1, sx + 4, sy));
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            let ctx = f.env.ctx(&own, 1000, &world);
+            f.core.poll(&ctx);
+            assert!(f.core.wb_holding(), "the control: held outside a duel");
+            f.core.duel = true;
+            assert!(!f.core.wb_holding(), "not held in a duel");
+            f.core.duel = false;
+            assert!(f.core.wb_holding(), "held again when the duel is over");
         });
     }
 

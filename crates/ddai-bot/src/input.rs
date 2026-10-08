@@ -28,6 +28,8 @@ pub struct EncodeInfo {
     pub hook_rising: bool,
     /// A fresh fire press was sent.
     pub fire_pressed: bool,
+    /// The jump key went from released to pressed (task 3.19: the duel journal counts jump presses).
+    pub jump_rising: bool,
 }
 
 /// The encoder's memory: what we last sent.
@@ -35,6 +37,7 @@ pub struct EncodeInfo {
 pub struct InputEncoder {
     prev_fire: i32,
     prev_hook: bool,
+    prev_jump: bool,
 }
 
 impl Default for InputEncoder {
@@ -72,12 +75,14 @@ impl InputEncoder {
         InputEncoder {
             prev_fire: 0,
             prev_hook: false,
+            prev_jump: false,
         }
     }
 
     /// Forgets the hook edge (the fire counter must continue: the server remembers it).
     pub fn reset_edges(&mut self) {
         self.prev_hook = false;
+        self.prev_jump = false;
     }
 
     /// The counter last sent.
@@ -95,9 +100,11 @@ impl InputEncoder {
         let info = EncodeInfo {
             hook_rising: action.hook && !self.prev_hook,
             fire_pressed: action.fire,
+            jump_rising: action.jump && !self.prev_jump,
         };
         self.prev_fire = fire;
         self.prev_hook = action.hook;
+        self.prev_jump = action.jump;
         (input, info)
     }
 
@@ -106,6 +113,7 @@ impl InputEncoder {
         let fire = next_fire_counter(self.prev_fire, false);
         self.prev_fire = fire;
         self.prev_hook = false;
+        self.prev_jump = false;
         neutral_input(fire)
     }
 }

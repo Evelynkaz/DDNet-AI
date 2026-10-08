@@ -108,6 +108,8 @@ pub struct BrainOptions {
     /// file); the decision cap moves with it ([`HybridConfig::with_budget_ms`]). `None` = the library default (4 ms under a 5 ms cap), which is
     /// also what `Some(4)` builds. Not read by the planner brain (`planner_budget_ms` is its own knob).
     pub hybrid_budget_ms: Option<u32>,
+    /// Task 3.19 (D-116, opt-in, `--duel-hammer`): the hybrid's reflex hammer and hammer-safe envelope, which act only in a detected duel.
+    pub reflex: ddai_planner::hybrid::ReflexConfig,
     pub seed: u64,
 }
 
@@ -151,6 +153,7 @@ impl Default for BrainOptions {
             hybrid_finish: false,
             hybrid_wb_hold: false,
             hybrid_budget_ms: None,
+            reflex: ddai_planner::hybrid::ReflexConfig::default(),
             seed: 1,
         }
     }
@@ -164,6 +167,39 @@ pub enum BrainError {
     Fly(String),
 }
 
+/// Task 3.19 (D-116): what `--duel-hammer` / `duel_hammer` in `settings.toml` mean: `off` (the default), `reflex` (the reflex hammer, only when the hit throws the
+/// other tee into a freeze: the variant that did no harm in the arena), `reflex-all` (swing at every chance: **worse** than nothing in the arena, kept for
+/// diagnostics), `envelope` (the hammer-safe envelope) or `both` (`reflex` + `envelope`). All act only while the bot has detected a duel
+/// ([`ddai_planner::hybrid::ReflexConfig::duel_only`]); the reflex waits 16 ticks after our last swing because a live world does not know the reload timer
+/// (`lockout_ticks`). None of them passed the pre-registered go bars (docs/research/duel-3.19.md): they are tools for a live measurement, not a recommendation.
+pub fn duel_hammer(mode: &str) -> Option<ddai_planner::hybrid::ReflexConfig> {
+    use ddai_planner::hybrid::ReflexConfig;
+    let live = ReflexConfig {
+        duel_only: true,
+        lockout_ticks: 16,
+        ..ReflexConfig::default()
+    };
+    let reflex = ReflexConfig {
+        hammer: true,
+        hazard_only: true,
+        ..live
+    };
+    match mode.to_ascii_lowercase().as_str() {
+        "off" => Some(ReflexConfig::default()),
+        "reflex" => Some(reflex),
+        "reflex-all" => Some(ReflexConfig {
+            hazard_only: false,
+            ..reflex
+        }),
+        "envelope" => Some(ReflexConfig { envelope: true, ..live }),
+        "both" => Some(ReflexConfig {
+            envelope: true,
+            ..reflex
+        }),
+        _ => None,
+    }
+}
+
 /// The live hybrid's configuration: the library defaults plus what the options set.
 pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
     let cfg = HybridConfig {
@@ -171,6 +207,7 @@ pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
         proposal_in_cap: opts.proposal_in_cap,
         mirror: opts.hybrid_mirror,
         wb_hold: opts.hybrid_wb_hold,
+        reflex: opts.reflex,
         ..HybridConfig::default()
     };
     let cfg = if opts.hybrid_finish { cfg.with_finish() } else { cfg };
@@ -285,6 +322,29 @@ fn make_fly(opts: &BrainOptions) -> Result<Box<dyn Brain>, BrainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duel_hammer_modes_are_off_by_default_and_duel_only() {
+        use ddai_planner::hybrid::ReflexConfig;
+        assert_eq!(BrainOptions::default().reflex, ReflexConfig::default());
+        assert_eq!(duel_hammer("off"), Some(ReflexConfig::default()));
+        let both = duel_hammer("BOTH").unwrap();
+        assert!(both.hammer && both.hazard_only && both.envelope && both.duel_only && both.lockout_ticks == 16);
+        let reflex = duel_hammer("reflex").unwrap();
+        assert!(reflex.hammer && reflex.hazard_only && !reflex.envelope && reflex.duel_only);
+        let all = duel_hammer("reflex-all").unwrap();
+        assert!(all.hammer && !all.hazard_only && !all.envelope && all.duel_only);
+        let env = duel_hammer("envelope").unwrap();
+        assert!(!env.hammer && env.envelope && env.duel_only);
+        assert_eq!(duel_hammer("sometimes"), None);
+        // The hybrid gets it from the options and nothing else changes.
+        let opts = BrainOptions {
+            reflex: both,
+            ..BrainOptions::default()
+        };
+        assert_eq!(hybrid_config(&opts).reflex, both);
+        assert_eq!(hybrid_config(&BrainOptions::default()).reflex, ReflexConfig::default());
+    }
 
     #[test]
     fn names_round_trip_and_only_planner_family_shields_itself() {
