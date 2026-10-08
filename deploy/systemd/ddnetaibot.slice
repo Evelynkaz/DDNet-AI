@@ -1,0 +1,22 @@
+# The CPU slice of the live bot (task 4.14, D-124): ddnet-ai-bot.service runs in it (Slice=ddnetaibot.slice) and nothing else does.
+# Why a slice of its own: cgroup v2 shares CPU only among SIBLINGS. The agents' builds, tests, arenas and training run in user.slice
+# (weight 100), and a service in system.slice competes with them as part of system.slice (weight 100 as well), whatever CPUWeight= the service
+# itself sets: in the measurements a weight on the service alone helped only partly and Nice= alone not at all (docs/research/cpu-priority.md). A top-level slice
+# competes with user.slice and system.slice directly, so its weight is the share that counts.
+# The name has NO dash on purpose: systemd reads "a-b.slice" as a child of "a.slice" (which would get the default weight 100 and be the one
+# that competes at the top). deploy/install-launcher.sh installs this file with the bot unit; the test in crates/ddnet-ai/tests/deploy_units.rs
+# keeps the two in step.
+#
+# CPUWeight= (systemd.resource-control(5): 1..10000, default 100, cgroup v2 cpu.weight): 1000 is ten times user.slice's share when the CPUs are
+# contended and changes nothing on a quiet machine (the bot itself uses ~0.2 of a core). It is a weight, not a reservation or a limit, and not
+# real-time scheduling: nothing here can starve the system, only make the agents' work wait for the bot's few milliseconds per decision.
+# IOWeight= (cgroup v2 io.weight, same range): takes effect only with the BFQ or iocost I/O controller; this VPS's disk has scheduler `none`, so
+# today it changes nothing. A no-cost default for a host that has one. (The measurements never set it.)
+
+[Unit]
+Description=CPU share of the DDNet-AI bot (task 4.14): the bot's CPU priority over the agents' work
+Documentation=file:///home/ubuntu/aiddnet/DDNet-AI/deploy/README.md
+
+[Slice]
+CPUWeight=1000
+IOWeight=1000

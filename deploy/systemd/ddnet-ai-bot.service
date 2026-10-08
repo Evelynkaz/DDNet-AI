@@ -81,6 +81,25 @@ Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=3 4
 
+# --- CPU priority over everything the agents run on this VPS (task 4.14, D-124; measurements: docs/research/cpu-priority.md) ---
+# Builds, tests, arenas and training share the 8 vCPUs with the bot. Under that load the bot scored fewer candidates per decision (~14 live
+# against ~28 in the arena) and missed its first input slot in 46-59% of the decisions instead of 5.7% (2026-10-08). Soft priorities only: no
+# real-time scheduling (RestrictRealtime=true below stays, CPUSchedulingPolicy= is not set).
+# Slice= is the setting that counts: the bot runs in a top-level slice of its own with CPUWeight=1000 (deploy/systemd/ddnetaibot.slice, which
+# explains why), so it competes with user.slice (the agents) at ten times their weight. It is the closest of the allowed options to the ceiling
+# the measurements found (SCHED_RR, forbidden here) and still far from it; it does not bring the bot back to quiet-machine behaviour.
+# Set on the service as well: CPUWeight= (systemd.resource-control(5), cgroup v2, 1..10000, default 100) keeps the bot ahead of anything else that
+# is ever put in the same cgroup, and Nice= (systemd.exec(5), -20..19, default 0) is the scheduler weight among threads of THIS cgroup only (under
+# cgroup v2 it never ranks the bot against other cgroups, so alone it did nothing in the measurements; here it is a cheap extra for the bot's own threads
+# against its helpers). -5 is mild (weight 3121 against 1024). A negative Nice= needs CAP_SYS_NICE, which systemd applies as PID 1 before it drops
+# the bounding set, so CapabilityBoundingSet= (empty, below) stays empty (checked: the process runs at -5).
+# IOWeight= (cgroup v2 io.weight) only takes effect with the BFQ or iocost I/O controller; this VPS's disk has scheduler `none`, so today it changes
+# nothing. It is kept as a no-cost default.
+Slice=ddnetaibot.slice
+CPUWeight=1000
+Nice=-5
+IOWeight=1000
+
 # --- Hardening (as for ddnet-ai-web.service) ---
 NoNewPrivileges=true
 ProtectSystem=strict

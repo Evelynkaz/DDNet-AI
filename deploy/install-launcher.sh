@@ -17,7 +17,8 @@
 # /var/backups/ddnet-ai-launcher/<timestamp>/ (only when the content differs; the binary is not backed up; the last 3 backup
 # directories are kept).
 #
-# It never starts or stops the bot and refuses to run while the bot unit is active. It does NOT install or restart the web unit
+# It never starts or stops the bot and refuses to run while the bot unit is active. The bot unit carries the CPU priority over the agents' work
+# (its own CPU slice ddnetaibot.slice, CPUWeight, Nice, IOWeight; task 4.14, D-124): this script installs it with the rest of the unit and reads back what systemd loads. It does NOT install or restart the web unit
 # (deploy/install.sh does, with the new ReadWritePaths for data/launch; task 5.12 changes nothing in the web unit: it gets no network
 # right, only the new routes of the new binary) and never touches Caddy, ufw, the allow-list, live-servers.toml or the secrets.
 #
@@ -44,7 +45,7 @@ OWN_DROPIN="$DROPIN_DIR/50-launch.conf"
 BACKUP_ROOT="/var/backups/ddnet-ai-launcher"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="$BACKUP_ROOT/$STAMP"
-UNITS=(ddnet-ai-bot.service ddnet-ai-sparring@.service ddnet-ai-launch.service ddnet-ai-launch.path
+UNITS=(ddnetaibot.slice ddnet-ai-bot.service ddnet-ai-sparring@.service ddnet-ai-launch.service ddnet-ai-launch.path
        ddnet-ai-servers.service ddnet-ai-servers.path ddnet-ai-proxycheck.service ddnet-ai-proxycheck.path)
 
 TAKE_OVER=0
@@ -87,7 +88,7 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   log "uninstalling the launcher"
   sudo systemctl disable --now ddnet-ai-launch.path ddnet-ai-servers.path ddnet-ai-proxycheck.path 2>/dev/null || true
   for f in ddnet-ai-launch.path ddnet-ai-launch.service ddnet-ai-sparring@.service ddnet-ai-servers.path ddnet-ai-servers.service \
-           ddnet-ai-proxycheck.path ddnet-ai-proxycheck.service; do
+           ddnet-ai-proxycheck.path ddnet-ai-proxycheck.service ddnetaibot.slice; do
     if sudo test -e "$UNIT_DIR/$f"; then backup_file "$UNIT_DIR/$f"; sudo rm -f "$UNIT_DIR/$f"; fi
   done
   for f in "$OWN_DROPIN" /etc/ddnet-ai/bot-launch.env; do
@@ -215,6 +216,21 @@ if sudo test -d "$BACKUP_ROOT"; then
 fi
 
 sudo systemctl daemon-reload
+# Task 4.14 (D-124): the bot's CPU priority is the slice file `ddnetaibot.slice` (CPUWeight, IOWeight) plus `Slice=`, `CPUWeight`, `Nice` and
+# `IOWeight` in the bot unit, all installed above. Ask systemd what it now loads (a foreign drop-in or a stale copy would show here). Only a
+# warning: the files are installed either way, and the settings apply from the bot's next start (this script never starts or stops it).
+check_prop() { # unit key
+  local unit="$1" key="$2" want got
+  want="$(sed -n "s/^${key}=//p" "$UNIT_SRC/$unit" | head -n 1)"
+  got="$(systemctl show -p "$key" --value "$unit" 2>/dev/null || true)"
+  if [[ -n "$want" && "$got" == "$want" ]]; then
+    log "$unit: $key=$got (CPU priority over the agents' work, D-124)"
+  else
+    log "WARNING: $unit: $key is '$got', the unit file says '$want': a drop-in overrides it? (systemctl cat $unit)"
+  fi
+}
+for key in Slice CPUWeight Nice IOWeight; do check_prop "$BOT_UNIT" "$key"; done
+for key in CPUWeight IOWeight; do check_prop ddnetaibot.slice "$key"; done
 sudo systemctl enable ddnet-ai-launch.path ddnet-ai-servers.path ddnet-ai-proxycheck.path >/dev/null
 sudo systemctl restart ddnet-ai-launch.path ddnet-ai-servers.path ddnet-ai-proxycheck.path
 sleep 1
