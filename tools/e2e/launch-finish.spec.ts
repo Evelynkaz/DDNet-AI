@@ -5,8 +5,8 @@
 // with `--finish ${BOT_FINISH}`). Nothing of the production units, /etc, Caddy or ~/aiddnet/data/bot is used.
 //
 // What it checks:
-//   1. the card: the control exists, is «выкл» by default, offers «цель (рекомендуется)» and «полный (не рекомендуется)» with a hint that
-//      says so, is hidden for the pure fly, and the request the page sends carries `finish` (and none for the fly) — on the local server
+//   1. the card: the control exists, is «выкл» by default, offers «цель (рекомендуется)» and «полный (только дуэль 1 на 1)» (task 5.16: it was «не рекомендуется») with a hint
+//      that says so, is hidden for the pure fly, and the request the page sends carries `finish` (and none for the fly) — on the local server
 //      choice too, with the POST answered by the test itself so that no bot is ever started on 8303;
 //   2. the real run on the private favourite: `target` -> the helper's env file has BOT_FINISH="target", the bot's own log line says it,
 //      the bot's STATUS (`/api/bot/status`) says `target`, and the «Бот» card and the «Запуск» card show it; then `off` (the default of
@@ -88,7 +88,7 @@ const botLog = () => readFileSync(path.join(DIR, "bot.log"), "utf8");
 
 test.beforeAll(() => mkdirSync(SHOTS, { recursive: true }));
 
-test("the card: «Дожим» is off by default, offers «цель» (recommended) and «полный» (not recommended), is hidden for the fly, and the request carries it", async ({ page }) => {
+test("the card: «Дожим» is off by default, offers «цель» (recommended) and «полный» (the duel's), is hidden for the fly, and the request carries it", async ({ page }) => {
   test.setTimeout(120_000);
   await login(page);
   // Answer the POST here: nothing may start on the local server's address (8303 belongs to the production server).
@@ -107,7 +107,7 @@ test("the card: «Дожим» is off by default, offers «цель» (recommend
   const finish = field(page, "Дожим");
   await expect(finish).toBeVisible();
   await expect(finish).toHaveValue("off");
-  expect(await finish.locator("option").allTextContents()).toEqual(["выкл", "цель (рекомендуется)", "ВБ (эксперимент)", "полный (не рекомендуется)"]);
+  expect(await finish.locator("option").allTextContents()).toEqual(["выкл", "цель (рекомендуется)", "ВБ (эксперимент)", "полный (только дуэль 1 на 1)"]);
   const hint = card(page).locator(".lc-finish-hint");
   await expect(hint).toContainText("Дожим выключен");
   await expect(hint).not.toHaveClass(/lc-finish-warn/);
@@ -115,7 +115,9 @@ test("the card: «Дожим» is off by default, offers «цель» (recommend
   await expect(hint).toContainText("Рекомендуется");
   await page.screenshot({ path: path.join(SHOTS, "5.13-card-target.png"), fullPage: true });
   await finish.selectOption("full");
-  await expect(hint).toContainText("Не рекомендуется");
+  await expect(hint).toContainText("Для дуэли 1 на 1, не для толпы");
+  // The duel switch is off here, so the card also says that this does not look like a duel (and flags it).
+  await expect(hint).toContainText("похоже, это не дуэль 1 на 1");
   await expect(hint).toHaveClass(/lc-finish-warn/);
   await page.screenshot({ path: path.join(SHOTS, "5.13-card-full.png"), fullPage: true });
 
@@ -220,7 +222,7 @@ test("the real run on the private server: `--finish target` reaches the bot (env
   await expect(card(page).locator(".lc-detail")).not.toContainText("дожим");
   await stopFromPage(page);
 
-  // 3. full (offered behind «не рекомендуется»): STATUS says full.
+  // 3. full (the duel's choice, task 5.16): STATUS says full.
   ageHelperState(900);
   await startOnPrivateServer(page, "full");
   expect(envFile()).toContain('BOT_FINISH="full"');

@@ -344,6 +344,10 @@ E-009, systemd-юнит бота и его установка — `deploy/README
 Выключено по умолчанию. Сообщения `Sv_PreInput` приходят в `SessionEvent::ExGameMessage`, `Bot::on_pre_input` кладёт их в `LiveWorld` (хранение и счёт — всегда); `--preinput on` включает проигрыш в предсказании (`LiveWorld::set_preinput`): чужие персонажи играют настоящие вводы на тиках, о которых сервер успел сообщить, дальше — модель окна 3.17 или последний настоящий ввод.
 Маркер `<data-dir>/bot/preinput.off` выключает проигрыш (раз в секунду). STATUS: `preinput`, `preinput_stats` (`docs/formats.md` §45). Тесты: `tests/preinput.rs` (выкл. = побитно прежнее, проигрыш, свой id, 0 аллокаций), e2e `tests/e2e_preinput.rs` (приватный сервер: сообщения приходят, ошибка предсказания с ними и без). Механизм и измерения — `docs/research/preinput.md`.
 
+## Поиск за последние 30 секунд в STATUS: `search_window` (задача 5.16, D-120; `docs/formats.md` §54)
+
+STATUS несёт аддитивный объект `search_window`: сколько решений искали за последние 30 с игрового времени, среднее число оценённых кандидатов на такое решение (`PlanTelemetry.evaluated`) и p90 времени мозга на них (корзины по 250 мкс). Сайт показывает его строкой «Машина: поиск бота» вместе с нагрузкой хоста и предупреждает, если кандидатов меньше 20 (по не менее чем 25 решениям) или нагрузка выше 6. `latency::SearchWindow`: кольцо из 30 слотов по секунде (50 тиков), запись решения и чтение без аллокаций (`the_search_window_allocates_nothing_when_recording_or_reading`); тесты — `latency::tests::the_search_window_*`, `bridge::tests` (поля и `null` при пустом окне), `tests/clips.rs::the_frames_say_what_the_brain_decided_and_how_long_it_took` (среднее окна равно среднему по кадрам клипа с флагом «искал»).
+
 ## Дуэль: ВБ не держим, клип на проигранный раунд, окно дуэли, `--duel-hammer` (задача 3.19, D-116; `docs/formats.md` §49)
 
 * **ВБ в дуэли.** Детектор дуэли 4.12 теперь доходит до `wb_holding`: `Navigator::set_duel` → `WayBlock::holding(.., duel)` (там было жёстко `false`). Тест — `tests/duel_wb.rs`, `nav_hooks::a_detected_duel_stops_the_wayblock_hold`.

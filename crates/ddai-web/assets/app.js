@@ -520,7 +520,7 @@
     var WINDOW_MODEL_LABELS = { off: "выкл", on: "вкл", hold: "выкл (предохранитель: хуже «держит»)", killed: "выкл (флажок)" };
     // Task 3.20b (D-112): the server's pre-inputs (`preinput` of the status); «off» still counts them, only the prediction does not use them.
     var PREINPUT_LABELS = { off: "выкл (только счёт)", on: "вкл", killed: "выкл (флажок)" };
-    var FINISH_LABELS = { off: "выкл", target: "цель", wb: "цель + удержание ВБ", full: "полный (не рекомендуется)" };
+    var FINISH_LABELS = { off: "выкл", target: "цель", wb: "цель + удержание ВБ", full: "полный (дуэль 1 на 1)" };
     // «Ходы от сервера»: the mode, how many arrived, the share of (snapshot, opponent) pairs whose newest message reaches at least one tick past the snapshot
     // (`known_ahead` bins above 0; the bin of tick 0 is at index -lead_from; it pools ALL opponents present), and, with the mode on, the share of decisions
     // the pre-inputs reached (`decisions_real` of `decisions`; TARGET only).
@@ -666,6 +666,18 @@
 
     var lastInfo = null;
 
+    // Task 5.16 (D-120): the «Машина» rows and the warning. The judgement is `LaunchCard.quietness` (launch.js), the one the «Запуск» card uses too.
+    function renderQuiet(host, searchWindow, brain) {
+      var q = LaunchCard.quietness(host, searchWindow, brain);
+      setText("bs-load", q.load);
+      setText("bs-search", q.search);
+      el("bs-load").classList.toggle("kv-warn", q.loadHigh);
+      el("bs-search").classList.toggle("kv-warn", q.searchLow);
+      var warn = el("bs-quiet-warn");
+      warn.hidden = !q.warn;
+      warn.textContent = q.warn ? "Внимание: машина загружена — бот думает хуже (" + q.reasons.join("; ") + "). Для дуэли освободите машину: остановите сборки, обучение и другие тяжёлые задачи." : "";
+    }
+
     function renderStatus(info) {
       lastInfo = info;
       var dot = el("bot-conn-dot");
@@ -689,6 +701,8 @@
           setText(id, "—");
         });
         el("bs-selfkill").classList.remove("kv-warn");
+        // The host's load is the web's own reading, so it is shown with no bot too (before pressing «Запустить»); the bot's search is not.
+        renderQuiet(info ? info.host : null, null, null);
         cooldownEl.textContent = "—";
         updateButtons();
         return;
@@ -722,6 +736,7 @@
       setText("bs-clips", String(s.clips_saved | 0));
       setText("bs-latency", fmtUs(s.decide_p50_us) + " / " + fmtUs(s.decide_p99_us));
       setText("bs-latency2", fmtUs(s.brain_p99_us) + " / " + fmtUs(s.overhead_p99_us));
+      renderQuiet(info.host, s.search_window, s.brain);
       setText("bs-identity", [s.name, s.clan, s.skin].filter(Boolean).join(" · ") || "—");
       setText("bs-tick", String(s.tick | 0));
       var cd = s.kill_cooldown_ticks | 0;

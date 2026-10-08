@@ -91,3 +91,44 @@
     grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
   }
 }
+
+/* Task 5.16 (D-120): the «Дуэль» preset: a button that only fills the form, the reason for each value (a disclosure), and the machine's quietness. */
+.launch-card .lc-preset {
+  margin: var(--sp-3) 0 0;
+}
+
+.launch-card .lc-preset-btn {
+  min-height: 44px;
+}
+
+.launch-card .lc-preset-note,
+.launch-card .lc-preset-done,
+.launch-card .lc-quiet {
+  margin: var(--sp-2) 0 0;
+  overflow-wrap: anywhere;
+}
+
+.launch-card .lc-preset-done:empty {
+  display: none;
+}
+
+.launch-card .lc-preset-info {
+  margin: var(--sp-2) 0 0;
+}
+
+.launch-card .lc-preset-list {
+  margin: var(--sp-2) 0 0;
+  padding-left: var(--sp-4);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+
+.launch-card .lc-preset-list li + li {
+  margin-top: var(--sp-2);
+}
+
+.launch-card .lc-preset-list strong {
+  color: var(--text);
+  font-weight: 600;
+}

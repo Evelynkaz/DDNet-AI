@@ -669,6 +669,63 @@ async fn the_status_panel_shows_the_live_bots_status_or_says_it_is_not_there() {
     );
 }
 
+/// Task 5.16 (D-120): the "machine quietness" row. The web adds the host's load average to `/api/bot/status` (whether or not a bot runs) and
+/// passes the bot's `search_window` through untouched; a missing or foreign load file is `null`, never a number made up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_status_carries_the_hosts_load_and_the_bots_search_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let loadavg = dir.path().join("loadavg");
+    std::fs::write(&loadavg, "7.25 3.10 1.00 2/300 999\n").unwrap();
+    let bridge_sock = dir.path().join("live.sock");
+    let mut status = sample_status();
+    status["search_window"] =
+        serde_json::json!({"window_s": 30, "decisions": 600, "candidates_mean": 13.5, "brain_p90_us": 4875});
+    let _bridge = fake_bridge(&bridge_sock, status, 100);
+    let (sock2, load2) = (bridge_sock.clone(), loadavg.clone());
+    let server = TestServer::start_with(move |c| {
+        c.bot_socket = Some(sock2);
+        c.loadavg_path = load2;
+    })
+    .await;
+    let l = login(&server);
+    let mut live = serde_json::Value::Null;
+    wait_for(|| {
+        live = get(&server, &l, "/api/bot/status").json();
+        live["live"] == true
+    })
+    .await;
+    assert_eq!(live["host"]["load1"], 7.25);
+    assert_eq!(live["host"]["load5"], 3.1);
+    assert_eq!(live["host"]["load15"], 1.0);
+    assert!(live["host"]["cpus"].as_u64().unwrap() >= 1);
+    assert_eq!(live["status"]["search_window"]["candidates_mean"], 13.5);
+    assert_eq!(live["status"]["search_window"]["brain_p90_us"], 4875);
+    // The reading is taken per request: a new file content is the next answer.
+    std::fs::write(&loadavg, "0.40 0.50 0.60 1/1 1\n").unwrap();
+    assert_eq!(get(&server, &l, "/api/bot/status").json()["host"]["load1"], 0.4);
+    // Not a load average: null, and the rest of the answer is unchanged.
+    std::fs::write(&loadavg, "not a load average\n").unwrap();
+    let junk = get(&server, &l, "/api/bot/status").json();
+    assert!(junk["host"].is_null(), "{junk}");
+    assert_eq!(junk["live"], true);
+
+    // No bot at all: the load is still there (the owner reads it before pressing «Запустить»).
+    let load3 = dir.path().join("loadavg2");
+    std::fs::write(&load3, "1.50 1.00 0.50 1/1 1\n").unwrap();
+    let plain = TestServer::start_with(move |c| c.loadavg_path = load3).await;
+    let lp = login(&plain);
+    let s = get(&plain, &lp, "/api/bot/status").json();
+    assert_eq!(
+        (s["live"].clone(), s["host"]["load1"].clone()),
+        (false.into(), 1.5.into())
+    );
+    // A path that does not exist: null.
+    let gone = dir.path().join("gone");
+    let missing = TestServer::start_with(move |c| c.loadavg_path = gone).await;
+    let lm = login(&missing);
+    assert!(get(&missing, &lm, "/api/bot/status").json()["host"].is_null());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_status_that_stops_coming_is_not_shown_as_current() {
     let dir = tempfile::tempdir().unwrap();

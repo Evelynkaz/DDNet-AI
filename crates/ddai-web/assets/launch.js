@@ -17,7 +17,8 @@
 
   var BRAIN_LABEL = { hybrid: "Гибрид", "hybrid-fly": "Гибрид + муха", fly: "Муха" };
   var DURATION_LABEL = { "15m": "15 мин", "60m": "1 час", unlimited: "До остановки" };
-  // Task 5.13 (D-097): the finishing switch. «цель» is the recommended live A/B; «полный» is offered behind a clear «не рекомендуется».
+  // Task 5.13 (D-097): the finishing switch. «цель» is the recommended live A/B. Task 5.16 (D-120): «полный» is the duel 1 on 1 choice (D-116, E-034),
+  // not a crowd one; its hint carries the numbers and the caveats.
   var FINISH_LABEL = { off: "выкл", target: "цель", wb: "ВБ", full: "полный" };
   var FINISH_HINT = {
     off: "Дожим выключен: замороженную цель бот отпускает, как раньше.",
@@ -26,8 +27,11 @@
     wb:
       "Эксперимент для игры на ВБ, не для дуэли (задача 3.18): к «цели» добавляется удержание жертвы в зале ВБ. Роль верхней полки качает замороженную жертву к фриз-стене зала, а замороженную цель не бросает, пока её добивают. На арене удержанных блоков на 3,6 п.п. больше (36,1% → 39,7%), но заранее объявленной планки (+4,0 п.п.) это не берёт; вживую не проверено. Качели работают только в зале ВБ и в роли верхней полки, в остальном это «цель».",
     full:
-      "Не рекомендуется: к «цели» добавляется подтягивание замороженной жертвы к фризу в оценке гибрида. В ревью прирост на дуэли не подтвердился. Нужен только для сравнения.",
+      "Для дуэли 1 на 1, не для толпы. К «цели» добавляется подтягивание замороженной жертвы к фризу. В арене дуэли (правила раунда F-DDrace, 1800 парных игр): +4,3 ± 2,2 п.п. побед (p 0,0001); на тихой машине +7,5 ± 4,1 п.п. (600 пар, p 0,0005). Оговорки: плечо выбрано после просмотра таблицы; соперник в арене один (live-v2); часть «цель» в арене не моделировалась; вживую не проверено, и счёт за 15 минут этого не покажет. В толпе подтягивание само по себе ничего не добавляло (257 против 259 удержанных блоков, 600 игр): там берите «цель».",
   };
+  // «полный» chosen while the duel switch is off: the card says so (a crowd is where it was never shown to help).
+  var FINISH_FULL_NOT_DUEL =
+    " Сейчас «Без самоубийств (дуэль)» выключено: похоже, это не дуэль 1 на 1.";
 
   // Task 5.15 (D-103/D-104): the smart wayblock. For every brain: it is the bot's navigation and target choice, not the brain's decision.
   var WB_HINT = {
@@ -49,8 +53,100 @@
   // Task 3.20b (D-112): the server's pre-inputs played in the prediction (an experiment, hybrid brains only).
   var PREINPUT_HINT = {
     off: "Выключено: ходы соперника сервер присылает, бот их считает (карточка «Бот», строка «Ходы от сервера»), но в предсказании не использует.",
-    on: "Эксперимент: в предсказании соперник ходит так, как сервер заранее прислал его настоящий ввод. Помогает, только если сервер присылает эти ходы заранее: у соперников с запасом предсказания в 2–3 тика и больше; при запасе по умолчанию (меньше тика) решение не узнаёт ничего нового. Сколько раз это было на самом деле, видно в карточке «Бот» (доля снапшотов, где ход известен хотя бы на тик вперёд). Бот только принимает, серверу ничего не отправляет. Выключить на ходу: файл data/bot/preinput.off.",
+    on: "Эксперимент: в предсказании соперник ходит так, как сервер заранее прислал его настоящий ввод. Помогает, только если сервер присылает эти ходы заранее: у соперников с запасом предсказания в 2–3 тика и больше; при запасе по умолчанию (меньше тика) решение не узнаёт ничего нового. Сколько раз это было на самом деле, видно в карточке «Бот» (доля снапшотов, где ход известен хотя бы на тик вперёд): на замере 132 с на joniTee (F-DDrace) это было у ≈ 24% пар «снапшот, соперник», запас 2–3 тика; выигрыша в силе вживую не измерено. Бот только принимает, серверу ничего не отправляет. Выключить на ходу: файл data/bot/preinput.off.",
   };
+
+  // Task 5.16 (D-120): the «Дуэль» preset. It only fills the form (the owner still presses «Запустить»); every value below says why, with the numbers
+  // and the caveats of docs/research/duel-3.19.md (D-116, E-034), preinput.md (D-112) and lag-shave.md (D-115).
+  var PRESET_NOTE =
+    "Заполняет форму для дуэли 1 на 1 (F-DDrace): мозг, дожим, самоубийства, ходы сервера, предсказатель и умный ВБ. Сервер, длительность и спарринг остаются вашими. Запускает только кнопка «Запустить».";
+  var PRESET_ITEMS = [
+    ["Мозг: Гибрид", "у чистой мухи нет ни дожима, ни ходов сервера."],
+    [
+      "Дожим: полный",
+      "в арене дуэли +4,3 ± 2,2 п.п. побед (1800 пар, p 0,0001), на тихой машине +7,5 ± 4,1 п.п. (600 пар). Выбран после просмотра таблицы, соперник в арене один, вживую не проверено.",
+    ],
+    [
+      "Без самоубийств (дуэль): вкл",
+      "в 1vs1 F-DDrace любая смерть бота даёт очко сопернику. Цена: бот теряет самоубийство при застревании; убить его можно кнопкой «Убить».",
+    ],
+    [
+      "Настоящие ходы соперника от сервера: вкл (эксперимент)",
+      "на замере 132 с на joniTee (F-DDrace) ход соперника был известен хотя бы на тик вперёд у ≈ 24% пар «снапшот, соперник». Выигрыша в силе вживую не измерено; бот только принимает.",
+    ],
+    [
+      "Предсказатель соперника: выкл",
+      "в арене он помогал на дальних тиках окна, на живых клипах при окне 2 пользы не видно.",
+    ],
+    [
+      "Умный ВБ: выкл",
+      "нужен для толпы на Copy Love Box; в распознанной дуэли бот ВБ не держит и сам.",
+    ],
+    [
+      "Тихая машина",
+      "под нагрузкой бот оценивает вдвое меньше вариантов: вживую 14,2 кандидата на решение при нагрузке 18–30 против ≈ 27 в арене при часах тихой машины (вживую на тихой машине ещё не измерено) (3.19, 3.16). Нагрузка должна быть не выше 6 (карточка «Состояние», строки про нагрузку и поиск).",
+    ],
+  ];
+
+  // Task 5.16: whether the machine is quiet enough, from the host's load average (`host` of `GET /api/bot/status`) and the bot's search of the last 30 s
+  // (`search_window` of its STATUS). The thresholds are the owner's: load above 6, or fewer than 20 candidates per decision. A mean over fewer than
+  // MIN_DECISIONS decisions is not judged. Pure: the «Бот» card (app.js) and this card use the same function.
+  var LOAD_WARN = 6;
+  var CANDIDATES_WARN = 20;
+  var MIN_DECISIONS = 25;
+
+  function num1(x) {
+    return x.toFixed(1).replace(".", ",");
+  }
+
+  function fmtMs(us) {
+    return us >= 20000 ? "от 20 мс" : (us / 1000).toFixed(2).replace(".", ",") + " мс";
+  }
+
+  function isNum(x) {
+    return typeof x === "number" && isFinite(x);
+  }
+
+  // The load with two decimals next to the threshold (6,01 must not read «6,0 выше 6»), one elsewhere.
+  function numLoad(x) {
+    return Math.abs(x - LOAD_WARN) < 0.5 ? x.toFixed(2).replace(".", ",") : num1(x);
+  }
+
+  // `brain` is the bot's brain name (STATUS `brain`): the candidate threshold was calibrated on the hybrid, so another brain's count is shown and not judged.
+  function quietness(host, sw, brain) {
+    var out = { load: "—", search: "—", loadHigh: false, searchLow: false, warn: false, reasons: [] };
+    if (host && isNum(host.load1)) {
+      out.load = numLoad(host.load1) + " / " + (isNum(host.load5) ? num1(host.load5) : "—") + " / " + (isNum(host.load15) ? num1(host.load15) : "—") + " (1 / 5 / 15 мин)";
+      if (isNum(host.cpus) && host.cpus > 0) {
+        out.load += ", ядер: " + host.cpus;
+      }
+      if (host.load1 > LOAD_WARN) {
+        out.loadHigh = true;
+        out.reasons.push("нагрузка " + numLoad(host.load1) + " выше " + LOAD_WARN);
+      }
+    }
+    if (sw && typeof sw === "object") {
+      if (!isNum(sw.decisions) || sw.decisions <= 0 || !isNum(sw.candidates_mean)) {
+        out.search = "нет решений с поиском за " + (isNum(sw.window_s) ? sw.window_s : 30) + " с";
+      } else {
+        out.search = num1(sw.candidates_mean) + " кандидата на решение";
+        if (isNum(sw.brain_p90_us)) {
+          out.search += " · p90 решения " + fmtMs(sw.brain_p90_us);
+        }
+        out.search += " · решений: " + sw.decisions + " за " + (isNum(sw.window_s) ? sw.window_s : 30) + " с";
+        if (typeof brain !== "string" || brain.indexOf("hybrid") !== 0) {
+          out.search += " (не гибрид: порог 20 к этому мозгу не применяется)";
+        } else if (sw.decisions < MIN_DECISIONS) {
+          out.search += " (мало, не оцениваем)";
+        } else if (sw.candidates_mean < CANDIDATES_WARN) {
+          out.searchLow = true;
+          out.reasons.push("кандидатов на решение " + num1(sw.candidates_mean) + " меньше " + CANDIDATES_WARN);
+        }
+      }
+    }
+    out.warn = out.loadHigh || out.searchLow;
+    return out;
+  }
 
   // What a refusal or an ending means, in words for the owner. The helper only ever sends these codes.
   var REASON_TEXT = {
@@ -208,6 +304,32 @@
       ui.detail = el("p", "hint lc-detail");
       card.appendChild(ui.detail);
 
+      // Task 5.16: the «Дуэль» preset (it only fills the form below) with the reason for each value, and the machine's quietness.
+      var preset = el("div", "lc-preset");
+      ui.preset = el("button", "lc-preset-btn alt", "Дуэль");
+      ui.preset.type = "button";
+      ui.preset.setAttribute("aria-pressed", "false");
+      preset.appendChild(ui.preset);
+      preset.appendChild(el("p", "hint lc-preset-note", PRESET_NOTE));
+      var more = el("details", "lc-preset-info");
+      more.appendChild(el("summary", null, "Что ставит «Дуэль» и почему"));
+      var list = el("ul", "lc-preset-list");
+      PRESET_ITEMS.forEach(function (item) {
+        var li = el("li");
+        li.appendChild(el("strong", null, item[0] + ". "));
+        li.appendChild(document.createTextNode(item[1]));
+        list.appendChild(li);
+      });
+      more.appendChild(list);
+      preset.appendChild(more);
+      ui.presetDone = el("p", "hint lc-preset-done");
+      ui.presetDone.setAttribute("role", "status");
+      preset.appendChild(ui.presetDone);
+      ui.quiet = el("p", "hint lc-quiet");
+      ui.quiet.setAttribute("role", "status");
+      preset.appendChild(ui.quiet);
+      card.appendChild(preset);
+
       ui.server = select([{ value: "local", text: serverLabel("local") }]);
       ui.brain = select([
         { value: "hybrid", text: BRAIN_LABEL.hybrid },
@@ -229,12 +351,12 @@
         { value: "on", text: "вкл" },
         { value: "off", text: "выкл" },
       ]);
-      // The finishing switch (task 5.13): off by default; the fly brain has none (the helper refuses it), so it is hidden for the fly.
+      // The finishing switch (task 5.13): off by default; the fly brain has none (the helper refuses it), so it is hidden for the fly. «полный» is the duel's (task 5.16).
       ui.finish = select([
         { value: "off", text: "выкл" },
         { value: "target", text: "цель (рекомендуется)" },
         { value: "wb", text: "ВБ (эксперимент)" },
-        { value: "full", text: "полный (не рекомендуется)" },
+        { value: "full", text: "полный (только дуэль 1 на 1)" },
       ]);
       // Task 5.15: two more switches, both off by default and sent only when on. Neither is brain-specific, so both stay shown for the fly.
       ui.wbSmart = select([
@@ -320,6 +442,14 @@
       ui.noSelfkill.addEventListener("change", syncOptions);
       ui.windowModel.addEventListener("change", syncMirror);
       ui.preinput.addEventListener("change", syncMirror);
+      // A change by hand takes back "the form is filled for the duel"; the preset button is lit only while the form IS the preset.
+      [ui.brain, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput].forEach(function (c) {
+        c.addEventListener("change", function () {
+          ui.presetDone.textContent = "";
+          syncPreset();
+        });
+      });
+      ui.preset.addEventListener("click", applyPreset);
       syncMirror();
       syncOptions();
       ui.start.addEventListener("click", onStart);
@@ -338,8 +468,7 @@
       // Finishing is for the hybrid brains only: the fly's choice is always «выкл» and the control is not shown.
       ui.finishField.hidden = fly;
       ui.finishHint.hidden = fly;
-      ui.finishHint.textContent = FINISH_HINT[ui.finish.value] || "";
-      ui.finishHint.classList.toggle("lc-finish-warn", ui.finish.value === "full");
+      syncFinishHint();
       // The predictor lives in the hybrid's lag window: not offered to the pure fly.
       ui.windowModelField.hidden = fly;
       ui.modelHint.hidden = fly;
@@ -357,12 +486,73 @@
       ui.preinputHint.textContent = PREINPUT_HINT[ui.preinput.value] || "";
     }
 
+    // «полный» is the duel's choice: with the duel switch off the hint says it does not look like a duel (and turns into a warning).
+    function syncFinishHint() {
+      var full = ui.finish.value === "full";
+      var odd = full && ui.noSelfkill.value !== "on";
+      ui.finishHint.textContent = (FINISH_HINT[ui.finish.value] || "") + (odd ? FINISH_FULL_NOT_DUEL : "");
+      ui.finishHint.classList.toggle("lc-finish-warn", odd);
+    }
+
+    // The values the «Дуэль» preset sets, as the form's own words.
+    var PRESET_VALUES = [
+      ["brain", "hybrid"],
+      ["finish", "full"],
+      ["noSelfkill", "on"],
+      ["preinput", "on"],
+      ["windowModel", "off"],
+      ["wbSmart", "off"],
+    ];
+
+    function presetIsSet() {
+      return PRESET_VALUES.every(function (kv) {
+        return ui[kv[0]].value === kv[1];
+      });
+    }
+
+    function syncPreset() {
+      var on = presetIsSet();
+      ui.preset.classList.toggle("current", on);
+      ui.preset.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+
+    // Task 5.16: fills the form for the duel and nothing else: no request is sent, the owner still presses «Запустить».
+    function applyPreset() {
+      PRESET_VALUES.forEach(function (kv) {
+        ui[kv[0]].value = kv[1];
+      });
+      syncMirror();
+      syncOptions();
+      syncPreset();
+      ui.presetDone.textContent = "Форма заполнена для дуэли. Проверьте и нажмите «Запустить»: само ничего не запускается.";
+    }
+
+    // One line under the preset: the load of the machine (and the bot's search while it plays), warning when it is not quiet.
+    function renderQuiet() {
+      var host = bridge ? bridge.host : null;
+      var live = !!(bridge && bridge.live && bridge.source === "live");
+      var q = quietness(host, live && bridge.status ? bridge.status.search_window : null, live && bridge.status ? bridge.status.brain : null);
+      var text;
+      if (!host || q.load === "—") {
+        text = "Нагрузку машины сайт сейчас прочитать не может.";
+      } else {
+        text = "Машина сейчас: нагрузка " + q.load + ".";
+        if (live && q.search !== "—") {
+          text += " Поиск бота: " + q.search + ".";
+        }
+        text += q.warn ? " Внимание: машина загружена — бот думает хуже (" + q.reasons.join("; ") + ")." : " Порог тишины: нагрузка не выше " + LOAD_WARN + ".";
+      }
+      ui.quiet.textContent = text;
+      ui.quiet.classList.toggle("warn", q.warn);
+    }
+
     // The hints of the two switches that every brain has; the duel switch turns its hint into a warning while it is on.
     function syncOptions() {
       ui.wbHint.textContent = WB_HINT[ui.wbSmart.value] || "";
       var duel = ui.noSelfkill.value === "on";
       ui.selfkillHint.textContent = SELFKILL_HINT[duel ? "on" : "off"];
       ui.selfkillHint.classList.toggle("warn", duel);
+      syncFinishHint();
     }
 
     function syncSparring() {
@@ -531,6 +721,9 @@
       [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput].forEach(function (c) {
         c.disabled = busy || !enabled;
       });
+      ui.preset.disabled = busy || !enabled;
+      syncPreset();
+      renderQuiet();
       syncSparring();
     }
 
@@ -668,7 +861,7 @@
       }
     }
 
-    return { mount: mount, onShown: onShown, onHidden: onHidden, preselect: preselect };
+    return { mount: mount, onShown: onShown, onHidden: onHidden, preselect: preselect, quietness: quietness };
   })();
 
   window.LaunchCard = LaunchCard;

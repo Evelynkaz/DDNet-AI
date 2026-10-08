@@ -2,7 +2,7 @@
 //!
 //! | route | |
 //! |---|---|
-//! | `GET /api/bot/status` | the live bot's status (from the read-only bridge) for the status panel |
+//! | `GET /api/bot/status` | the live bot's status (from the read-only bridge) for the status panel, and the host's load average (task 5.16) |
 //! | `POST /api/bot/command` | one typed command ([`ddai_botctl::proto::ControlCommand`]) to the bot, its reply back |
 //! | `GET /api/bot/relations` | the friend / war / ignore / clan lists, as normalised names |
 //! | `POST /api/bot/relations` | add / remove one name, persist, and ask the running bot to reload |
@@ -42,6 +42,47 @@ use crate::state::SharedState;
 
 /// A bridge status older than this means the bot is not (or no longer) there.
 pub const STATUS_STALE: Duration = Duration::from_secs(3);
+
+/// Task 5.16 (D-120): where the host's load average is read from.
+pub const DEFAULT_LOADAVG_PATH: &str = "/proc/loadavg";
+
+/// The three load averages of `/proc/loadavg` (`0.52 0.58 0.59 1/467 12345`): 1, 5 and 15 minutes. `None` for anything that is not three finite,
+/// non-negative numbers first (a file that is not a loadavg is no reading).
+pub fn parse_loadavg(text: &str) -> Option<[f64; 3]> {
+    let mut it = text.split_whitespace();
+    let mut out = [0.0; 3];
+    for slot in &mut out {
+        let v: f64 = it.next()?.parse().ok()?;
+        if !v.is_finite() || !(0.0..1e6).contains(&v) {
+            return None;
+        }
+        *slot = v;
+    }
+    Some(out)
+}
+
+/// The cores this process can use (cached: on Linux the std call reads the cgroup files).
+fn cpu_count() -> usize {
+    static CPUS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CPUS.get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
+}
+
+/// `{load1, load5, load15, cpus}` of the host for the "machine quietness" row of the «Бот» card, or `null` where the file is missing or is not a
+/// load average. A file larger than 256 bytes is not read past that (a load average is under 60).
+async fn host_load(path: &std::path::Path) -> serde_json::Value {
+    use tokio::io::AsyncReadExt;
+    let Ok(file) = tokio::fs::File::open(path).await else {
+        return serde_json::Value::Null;
+    };
+    let mut buf = Vec::with_capacity(256);
+    if file.take(256).read_to_end(&mut buf).await.is_err() {
+        return serde_json::Value::Null;
+    }
+    match parse_loadavg(&String::from_utf8_lossy(&buf)) {
+        Some([l1, l5, l15]) => serde_json::json!({ "load1": l1, "load5": l5, "load15": l15, "cpus": cpu_count() }),
+        None => serde_json::Value::Null,
+    }
+}
 
 pub(crate) fn json_error(status: StatusCode, error: &'static str) -> Response {
     (status, Json(serde_json::json!({ "error": error }))).into_response()
@@ -155,6 +196,8 @@ pub async fn status(State(state): State<SharedState>, jar: CookieJar) -> Respons
         "age_ms": age_ms,
         "status": status,
         "control_socket": state.control.socket_present().await,
+        // Task 5.16: the host's load average, whether or not a bot runs (the owner reads it before pressing «Запустить»).
+        "host": host_load(&state.config.loadavg_path).await,
     }))
     .into_response()
 }
@@ -375,6 +418,45 @@ mod tests {
         let status = r.status();
         let bytes = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[test]
+    fn a_loadavg_line_is_three_numbers_and_anything_else_is_no_reading() {
+        assert_eq!(parse_loadavg("0.52 0.58 0.59 1/467 12345\n"), Some([0.52, 0.58, 0.59]));
+        assert_eq!(parse_loadavg("18.20 30.00 7.5"), Some([18.2, 30.0, 7.5]));
+        for bad in [
+            "",
+            "1.0 2.0",
+            "x y z",
+            "1.0 2.0 nan",
+            "1.0 inf 3.0",
+            "-1.0 2.0 3.0",
+            "1e9 2.0 3.0",
+            "1,5 2.0 3.0",
+        ] {
+            assert_eq!(parse_loadavg(bad), None, "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_host_load_reads_a_file_and_is_null_for_a_missing_or_foreign_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("loadavg");
+        std::fs::write(&ok, "7.25 3.10 1.00 2/300 999\n").unwrap();
+        let v = host_load(&ok).await;
+        assert_eq!(
+            (v["load1"].as_f64(), v["load5"].as_f64(), v["load15"].as_f64()),
+            (Some(7.25), Some(3.1), Some(1.0))
+        );
+        assert!(v["cpus"].as_u64().unwrap() >= 1);
+        assert!(host_load(&dir.path().join("nope")).await.is_null());
+        let junk = dir.path().join("junk");
+        std::fs::write(&junk, "hello world\n").unwrap();
+        assert!(host_load(&junk).await.is_null());
+        // A huge file is cut at 256 bytes and then is not a load average.
+        let big = dir.path().join("big");
+        std::fs::write(&big, "x".repeat(100_000)).unwrap();
+        assert!(host_load(&big).await.is_null());
     }
 
     /// 4.5: a lists file on a read-only file system is told apart (the page tells the owner to restart the web unit); every

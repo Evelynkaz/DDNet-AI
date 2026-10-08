@@ -21,6 +21,11 @@
 //      only when on, both with honest hints and hidden / refused for the pure fly; the real run with both on (env `BOT_FINISH="wb"` and
 //      `BOT_PREINPUT="on"`, the bot's log lines, STATUS, the «Бот» card rows «Дожим» and «Ходы от сервера»), then the defaults.
 //
+//   5. (task 5.16, D-120) the «Дуэль» preset: one click fills brain «Гибрид», «Дожим: полный», «Без самоубийств (дуэль)» on, «Настоящие ходы соперника
+//      от сервера» on, the predictor and the smart wayblock off, sends nothing by itself, leaves server / duration / sparring alone, and the request it then
+//      leads to has exactly the old fields; «полный» is labelled for the duel and not for crowds; the «Бот» card's «Машина» rows and warning (load above 6, or
+//      fewer than 20 candidates per decision over at least 25 decisions) against scripted STATUS answers, and the real run's STATUS carries `search_window`.
+//
 // Needs the env of options-e2e.sh (else it skips). Screenshots: <scratch dir of the run>/screenshots/5.15-*.png (never in git).
 
 import { test, expect, type Dialog, type Page } from "@playwright/test";
@@ -386,7 +391,7 @@ test("the card: «Дожим» offers «ВБ (эксперимент)» with an 
   // «Дожим»: the new value, in the list after «цель», with a hint that says what it is and that it is below the bar.
   const finish = field(page, "Дожим");
   const finishHint = card(page).locator(".lc-finish-hint");
-  expect(await finish.locator("option").allTextContents()).toEqual(["выкл", "цель (рекомендуется)", "ВБ (эксперимент)", "полный (не рекомендуется)"]);
+  expect(await finish.locator("option").allTextContents()).toEqual(["выкл", "цель (рекомендуется)", "ВБ (эксперимент)", "полный (только дуэль 1 на 1)"]);
   expect(await finish.locator("option").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value))).toEqual(["off", "target", "wb", "full"]);
   await finish.selectOption("wb");
   await expect(finishHint).toContainText("Эксперимент для игры на ВБ, не для дуэли");
@@ -462,6 +467,20 @@ test("the real run on the private server: `--finish wb` and `--preinput on` reac
   await expect(page.locator("#bs-finish")).toHaveText("цель + удержание ВБ", { timeout: 15_000 });
   await expect(page.locator("#bs-preinput")).toContainText("вкл", { timeout: 15_000 });
   await expect(page.locator("#bs-preinput")).toContainText("пришло");
+  // Task 5.16: the bot's STATUS carries the 30 s search window (additive; no opponent on the private server, so it may well be empty), the site
+  // adds the host's load, and the «Машина» rows show both.
+  const sw = (await botStatus(page)).search_window;
+  expect(sw).toBeTruthy();
+  expect(sw.window_s).toBe(30);
+  expect(typeof sw.decisions).toBe("number");
+  expect(sw.candidates_mean === null || typeof sw.candidates_mean === "number").toBe(true);
+  expect(sw.brain_p90_us === null || typeof sw.brain_p90_us === "number").toBe(true);
+  expect((sw.decisions === 0) === (sw.candidates_mean === null)).toBe(true);
+  const host = (await (await page.request.get(BASE + "/api/bot/status")).json()).host;
+  expect(host.load1).toBeGreaterThanOrEqual(0);
+  expect(host.cpus).toBeGreaterThanOrEqual(1);
+  await expect(page.locator("#bs-load")).toHaveText(/^\d+,\d \/ \d+,\d \/ \d+,\d \(1 \/ 5 \/ 15 мин\), ядер: \d+$/, { timeout: 15_000 });
+  await expect(page.locator("#bs-search")).toHaveText(/^(нет решений с поиском за 30 с|\d+,\d кандидата на решение · .*решений: \d+ за 30 с.*)$/, { timeout: 15_000 });
   await page.screenshot({ path: path.join(SHOTS, "3.20b-bot-on.png"), fullPage: true });
   await stopFromPage(page);
 
@@ -482,4 +501,277 @@ test("the real run on the private server: `--finish wb` and `--preinput on` reac
     .split("\n")
     .filter((l) => l.startsWith("start ddnet-ai-bot"));
   expect(starts).toHaveLength(startsBefore + 2);
+});
+
+test("the card: the «Дуэль» preset fills the form in one click, sends nothing by itself, leaves server / duration / sparring alone, and the request it leads to has only the old fields", async ({ page }) => {
+  test.setTimeout(120_000);
+  await login(page);
+  // Task 5.16 (D-120). The POST is answered here: nothing may start.
+  const posted: any[] = [];
+  await page.route("**/api/bot/launch", async (route) => {
+    if (route.request().method() === "POST") {
+      posted.push(JSON.parse(route.request().postData() ?? "{}"));
+      await route.fulfill({ status: 429, contentType: "application/json", body: JSON.stringify({ error: "rate_limited" }) });
+    } else {
+      await route.continue();
+    }
+  });
+  await openBotTab(page);
+  await expect(card(page).locator(".lc-state-text")).toHaveText("Бот остановлен", { timeout: 20_000 });
+
+  const preset = card(page).locator(".lc-preset-btn");
+  const done = card(page).locator(".lc-preset-done");
+  const finishHint = card(page).locator(".lc-finish-hint");
+  await expect(preset).toBeVisible();
+  await expect(preset).toHaveText("Дуэль");
+  await expect(preset).toBeEnabled();
+  await expect(card(page).locator(".lc-preset-note")).toContainText("Запускает только кнопка «Запустить»");
+
+  // «полный» is labelled for the duel, with the numbers and the caveats; it is no longer «не рекомендуется».
+  const finish = field(page, "Дожим");
+  expect(await finish.locator("option").allTextContents()).toEqual(["выкл", "цель (рекомендуется)", "ВБ (эксперимент)", "полный (только дуэль 1 на 1)"]);
+
+  // A form that is as far from the preset as it gets (and server / duration / sparring set to values the preset must not touch).
+  await field(page, "Сервер").selectOption("local");
+  await field(page, "Мозг").selectOption("hybrid-fly");
+  await finish.selectOption("target");
+  await field(page, "Умный ВБ").selectOption("on");
+  await field(page, "Без самоубийств \\(дуэль\\)").selectOption("off");
+  await field(page, "Предсказатель соперника \\(эксперимент\\)").selectOption("on");
+  await field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)").selectOption("off");
+  await field(page, "Длительность").selectOption("60m");
+  await field(page, "Спарринг \\(только локальный сервер\\)").selectOption("1");
+  await field(page, "Предсказание соперника").selectOption("off");
+  await expect(preset).not.toHaveClass(/current/);
+  await expect(preset).toHaveAttribute("aria-pressed", "false");
+  await expect(done).toBeHidden();
+
+  await preset.click();
+  await expect(field(page, "Мозг")).toHaveValue("hybrid");
+  await expect(finish).toHaveValue("full");
+  await expect(field(page, "Без самоубийств \\(дуэль\\)")).toHaveValue("on");
+  await expect(field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)")).toHaveValue("on");
+  await expect(field(page, "Предсказатель соперника \\(эксперимент\\)")).toHaveValue("off");
+  await expect(field(page, "Умный ВБ")).toHaveValue("off");
+  // Not touched: the server, the duration, the sparring and the hybrid's own opponent model.
+  await expect(field(page, "Сервер")).toHaveValue("local");
+  await expect(field(page, "Длительность")).toHaveValue("60m");
+  await expect(field(page, "Спарринг \\(только локальный сервер\\)")).toHaveValue("1");
+  await expect(field(page, "Предсказание соперника")).toHaveValue("off");
+  // It filled the form and sent nothing; it says so and lights up while the form IS the preset.
+  await expect(done).toContainText("Форма заполнена для дуэли");
+  await expect(done).toContainText("само ничего не запускается");
+  await expect(preset).toHaveClass(/current/);
+  await expect(preset).toHaveAttribute("aria-pressed", "true");
+  await page.waitForTimeout(500);
+  expect(posted).toHaveLength(0);
+  await expect(card(page).locator(".lc-state-text")).toHaveText("Бот остановлен");
+
+  // Every value has its hint, with the numbers and the caveats.
+  await expect(finishHint).toContainText("Для дуэли 1 на 1, не для толпы");
+  await expect(finishHint).toContainText("+4,3 ± 2,2 п.п. побед (p 0,0001)");
+  await expect(finishHint).toContainText("+7,5 ± 4,1 п.п. (600 пар, p 0,0005)");
+  await expect(finishHint).toContainText("плечо выбрано после просмотра таблицы");
+  await expect(finishHint).toContainText("вживую не проверено");
+  await expect(finishHint).toContainText("там берите «цель»");
+  await expect(finishHint).not.toContainText("не рекомендуется");
+  await expect(finishHint).not.toHaveClass(/lc-finish-warn/);
+  await expect(card(page).locator(".lc-selfkill-hint")).toContainText("Для 1vs1 F-DDrace: любая смерть бота даёт очко сопернику");
+  await expect(card(page).locator(".lc-preinput-hint")).toContainText("≈ 24% пар");
+  await expect(card(page).locator(".lc-preinput-hint")).toContainText("выигрыша в силе вживую не измерено");
+  await expect(card(page).locator(".lc-model-hint")).toContainText("Предсказатель выключен");
+  await expect(card(page).locator(".lc-wb-hint")).toContainText("Умный ВБ выключен");
+  const info = card(page).locator(".lc-preset-info");
+  await expect(info).not.toHaveAttribute("open", "");
+  await info.locator("summary").click();
+  const items = card(page).locator(".lc-preset-list li");
+  await expect(items).toHaveCount(7);
+  const text = await card(page).locator(".lc-preset-list").innerText();
+  for (const needle of [
+    "Мозг: Гибрид",
+    "Дожим: полный",
+    "+4,3 ± 2,2 п.п. побед (1800 пар, p 0,0001)",
+    "+7,5 ± 4,1 п.п. (600 пар)",
+    "соперник в арене один, вживую не проверено",
+    "Без самоубийств (дуэль): вкл",
+    "Настоящие ходы соперника от сервера: вкл (эксперимент)",
+    "≈ 24% пар",
+    "Предсказатель соперника: выкл",
+    "Умный ВБ: выкл",
+    "Тихая машина",
+    "14,2 кандидата на решение при нагрузке 18–30 против ≈ 27 в арене при часах тихой машины (вживую на тихой машине ещё не измерено)",
+  ]) {
+    expect(text).toContain(needle);
+  }
+  await page.screenshot({ path: path.join(SHOTS, "5.16-preset.png"), fullPage: true });
+
+  // «Запустить»: the request is exactly the old fields (the off switches are absent, the on ones are the closed values).
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(posted[0]).toEqual({
+    action: "start",
+    brain: "hybrid",
+    server: "local",
+    duration: "60m",
+    sparring: 1,
+    mirror: "off",
+    finish: "full",
+    no_selfkill: true,
+    preinput: true,
+  });
+
+  // «полный» without the duel switch is flagged as not looking like a duel, and a change by hand takes the preset's mark and message back.
+  await field(page, "Без самоубийств \\(дуэль\\)").selectOption("off");
+  await expect(finishHint).toHaveClass(/lc-finish-warn/);
+  await expect(finishHint).toContainText("похоже, это не дуэль 1 на 1");
+  await expect(preset).not.toHaveClass(/current/);
+  await expect(done).toBeHidden();
+  await expect(done).toHaveText("");
+  // Again: the click puts everything back, also from the pure fly (which hides the hybrid's controls).
+  await field(page, "Мозг").selectOption("fly");
+  await expect(finish).toBeHidden();
+  await preset.click();
+  await expect(field(page, "Мозг")).toHaveValue("hybrid");
+  await expect(finish).toBeVisible();
+  await expect(finish).toHaveValue("full");
+  await expect(finishHint).not.toHaveClass(/lc-finish-warn/);
+
+  // Phone width: nothing scrolls sideways with the preset, its list and the longest hint.
+  await page.setViewportSize({ width: 360, height: 740 });
+  await noHorizontalScroll(page);
+  await page.screenshot({ path: path.join(SHOTS, "5.16-preset-phone.png"), fullPage: true });
+});
+
+/** A STATUS of a live bot, as the site serves it, with the host's load and the bot's search window of the case under test. */
+function liveStatusAnswer(host: any, searchWindow: any | undefined, live = true): any {
+  const status: any = {
+    tick: 5000, own: 0, target: 1, mode: "fight", brain: "hybrid", alive: true, frozen: false, blocks: 1, blocked_by: 0, self_kills: 0,
+    decisions: 100, collapsed: 0, decide_p50_us: 800, decide_p99_us: 4100, brain_p99_us: 3900, overhead_p99_us: 200, telemetry: null,
+    connected: true, server: "127.0.0.1:8463", map: "Copy Love Box", name: "Muha", clan: "", skin: "default", target_tag: "c1-deadbeef", wb: "WB: off",
+    goto: "", deaths: 0, clips_saved: 0, kill_cooldown_ticks: 0, paused: false, finish: "full", selfkill: "off", wb_smart: "off", duel: true,
+    window_model: "off", preinput: "on",
+  };
+  if (searchWindow !== undefined) status.search_window = searchWindow;
+  return {
+    bridge: true, source: live ? "live" : "none", demo_configured: false, live, age_ms: 100, status: live ? status : null, control_socket: false, host,
+  };
+}
+
+test("the «Бот» card: the machine's quietness rows and the warning (load above 6, or fewer than 20 candidates per decision), and the same line under the preset", async ({ page }) => {
+  test.setTimeout(120_000);
+  await login(page);
+  // Task 5.16 (D-120). The status answers are scripted here (the real machine's load is not ours to set); the launch routes are left alone.
+  let answer: any = null;
+  await page.route("**/api/bot/status", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(answer) });
+  });
+  const sw = (decisions: number, mean: number | null, p90: number | null) => ({ window_s: 30, decisions, candidates_mean: mean, brain_p90_us: p90 });
+  const host = (l1: number) => ({ load1: l1, load5: 1.8, load15: 1.5, cpus: 8 });
+  const load = page.locator("#bs-load");
+  const search = page.locator("#bs-search");
+  const warn = page.locator("#bs-quiet-warn");
+  const quiet = card(page).locator(".lc-quiet");
+  answer = liveStatusAnswer(host(2.1), sw(612, 27.34, 4125));
+  await openBotTab(page);
+
+  // 1. quiet: the numbers, no warning. The decimal comma, the p90 in ms, the count of decisions.
+  await expect(load).toHaveText("2,1 / 1,8 / 1,5 (1 / 5 / 15 мин), ядер: 8", { timeout: 15_000 });
+  await expect(search).toHaveText("27,3 кандидата на решение · p90 решения 4,13 мс · решений: 612 за 30 с");
+  await expect(warn).toBeHidden();
+  await expect(load).not.toHaveClass(/kv-warn/);
+  await expect(search).not.toHaveClass(/kv-warn/);
+  await expect(page.locator("#bs-quiet-note")).toContainText("порог 20");
+  await expect(page.locator("#bs-quiet-note")).toContainText("в толпе число может быть другим (не измерено)");
+  await expect(page.locator("#bs-quiet-note")).toContainText("никуда не отправляются");
+  await expect(quiet).toContainText("Машина сейчас: нагрузка 2,1 / 1,8 / 1,5");
+  await expect(quiet).toContainText("Поиск бота: 27,3 кандидата на решение");
+  await expect(quiet).not.toHaveClass(/warn/);
+  await page.screenshot({ path: path.join(SHOTS, "5.16-quiet.png"), fullPage: true });
+
+  // 2. load above 6: the warning says it, with the reason; the load row is flagged, the search row is not.
+  answer = liveStatusAnswer(host(7.4), sw(612, 27.3, 4000));
+  await expect(warn).toBeVisible({ timeout: 15_000 });
+  await expect(warn).toContainText("машина загружена — бот думает хуже");
+  await expect(warn).toContainText("нагрузка 7,4 выше 6");
+  await expect(warn).not.toContainText("кандидатов");
+  await expect(load).toHaveClass(/kv-warn/);
+  await expect(search).not.toHaveClass(/kv-warn/);
+  await expect(quiet).toHaveClass(/warn/);
+  await expect(quiet).toContainText("машина загружена — бот думает хуже");
+  await page.screenshot({ path: path.join(SHOTS, "5.16-quiet-load.png"), fullPage: true });
+
+  // 3. few candidates on a quiet machine: the warning names the candidates only.
+  answer = liveStatusAnswer(host(1.0), sw(600, 14.2, 6000));
+  await expect(warn).toBeVisible({ timeout: 15_000 });
+  await expect(warn).toContainText("машина загружена — бот думает хуже");
+  await expect(warn).toContainText("кандидатов на решение 14,2 меньше 20");
+  await expect(warn).not.toContainText("нагрузка");
+  await expect(search).toHaveClass(/kv-warn/);
+  await expect(load).not.toHaveClass(/kv-warn/);
+  // ... both at once name both.
+  answer = liveStatusAnswer(host(18.5), sw(600, 11.0, 9000));
+  await expect(warn).toContainText("нагрузка 18,5 выше 6; кандидатов на решение 11,0 меньше 20", { timeout: 15_000 });
+
+  // 4. the boundaries: load 6 and 20 candidates are not warnings (the rule is above 6 and below 20); and a mean over fewer than 25 decisions is not judged.
+  answer = liveStatusAnswer(host(6), sw(600, 20, 4000));
+  await expect(warn).toBeHidden({ timeout: 15_000 });
+  await expect(load).toHaveText(/^6,00 \//);
+  answer = liveStatusAnswer(host(1), sw(24, 3.5, 4000));
+  await expect(search).toContainText("(мало, не оцениваем)", { timeout: 15_000 });
+  await expect(warn).toBeHidden();
+  answer = liveStatusAnswer(host(1), sw(25, 19.9, 4000));
+  await expect(warn).toBeVisible({ timeout: 15_000 });
+
+  // 5. nothing searched in the last 30 s; a slow bin; a bot of an older build (no `search_window`); an unreadable load.
+  answer = liveStatusAnswer(host(1), sw(0, null, null));
+  await expect(search).toHaveText("нет решений с поиском за 30 с", { timeout: 15_000 });
+  await expect(warn).toBeHidden();
+  answer = liveStatusAnswer(host(1), sw(100, 25, 20000));
+  await expect(search).toContainText("p90 решения от 20 мс", { timeout: 15_000 });
+  answer = liveStatusAnswer(host(1), undefined);
+  await expect(search).toHaveText("—", { timeout: 15_000 });
+  await expect(warn).toBeHidden();
+  // The candidate threshold is the hybrid's: another brain's count is shown and not judged.
+  const planner = liveStatusAnswer(host(1), sw(600, 5.0, 4000));
+  planner.status.brain = "planner-normal-5ms";
+  answer = planner;
+  await expect(search).toContainText("(не гибрид: порог 20 к этому мозгу не применяется)", { timeout: 15_000 });
+  await expect(warn).toBeHidden();
+  answer = liveStatusAnswer(null, sw(100, 25, 4000));
+  await expect(load).toHaveText("—", { timeout: 15_000 });
+  await expect(search).toContainText("25,0 кандидата на решение");
+  await expect(quiet).toContainText("Нагрузку машины сайт сейчас прочитать не может");
+
+  // 6. no bot at all: the load is still shown (before pressing «Запустить») and warns; the bot's search is «—».
+  answer = liveStatusAnswer(host(9.9), undefined, false);
+  await expect(load).toHaveText("9,9 / 1,8 / 1,5 (1 / 5 / 15 мин), ядер: 8", { timeout: 15_000 });
+  await expect(search).toHaveText("—");
+  await expect(warn).toBeVisible();
+  await expect(warn).toContainText("нагрузка 9,9 выше 6");
+  await expect(quiet).toContainText("Внимание: машина загружена — бот думает хуже");
+  await expect(quiet).not.toContainText("Поиск бота");
+  // ... and the judgement is a pure function the page exposes: the same numbers.
+  const verdicts = await page.evaluate(() => {
+    const q = (window as any).LaunchCard.quietness;
+    const sw = (d: number, m: number) => ({ window_s: 30, decisions: d, candidates_mean: m, brain_p90_us: 1000 });
+    return [
+      q({ load1: 6, cpus: 8 }, sw(100, 20), "hybrid").warn,
+      q({ load1: 6.01, cpus: 8 }, sw(100, 20), "hybrid").warn,
+      q({ load1: 0, cpus: 8 }, sw(100, 19.99), "hybrid").warn,
+      q({ load1: 0, cpus: 8 }, sw(24, 1), "hybrid").warn,
+      q({ load1: 0, cpus: 8 }, sw(100, 5), "planner-normal-5ms").warn,
+      q({ load1: 0, cpus: 8 }, sw(100, 5)).warn,
+      q({ load1: 6.01, cpus: 8 }, null, "hybrid").reasons.join(),
+      q(null, null).warn,
+      q({ load1: "7" }, null).warn,
+    ];
+  });
+  expect(verdicts).toEqual([false, true, true, false, false, false, "нагрузка 6,01 выше 6", false, false]);
+
+  // Phone width: the rows and the warning do not scroll sideways.
+  answer = liveStatusAnswer(host(18.5), sw(600, 11.0, 9000));
+  await expect(warn).toBeVisible({ timeout: 15_000 });
+  await page.setViewportSize({ width: 360, height: 740 });
+  await noHorizontalScroll(page);
+  await page.screenshot({ path: path.join(SHOTS, "5.16-quiet-phone.png"), fullPage: true });
 });

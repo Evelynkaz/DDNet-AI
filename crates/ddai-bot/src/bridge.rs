@@ -305,6 +305,33 @@ pub struct StatusMessage {
     /// Additive since task 3.16 (D-115): the fixed prediction margin in ms (`--prediction-margin-ms` / `prediction_margin_ms`), `null` while the
     /// margin is adaptive (the default; the live value is in the `input margin` log line).
     pub prediction_margin_ms: Option<i32>,
+    /// Additive since task 5.16 (D-120): the search of the last 30 s of game time (see [`SearchWindowStatus`]), for the site's "machine
+    /// quietness" row. A bot of an older build sends no such field.
+    pub search_window: SearchWindowStatus,
+}
+
+/// STATUS `search_window` (task 5.16, D-120): what the hybrid's searching decisions of the last `window_s` seconds of game time looked like.
+/// `decisions` counts the decisions that searched (a decision with no target in reach scores no candidates and is not counted), `candidates_mean`
+/// is their mean number of scored candidates (one decimal) and `brain_p90_us` the 90th percentile of the brain's time for them (250 us bins; the
+/// last bin, 20 ms, reads "at least"). Both are `null` while no decision searched in the window, and always for a brain that does not search
+/// (the fly reports no candidates; the planner does report its own count, which the site shows but does not judge: the threshold is the hybrid's). Counted by [`crate::latency::SearchWindow`]; nothing leaves the machine.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct SearchWindowStatus {
+    pub window_s: u32,
+    pub decisions: u32,
+    pub candidates_mean: Option<f64>,
+    pub brain_p90_us: Option<u32>,
+}
+
+impl SearchWindowStatus {
+    pub fn from_window(w: &crate::latency::WindowStats) -> Self {
+        SearchWindowStatus {
+            window_s: crate::latency::WINDOW_SECONDS as u32,
+            decisions: w.decisions,
+            candidates_mean: w.candidates_mean.map(|m| (m * 10.0).round() / 10.0),
+            brain_p90_us: w.brain_p90_us,
+        }
+    }
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -852,6 +879,12 @@ mod tests {
             preinput_stats: serde_json::json!({"received": 7}),
             hybrid_budget_ms: 3,
             prediction_margin_ms: None,
+            search_window: SearchWindowStatus {
+                window_s: 30,
+                decisions: 41,
+                candidates_mean: Some(26.8),
+                brain_p90_us: Some(4125),
+            },
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
@@ -872,6 +905,29 @@ mod tests {
         assert!(v["window_guard"].is_null());
         assert_eq!(v["preinput"], "on");
         assert_eq!(v["preinput_stats"]["received"], 7);
+        // Task 5.16: additive, a plain object of numbers (null while the window is empty).
+        assert_eq!(v["search_window"]["window_s"], 30);
+        assert_eq!(v["search_window"]["decisions"], 41);
+        assert_eq!(v["search_window"]["candidates_mean"], 26.8);
+        assert_eq!(v["search_window"]["brain_p90_us"], 4125);
+    }
+
+    #[test]
+    fn the_search_window_status_rounds_the_mean_and_is_null_when_nothing_searched() {
+        let empty = SearchWindowStatus::from_window(&crate::latency::SearchWindow::default().stats(1234));
+        let v = serde_json::to_value(empty).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"window_s": 30, "decisions": 0, "candidates_mean": null, "brain_p90_us": null})
+        );
+        let mut w = crate::latency::SearchWindow::default();
+        for c in [27, 27, 28] {
+            w.record(100, c, std::time::Duration::from_micros(4100));
+        }
+        let v = serde_json::to_value(SearchWindowStatus::from_window(&w.stats(100))).unwrap();
+        assert_eq!(v["candidates_mean"], 27.3);
+        assert_eq!(v["decisions"], 3);
+        assert_eq!(v["brain_p90_us"], 4125);
     }
 
     #[test]

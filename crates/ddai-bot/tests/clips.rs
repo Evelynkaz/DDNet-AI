@@ -502,6 +502,28 @@ fn the_frames_say_what_the_brain_decided_and_how_long_it_took() {
                     .any(|f| f.bot.candidates > 0 && f.bot.has(ddai_clip::BotRec::BIT_SEARCHED)),
                 "{kind:?}: the plan summary (candidates, searched) reaches the clip"
             );
+            // Task 5.16 (D-120): the 30 s window of the STATUS counts the same decisions the clip frames flag as searched, with the same candidates.
+            let searched: Vec<u32> = clip
+                .frames
+                .iter()
+                .filter(|f| f.bot.has(ddai_clip::BotRec::BIT_SEARCHED))
+                .map(|f| f.bot.candidates)
+                .collect();
+            let w = bot.latency().recent.stats(sc.tick);
+            assert_eq!(
+                w.decisions as usize,
+                searched.len(),
+                "{kind:?}: the window counts the searched decisions"
+            );
+            if !searched.is_empty() {
+                let mean = f64::from(searched.iter().sum::<u32>()) / searched.len() as f64;
+                let got = w.candidates_mean.expect("a window with decisions has a mean");
+                assert!(
+                    (got - mean).abs() < 1e-9,
+                    "{kind:?}: window mean {got} vs clip mean {mean}"
+                );
+                assert!(w.brain_p90_us.is_some_and(|us| us > 0), "{kind:?}: {w:?}");
+            }
         }
     });
 }

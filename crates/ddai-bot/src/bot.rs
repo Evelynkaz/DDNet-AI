@@ -1348,7 +1348,7 @@ impl Bot {
             if self.stats.brain_decisions > before.brain_decisions
                 && let Some(p) = self.brain.last_plan()
             {
-                self.latency.record_plan(&p, brain_time);
+                self.latency.record_plan(snap.tick, &p, brain_time);
             }
             // A rolling high quantile, not a mean (task 4.1b): the driver holds the decision until
             // the tick it was aimed at, so a conservative estimate only costs latency.

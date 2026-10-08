@@ -113,6 +113,9 @@ pub struct WebConfig {
     pub say_burst: usize,
     pub say_burst_window: Duration,
     pub say_max_per_minute: usize,
+    /// Task 5.16 (D-120): where `GET /api/bot/status` reads the host's load average from (`/proc/loadavg`; tests point it at a file). Read-only; nothing
+    /// is kept or sent anywhere.
+    pub loadavg_path: PathBuf,
 }
 
 impl WebConfig {
@@ -161,6 +164,7 @@ impl WebConfig {
             say_burst: 2,
             say_burst_window: Duration::from_secs(3),
             say_max_per_minute: 10,
+            loadavg_path: PathBuf::from(crate::http::bot::DEFAULT_LOADAVG_PATH),
             data_dir,
         }
     }

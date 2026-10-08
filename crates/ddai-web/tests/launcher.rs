@@ -889,6 +889,95 @@ async fn a_symlinked_or_garbage_status_file_is_not_shown() {
     assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null);
 }
 
+/// Task 5.16 (D-120): the «Дуэль» preset only fills the form, so the request it leads to is made of the fields that were already there. This is
+/// the exact body `launch.js` builds with the preset's values (brain «Гибрид», «Дожим: полный», «Без самоубийств»: вкл, «Настоящие ходы»: вкл, the
+/// predictor and the smart wayblock off, i.e. absent): the site takes it, the helper's own parser reads it back, and nothing else is in the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
+    let server = deployed().await;
+    let l = login(&server);
+    let body = serde_json::json!({
+        "action": "start", "brain": "hybrid", "server": "local", "duration": "15m", "sparring": 0,
+        "mirror": "on", "finish": "full", "no_selfkill": true, "preinput": true
+    });
+    let r = post(&server, &l, &body);
+    assert_eq!(r.status, 202, "{r:?}");
+    let text = fs::read_to_string(request_file(&server)).unwrap();
+    let req = parse_request(text.as_bytes()).expect("the helper's own parser accepts it");
+    assert_eq!(
+        (
+            req.brain,
+            req.finish,
+            req.no_selfkill,
+            req.preinput,
+            req.mirror,
+            req.wb_smart,
+            req.window_model
+        ),
+        (
+            Some(Brain::Hybrid),
+            Some(Finish::Full),
+            Some(true),
+            Some(true),
+            Some(Mirror::On),
+            None,
+            None
+        ),
+        "{text}"
+    );
+    // The off switches of the preset are the absence of their fields (an old helper with a strict format still takes the request).
+    assert!(!text.contains("wb_smart") && !text.contains("window_model"), "{text}");
+    // There is no preset field and no other new one: a request that names one is refused whole, nothing written.
+    fs::remove_file(request_file(&server)).unwrap();
+    for (name, value) in [("preset", serde_json::json!("duel")), ("duel", serde_json::json!(true))] {
+        let mut b = body.clone();
+        b[name] = value;
+        let r = post(&server, &l, &b);
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{name}"
+        );
+    }
+    assert!(files_in(&launch_dir(&server)).is_empty());
+    // The page builds its body from exactly these fields (a new `body.<field>` in launch.js must be a field the request format knows).
+    let js = String::from_utf8_lossy(&send(server.addr, Req::new("GET", "/launch.js")).body).into_owned();
+    let mut fields = std::collections::BTreeSet::new();
+    for part in js.split("body.").skip(1) {
+        let name: String = part
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if part[name.len()..].trim_start().starts_with('=') && !part[name.len()..].trim_start().starts_with("==") {
+            fields.insert(name);
+        }
+    }
+    let known: std::collections::BTreeSet<String> = [
+        "action",
+        "brain",
+        "server",
+        "duration",
+        "sparring",
+        "mirror",
+        "finish",
+        "wb_smart",
+        "no_selfkill",
+        "window_model",
+        "preinput",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    // (`body.server` is read, not assigned, in the confirmation; the assigned ones are the optional switches.)
+    for f in &fields {
+        assert!(
+            known.contains(f),
+            "launch.js sets a request field the format does not know: {f}"
+        );
+    }
+    assert!(fields.contains("finish") && fields.contains("no_selfkill") && fields.contains("preinput"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
     let server = plain_server().await;
@@ -908,7 +997,7 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
     for needle in [
         "Дожим",
         "цель (рекомендуется)",
-        "полный (не рекомендуется)",
+        "полный (только дуэль 1 на 1)",
         "finish_hybrid_only",
         // Task 5.15: the two more switches, their hints and the fields they send.
         "Умный ВБ",
@@ -937,12 +1026,34 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         "ВБ (эксперимент)",
         "заранее объявленной планки (+4,0 п.п.) это не берёт",
         "Эксперимент для игры на ВБ, не для дуэли",
+        // Task 5.16: the «Дуэль» preset, the honest «полный», the reason for each preset value and the quietness judgement.
+        "Для дуэли 1 на 1, не для толпы",
+        "+4,3 ± 2,2 п.п. побед (p 0,0001)",
+        "+7,5 ± 4,1 п.п. (600 пар, p 0,0005)",
+        "плечо выбрано после просмотра таблицы",
+        "257 против 259 удержанных блоков",
+        "похоже, это не дуэль 1 на 1",
+        "Заполняет форму для дуэли 1 на 1",
+        "Запускает только кнопка «Запустить»",
+        "Что ставит «Дуэль» и почему",
+        "≈ 24% пар",
+        "14,2 кандидата на решение при нагрузке 18–30",
+        "машина загружена — бот думает хуже",
+        "quietness",
     ] {
         assert!(js.contains(needle), "launch.js lacks {needle}");
     }
+    assert!(
+        !js.contains("не рекомендуется"),
+        "«полный» is no longer unconditionally not recommended"
+    );
     assert!(html.contains(r#"id="bs-wbsmart""#));
     assert!(html.contains(r#"id="bs-windowmodel""#));
     assert!(html.contains(r#"id="bs-preinput""#));
+    // Task 5.16: the machine's quietness rows and warning of the «Бот» card.
+    for id in ["bs-load", "bs-search", "bs-quiet-warn", "bs-quiet-note"] {
+        assert!(html.contains(&format!(r#"id="{id}""#)), "{id}");
+    }
     // The «Бот» card's script knows the modes of the pre-inputs and the `known_ahead` share it prints.
     let app = String::from_utf8_lossy(&send(server.addr, Req::new("GET", "/app.js")).body).into_owned();
     for needle in [

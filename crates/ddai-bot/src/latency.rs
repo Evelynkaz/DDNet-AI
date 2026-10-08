@@ -286,6 +286,140 @@ impl SlotStats {
     }
 }
 
+/// Task 5.16 (D-120): the search of the last [`WINDOW_SECONDS`] seconds of game time, for the site's "machine quietness" row: how many
+/// candidates the hybrid scored per decision (the mean) and the 90th percentile of the brain's time for those decisions. One slot per game
+/// second (50 ticks), kept in a ring keyed by the second: fixed arrays, so recording a decision is a few adds and the decision path allocates
+/// nothing; reading it scans 30 slots of 82 counters. A slot belongs to the window when its second lies in `now - 29 ..= now`, so a bot that
+/// stopped searching reports an empty window by itself, and a game tick that went back by more than a second (a map change) clears the ring. The brain-time percentile is a histogram of 250 us bins (the last bin is "20 ms and more"): a resolution of 0.25 ms, which is
+/// what the owner needs against the 5 ms bar of `docs/research/duel-3.19.md` section 8, not a replacement for `LatencyStats::brain_made`.
+#[derive(Debug, Clone)]
+pub struct SearchWindow {
+    slots: [WindowSlot; WINDOW_SECONDS],
+    /// The newest tick recorded (`i32::MIN` before the first).
+    last_tick: i32,
+}
+
+/// The window's length in seconds of game time.
+pub const WINDOW_SECONDS: usize = 30;
+const TICKS_PER_SECOND: i32 = 50;
+/// Width of a brain-time bin in the window, microseconds.
+pub const WINDOW_BIN_US: u32 = 250;
+/// 0 .. 20 ms in 250 us bins, plus one for "20 ms and more".
+const WINDOW_BINS: usize = 81;
+
+#[derive(Debug, Clone, Copy)]
+struct WindowSlot {
+    /// The game second (`tick / 50`) this slot holds; `i32::MIN` = never written.
+    second: i32,
+    decisions: u32,
+    candidates: u64,
+    bins: [u32; WINDOW_BINS],
+}
+
+impl Default for WindowSlot {
+    fn default() -> Self {
+        WindowSlot {
+            second: i32::MIN,
+            decisions: 0,
+            candidates: 0,
+            bins: [0; WINDOW_BINS],
+        }
+    }
+}
+
+impl Default for SearchWindow {
+    fn default() -> Self {
+        SearchWindow {
+            slots: [WindowSlot::default(); WINDOW_SECONDS],
+            last_tick: i32::MIN,
+        }
+    }
+}
+
+/// What [`SearchWindow::stats`] reads: the decisions that searched in the window, their mean candidate count and the p90 of their brain time.
+/// Both are `None` while the window holds no decision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowStats {
+    pub decisions: u32,
+    pub candidates_mean: Option<f64>,
+    pub brain_p90_us: Option<u32>,
+}
+
+impl SearchWindow {
+    /// One decision that searched, at game tick `tick`.
+    pub fn record(&mut self, tick: i32, candidates: u32, brain: Duration) {
+        // The game tick went back by more than a second (a new map or session): the old seconds belong to another timeline, so they must not
+        // come back into the window when the new ticks catch up with them.
+        if tick < self.last_tick.saturating_sub(TICKS_PER_SECOND) {
+            self.slots = [WindowSlot::default(); WINDOW_SECONDS];
+            self.last_tick = tick;
+        } else {
+            self.last_tick = self.last_tick.max(tick);
+        }
+        let second = tick.div_euclid(TICKS_PER_SECOND);
+        let slot = &mut self.slots[second.rem_euclid(WINDOW_SECONDS as i32) as usize];
+        if slot.second != second {
+            *slot = WindowSlot {
+                second,
+                ..WindowSlot::default()
+            };
+        }
+        slot.decisions = slot.decisions.saturating_add(1);
+        slot.candidates += u64::from(candidates);
+        let us = u32::try_from(brain.as_micros()).unwrap_or(u32::MAX);
+        let bin = ((us / WINDOW_BIN_US) as usize).min(WINDOW_BINS - 1);
+        slot.bins[bin] = slot.bins[bin].saturating_add(1);
+    }
+
+    /// The window ending at game tick `now`.
+    pub fn stats(&self, now: i32) -> WindowStats {
+        let now_second = now.div_euclid(TICKS_PER_SECOND);
+        let mut decisions = 0u64;
+        let mut candidates = 0u64;
+        let mut bins = [0u64; WINDOW_BINS];
+        for slot in &self.slots {
+            // `second` is i32::MIN for an unused slot: the subtraction is done in i64 so it cannot overflow.
+            let age = i64::from(now_second) - i64::from(slot.second);
+            if !(0..WINDOW_SECONDS as i64).contains(&age) {
+                continue;
+            }
+            decisions += u64::from(slot.decisions);
+            candidates += slot.candidates;
+            for (total, n) in bins.iter_mut().zip(&slot.bins) {
+                *total += u64::from(*n);
+            }
+        }
+        if decisions == 0 {
+            return WindowStats {
+                decisions: 0,
+                candidates_mean: None,
+                brain_p90_us: None,
+            };
+        }
+        // The smallest bin holding at least 90% of the decisions; its midpoint (the last bin: its lower edge, "at least").
+        let need = (decisions * 9).div_ceil(10);
+        let mut seen = 0u64;
+        let mut p90 = 0u32;
+        for (i, n) in bins.iter().enumerate() {
+            seen += n;
+            if seen >= need {
+                let lo = i as u32 * WINDOW_BIN_US;
+                p90 = if i == WINDOW_BINS - 1 {
+                    lo
+                } else {
+                    lo + WINDOW_BIN_US / 2
+                };
+                break;
+            }
+        }
+        WindowStats {
+            decisions: u32::try_from(decisions).unwrap_or(u32::MAX),
+            candidates_mean: Some(candidates as f64 / decisions as f64),
+            brain_p90_us: Some(p90),
+        }
+    }
+}
+
 /// All series.
 #[derive(Debug, Clone, Default)]
 pub struct LatencyStats {
@@ -329,6 +463,8 @@ pub struct LatencyStats {
     pub slack: Series,
     pub ready: Series,
     pub slots: SlotStats,
+    /// Task 5.16: the last 30 s of searching decisions, for the site (STATUS `search_window`).
+    pub recent: SearchWindow,
 }
 
 impl LatencyStats {
@@ -359,10 +495,11 @@ impl LatencyStats {
 
     /// What the brain said about one decision it made (see the fields). Only decisions that searched count: a
     /// decision that returned early has no verdict of its own.
-    pub fn record_plan(&mut self, p: &ddai_brain::PlanTelemetry, brain: Duration) {
+    pub fn record_plan(&mut self, tick: i32, p: &ddai_brain::PlanTelemetry, brain: Duration) {
         if !p.searched {
             return;
         }
+        self.recent.record(tick, p.candidates, brain);
         self.brain_made.push(brain);
         self.candidates.push(Duration::from_micros(u64::from(p.candidates)));
         self.proposal.push(Duration::from_micros(u64::from(p.proposal_us)));
@@ -479,6 +616,7 @@ mod tests {
         let mut l = LatencyStats::default();
         for k in 1..=100u32 {
             l.record_plan(
+                1000,
                 &ddai_brain::PlanTelemetry {
                     searched: true,
                     candidates: k,
@@ -499,6 +637,7 @@ mod tests {
         assert_eq!(LatencyStats::default().candidates.summary(), Summary::default());
         // A decision that did not search leaves every series as it was.
         l.record_plan(
+            1000,
             &ddai_brain::PlanTelemetry {
                 searched: false,
                 candidates: 7,
@@ -509,6 +648,123 @@ mod tests {
             Duration::from_micros(9),
         );
         assert_eq!((l.candidates.summary().count, l.brain_made.summary().count), (100, 100));
+    }
+
+    /// Task 5.16 (D-120): the 30 s window of the "machine quietness" row.
+    #[test]
+    fn the_search_window_reports_the_mean_candidates_and_the_p90_of_the_last_thirty_seconds() {
+        let mut w = SearchWindow::default();
+        assert_eq!(
+            w.stats(0),
+            WindowStats {
+                decisions: 0,
+                candidates_mean: None,
+                brain_p90_us: None
+            }
+        );
+        // 2 s at 25 decisions a second: 27 candidates, brain 3000 us in 90 of 100 decisions, 9000 us in 10 of them.
+        for i in 0..100 {
+            let us = if i % 10 == 9 { 9000 } else { 3000 };
+            w.record(i * 2, 27, Duration::from_micros(us));
+        }
+        let st = w.stats(199);
+        assert_eq!(st.decisions, 100);
+        assert_eq!(st.candidates_mean, Some(27.0));
+        // The 90th of 100 is a 3000 us decision: its 250 us bin [3000, 3250) reads 3125.
+        assert_eq!(st.brain_p90_us, Some(3125));
+        // One more slow decision makes 11 of 101 slow: the 91st value is slow now.
+        w.record(199, 27, Duration::from_micros(9000));
+        w.record(199, 27, Duration::from_micros(9000));
+        assert_eq!(w.stats(199).brain_p90_us, Some(9125));
+    }
+
+    #[test]
+    fn the_search_window_forgets_seconds_older_than_thirty_and_hides_a_tick_that_went_backwards() {
+        let mut w = SearchWindow::default();
+        for tick in 0..250 {
+            w.record(tick, 10, Duration::from_micros(2000));
+        }
+        // 5 s of decisions; the window ending at second 29 still holds the first one (age 29), the one ending at 30 does not.
+        assert_eq!(w.stats(29 * 50).decisions, 250);
+        assert_eq!(w.stats(30 * 50).decisions, 200, "second 0 is 30 s old and gone");
+        assert_eq!(w.stats(33 * 50 + 49).decisions, 50, "only second 4 is left");
+        assert_eq!(
+            w.stats(34 * 50).decisions,
+            0,
+            "an idle bot reports an empty window by itself"
+        );
+        assert_eq!(w.stats(34 * 50).candidates_mean, None);
+        // New seconds reuse the ring's slots: the mean follows the newer decisions only.
+        for tick in 3000..3050 {
+            w.record(tick, 30, Duration::from_micros(2000));
+        }
+        let st = w.stats(3049);
+        assert_eq!((st.decisions, st.candidates_mean), (50, Some(30.0)));
+        // The game tick went backwards (a map change): the old slots are in the future, not in the window.
+        assert_eq!(
+            w.stats(10).decisions,
+            0,
+            "seconds 1..=4 lie in the future of tick 10, the slot of second 0 now holds second 60"
+        );
+        // A jump back by more than a second clears the ring: old seconds do not reappear when the new ticks catch up with them.
+        let mut w = SearchWindow::default();
+        for tick in 3000..3050 {
+            w.record(tick, 30, Duration::from_micros(2000));
+        }
+        w.record(10, 7, Duration::from_micros(2000));
+        assert_eq!(w.stats(10).decisions, 1);
+        assert_eq!(w.stats(3049).decisions, 0, "the old timeline is gone");
+        for tick in 3000..3050 {
+            w.record(tick, 9, Duration::from_micros(2000));
+        }
+        assert_eq!(
+            w.stats(3049).candidates_mean,
+            Some(9.0),
+            "only the new timeline's decisions"
+        );
+        // A small step back (reordered snapshots, under a second) is not a reset.
+        w.record(3040, 9, Duration::from_micros(2000));
+        assert_eq!(w.stats(3049).decisions, 51);
+        let mut w = SearchWindow::default();
+        w.record(5000, 20, Duration::from_micros(1000));
+        assert_eq!(w.stats(100).decisions, 0);
+        // A negative tick (before the first snapshot) must not panic or index out of the ring.
+        w.record(-7, 5, Duration::from_micros(1));
+        assert_eq!(w.stats(-7).decisions, 1);
+    }
+
+    #[test]
+    fn the_search_window_clamps_a_slow_decision_into_its_last_bin_and_reads_it_as_at_least() {
+        let mut w = SearchWindow::default();
+        w.record(0, 3, Duration::from_millis(250));
+        w.record(0, 3, Duration::from_secs(10_000_000));
+        assert_eq!(w.stats(0).brain_p90_us, Some(20_000));
+        let mut w = SearchWindow::default();
+        w.record(0, 3, Duration::from_micros(0));
+        assert_eq!(w.stats(0).brain_p90_us, Some(125));
+    }
+
+    #[test]
+    fn only_decisions_that_searched_feed_the_search_window() {
+        let mut l = LatencyStats::default();
+        let searched = |c| ddai_brain::PlanTelemetry {
+            searched: true,
+            candidates: c,
+            ..ddai_brain::PlanTelemetry::default()
+        };
+        l.record_plan(500, &searched(20), Duration::from_micros(4000));
+        l.record_plan(
+            500,
+            &ddai_brain::PlanTelemetry {
+                searched: false,
+                candidates: 99,
+                ..ddai_brain::PlanTelemetry::default()
+            },
+            Duration::from_micros(9),
+        );
+        l.record_plan(501, &searched(30), Duration::from_micros(4000));
+        let st = l.recent.stats(501);
+        assert_eq!((st.decisions, st.candidates_mean), (2, Some(25.0)));
     }
 
     /// Task 3.16: the horizon series counts ticks; its shares are exact and add up to 100.
@@ -566,6 +822,29 @@ mod tests {
         });
         // `Vec::with_capacity(RING)` reserved everything up front in `default()`.
         assert_eq!(info.count_total, 0, "{info:?}");
+    }
+
+    /// Task 5.16: the decision path feeds the 30 s window (every second a new slot) and the status reads it; neither allocates.
+    #[test]
+    fn the_search_window_allocates_nothing_when_recording_or_reading() {
+        let mut l = LatencyStats::default();
+        let plan = ddai_brain::PlanTelemetry {
+            searched: true,
+            candidates: 27,
+            ..ddai_brain::PlanTelemetry::default()
+        };
+        // Warm the rings (their first pushes may grow a Vec); the measured part is a steady state.
+        for i in 0..RING as i32 + 10 {
+            l.record_plan(i, &plan, Duration::from_micros(4000));
+        }
+        let mut sink = 0u64;
+        let info = allocation_counter::measure(|| {
+            for i in 0..5000i32 {
+                l.record_plan(i, &plan, Duration::from_micros(4000));
+                sink += u64::from(l.recent.stats(i).decisions);
+            }
+        });
+        assert_eq!(info.count_total, 0, "{info:?} (sink {sink})");
     }
 
     /// A heavy-tailed, deterministic sample stream (microseconds): mostly 50-400, a long tail to ~30 ms.

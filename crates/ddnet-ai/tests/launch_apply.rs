@@ -824,6 +824,57 @@ fn the_preinput_switch_is_written_always_as_on_or_off_for_the_hybrids_and_surviv
 }
 
 #[test]
+fn the_duel_presets_request_starts_the_bot_with_the_duel_words_and_nothing_new() {
+    // Task 5.16 (D-120): the site's «Дуэль» preset only fills the form; what the page then sends is made of the fields that already exist. The helper,
+    // which re-checks every value, writes the duel's words and echoes them in its status (so the «Запуск» card shows what really started).
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["brain"] = json!("hybrid");
+    body["duration"] = json!("15m");
+    body["mirror"] = json!("on");
+    body["finish"] = json!("full");
+    body["no_selfkill"] = json!(true);
+    body["preinput"] = json!(true);
+    assert!(rig.send(&body).status.success());
+    let st = rig.status();
+    assert_eq!(st["state"], "started", "{st}");
+    let env = rig.env_file();
+    for line in [
+        "BOT_BRAIN=\"hybrid\"\n",
+        "BOT_FINISH=\"full\"\n",
+        "BOT_NO_SELFKILL=\"true\"\n",
+        "BOT_PREINPUT=\"on\"\n",
+        "BOT_WB_SMART=\"off\"\n",
+        "BOT_WINDOW_MODEL=\"\"\n",
+    ] {
+        assert!(env.contains(line), "{line} missing from {env}");
+    }
+    assert_eq!(
+        (
+            st["finish"].as_str(),
+            st["no_selfkill"].as_bool(),
+            st["preinput"].as_bool(),
+            st["wb_smart"].as_str(),
+            st["window_model"].as_bool()
+        ),
+        (Some("full"), Some(true), Some(true), Some("off"), Some(false)),
+        "{st}"
+    );
+    // The preset names nothing else: a request with a `preset` (or any invented) field is refused whole, nothing started.
+    for extra in ["preset", "duel"] {
+        let rig = Rig::new();
+        let mut b = body.clone();
+        b[extra] = json!("duel");
+        assert!(rig.send(&b).status.success());
+        assert_eq!(reason(&rig.status()), "bad_request", "{extra}: {}", rig.status());
+        assert!(
+            rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists(),
+            "{extra}"
+        );
+    }
+}
+
+#[test]
 fn the_preinput_switch_is_refused_for_the_pure_fly_and_for_any_value_but_a_boolean() {
     // The pure fly is not offered the pre-inputs: refused with its own code, nothing started; `false` is fine.
     let rig = Rig::new();

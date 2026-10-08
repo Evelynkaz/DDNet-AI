@@ -36,7 +36,7 @@ use crate::bot::{Bot, BotConfig, BotEvent, BotStats, Output};
 use crate::brains::{BrainError, BrainOptions, make_brain};
 use crate::bridge::{
     Bridge, ChatMessage, FrameChar, MapMessage, PlayerEntry, PlayerInfoEntry, PlayerInfoMessage, PlayersMessage,
-    StatusMessage,
+    SearchWindowStatus, StatusMessage,
 };
 use crate::command::{BotCommand, CommandInbox};
 use crate::console::Printer;
@@ -925,6 +925,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
             .hybrid_budget_ms
             .unwrap_or(ddai_planner::hybrid::DEFAULT_BUDGET_MS as u32),
         prediction_margin_ms: (!cfg.client.adaptive_margin).then_some(cfg.client.prediction_margin_ms),
+        search_window: SearchWindowStatus::from_window(&bot.latency().recent.stats(tick)),
     }
 }
 

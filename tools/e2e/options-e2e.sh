@@ -14,6 +14,8 @@
 # `launch-options.spec.ts` then clicks through the card and checks that both flags reached the bot: the env file, the bot's own log lines
 # («wb smart: on», «self-kill: off (flag)»), its STATUS (`/api/bot/status`) and the «Бот» card.
 #
+# Since task 5.16 the same stack also drives the «Дуэль» preset and the «Машина» rows of the «Бот» card (scripted STATUS answers; the real run checks
+# the bot's `search_window` and the host's load).
 # Since tasks 3.17 and 3.20b the same stack also drives the toggles «Предсказатель соперника», «Настоящие ходы соперника от сервера» and the
 # «ВБ (эксперимент)» value of «Дожим»; the unit's words `--window-model=`, `--preinput` and `--finish` are run-bot.sh's.
 #
@@ -22,15 +24,17 @@
 #        CARGO_TARGET_DIR=/path ...                            (the build and the binary it finds follow it)
 # Screenshots of the run: $E2E/screenshots (the scratch directory is recreated by the next run; copy what you want to keep).
 #        DDAI_E2E_KEEP=1 ...                                   (leave the stack running after the run, for a look)
+#        DDAI_E2E_GAME_PORT / DDAI_E2E_ECON_PORT / DDAI_E2E_WEB_PORT / DDAI_E2E_DIR   (other free loopback ports and scratch directory, defaults 8463 / 8464 / 7793)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 E2E="${DDAI_E2E_DIR:-$HOME/aiddnet/data/scratch/task-5.15-e2e}"
 SERVER_BIN="${DDNET_SERVER_BIN:-$HOME/aiddnet/build/ddnet-20.1/build/DDNet-Server}"
-GAME_PORT=8463
-ECON_PORT=8464
-WEB_PORT=7793
+# The private server's and the test web instance's ports (task 5.16: overridable, so that two worktrees' runs do not meet on the same ones).
+GAME_PORT="${DDAI_E2E_GAME_PORT:-8463}"
+ECON_PORT="${DDAI_E2E_ECON_PORT:-8464}"
+WEB_PORT="${DDAI_E2E_WEB_PORT:-7793}"
 
 log() { printf '[options-e2e] %s\n' "$*" >&2; }
 die() { printf '[options-e2e] ERROR: %s\n' "$*" >&2; exit 1; }
