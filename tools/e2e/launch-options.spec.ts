@@ -413,7 +413,10 @@ test("the card: «Дожим» offers «ВБ (эксперимент)» with an 
   await expect(hint).toContainText("в предсказании не использует");
   await pre.selectOption("on");
   await expect(hint).toContainText("Помогает, только если сервер присылает эти ходы заранее");
-  await expect(hint).toContainText("при запасе по умолчанию (меньше тика) решение не узнаёт ничего нового");
+  await expect(hint).toContainText("при запасе предсказания соперника по умолчанию (10 мс) решение почти ничего не узнаёт заранее");
+  await expect(hint).toContainText("7,6% пар «снапшот, соперник» (joniTee, 08.10), 8,0% (GER, 07.10) и ≈ 0,2%");
+  await expect(hint).toContainText("сколько это даёт в силе, вживую не измерено");
+  await expect(hint).not.toContainText("24%");
   await expect(hint).toContainText("серверу ничего не отправляет");
   await page.screenshot({ path: path.join(SHOTS, "3.20b-card-on.png"), fullPage: true });
   await noHorizontalScroll(page);
@@ -538,7 +541,7 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
   await field(page, "Умный ВБ").selectOption("on");
   await field(page, "Без самоубийств \\(дуэль\\)").selectOption("off");
   await field(page, "Предсказатель соперника \\(эксперимент\\)").selectOption("on");
-  await field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)").selectOption("off");
+  await field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)").selectOption("on");
   await field(page, "Длительность").selectOption("60m");
   await field(page, "Спарринг \\(только локальный сервер\\)").selectOption("1");
   await field(page, "Предсказание соперника").selectOption("off");
@@ -550,7 +553,7 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
   await expect(field(page, "Мозг")).toHaveValue("hybrid");
   await expect(finish).toHaveValue("full");
   await expect(field(page, "Без самоубийств \\(дуэль\\)")).toHaveValue("on");
-  await expect(field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)")).toHaveValue("on");
+  await expect(field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)")).toHaveValue("off");
   await expect(field(page, "Предсказатель соперника \\(эксперимент\\)")).toHaveValue("off");
   await expect(field(page, "Умный ВБ")).toHaveValue("off");
   // Not touched: the server, the duration, the sparring and the hybrid's own opponent model.
@@ -577,8 +580,7 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
   await expect(finishHint).not.toContainText("не рекомендуется");
   await expect(finishHint).not.toHaveClass(/lc-finish-warn/);
   await expect(card(page).locator(".lc-selfkill-hint")).toContainText("Для 1vs1 F-DDrace: любая смерть бота даёт очко сопернику");
-  await expect(card(page).locator(".lc-preinput-hint")).toContainText("≈ 24% пар");
-  await expect(card(page).locator(".lc-preinput-hint")).toContainText("выигрыша в силе вживую не измерено");
+  await expect(card(page).locator(".lc-preinput-hint")).toContainText("Выключено: ходы соперника сервер присылает");
   await expect(card(page).locator(".lc-model-hint")).toContainText("Предсказатель выключен");
   await expect(card(page).locator(".lc-wb-hint")).toContainText("Умный ВБ выключен");
   const info = card(page).locator(".lc-preset-info");
@@ -594,8 +596,9 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
     "+7,5 ± 4,1 п.п. (600 пар)",
     "соперник в арене один, вживую не проверено",
     "Без самоубийств (дуэль): вкл",
-    "Настоящие ходы соперника от сервера: вкл (эксперимент)",
-    "≈ 24% пар",
+    "Настоящие ходы соперника от сервера: выкл",
+    "пользы против соперника с запасом по умолчанию (10 мс) нет: вживую ход известен заранее в ~0,2–8% случаев",
+    "включать только для опыта",
     "Предсказатель соперника: выкл",
     "Умный ВБ: выкл",
     "Тихая машина",
@@ -617,7 +620,6 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
     mirror: "off",
     finish: "full",
     no_selfkill: true,
-    preinput: true,
   });
 
   // «полный» without the duel switch is flagged as not looking like a duel, and a change by hand takes the preset's mark and message back.

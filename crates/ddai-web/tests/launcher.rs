@@ -890,7 +890,7 @@ async fn a_symlinked_or_garbage_status_file_is_not_shown() {
 }
 
 /// Task 5.16 (D-120): the «Дуэль» preset only fills the form, so the request it leads to is made of the fields that were already there. This is
-/// the exact body `launch.js` builds with the preset's values (brain «Гибрид», «Дожим: полный», «Без самоубийств»: вкл, «Настоящие ходы»: вкл, the
+/// the exact body `launch.js` builds with the preset's values (brain «Гибрид», «Дожим: полный», «Без самоубийств»: вкл, «Настоящие ходы»: выкл, the
 /// predictor and the smart wayblock off, i.e. absent): the site takes it, the helper's own parser reads it back, and nothing else is in the file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
@@ -898,7 +898,7 @@ async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
     let l = login(&server);
     let body = serde_json::json!({
         "action": "start", "brain": "hybrid", "server": "local", "duration": "15m", "sparring": 0,
-        "mirror": "on", "finish": "full", "no_selfkill": true, "preinput": true
+        "mirror": "on", "finish": "full", "no_selfkill": true
     });
     let r = post(&server, &l, &body);
     assert_eq!(r.status, 202, "{r:?}");
@@ -918,7 +918,7 @@ async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
             Some(Brain::Hybrid),
             Some(Finish::Full),
             Some(true),
-            Some(true),
+            None,
             Some(Mirror::On),
             None,
             None
@@ -926,7 +926,10 @@ async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
         "{text}"
     );
     // The off switches of the preset are the absence of their fields (an old helper with a strict format still takes the request).
-    assert!(!text.contains("wb_smart") && !text.contains("window_model"), "{text}");
+    assert!(
+        !text.contains("wb_smart") && !text.contains("window_model") && !text.contains("preinput"),
+        "{text}"
+    );
     // There is no preset field and no other new one: a request that names one is refused whole, nothing written.
     fs::remove_file(request_file(&server)).unwrap();
     for (name, value) in [("preset", serde_json::json!("duel")), ("duel", serde_json::json!(true))] {
@@ -1020,7 +1023,7 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         // Task 3.20b: the pre-input toggle, its honest hint, the `wb` value of the finishing control and its refusal.
         "Настоящие ходы соперника от сервера (эксперимент)",
         "Помогает, только если сервер присылает эти ходы заранее",
-        "при запасе по умолчанию (меньше тика) решение не узнаёт ничего нового",
+        "при запасе предсказания соперника по умолчанию (10 мс) решение почти ничего не узнаёт заранее",
         "preinput_hybrid_only",
         "body.preinput",
         "ВБ (эксперимент)",
@@ -1036,7 +1039,8 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         "Заполняет форму для дуэли 1 на 1",
         "Запускает только кнопка «Запустить»",
         "Что ставит «Дуэль» и почему",
-        "≈ 24% пар",
+        "7,6% пар «снапшот, соперник» (joniTee, 08.10), 8,0% (GER, 07.10) и ≈ 0,2%",
+        "пользы против соперника с запасом по умолчанию (10 мс) нет",
         "14,2 кандидата на решение при нагрузке 18–30",
         "машина загружена — бот думает хуже",
         "quietness",

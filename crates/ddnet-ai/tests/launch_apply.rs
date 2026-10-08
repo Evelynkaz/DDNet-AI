@@ -834,7 +834,6 @@ fn the_duel_presets_request_starts_the_bot_with_the_duel_words_and_nothing_new()
     body["mirror"] = json!("on");
     body["finish"] = json!("full");
     body["no_selfkill"] = json!(true);
-    body["preinput"] = json!(true);
     assert!(rig.send(&body).status.success());
     let st = rig.status();
     assert_eq!(st["state"], "started", "{st}");
@@ -843,7 +842,7 @@ fn the_duel_presets_request_starts_the_bot_with_the_duel_words_and_nothing_new()
         "BOT_BRAIN=\"hybrid\"\n",
         "BOT_FINISH=\"full\"\n",
         "BOT_NO_SELFKILL=\"true\"\n",
-        "BOT_PREINPUT=\"on\"\n",
+        "BOT_PREINPUT=\"off\"\n",
         "BOT_WB_SMART=\"off\"\n",
         "BOT_WINDOW_MODEL=\"\"\n",
     ] {
@@ -857,7 +856,7 @@ fn the_duel_presets_request_starts_the_bot_with_the_duel_words_and_nothing_new()
             st["wb_smart"].as_str(),
             st["window_model"].as_bool()
         ),
-        (Some("full"), Some(true), Some(true), Some("off"), Some(false)),
+        (Some("full"), Some(true), Some(false), Some("off"), Some(false)),
         "{st}"
     );
     // The preset names nothing else: a request with a `preset` (or any invented) field is refused whole, nothing started.
