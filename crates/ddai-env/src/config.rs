@@ -571,6 +571,9 @@ pub struct HybridSpec {
     /// Head ablation of the window model: the comma-separated heads it may use (`dir`, `jump`, `hook`, `press`, `aim`; default all); the others predict hold.
     #[serde(default)]
     pub window_heads: Option<String>,
+    /// Task 3.21 (E-036): decoding thresholds of a v2 window model, `"press=-1.5,jump=0.5,hook=0,dir_margin=1"` (logits; the keys given replace the model file's own).
+    #[serde(default)]
+    pub window_decode: Option<String>,
     /// Task 3.16 (D-115): the live knob `hybrid_budget_ms` itself (whole ms, 1 to 8): `HybridConfig::with_budget_ms`, applied after every other
     /// field of this table, so the search budget **and** the decision cap move together exactly as they do in the bot. Deadline mode only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1087,10 +1090,18 @@ pub fn builtin_brain(spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
                     Some(list) => ddai_oppnet::predictor::parse_heads(list).map_err(EnvError::new)?,
                     None => ddai_oppnet::predictor::HEAD_ALL,
                 };
-                let model = ddai_oppnet::OppPredictor::load(&path)
-                    .map_err(EnvError::new)?
-                    .with_gate(gate as f32)
-                    .with_heads(heads);
+                let model = match ddai_oppnet::AnyPredictor::load(&path).map_err(EnvError::new)? {
+                    ddai_oppnet::AnyPredictor::V1(m) => {
+                        ddai_oppnet::AnyPredictor::V1(m.with_gate(gate as f32).with_heads(heads))
+                    }
+                    ddai_oppnet::AnyPredictor::V2(m) => {
+                        let mut d = *m.decode();
+                        if let Some(list) = spec.hybrid.as_ref().and_then(|h| h.window_decode.as_deref()) {
+                            ddai_oppnet::v2::predictor::apply_decode_overrides(&mut d, list).map_err(EnvError::new)?;
+                        }
+                        ddai_oppnet::AnyPredictor::V2(m.with_decode(d))
+                    }
+                };
                 brain.set_window_model(Box::new(model));
             }
             Ok(Box::new(brain))

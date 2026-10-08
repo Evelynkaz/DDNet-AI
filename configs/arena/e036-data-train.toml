@@ -1,0 +1,39 @@
+# work-clock: default-rate
+# Task 3.21 (E-036): games of our hybrid (main defaults, 4 ms of WORK, no window model, lag 2 = the live lag) against live-v2 at the opponent lags 0..3,
+# recorded by `opp_record --v2` as arena data for the v2 opponent-input predictor. Seeds 250001.. (never used).
+#   opp_record --v2 --config configs/arena/e036-data-train.toml --out ~/aiddnet/data/runs/E-036/data/train --threads 3
+name = "e036-data-train"
+base_seed = 250001
+games = 600
+
+[[condition]]
+name = "joni 2/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "joni 2/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "joni 2/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "joni 2/3"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 3 }]
+
+[[condition]]
+name = "joni 2/1 strong"
+arena = "joni-duel"
+games = 150
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2-strong", lag = 1 }]
+
+[[condition]]
+name = "joni 2/2 strong"
+arena = "joni-duel"
+games = 150
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2-strong", lag = 2 }]

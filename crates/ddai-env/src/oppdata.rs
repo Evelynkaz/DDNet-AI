@@ -63,3 +63,54 @@ pub fn record_game(
     })?;
     Ok((rec, report))
 }
+
+/// Task 3.21 (E-036): [`record_game`] in the v2 format (`ddai_oppnet::v2::data`): the rays around **both** tees.
+pub fn record_game_v2(
+    arena: &Arena,
+    rules: &Rules,
+    seed: u64,
+    layout: Layout,
+    players: Vec<PlayerSetup>,
+) -> Result<(ddai_oppnet::v2::data::GameRec, GameReport), EnvError> {
+    use ddai_oppnet::v2::data::{GameRec as GameRec2, TickRec as TickRec2};
+    if players.len() != 2 {
+        return Err(EnvError::new("the recorder needs exactly two players"));
+    }
+    let mut rec = GameRec2 {
+        arena: arena.name.clone(),
+        seed,
+        lag: [players[0].lag.min(255) as u8, players[1].lag.min(255) as u8],
+        swap: layout.swap,
+        decide_every: rules.decide_every.clamp(1, 255) as u8,
+        tick0: 0,
+        ticks: Vec::new(),
+    };
+    let report = play_game_watched(arena, rules, seed, layout, players, &mut |sim, tick| {
+        let w = sim.pw.inner();
+        if rec.ticks.is_empty() {
+            rec.tick0 = tick;
+        }
+        let frames = [
+            TeeFrame::from_world(w, 0, 1).unwrap_or_default(),
+            TeeFrame::from_world(w, 1, 0).unwrap_or_default(),
+        ];
+        let input = |id: u8| {
+            w.cores
+                .get(id)
+                .map_or_else(InputRec::default, |c| InputRec::from_wire(&c.input))
+        };
+        let mut ray = [[1.0f32; N_RAYS]; 2];
+        for (r, f) in ray.iter_mut().zip(&frames) {
+            if f.alive {
+                rays(w, f.pos, r);
+            }
+        }
+        rec.ticks.push(TickRec2 {
+            frames,
+            applied: [input(0), input(1)],
+            rays: ray,
+        });
+        !(observe::is_out(w, 0) || observe::is_out(w, 1))
+    })?;
+    Ok((rec, report))
+}

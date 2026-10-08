@@ -1,0 +1,22 @@
+# work-clock: default-rate
+# Task 3.21 (E-036), step 1: E-028 re-measured at the LIVE lag cells 2/0, 2/1, 2/2 (D-115: the live lag is 2 in arena terms; E-028 measured 3/x).
+# Arm "base". Fresh seeds 210001..210200 (never used). Same player settings as e028-eval-*-d.toml.
+#   opp_arena --config configs/arena/e036-remeasure-base.toml --threads 3 --jsonl ~/aiddnet/data/runs/E-036/remeasure-base.jsonl
+name = "e036-remeasure-base"
+base_seed = 210001
+games = 200
+
+[[condition]]
+name = "base lag 2/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "base lag 2/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "base lag 2/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]

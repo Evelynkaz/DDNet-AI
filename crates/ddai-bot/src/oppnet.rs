@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ddai_brain::Observation;
-use ddai_oppnet::OppPredictor;
+use ddai_oppnet::AnyPredictor;
 use ddai_oppnet::live::guard::{GuardConfig, GuardState, Transition};
 use ddai_oppnet::live::writer::{DEFAULT_KEEP, DEFAULT_MAX_BYTES, LogWriter};
 use ddai_oppnet::live::{LiveOpp, Pair, RegimeGate, WindowUse, hex};
@@ -172,7 +172,7 @@ impl WindowModelRt {
     pub fn load(cfg: &WindowModelConfig, now: Instant) -> Result<WindowModelRt, String> {
         let bytes = std::fs::read(&cfg.model).map_err(|e| format!("window model {}: {e}", cfg.model.display()))?;
         let sha: [u8; 32] = Sha256::digest(&bytes).into();
-        let pred = OppPredictor::load(&cfg.model)?;
+        let pred = AnyPredictor::load(&cfg.model)?;
         let live = LiveOpp::new(pred, cfg.guard, sha)
             .map_err(|e| format!("window model: {e}"))?
             .with_gate(cfg.gate);

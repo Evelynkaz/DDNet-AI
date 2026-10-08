@@ -2,7 +2,7 @@
 //!
 //! Plays the games of every condition (same seeds and layouts as `ddnet-ai arena run`) and keeps, for every world tick up to the first freeze
 //! (which decides a 1v1 game), the snapshot-observable state of both tees, the inputs they applied, and the rays around slot 1 (the opponent).
-//! One file per condition in `--out`: `<condition>.opp`, a `Vec<GameRec>` (see `ddai_oppnet::data`).
+//! One file per condition in `--out`: `<condition>.opp`, a `Vec<GameRec>` (see `ddai_oppnet::data`; with `--v2` the task 3.21 record of `ddai_oppnet::v2::data`).
 //!
 //! ```text
 //! cargo run --release -p ddai-env --example opp_record -- --config configs/arena/e028-data-joni.toml --out ~/aiddnet/data/runs/E-028/data/train --threads 3
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use ddai_env::arena::Arena;
 use ddai_env::config::{PlayerSpec, RunConfig, builtin_brain};
-use ddai_env::oppdata::record_game;
+use ddai_env::oppdata::{record_game, record_game_v2};
 use ddai_env::run::{layout_of, load_arenas};
 use ddai_env::sim::PlayerSetup;
 use ddai_oppnet::data::GameRec;
@@ -25,6 +25,8 @@ struct Args {
     threads: usize,
     games: Option<u32>,
     only: Option<String>,
+    /// Task 3.21: the v2 record (rays around both tees).
+    v2: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -34,6 +36,7 @@ fn parse_args() -> Result<Args, String> {
         threads: 3,
         games: None,
         only: None,
+        v2: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -44,19 +47,32 @@ fn parse_args() -> Result<Args, String> {
             "--threads" => a.threads = v()?.parse().map_err(|e| format!("--threads: {e}"))?,
             "--games" => a.games = Some(v()?.parse().map_err(|e| format!("--games: {e}"))?),
             "--only" => a.only = Some(v()?),
+            "--v2" => a.v2 = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
     if a.config.as_os_str().is_empty() || a.out.as_os_str().is_empty() {
         return Err(
-            "usage: opp_record --config <toml> --out <dir> [--threads N] [--games N] [--only <condition substring>]"
+            "usage: opp_record --config <toml> --out <dir> [--threads N] [--games N] [--only <condition substring>] [--v2]"
                 .into(),
         );
     }
     Ok(a)
 }
 
-fn record(cfg: &RunConfig, arenas: &BTreeMap<String, Arena>, cond_i: usize, g: u32) -> Result<(GameRec, char), String> {
+/// A recorded game of either format.
+enum Rec {
+    V1(GameRec),
+    V2(ddai_oppnet::v2::data::GameRec),
+}
+
+fn record(
+    cfg: &RunConfig,
+    arenas: &BTreeMap<String, Arena>,
+    cond_i: usize,
+    g: u32,
+    v2: bool,
+) -> Result<(Rec, char), String> {
     let cond = &cfg.condition[cond_i];
     let arena = &arenas[&cond.arena];
     let rules = cfg.rules_for(cond);
@@ -80,7 +96,15 @@ fn record(cfg: &RunConfig, arenas: &BTreeMap<String, Arena>, cond_i: usize, g: u
         })
         .collect::<Result<_, String>>()?;
     let seed = cfg.base_seed.wrapping_add(u64::from(g));
-    let (rec, report) = record_game(arena, &rules, seed, layout_of(arena, g), players).map_err(|e| e.to_string())?;
+    let (rec, report) = if v2 {
+        let (rec, report) =
+            record_game_v2(arena, &rules, seed, layout_of(arena, g), players).map_err(|e| e.to_string())?;
+        (Rec::V2(rec), report)
+    } else {
+        let (rec, report) =
+            record_game(arena, &rules, seed, layout_of(arena, g), players).map_err(|e| e.to_string())?;
+        (Rec::V1(rec), report)
+    };
     let r = format!("{:?}", report.result).chars().next().unwrap_or('?');
     Ok((rec, r))
 }
@@ -122,18 +146,30 @@ fn main() -> Result<(), String> {
         }
         let n = a.games.unwrap_or_else(|| cfg.games_for(cond));
         let t0 = std::time::Instant::now();
-        let res: Vec<Result<(GameRec, char), String>> =
-            pool.install(|| (0..n).into_par_iter().map(|g| record(&cfg, &arenas, ci, g)).collect());
-        let mut games = Vec::new();
+        let res: Vec<Result<(Rec, char), String>> = pool.install(|| {
+            (0..n)
+                .into_par_iter()
+                .map(|g| record(&cfg, &arenas, ci, g, a.v2))
+                .collect()
+        });
+        let (mut games1, mut games2) = (Vec::new(), Vec::new());
         let mut counts = BTreeMap::new();
         for r in res {
             let (rec, c) = r?;
             *counts.entry(c).or_insert(0u32) += 1;
-            games.push(rec);
+            match rec {
+                Rec::V1(g) => games1.push(g),
+                Rec::V2(g) => games2.push(g),
+            }
         }
-        let ticks: usize = games.iter().map(|g| g.ticks.len()).sum();
+        let ticks: usize =
+            games1.iter().map(|g| g.ticks.len()).sum::<usize>() + games2.iter().map(|g| g.ticks.len()).sum::<usize>();
         let path = a.out.join(format!("{}.opp", file_name(&cond.name)));
-        ddai_oppnet::blob::write_blob(&path, &games, 3)?;
+        if a.v2 {
+            ddai_oppnet::blob::write_blob(&path, &games2, 3)?;
+        } else {
+            ddai_oppnet::blob::write_blob(&path, &games1, 3)?;
+        }
         println!(
             "{}: {n} games, {ticks} ticks, results {counts:?}, {:.0}s -> {}",
             cond.name,

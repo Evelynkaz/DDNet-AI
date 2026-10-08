@@ -9,8 +9,10 @@
 //! * [`predictor`]: the network behind `ddai_planner::hybrid::window::WindowModel`.
 //! * [`live`] (task 3.17): the predictor in the live bot -- history from every snapshot, the online guard against hold, the compact log and its analysis.
 
+pub mod any;
 pub mod blob;
 pub mod bundle;
+pub mod clipdata;
 pub mod data;
 pub mod feature;
 pub mod frame;
@@ -18,6 +20,8 @@ pub mod live;
 pub mod net;
 pub mod predictor;
 pub mod train;
+pub mod v2;
 
+pub use any::AnyPredictor;
 pub use bundle::OppBundle;
 pub use predictor::OppPredictor;

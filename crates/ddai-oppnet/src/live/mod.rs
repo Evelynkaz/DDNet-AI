@@ -24,9 +24,9 @@ use ddai_physics::core::PlayerInput as WireInput;
 use ddai_physics::world::World;
 use ddai_planner::hybrid::window::{PredictedInput, WindowCtx, WindowModel};
 
+use crate::any::AnyPredictor;
 use crate::feature::{HORIZON, IF_SLOTS, wrap_angle};
 use crate::frame::TeeFrame;
-use crate::predictor::OppPredictor;
 use guard::{Guard, GuardConfig, GuardState, GuardStatus, Transition};
 
 /// The longest window the model is asked about (its in-flight slots and its one-hot length).
@@ -315,7 +315,7 @@ impl RegimeGate {
 }
 
 pub struct LiveOpp {
-    pred: OppPredictor,
+    pred: AnyPredictor,
     guard: Guard,
     gate: RegimeGate,
     sha: [u8; 32],
@@ -334,9 +334,9 @@ pub struct LiveOpp {
 }
 
 impl LiveOpp {
-    pub fn new(pred: OppPredictor, cfg: GuardConfig, sha: [u8; 32]) -> Result<LiveOpp, String> {
+    pub fn new(pred: impl Into<AnyPredictor>, cfg: GuardConfig, sha: [u8; 32]) -> Result<LiveOpp, String> {
         Ok(LiveOpp {
-            pred,
+            pred: pred.into(),
             guard: Guard::new(cfg)?,
             gate: RegimeGate::default(),
             sha,
@@ -521,7 +521,7 @@ impl LiveOpp {
         } = *pair;
         let lag = own.len();
         self.counts.window_lens[lag.min(9)] += 1;
-        if lag == 0 || lag > WINDOW_MAX {
+        if lag == 0 || lag > self.pred.max_window().min(WINDOW_MAX) {
             self.counts.skipped_window += 1;
             return WindowUse::Hold;
         }
