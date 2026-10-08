@@ -271,6 +271,10 @@ fn config(
         brain: BrainOptions {
             seed,
             hybrid_budget_ms: budget_ms.map(|b| u32::try_from(b).expect("DDAI_T_BUDGET")),
+            // Task 4.13: `DDAI_T_THREADS=<n>` is `--search-threads n` of the focal bot (default: the library's, one thread) and
+            // `DDAI_T_FINISH=1` the duel preset's `--finish full`.
+            search_threads: trace_is_focal.then(|| env_u64("DDAI_T_THREADS", 1) as usize),
+            hybrid_finish: trace_is_focal && std::env::var("DDAI_T_FINISH").as_deref() == Ok("1"),
             ..BrainOptions::default()
         },
         relations: Relations::new(),

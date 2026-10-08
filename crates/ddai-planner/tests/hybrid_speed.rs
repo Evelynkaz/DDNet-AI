@@ -105,6 +105,7 @@ struct Row {
     search_ms: Vec<f64>,
     overshoot_ms: Vec<f64>,
     shield_ms: Vec<f64>,
+    mirror_ms: Vec<f64>,
     rollout_ms: Vec<f64>,
     stage1_ticks: Vec<f64>,
     stage2_ticks: Vec<f64>,
@@ -151,6 +152,7 @@ fn run_scenes(
         search_ms: vec![],
         overshoot_ms: vec![],
         shield_ms: vec![],
+        mirror_ms: vec![],
         rollout_ms: vec![],
         stage1_ticks: vec![],
         stage2_ticks: vec![],
@@ -244,6 +246,7 @@ fn run_scenes(
                     row.search_ms.push(t.search_ms);
                     row.overshoot_ms.push(t.search_ms - t.budget_ms);
                     row.shield_ms.push(t.shield_ms);
+                    row.mirror_ms.push(t.mirror_ms);
                     row.rollout_ms.push(t.rollout_ms);
                     row.stage1_ticks.push(t.work.stage1 as f64);
                     row.stage2_ticks.push(t.work.stage2 as f64);
@@ -404,6 +407,7 @@ fn speed_report() {
         ("search wall ms", &mut r.search_ms),
         ("  of which scoring rollouts ms", &mut r.rollout_ms),
         ("shield wall ms", &mut r.shield_ms),
+        ("opponent model (mirror) wall ms", &mut r.mirror_ms),
     ] {
         println!(
             "| {name} | {:.2} | {:.2} | {:.2} |",
@@ -512,6 +516,124 @@ fn speed_report() {
         n,
     );
     println!("{}", line("scripted proposer K=3", &mut r, us4));
+}
+
+/// Task 4.13: `--search-threads` N = 1..4 on the wall clock, the live configuration (`HybridConfig::default()`, 4 ms search under a
+/// 5 ms cap, opponent model on; `DDAI_THR_FINISH=1` adds the duel preset's `with_finish`), 2 tees close together (a duel). Rounds are
+/// interleaved (1 2 3 4 1 2 3 4 ...) so that drift in the machine's load hits every N alike. Prints, per N, over all rounds: candidates
+/// per decision p50 / p90, decision wall ms p50 / p90 / p99 / max, the share of decisions longer than 5 ms, and the load average before
+/// and after. Needs a quiet machine and the lead's go-ahead.
+///
+/// ```text
+/// DDAI_THR_ROUNDS=6 DDAI_SPEED_DECISIONS=300 cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture threads_report
+/// ```
+#[test]
+#[ignore = "heavy; needs the Copy Love Box map and a quiet machine"]
+fn threads_report() {
+    let Some(map) = clb() else {
+        eprintln!("no Copy Love Box map; skipping");
+        return;
+    };
+    let n: usize = std::env::var("DDAI_SPEED_DECISIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let rounds: usize = std::env::var("DDAI_THR_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    let finish = std::env::var("DDAI_THR_FINISH").is_ok_and(|v| v == "1");
+    let tees: usize = std::env::var("DDAI_THR_TEES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let load = || {
+        std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    let loads = [load()];
+    let counts = [1usize, 2, 3, 4];
+    let mut acc: Vec<(Vec<f64>, Vec<f64>)> = counts.iter().map(|_| (vec![], vec![])).collect();
+    for _ in 0..rounds {
+        for (k, &w) in counts.iter().enumerate() {
+            let base = HybridConfig {
+                workers: w,
+                ..HybridConfig::default()
+            };
+            let cfg = if finish { base.with_finish() } else { base };
+            let r = run(&map, &cfg, Box::new(NoProposer), tees, n);
+            acc[k].0.extend(r.cands);
+            acc[k].1.extend(r.wall);
+        }
+    }
+    println!(
+        "\nthreads_report: {tees} tees, finish {finish}, {rounds} rounds x {n} decisions, load {} -> {}\n",
+        loads[0],
+        load()
+    );
+    println!(
+        "| threads | candidates p50 / p90 | wall ms p50 / p90 / p99 / max | decisions > 5 ms |\n|---|---|---|---|"
+    );
+    for (k, &w) in counts.iter().enumerate() {
+        let (c, wl) = &mut acc[k];
+        let over = wl.iter().filter(|&&x| x > 5.0).count() as f64 / wl.len().max(1) as f64;
+        println!(
+            "| {w} | {:.0} / {:.0} | {:.2} / {:.2} / {:.2} / {:.2} | {:.1}% |",
+            pct(c, 50.0),
+            pct(c, 90.0),
+            pct(wl, 50.0),
+            pct(wl, 90.0),
+            pct(wl, 99.0),
+            pct(wl, 100.0),
+            100.0 * over
+        );
+    }
+}
+
+/// Task 4.13: where the wall time of a live decision goes (the live configuration, one thread): per phase p50 / p90 / p99 over
+/// `DDAI_SPEED_DECISIONS` decisions of 2 tees (`DDAI_THR_TEES`), `DDAI_THR_FINISH=1` for the duel preset.
+///
+/// ```text
+/// cargo test -p ddai-planner --release --test hybrid_speed -- --ignored --nocapture phases_report
+/// ```
+#[test]
+#[ignore = "heavy; needs the Copy Love Box map"]
+fn phases_report() {
+    let Some(map) = clb() else {
+        eprintln!("no Copy Love Box map; skipping");
+        return;
+    };
+    let n: usize = std::env::var("DDAI_SPEED_DECISIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
+    let tees: usize = std::env::var("DDAI_THR_TEES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let finish = std::env::var("DDAI_THR_FINISH").is_ok_and(|v| v == "1");
+    let base = HybridConfig::default();
+    let cfg = if finish { base.with_finish() } else { base };
+    let mut r = run(&map, &cfg, Box::new(NoProposer), tees, n);
+    println!("\nphases_report: {tees} tees, finish {finish}, {n} decisions\n");
+    println!("| phase | p50 | p90 | p99 |\n|---|---|---|---|");
+    for (name, v) in [
+        ("decision wall ms", &mut r.wall),
+        ("opponent model (mirror) ms", &mut r.mirror_ms),
+        ("search ms", &mut r.search_ms),
+        ("  of which scoring rollouts ms", &mut r.rollout_ms),
+        ("shield ms", &mut r.shield_ms),
+        ("candidates", &mut r.cands),
+    ] {
+        println!(
+            "| {name} | {:.2} | {:.2} | {:.2} |",
+            pct(v, 50.0),
+            pct(v, 90.0),
+            pct(v, 99.0)
+        );
+    }
 }
 
 /// The work clock's calibration (task 3.6, D-045 amended): real microseconds per tee-tick of a whole

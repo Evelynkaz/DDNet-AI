@@ -215,6 +215,7 @@ const STAGE_BEHIND_PX: f64 = 110.0;
 /// read-only world state, exactly like TS's own module-level function. `travel` is not a
 /// parameter -- see `crate::fields`'s module doc comment (TS computes it but `scoreTick` itself
 /// never reads it, `docs/research/orig-plan.md` §11 item 1).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn score_tick<W: PlanWorld>(
     world: &W,
