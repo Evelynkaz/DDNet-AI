@@ -1487,4 +1487,171 @@ mod tests {
             same(&a, &b, &format!("op {k}"));
         }
     }
+    /// A `Collision32` that never claims a clear flight step: the reference for [`PlanCollision::flight_clear`].
+    struct NeverClear<'a>(&'a Collision32);
+
+    impl PlanCollision for NeverClear<'_> {
+        fn identity(&self) -> u64 {
+            PlanCollision::identity(self.0)
+        }
+        fn width(&self) -> i32 {
+            PlanCollision::width(self.0)
+        }
+        fn height(&self) -> i32 {
+            PlanCollision::height(self.0)
+        }
+        fn game_tile(&self, tx: i32, ty: i32) -> u8 {
+            PlanCollision::game_tile(self.0, tx, ty)
+        }
+        fn is_solid(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_solid(self.0, x, y)
+        }
+        fn is_death(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_death(self.0, x, y)
+        }
+        fn is_freeze(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_freeze(self.0, x, y)
+        }
+        fn is_un_freeze(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_un_freeze(self.0, x, y)
+        }
+        fn is_no_hook(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_no_hook(self.0, x, y)
+        }
+        fn is_hazard(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_hazard(self.0, x, y)
+        }
+        fn test_box(&self, pos: Vec2, size: Vec2) -> bool {
+            PlanCollision::test_box(self.0, pos, size)
+        }
+        fn intersect_line(&self, pos0: Vec2, pos1: Vec2) -> LineHit {
+            PlanCollision::intersect_line(self.0, pos0, pos1)
+        }
+        fn intersect_line_hook(&self, pos0: Vec2, pos1: Vec2) -> LineHit {
+            PlanCollision::intersect_line_hook(self.0, pos0, pos1)
+        }
+        fn has_tele(&self) -> bool {
+            PlanCollision::has_tele(self.0)
+        }
+        fn tele_at(&self, x: f64, y: f64) -> (i32, i32) {
+            PlanCollision::tele_at(self.0, x, y)
+        }
+        fn tele_outs_for(&self, number: i32) -> Vec<Vec2> {
+            PlanCollision::tele_outs_for(self.0, number)
+        }
+    }
+
+    /// Task 4.13: a random map of solid, freeze and death tiles for the flight-clearance tests.
+    fn random_flight_map(seed: u64) -> Arc<MapData> {
+        let (w, h) = (48usize, 36usize);
+        let mut s = seed | 1;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut game = vec![ddai_physics::map::Tile::default(); w * h];
+        for (i, t) in game.iter_mut().enumerate() {
+            let (x, y) = (i % w, i / w);
+            let index = if x == 0 || y == 0 || x == w - 1 || y == h - 1 || next() % 11 == 0 {
+                ddai_physics::map::TILE_SOLID
+            } else if next() % 40 == 0 {
+                ddai_physics::map::TILE_FREEZE
+            } else if next() % 150 == 0 {
+                ddai_physics::map::TILE_DEATH
+            } else {
+                0
+            };
+            t.index = index;
+        }
+        Arc::new(MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        })
+    }
+
+    /// Task 4.13: whatever `flight_clear` says is true is true: a tee box centred anywhere within 16 px of the point meets no solid cell
+    /// and the hazard test is `false` at every point within 16 px; and the ballistic flight with the shortcut equals the flight without it, bit for bit.
+    #[test]
+    fn flight_clear_is_sound_and_the_flight_with_it_equals_the_flight_without() {
+        let mut s = 0x1357_9BDF_2468_ACE1u64;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let (mut clear, mut not_clear) = (0u32, 0u32);
+        for map_seed in 0..4u64 {
+            let map = random_flight_map(0xC0FFEE + map_seed);
+            let world = PhysicsWorld::new(map, 1);
+            let col = world.collision();
+            let never = NeverClear(col);
+            let box_size = Vec2 { x: 28.0, y: 28.0 };
+            for _ in 0..40_000 {
+                let (x, y) = (
+                    (next() % (48 * 32 * 100)) as f64 / 100.0 - 20.0,
+                    (next() % (36 * 32 * 100)) as f64 / 100.0 - 20.0,
+                );
+                if PlanCollision::flight_clear(col, x, y) {
+                    clear += 1;
+                    for _ in 0..6 {
+                        let (dx, dy) = (
+                            (next() % 3201) as f64 / 100.0 - 16.0,
+                            (next() % 3201) as f64 / 100.0 - 16.0,
+                        );
+                        let p = Vec2 { x: x + dx, y: y + dy };
+                        assert!(
+                            !PlanCollision::test_box(col, p, box_size),
+                            "box at ({}, {}) from ({x}, {y})",
+                            p.x,
+                            p.y
+                        );
+                        assert!(
+                            !PlanCollision::is_hazard(col, p.x, p.y),
+                            "hazard at ({}, {}) from ({x}, {y})",
+                            p.x,
+                            p.y
+                        );
+                    }
+                } else {
+                    not_clear += 1;
+                }
+            }
+            for k in 0..30_000u32 {
+                let at = Vec2 {
+                    x: 40.0 + (next() % ((46 * 32 - 40) * 10)) as f64 / 10.0,
+                    y: 40.0 + (next() % ((34 * 32 - 40) * 10)) as f64 / 10.0,
+                };
+                let from = Vec2 {
+                    x: at.x + (next() % 160) as f64 - 80.0,
+                    y: at.y + (next() % 160) as f64 - 80.0,
+                };
+                let vel = Vec2 {
+                    x: (next() % 600) as f64 / 10.0 - 30.0,
+                    y: (next() % 600) as f64 / 10.0 - 30.0,
+                };
+                let sep = crate::vmath::vdistance(at, from);
+                let fast = crate::fields::launch_flight_lands_in_hazard(col, at, from, sep, vel);
+                let slow = crate::fields::launch_flight_lands_in_hazard(&never, at, from, sep, vel);
+                assert_eq!(
+                    fast.to_bits(),
+                    slow.to_bits(),
+                    "map {map_seed} case {k}: {at:?} {from:?} {vel:?}"
+                );
+            }
+        }
+        assert!(
+            clear > 1_000 && not_clear > 1_000,
+            "both answers must occur ({clear}, {not_clear})"
+        );
+    }
 }
