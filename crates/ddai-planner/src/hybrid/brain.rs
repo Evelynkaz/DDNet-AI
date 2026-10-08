@@ -16,6 +16,7 @@ use ddai_physics::map::MapData;
 use crate::brains::{ClockKind, PlannerStats, action_from_input, enemy_input_from_tee, target_of};
 use crate::clock::{Clock, StepClock, WallClock};
 use crate::hybrid::config::{HybridConfig, HybridMode};
+use crate::hybrid::duelfix::DuelFixConfig;
 use crate::hybrid::proposer::{NoProposer, ProposalOutcome, Proposer};
 use crate::hybrid::search::{DecisionInput, DecisionTelemetry, HybridSearch, SOURCE_KINDS, Source, WorkCounters};
 use crate::hybrid::window::{PredictedInput, WindowCtx, WindowModel, input_from_prediction};
@@ -210,6 +211,16 @@ pub struct HybridBrain {
     reflex: ReflexTotals,
     /// Task 3.19: the bot's `LiveContext::duel` of the last decision.
     live_duel: bool,
+    /// Task 3.23: what the duel fixes did (counted only when one of them is on).
+    fixes: FixTotals,
+}
+
+/// Task 3.23: decisions that went through the choice among the plans that act (`pushed`: a static victim or a frozen one off the freeze) and
+/// swings at a frozen victim dropped (`hammer_vetoes`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FixTotals {
+    pub pushed: u64,
+    pub hammer_vetoes: u64,
 }
 
 /// Task 3.19: decisions on which the reflex hammer swung (`swings`, of which `aimed` had to turn the aim) and the envelope dropped a jump / a hook.
@@ -280,6 +291,7 @@ impl HybridBrain {
             deadline_ms: None,
             reflex: ReflexTotals::default(),
             live_duel: false,
+            fixes: FixTotals::default(),
         })
     }
 
@@ -553,7 +565,8 @@ impl HybridBrain {
         // Task 3.19: the tees the input acts on (after the lag window), for the reflex hammer and the envelope.
         let reflex_on =
             (self.cfg.reflex.hammer || self.cfg.reflex.envelope) && (self.live_duel || !self.cfg.reflex.duel_only);
-        let acting = if reflex_on {
+        let fixes_on = self.cfg.duel_fixes.no_hammer_frozen && (self.live_duel || !self.cfg.duel_fixes.duel_only);
+        let acting = if reflex_on || fixes_on {
             let w = search.world_mut();
             w.get_tee(self_id)
                 .zip(w.get_tee(target_id))
@@ -571,9 +584,24 @@ impl HybridBrain {
                 lag_ticks: in_flight.len() as u32,
                 roll_ticks,
                 deadline_ms,
+                duel: self.live_duel,
             },
         );
+        if let Some((me, victim, _)) = acting
+            && fixes_on
+            && !tel.shielded
+        {
+            let dropped = crate::hybrid::duelfix::drop_hammer_at_frozen(
+                &self.cfg.duel_fixes,
+                &me,
+                &victim,
+                self.prev.fire,
+                &mut out,
+            );
+            self.fixes.hammer_vetoes += u64::from(dropped);
+        }
         if let Some((me, victim, now)) = acting
+            && reflex_on
             && !tel.shielded
         {
             // The envelope first (it may drop the jump or the hook the swing would otherwise ride), then the swing.
@@ -607,6 +635,7 @@ impl HybridBrain {
                 }
             }
         }
+        self.fixes.pushed += u64::from(tel.static_push);
         self.totals.add(&tel);
         self.stats.decisions += 1;
         self.stats.searched += 1;
@@ -649,6 +678,7 @@ impl Brain for HybridBrain {
         self.prev = empty_input();
         self.totals = Totals::default();
         self.reflex = ReflexTotals::default();
+        self.fixes = FixTotals::default();
         self.stats = PlannerStats::default();
         self.last = None;
         if let Some(p) = self.proposer.as_mut() {
@@ -769,14 +799,23 @@ impl Brain for HybridBrain {
         } else {
             String::new()
         };
+        let fixes = if self.cfg.duel_fixes == DuelFixConfig::default() {
+            String::new()
+        } else {
+            format!(
+                ",\"duel_fixes\":{{\"pushed\":{},\"hammer_vetoes\":{}}}",
+                self.fixes.pushed, self.fixes.hammer_vetoes
+            )
+        };
         Some(format!(
-            "{{\"brain\":\"{}\",\"proposer\":\"{}\",\"workers\":{},\"totals\":{},\"last\":{}{}}}",
+            "{{\"brain\":\"{}\",\"proposer\":\"{}\",\"workers\":{},\"totals\":{},\"last\":{}{}{}}}",
             self.name,
             self.search.as_ref().map_or("none", HybridSearch::proposer_name),
             self.cfg.workers,
             self.totals.to_json(),
             last,
-            reflex
+            reflex,
+            fixes
         ))
     }
 }

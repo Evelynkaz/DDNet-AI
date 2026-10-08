@@ -1,0 +1,28 @@
+# work-clock: default-rate
+# Task 3.23 (D-121, E-038): the finishing scenarios F1..F5 (configs/scenarios-d121): a frozen victim lying off the freeze in the 1vs1 box. `base` is the hybrid
+# as the duel plays it (`--finish full` = frozen_drag_weight 20); `finish` adds the third fix of 3.23 (a plan that acts while the victim lies off the freeze,
+# approach plans, no swing at a frozen tee). `duel_only = false`: the scenario runner has no live context.
+#   ddnet-ai arena scenarios --dir configs/scenarios-d121 --config configs/arena/d121-scenarios.toml --out ~/aiddnet/data/runs/E-038/scenarios
+name = "D-121 finishing scenarios, confirmation (seed 1210, 200 trials)"
+seed = 1210
+trials = 200
+
+[[brain]]
+label = "idle"
+brain = "idle"
+
+[[brain]]
+label = "base"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { frozen_drag_weight = 20.0 }
+
+[[brain]]
+label = "finish"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { frozen_drag_weight = 20.0, duel_fixes = { duel_only = false, finish_push = true, finish_approach = 6, no_hammer_frozen = true } }

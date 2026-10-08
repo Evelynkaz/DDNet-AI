@@ -208,6 +208,7 @@ fn base_ctx(pw: &PhysicsWorld) -> Ctx {
         }),
         self_freeze_bias: 1.0,
         steps: 0,
+        counter: false,
     }
 }
 

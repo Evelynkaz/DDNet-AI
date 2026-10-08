@@ -29,7 +29,7 @@ use std::sync::Arc;
 use ddai_brain::{Brain, ResetContext, WorldView};
 use ddai_clip::format::{Clip, Frame};
 use ddai_clip::replay::feed;
-use ddai_env::config::{HybridSpec, PlayerSpec, builtin_brain};
+use ddai_env::config::{DuelFixSpec, HybridSpec, PlayerSpec, builtin_brain};
 use ddai_env::observe;
 use ddai_env::sim::wire_from_action;
 use ddai_physics::core::PlayerInput as Wire;
@@ -223,7 +223,20 @@ fn load_clip(path: &Path, maps: &Path, offsets: &[i32]) -> Result<ClipData, Stri
     let bytes = std::fs::read(&map_file).map_err(|e| e.to_string())?;
     let map = Arc::new(ddai_map::load_map(&bytes).map_err(|e| format!("{e}"))?.data);
     let own = clip.header.own_id;
-    let freeze_tick = clip.header.reason.tick;
+    // `PM_FREEZE=<file name>:<tick>,...` (post-mortem 2026-10-08): the freeze onset to count the offsets from, for clips whose reason tick
+    // is not the freeze (a `duel-loss` clip is saved at the round's end).
+    let fname = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().to_string());
+    let freeze_tick = std::env::var("PM_FREEZE")
+        .ok()
+        .and_then(|v| {
+            v.split(',')
+                .filter_map(|e| e.split_once(':'))
+                .find(|(n, _)| *n == fname)
+                .and_then(|(_, t)| t.parse::<i32>().ok())
+        })
+        .unwrap_or(clip.header.reason.tick);
     // The opponent: the other tee nearest to us most often in the 100 ticks before the freeze.
     let mut counts: BTreeMap<i32, usize> = BTreeMap::new();
     for f in clip
@@ -358,12 +371,32 @@ fn play(cd: &ClipData, start: &World<f32>, cell: &Cell, seed: u64, horizon: i32)
             spec.mode = Some("deadline".into());
             spec.clock = Some("work".into());
             spec.budget_ms = Some(cell.budget);
+            // Post-mortem 2026-10-08: `PM_STEP_US` (work clock per tee-tick, 2.1 = the live-like starved search), `PM_DRAG`
+            // (`frozen_drag_weight`, 20 = `--finish full`), `PM_ROPE` (`rope_ceiling_cost`).
+            let env_f = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
+            spec.step_ms = env_f("PM_STEP_US").map(|us| us / 1000.0);
+            let mut h = HybridSpec::default();
             if cell.m1 {
-                spec.hybrid = Some(HybridSpec {
-                    window_model: Some(M1.into()),
-                    ..Default::default()
+                h.window_model = Some(M1.into());
+            }
+            h.frozen_drag_weight = env_f("PM_DRAG");
+            h.rope_ceiling_cost = env_f("PM_ROPE");
+            // Task 3.23: `PM_FIXES=static,counter,belief=0.8,protect,finish,nohammer` switches the duel fixes on (this tool has no live context, so they act outside a duel too).
+            if let Ok(list) = std::env::var("PM_FIXES") {
+                let has = |k: &str| list.split(',').any(|x| x == k);
+                h.duel_fixes = Some(DuelFixSpec {
+                    duel_only: Some(false),
+                    static_push: has("static").then_some(true),
+                    counter_release: has("counter").then_some(true),
+                    protect_defence: has("protect").then_some(true),
+                    finish_push: has("finish").then_some(true),
+                    finish_approach: has("finish").then_some(6),
+                    no_hammer_frozen: has("nohammer").then_some(true),
+                    hooked_belief: list.split(',').find_map(|x| x.strip_prefix("belief=")?.parse().ok()),
+                    ..DuelFixSpec::default()
                 });
             }
+            spec.hybrid = Some(h);
         } else {
             spec.mode = Some("fixed".into());
             spec.preset = Some("live-v2".into());
@@ -860,7 +893,11 @@ fn main() -> Result<(), String> {
     if cells.is_empty() || seeds == 0 {
         return Ok(());
     }
-    // Jobs: (clip, start, cell, seed).
+    // Jobs: (clip, start, cell, seed). `PM_SEED0` moves the seeds (task 3.23: fresh seeds for the confirmation).
+    let seed0: u64 = std::env::var("PM_SEED0")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(19_001);
     let mut jobs = Vec::new();
     for (ci, cd) in data.iter().enumerate() {
         for (si, (_, _, w)) in cd.starts.iter().enumerate() {
@@ -870,7 +907,7 @@ fn main() -> Result<(), String> {
             }
             for (ki, _) in cells.iter().enumerate() {
                 for s in 0..seeds {
-                    jobs.push((ci, si, ki, 19_001 + s));
+                    jobs.push((ci, si, ki, seed0 + s));
                 }
             }
         }

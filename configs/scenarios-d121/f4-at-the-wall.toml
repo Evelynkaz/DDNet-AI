@@ -1,0 +1,32 @@
+# F4 -- finishing a frozen victim in the 1vs1 box of Copy Love Box (f9793b34), task 3.23 (D-121, docs/research/duel-fixes-3.23.md): The victim lies frozen on the floor two tiles from the left freeze wall; we stand four tiles to its right.
+# The victim (slot 1) is frozen for 150 ticks (the moment right after our block) and idle; the subject (slot 0) is the brain under test. Success is the held-block
+# rule of D-059 (amended): the victim is out on EVERY tick of the 250-tick window (a victim that thaws at tick 150 and walks off fails) and the subject is never
+# out. Doing nothing fails: the victim lies off the freeze and thaws. The round rule of F-DDrace (a tee that lies in a freeze tile for 50 ticks loses) is the
+# looser reading; this is the strict one.
+id = "F4"
+name = "Finish: at-the-wall"
+source = "task 3.23; docs/research/duel-fixes-3.23.md"
+description = "The victim lies frozen on the floor two tiles from the left freeze wall; we stand four tiles to its right."
+horizon = 250
+trials = 20
+
+[map]
+kind = "file"
+file = "cache/Copy Love Box_f9793b3416f04eafc1c05c1ca43f6107dff34bf9eb3d5c9ba26ad9ef6317abcb.map"
+sha256 = "f9793b3416f04eafc1c05c1ca43f6107dff34bf9eb3d5c9ba26ad9ef6317abcb"
+
+[[tee]]
+pos = [84.5, 180.5]
+jitter = [0.4, 0.0]
+
+[[tee]]
+pos = [80.5, 180.5]
+jitter = [0.4, 0.0]
+freeze_ticks = 150
+
+[success]
+kind = "all"
+of = [
+    { kind = "stays_out", tee = 1, from = 1, to = 250 },
+    { kind = "not_out", tee = 0 },
+]

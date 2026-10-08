@@ -607,6 +607,42 @@ pub struct HybridSpec {
     /// Also drop the hook of a climb toward a tee above (default false).
     #[serde(default)]
     pub envelope_hook_climb: Option<bool>,
+    /// Task 3.23 (D-121): the fixes of the 2026-10-08 duel against a human (`HybridConfig::duel_fixes`). All default off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duel_fixes: Option<DuelFixSpec>,
+}
+
+/// Task 3.23: `[hybrid.duel_fixes]` (see `ddai_planner::hybrid::DuelFixConfig`); a key not given keeps the default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DuelFixSpec {
+    /// The fixes act only in a duel (the arena's live view is one; default true).
+    #[serde(default)]
+    pub duel_only: Option<bool>,
+    /// Fix 1: against a static victim choose among the plans that act, while one is safe.
+    #[serde(default)]
+    pub static_push: Option<bool>,
+    /// Fix 3: a frozen victim lying off the freeze is answered by a plan that acts, and approach plans join the pool.
+    #[serde(default)]
+    pub finish_push: Option<bool>,
+    /// Fix 3: at most this many approach plans (technique T30) per such decision.
+    #[serde(default)]
+    pub finish_approach: Option<usize>,
+    /// Fix 3: no hammer swing at a frozen victim.
+    #[serde(default)]
+    pub no_hammer_frozen: Option<bool>,
+    /// Fix 2: the reacting victim of the robust stage lets go of us once it is below us while we rise.
+    #[serde(default)]
+    pub counter_release: Option<bool>,
+    /// Fix 2: the robust stage believes the victim reacts with at least this probability while his hook holds us (0 = off).
+    #[serde(default)]
+    pub hooked_belief: Option<f64>,
+    /// Fix 2: the best defensive techniques are re-scored by the robust stage while his hook holds us.
+    #[serde(default)]
+    pub protect_defence: Option<bool>,
+    /// Fix 1: passive decisions before a victim counts as static (default 25, one second).
+    #[serde(default)]
+    pub static_after: Option<u32>,
 }
 
 impl HybridSpec {
@@ -943,6 +979,35 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         }
         if let Some(v) = h.envelope_hook_climb {
             cfg.reflex.hook_climb = v;
+        }
+        if let Some(d) = &h.duel_fixes {
+            if let Some(v) = d.duel_only {
+                cfg.duel_fixes.duel_only = v;
+            }
+            if let Some(v) = d.static_push {
+                cfg.duel_fixes.static_push = v;
+            }
+            if let Some(v) = d.finish_push {
+                cfg.duel_fixes.finish_push = v;
+            }
+            if let Some(v) = d.finish_approach {
+                cfg.duel_fixes.finish_approach = v;
+            }
+            if let Some(v) = d.no_hammer_frozen {
+                cfg.duel_fixes.no_hammer_frozen = v;
+            }
+            if let Some(v) = d.counter_release {
+                cfg.duel_fixes.counter_release = v;
+            }
+            if let Some(v) = d.protect_defence {
+                cfg.duel_fixes.protect_defence = v;
+            }
+            if let Some(v) = d.hooked_belief {
+                cfg.duel_fixes.hooked_belief = v;
+            }
+            if let Some(v) = d.static_after {
+                cfg.duel_fixes.static_after = v;
+            }
         }
         if let Some(v) = h.polish {
             cfg.polish = v;
