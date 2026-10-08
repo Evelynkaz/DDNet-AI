@@ -53,6 +53,8 @@ site/dist-preview/
 # Task 3.15: opponent-input predictor models and their recorded datasets (E-028).
 *.oppnet
 *.opp
+# Task 3.21: live-clip data sets of the predictor (derived from clips, which never go to git).
+*.clipgames
 *.safetensors
 *.npz
 *.pt

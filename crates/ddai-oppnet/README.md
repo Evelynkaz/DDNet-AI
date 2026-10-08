@@ -79,3 +79,18 @@ cargo run --release -p ddai-oppnet --example opp_bench
 Живое подключение — не через `HybridConfig::window_model` (у живого гибрида окна нет: бот сам предсказывает мир до тика ввода), а через `ddai_bot::oppnet` и `LiveWorld::predict_local_observation_with`. Модуль `live`: `LiveOpp::observe` (каждый снапшот с целью: оценка открытых окон по тому, что показал снапшот, и
 запись кадра в историю), `LiveOpp::window` (решение: прогноз на тики окна, ввод цели для броска, если предохранитель разрешает), `guard::Guard` (250 окон, `hold` при проигрыше > 5%, возврат через 500 окон), `writer::LogWriter` (журнал ≤ 8 МиБ × 4, свой поток), `analyze::Report`. Всё без аллокаций после создания (тесты).
 Признаки живые = обучающие (`ddai-env/tests/live_features.rs`). Ключи, маркер, STATUS, журнал — `docs/formats.md` §44; как ставить A/B — `docs/research/opponent-predictor-live.md`.
+
+## Поколение 2 и живое окно (задача 3.21, E-036, D-118; no-go)
+
+`v2` — модель для живого окна в 2 тика: `docs/research/opponent-predictor-v2.md`, формат — `docs/formats.md` §52. `AnyPredictor::load` читает файл любого поколения (по заголовку); `LiveOpp` и арена (`hybrid.window_model`, ключ `window_decode` для порогов v2) работают с обоими.
+Вход 155 чисел (2 кадра пары, лучи вокруг обоих ти, наши вводы в полёте, окно `0..=4`, «известные» вводы по тикам), выход 28 (4 тика × направление, прыжок, хук, удар, прицел), декодирование с запасами `Decode`. Данные с настоящим соперником — `clipdata` (`ClipGame`, метки из следующих снапшотов).
+
+```bash
+live_data build --out <dir> <каталоги клипов>                       # (ddai-env) клипы -> *.clipgames по сессиям
+opp_record --v2 --config configs/arena/e036-data-train.toml --out <dir> --threads 3   # (ddai-env) арена v2
+opp_train2 --train-arena <dir> --train-clips s0.clipgames --val-arena <dir> --clip-weight 5 --out m2.oppnet
+opp_eval2 --model m2.oppnet --arena <dir> --clips s1.clipgames [--known N]            # точность по головам, AUC удара, известные тики
+live_eval --clips <каталоги> --model name=m2.oppnet --sessions 1 --lag 2             # (ddai-env) живой путь на клипах: направление/хук/положение/удар против «держит»
+clip_stats <s0.clipgames>... / opp_stats <*.opp>...                  # поведение соперника в клипах и в арене
+opp_bench2 --model m2.oppnet                                         # цена вызова
+```

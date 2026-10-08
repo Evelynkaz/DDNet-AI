@@ -3,7 +3,7 @@
 #
 # Fails when `git ls-files` (the index of the current directory's repository) contains
 #   1. a file with a weight / data extension (.bundle .flyg .ckpt .safetensors .npz .pt .pth .onnx .h5 .pkl .gguf
-#      .tflite .feather .parquet .bin .demo .map .oppnet .opp), or named state.bin, policy.json, opponent.json, value*.json or *.checkpoint.json,
+#      .tflite .feather .parquet .bin .demo .map .oppnet .opp .clipgames), or named state.bin, policy.json, opponent.json, value*.json or *.checkpoint.json,
 #      unless it sits under crates/**/tests/fixtures/ (small test fixtures) or matches the allowlist;
 #   2. any file larger than 2 MB (2 097 152 bytes), unless it matches the allowlist; or
 #   3. a `filter=lfs` attribute in any tracked .gitattributes (Git LFS is not used here, and an LFS pointer is a tiny
@@ -64,7 +64,7 @@ while IFS= read -r -d '' entry; do
     *)
       case "$lower" in
         *.bundle | *.flyg | *.ckpt | *.safetensors | *.npz | *.pt | *.pth | *.onnx | *.h5 | *.pkl | *.gguf | *.tflite | \
-          *.feather | *.parquet | *.bin | *.demo | *.map | *.oppnet | *.opp | *.checkpoint.json)
+          *.feather | *.parquet | *.bin | *.demo | *.map | *.oppnet | *.opp | *.clipgames | *.checkpoint.json)
           fail "tracked file with a weight/data extension: $path"
           ;;
       esac

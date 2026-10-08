@@ -161,7 +161,7 @@ Joni-дуэль, гибрид 4 мс работы против `live-v2` (фик
 |---|---|
 | `cargo fmt --check` | чисто |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | чисто |
-| `RUST_TEST_THREADS=3 cargo test --workspace --locked` | 3 803 пройдено, 0 провалено, 103 игнорировано |
+| `RUST_TEST_THREADS=3 cargo test --workspace --locked` | 3 804 пройдено, 0 провалено, 103 игнорировано |
 | `cargo deny check` | advisories / bans / licenses / sources ok (предупреждение о неиспользуемой лицензии `MPL-2.0` — прежнее) |
 | `tools/ci/no-weights.sh` | ok (`*.oppnet`, `*.opp`, `*.clipgames` не в дереве) |
 | равенство признаков 3.17 (`tests/live_features.rs`, 4 прогона: шаг 2 и 1 тик, старые ядра и без) | расхождений 0: кадры, 29 признаков, лучи — и **логиты v2-сети** из арена-мира и из мира `LiveWorld` побитно равны |
