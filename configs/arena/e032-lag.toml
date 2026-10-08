@@ -1,0 +1,73 @@
+# work-clock: default-rate
+# Task 3.16 (D-115, E-032): fixed lag cells around the lag we can reach (ours 1 or 2, theirs 0, 1, 2)
+# The focal hybrid is the live build's (main defaults, no fly proposer, opponent model on), vs live-v2 (fixed 20x2), joni arena. Seeds 13001.. are fresh
+# (E-026 used 7001, 8001, 10001, 11001; the reviewers' 2001). `hybrid.live_budget_ms = B` is the live knob `hybrid_budget_ms`: search budget B ms AND decision cap B+1.
+# Lag is the arena's `lag` = the live horizon (`to_tick - tick`) = the tick the input goes out for minus the snapshot's tick minus 1.
+name = "E-032 lag cells"
+base_seed = 13001
+games = 200
+
+[[condition]]
+name = "B4 lag 1/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag = 1 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B4 lag 2/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B4 lag 1/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag = 1 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "B4 lag 2/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "B4 lag 1/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag = 1 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "B4 lag 2/0"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "B3 lag 1/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 3 }, lag = 1 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B3 lag 2/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 3 }, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B2 lag 1/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 2 }, lag = 1 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B2 lag 2/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 2 }, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B4 lag 3/1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B4 lag 3/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag = 3 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]
+
+[[condition]]
+name = "B3 lag 2/2"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 3 }, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]

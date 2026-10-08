@@ -508,6 +508,8 @@ pub struct DecisionInput<'a> {
     pub lag_ticks: u32,
     /// Physics ticks the brain simulated to roll the planning world forward (work counter).
     pub roll_ticks: u64,
+    /// Task 3.16 (opt-in): the decision cap of this decision is at most this many ms (the time left to the input slot the caller aims at).
+    pub deadline_ms: Option<f64>,
 }
 
 /// The decision procedure and everything it keeps between decisions.
@@ -1356,7 +1358,11 @@ impl HybridSearch {
             return (prev, tel);
         }
         self.planner.opp_seed = js::opp_seed_next(self.planner.opp_seed);
-        let cfg = self.cfg.clone();
+        let mut cfg = self.cfg.clone();
+        if let Some(d) = inp.deadline_ms {
+            // Task 3.16: the caller's deadline lowers the cap of this decision, never raises it (the extension of D-042 keeps its own limit).
+            cfg.decision_cap_ms = Some(cfg.decision_cap_ms.map_or(d, |cap| js::min(cap, d)));
+        }
         let n = cfg.planner.steps as usize;
         // Task 3.10b: a decision of the longer horizon may be held to its budget (no D-042 extension, neither in the search nor in the shield's `safer_input`).
         let adaptive_on = cfg.adaptive.enabled && !(n > self.base_steps as usize && cfg.frozen_no_extension);

@@ -4,6 +4,8 @@
 //! - `{"k":"s","tick":T,"in":[direction,target_x,target_y,jump,fire,hook,flags,weapon,next,prev]}` — a `NETMSG_INPUT` for
 //!   `IntendedTick = T` left the socket;
 //! - `{"k":"t","tick":T,"left":MS}` — the server's `NETMSG_INPUTTIMING` for it (`left < 0`: it arrived late and the server moved it);
+//! - `{"k":"a","snap":T,"pred":P,"slack_us":U}` (task 3.16) — a snapshot of tick `T` arrived when the last input sent was for tick `P`
+//!   and the next was due in `U` microseconds (-1: before the driver's bootstrap);
 //! - `{"k":"d","tick":T,"first":F,"exp":E,"brain":0|1,"wire_us":..,"handed_us":..,"pickup_us":..}` — the decision whose first input
 //!   was `T`: the first slot after its snapshot (`F`), the tick it was aimed at (`E`), and the times of the stages;
 //!
@@ -61,6 +63,16 @@ impl InputTrace {
 
     pub fn timing(&mut self, tick: i32, time_left: i32) {
         let _ = writeln!(self.out, r#"{{"k":"t","tick":{tick},"left":{time_left}}}"#);
+    }
+
+    /// Task 3.16: a snapshot the bot is about to decide on: its tick, the tick of the last input the driver had sent (`pred`), and the time (us) until
+    /// the next input is due (`slack_us`; -1 before the driver's bootstrap). `first - snap` is the lag of the first slot, in ticks.
+    pub fn snapshot(&mut self, tick: i32, pred: i32, slack: Option<Duration>) {
+        let _ = writeln!(
+            self.out,
+            r#"{{"k":"a","snap":{tick},"pred":{pred},"slack_us":{}}}"#,
+            slack.map_or(-1, |d| d.as_micros() as i64)
+        );
     }
 
     pub fn decision(

@@ -14,8 +14,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use ddai_env::arena::Arena;
-use ddai_env::config::{PlayerSpec, RunConfig, builtin_brain};
-use ddai_env::game::play_game_watched;
+use ddai_env::config::{PlayerSpec, RunConfig, builtin_brain, lag_models_of};
+use ddai_env::game::play_game_modeled;
 use ddai_env::observe;
 use ddai_env::run::{layout_of, load_arenas};
 use ddai_env::sim::PlayerSetup;
@@ -123,7 +123,7 @@ fn play(
     let mut was_out = [false; 2];
     let mut first = true;
     let mut decided = false;
-    let rep = play_game_watched(arena, &rules, seed, layout_of(arena, g), players, &mut |sim, tick| {
+    let rep = play_game_modeled(arena, &rules, seed, layout_of(arena, g), players, lag_models_of(&slots), &mut |sim, tick| {
         if first {
             sim.record_events = true;
             first = false;
@@ -220,6 +220,8 @@ fn play(
     let line = json!({
         "condition": cond.name, "game": g, "result": format!("{:?}", rep.result), "credited": rep.credited, "held": rep.held, "held_block": rep.held_block, "end_tick": rep.end_tick,
         "spawns": rep.spawns,
+        // Task 3.16: with `lag_model`, the focal player's decisions by the lag (ticks) they got, and how many were applied later than planned.
+        "lag_hist": rep.players[0].lag_hist, "lag_late": rep.players[0].lag_late, "lag_cost_hist": rep.players[0].lag_cost_hist,
         "sides": sides.iter().map(|s| json!({
             "hammer_hits": s.hammer_hits, "hammer_fires": s.hammer_fires, "holds": s.holds, "dir_changes": s.dir_changes,
             "hook_ticks": s.hook_ticks, "hook_presses": s.hook_presses, "forced_ends": s.forced_ends, "freeze": s.freeze,
@@ -353,6 +355,60 @@ fn main() -> Result<(), String> {
                     println!("{l}");
                 }
             }
+        }
+        // Task 3.16: the lag the focal player's lag model gave its decisions (nothing printed without a model).
+        let mut hist: Vec<u64> = Vec::new();
+        let mut late = 0u64;
+        for (_, line, _, _) in &rows {
+            if let Some(h) = line["lag_hist"].as_array() {
+                hist.resize(hist.len().max(h.len()), 0);
+                for (k, n) in h.iter().enumerate() {
+                    hist[k] += n.as_u64().unwrap_or(0);
+                }
+            }
+            late += line["lag_late"].as_u64().unwrap_or(0);
+        }
+        let mut cost: Vec<u64> = Vec::new();
+        for (_, line, _, _) in &rows {
+            if let Some(h) = line["lag_cost_hist"].as_array() {
+                cost.resize(cost.len().max(h.len()), 0);
+                for (k, n) in h.iter().enumerate() {
+                    cost[k] += n.as_u64().unwrap_or(0);
+                }
+            }
+        }
+        let decisions: u64 = hist.iter().sum();
+        if decisions > 0 {
+            // Percentiles of the decision cost the model saw (ms, the upper edge of the bin the rank falls in).
+            let total: u64 = cost.iter().sum();
+            let pct = |p: f64| {
+                let rank = ((total as f64 - 1.0) * p).round() as u64;
+                let mut seen = 0;
+                for (k, &n) in cost.iter().enumerate() {
+                    seen += n;
+                    if seen > rank {
+                        return (k as f64 + 1.0) * ddai_env::sim::COST_BIN_MS;
+                    }
+                }
+                f64::NAN
+            };
+            println!(
+                "  decision cost (brain clock, bin upper edge): p50 {:.2} p90 {:.2} p99 {:.2} ms",
+                pct(0.5),
+                pct(0.9),
+                pct(0.99)
+            );
+            let share = |k: usize| 100.0 * hist.get(k).copied().unwrap_or(0) as f64 / decisions as f64;
+            let mean = hist.iter().enumerate().map(|(k, &n)| k as f64 * n as f64).sum::<f64>() / decisions as f64;
+            println!(
+                "  lag model (us): {decisions} decisions, mean lag {mean:.3} ticks | lag 1: {:.1}%  2: {:.1}%  3: {:.1}%  4: {:.1}%  5+: {:.1}% | later than planned {:.1}%",
+                share(1),
+                share(2),
+                share(3),
+                share(4),
+                (5..hist.len()).map(share).sum::<f64>(),
+                100.0 * late as f64 / decisions as f64
+            );
         }
         for (i, who) in ["us (slot 0)", "opp (slot 1)"].iter().enumerate() {
             let hits: u32 = rows.iter().map(|r| r.2[i].hammer_hits).sum();

@@ -61,6 +61,19 @@ pub struct PlayerReport {
     pub hash: String,
     /// The brain's own telemetry (`Brain::telemetry`, JSON), if any.
     pub telemetry: Option<serde_json::Value>,
+    /// Task 3.16: with an input-lag model ([`crate::sim::LagModel`]), the decisions by the lag in ticks they got (index = ticks, the last bin takes
+    /// more) and how many of them were applied later than the brain planned for; empty without a model.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lag_hist: Vec<u32>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub lag_late: u32,
+    /// Task 3.16: the decision costs the lag model saw, a histogram in bins of [`crate::sim::COST_BIN_MS`] (empty without a model).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lag_cost_hist: Vec<u32>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Wall-clock decision times; the only non-deterministic part of a [`GameReport`].
@@ -231,6 +244,20 @@ pub fn play_game_watched(
     players: Vec<PlayerSetup>,
     observe: &mut dyn FnMut(&mut Sim, i32) -> bool,
 ) -> Result<GameReport, EnvError> {
+    play_game_modeled(arena, rules, seed, layout, players, Vec::new(), observe)
+}
+
+/// [`play_game_watched`] with input-lag models (task 3.16, [`crate::sim::LagModel`]) for the players that have one (`lag_models[slot]`; a short
+/// vector or a `None` keeps that player's fixed lag). Without any model it is exactly [`play_game_watched`].
+pub fn play_game_modeled(
+    arena: &Arena,
+    rules: &Rules,
+    seed: u64,
+    layout: Layout,
+    players: Vec<PlayerSetup>,
+    lag_models: Vec<Option<crate::sim::LagModel>>,
+    observe: &mut dyn FnMut(&mut Sim, i32) -> bool,
+) -> Result<GameReport, EnvError> {
     let n = players.len();
     if n < 2 {
         return Err(EnvError::new("a game needs at least two players"));
@@ -265,6 +292,7 @@ pub fn play_game_watched(
         .hold_target
         .then(|| std::rc::Rc::new(HoldTarget::new(arena.map.clone())));
     let mut sim = Sim::new(pw, arena.map.clone(), players, rules.decide_every, seed);
+    sim.set_lag_models(lag_models);
     let mut last_touch: Vec<Touch> = vec![None; n];
     let mut was_out = vec![false; n];
 
@@ -428,6 +456,11 @@ pub fn play_game_watched(
                 .brain
                 .telemetry()
                 .map(|t| serde_json::from_str(&t).unwrap_or(serde_json::Value::String(t))),
+            lag_hist: sim.lag_models[i].as_ref().map_or_else(Vec::new, |m| m.hist.to_vec()),
+            lag_late: sim.lag_models[i].as_ref().map_or(0, |m| m.later),
+            lag_cost_hist: sim.lag_models[i]
+                .as_ref()
+                .map_or_else(Vec::new, |m| m.cost_hist.clone()),
         });
     }
     Ok(GameReport {

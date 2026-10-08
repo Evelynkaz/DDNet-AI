@@ -715,6 +715,7 @@ impl Brain for PlannerBrain {
             candidates: i.candidates.max(0) as u32,
             proposal_us: 0,
             search_us: 0,
+            decision_us: 0,
         })
     }
 

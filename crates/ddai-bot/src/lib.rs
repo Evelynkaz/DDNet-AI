@@ -49,6 +49,7 @@ pub mod settings;
 pub mod smartkill;
 pub mod target;
 pub mod tees;
+pub mod timing_knobs;
 pub mod trace;
 pub mod unstick;
 pub mod wander;

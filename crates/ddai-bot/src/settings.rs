@@ -46,6 +46,43 @@ pub struct Settings {
     /// `bot/window-model.off` switches the model off while it exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_model: Option<PathBuf>,
+    /// Task 3.16 (D-115): the hybrid's search budget in whole ms, 1 to 8 (`--hybrid-budget-ms`; the decision cap moves with it). Absent: 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hybrid_budget_ms: Option<RawKnob>,
+    /// Task 3.16 (D-115): a **fixed** prediction margin in ms, 0 to 30 (`--prediction-margin-ms`): the adaptive controller is off for the run.
+    /// Absent: adaptive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction_margin_ms: Option<RawKnob>,
+}
+
+/// A number-valued key of the settings file that must never make the file unreadable (task 3.16, F1): a hand edit such as `-1`, `3.5` or `"5"` is
+/// a perfectly parsable TOML value of the wrong kind, and a typed field would turn it into a serde error, which moves the whole file aside
+/// (`.bad-<ts>`) and loses every other setting. Here any TOML value reads; [`crate::timing_knobs::resolve`] judges it (whole number in range, or ignored
+/// with a warning).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawKnob {
+    /// A TOML integer (any sign and size that fits an `i64`).
+    Int(i64),
+    /// Anything else (a float, a string, a table, ...), kept as the text TOML shows for it, for the warning.
+    Other(String),
+}
+
+impl<'de> Deserialize<'de> for RawKnob {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match toml::Value::deserialize(d)? {
+            toml::Value::Integer(i) => RawKnob::Int(i),
+            other => RawKnob::Other(other.to_string()),
+        })
+    }
+}
+
+impl Serialize for RawKnob {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            RawKnob::Int(i) => s.serialize_i64(*i),
+            RawKnob::Other(text) => s.serialize_str(text),
+        }
+    }
 }
 
 /// `~/aiddnet/data/bot/settings.toml`.
@@ -68,6 +105,8 @@ pub const KNOWN_KEYS: &[&str] = &[
     "owner_chat",
     "duel_commands",
     "window_model",
+    "hybrid_budget_ms",
+    "prediction_margin_ms",
 ];
 
 /// The top-level keys of the file at `path` that [`Settings`] does not know (a typo such as `owner-chat`), sorted. An unreadable or
@@ -297,6 +336,8 @@ mod tests {
             owner_chat: Some(true),
             duel_commands: Some(vec!["/duel".into()]),
             window_model: Some(PathBuf::from("a")),
+            hybrid_budget_ms: Some(RawKnob::Int(4)),
+            prediction_margin_ms: Some(RawKnob::Int(10)),
         };
         let table: toml::Table = toml::to_string(&full).unwrap().parse().unwrap();
         let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
@@ -322,10 +363,62 @@ mod tests {
             owner_chat: Some(false),
             duel_commands: Some(vec!["/duel".into(), "/1vs1".into()]),
             window_model: Some(PathBuf::from("/x/m1.oppnet")),
+            hybrid_budget_ms: Some(RawKnob::Int(3)),
+            prediction_margin_ms: Some(RawKnob::Int(0)),
         };
         save(&path, &s).unwrap();
         assert_eq!(load(&path), Loaded::Ok(s));
         assert!(!dir.path().join("bot/settings.toml.tmp").exists(), "atomic");
+    }
+
+    /// Task 3.16, review F1: a value of the wrong kind in one of the two lag keys must not cost the owner the whole file.
+    #[test]
+    fn a_bad_looking_lag_key_never_moves_the_file_aside_or_costs_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, (value, other)) in [
+            ("-1", false),
+            ("99", false),
+            ("3.5", true),
+            ("\"5\"", true),
+            ("[1, 2]", true),
+            ("true", true),
+            ("{ a = 1 }", true),
+            ("4", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for key in ["hybrid_budget_ms", "prediction_margin_ms"] {
+                let path = dir.path().join(format!("s{i}-{key}.toml"));
+                std::fs::write(&path, format!("brain = \"planner\"\nclan = \"X\"\n{key} = {value}\n")).unwrap();
+                let Loaded::Ok(s) = load(&path) else {
+                    panic!("{key} = {value} made the file corrupt");
+                };
+                assert_eq!(s.brain.as_deref(), Some("planner"), "{key} = {value}");
+                assert_eq!(s.clan.as_deref(), Some("X"));
+                assert!(path.exists(), "the file stays where it is");
+                assert!(unknown_keys(&path).is_empty());
+                let got = if key == "hybrid_budget_ms" {
+                    &s.hybrid_budget_ms
+                } else {
+                    &s.prediction_margin_ms
+                };
+                assert_eq!(
+                    matches!(got, Some(RawKnob::Other(_))),
+                    other,
+                    "{key} = {value}: {got:?}"
+                );
+            }
+        }
+        // And it round-trips through a save (the console commands save the whole struct).
+        let path = dir.path().join("rt.toml");
+        std::fs::write(&path, "prediction_margin_ms = 4.5\nhybrid_budget_ms = 3\n").unwrap();
+        update(&path, |s| s.low = Some(true)).unwrap();
+        let Loaded::Ok(s) = load(&path) else {
+            panic!("corrupt after a save")
+        };
+        assert_eq!(s.hybrid_budget_ms, Some(RawKnob::Int(3)));
+        assert!(matches!(s.prediction_margin_ms, Some(RawKnob::Other(_))));
     }
 
     #[test]

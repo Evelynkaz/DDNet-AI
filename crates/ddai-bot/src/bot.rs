@@ -1902,6 +1902,11 @@ impl Bot {
             self.latency.horizon.push(Duration::from_micros(
                 u64::try_from((to_tick - tick).max(0)).unwrap_or(0),
             ));
+            // Task 3.16: the slot's slack (arrival -> the next input is due) against the time this decision is aimed to need.
+            self.latency.slack.push(snap.next_input_in.unwrap_or(Duration::ZERO));
+            self.latency
+                .ready
+                .push(*queue_delay + if cfg.kind_estimate { *est_brain } else { *est_decision } + cfg.driver_pickup);
             if prediction.clamped() {
                 // The horizon wanted is beyond the cap: the decision is made on a world that stops short
                 // of the tick it will take effect on (a very long RTT). Counted always, said at most

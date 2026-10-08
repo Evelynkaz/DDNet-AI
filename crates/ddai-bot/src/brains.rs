@@ -104,6 +104,10 @@ pub struct BrainOptions {
     pub hybrid_finish: bool,
     /// Task 3.18 (opt-in, `--finish wb`): the hybrid's wayblock hold ([`HybridConfig::wb_hold`]).
     pub hybrid_wb_hold: bool,
+    /// Task 3.16 (D-115): the hybrid's search budget in whole milliseconds, 1 to 8 (`--hybrid-budget-ms`, `hybrid_budget_ms` in the settings
+    /// file); the decision cap moves with it ([`HybridConfig::with_budget_ms`]). `None` = the library default (4 ms under a 5 ms cap), which is
+    /// also what `Some(4)` builds. Not read by the planner brain (`planner_budget_ms` is its own knob).
+    pub hybrid_budget_ms: Option<u32>,
     pub seed: u64,
 }
 
@@ -146,6 +150,7 @@ impl Default for BrainOptions {
             hybrid_mirror: true,
             hybrid_finish: false,
             hybrid_wb_hold: false,
+            hybrid_budget_ms: None,
             seed: 1,
         }
     }
@@ -168,7 +173,11 @@ pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
         wb_hold: opts.hybrid_wb_hold,
         ..HybridConfig::default()
     };
-    if opts.hybrid_finish { cfg.with_finish() } else { cfg }
+    let cfg = if opts.hybrid_finish { cfg.with_finish() } else { cfg };
+    match opts.hybrid_budget_ms {
+        Some(ms) => cfg.with_budget_ms(f64::from(ms)),
+        None => cfg,
+    }
 }
 
 /// The hybrid the bot plays: wall clock, with the fly of `opts.fly_bundle` as its proposer when there is one.
@@ -490,6 +499,49 @@ mod tests {
             Some(1),
             "the library default is one thread"
         );
+    }
+
+    /// Task 3.16 (D-115): no option is the library default byte for byte, `Some(4)` is the same point, and a budget moves the cap with it.
+    #[test]
+    fn the_hybrid_budget_option_defaults_to_the_library_config_and_moves_the_cap() {
+        let default_cfg = hybrid_config(&BrainOptions::default());
+        assert_eq!(
+            default_cfg,
+            hybrid_config(&BrainOptions {
+                hybrid_budget_ms: Some(4),
+                ..BrainOptions::default()
+            })
+        );
+        assert_eq!(
+            default_cfg.mode,
+            ddai_planner::hybrid::HybridMode::Deadline { budget_ms: 4.0 }
+        );
+        assert_eq!(default_cfg.decision_cap_ms, Some(5.0));
+        let two = hybrid_config(&BrainOptions {
+            hybrid_budget_ms: Some(2),
+            ..BrainOptions::default()
+        });
+        assert_eq!(two.mode, ddai_planner::hybrid::HybridMode::Deadline { budget_ms: 2.0 });
+        assert_eq!(two.decision_cap_ms, Some(3.0));
+        // Nothing else of the config moves.
+        assert_eq!(
+            HybridConfig {
+                mode: default_cfg.mode,
+                decision_cap_ms: default_cfg.decision_cap_ms,
+                ..two
+            },
+            default_cfg
+        );
+        // The brain name carries the budget (the web page and the journal show it).
+        let b = make_brain(
+            BrainKind::Hybrid,
+            &BrainOptions {
+                hybrid_budget_ms: Some(2),
+                ..BrainOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(b.name().contains("2ms"), "{}", b.name());
     }
 
     #[test]

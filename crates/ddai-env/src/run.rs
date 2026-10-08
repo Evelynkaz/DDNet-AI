@@ -13,8 +13,8 @@ use rayon::prelude::*;
 
 use crate::EnvError;
 use crate::arena::{Arena, load_arena_defs};
-use crate::config::{BrainFactory, Condition, PlayerSpec, Rules, RunConfig};
-use crate::game::{GameReport, Layout, play_game};
+use crate::config::{BrainFactory, Condition, PlayerSpec, Rules, RunConfig, lag_models_of};
+use crate::game::{GameReport, Layout, play_game_modeled};
 use crate::sim::PlayerSetup;
 
 /// Builds the players of one game from the condition's slot specs.
@@ -60,12 +60,14 @@ pub fn play_indexed(
     base_seed: u64,
     g: u32,
 ) -> Result<GameReport, EnvError> {
-    play_game(
+    play_game_modeled(
         arena,
         rules,
         base_seed.wrapping_add(u64::from(g)),
         layout_of(arena, g),
         setups(slots, factory, arena)?,
+        lag_models_of(slots),
+        &mut |_, _| true,
     )
 }
 

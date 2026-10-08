@@ -34,6 +34,11 @@ fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
+/// Where the harness keeps its map cache, clips, memory and bridge socket: `DDAI_T_SCRATCH`, else the scratch directory of task 3.11.
+fn scratch_dir() -> PathBuf {
+    std::env::var_os("DDAI_T_SCRATCH").map_or_else(|| data_dir().join("scratch/task-3.11"), PathBuf::from)
+}
+
 fn data_dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").expect("HOME")).join("aiddnet/data")
 }
@@ -225,11 +230,21 @@ fn config(
 ) -> RunnerConfig {
     let mut client = ClientConfig {
         name: name.to_string(),
-        cache_dir: data_dir().join("scratch/task-3.11/mapcache"),
+        cache_dir: scratch_dir().join("mapcache"),
         adaptive_margin: true,
         ..ClientConfig::default()
     };
     let trace_is_focal = trace.is_some();
+    // Task 3.16: the two input-lag knobs of the focal bot (the opponents keep the defaults). `DDAI_T_MARGIN=<ms>` is a fixed prediction margin
+    // (`--prediction-margin-ms`), `DDAI_T_BUDGET=<ms>` the hybrid's search budget (`--hybrid-budget-ms`).
+    let margin_ms = trace_is_focal
+        .then(|| env_u64("DDAI_T_MARGIN", u64::MAX))
+        .filter(|&m| m != u64::MAX);
+    let budget_ms = trace_is_focal.then(|| env_u64("DDAI_T_BUDGET", 0)).filter(|&b| b != 0);
+    if let Some(m) = margin_ms {
+        client.adaptive_margin = false;
+        client.prediction_margin_ms = i32::try_from(m).expect("DDAI_T_MARGIN");
+    }
     let mut bot = BotConfig {
         brain: kind,
         mode: Mode::Fight,
@@ -241,7 +256,7 @@ fn config(
     let wb_auto = trace_is_focal && std::env::var("DDAI_T_WB").as_deref() == Ok("auto");
     // `DDAI_T_PROD=1`: what the production unit also has: the clip recorder with the autoclip, the navigation memory files, the bridge.
     let prod = trace_is_focal && std::env::var("DDAI_T_PROD").as_deref() == Ok("1");
-    let scratch = data_dir().join("scratch/task-3.11");
+    let scratch = scratch_dir();
     if prod {
         bot.clips = ddai_bot::clipper::ClipConfig {
             dir: Some(scratch.join("clips")),
@@ -255,6 +270,7 @@ fn config(
         bot,
         brain: BrainOptions {
             seed,
+            hybrid_budget_ms: budget_ms.map(|b| u32::try_from(b).expect("DDAI_T_BUDGET")),
             ..BrainOptions::default()
         },
         relations: Relations::new(),

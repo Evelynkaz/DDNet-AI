@@ -5186,7 +5186,7 @@ BotRec  { target, brain (0 hybrid 1 planner 2 scripted 3 idle 4 fly), flags (BIT
 Не портировано (с причиной в ответе): `say`, `owner`, `llm`, `d`, `emote`, `yes/no/votes/vote`, `duel`, `style`, `try`, `lang`, `log` — всё, что пишет в чат, голосует, или чего нет в Rust-боте.
 Ответы консоли называют других игроков **тегами** `c<id>-<хэш>`; настоящие ники — только с явным `--console-names` (правка ревью: консоль под юнитом пишет в общий журнал). Ответы идут на терминал оператора, в `tracing` не попадают.
 
-**`settings.toml`** (`~/aiddnet/data/bot/settings.toml`, `--settings`, `--no-settings`; не в git): `brain`, `wb`, `relations`, `low`, `strong`; все поля необязательны. Командная строка важнее файла;
+**`settings.toml`** (`~/aiddnet/data/bot/settings.toml`, `--settings`, `--no-settings`; не в git): `brain`, `wb`, `relations`, `low`, `strong`, а также (задача 3.16, §48) `hybrid_budget_ms` и `prediction_margin_ms`; все поля необязательны. Командная строка важнее файла;
 файл, который не разбирается, переименовывается в `settings.toml.bad-<unix-секунды>` и игнорируется (как `start.mjs:242-246`). `!brain`, `!wb`, `!low`, `!strong` записывают изменения.
 
 ### 24.6 Выбор сервера: только список разрешённых
@@ -6423,3 +6423,42 @@ beta_kl, best_score, best_iter, snapshots, curriculum { offsets [V, B, H], moves
 ### 47.3 Инструменты
 
 `train upgrade-readout --bundle B --out O --readout linear-dn|mlp-dn-<H>|mlp-enc-<H> [--seed S]`; `tools/e031/{gen_configs.sh, bc_arms.sh, eval.sh, summary.sh, offline_table.py, thr_grid.sh, dagger_round.sh}`; конфиги `configs/train/e031-ro-*.toml`; зонд `train probe-hook` дополнен MLP на DN текущего кадра.
+
+## 48. Лаг ввода: ручки `hybrid_budget_ms` / `prediction_margin_ms`, ряды `slack` / `ready` / `horizon shares`, запись `a` трассы, `lag_model` арены (задача 3.16, D-112, `ddai-bot::{timing_knobs, latency, trace, bridge}`, `ddai-env::{sim, config}`)
+
+Всё аддитивно: без новых ключей и флагов поведение и вывод прежние.
+
+### 48.1 `settings.toml` и командная строка
+
+- `hybrid_budget_ms` — целое 1…8 (мс): бюджет поиска гибрида; потолок решения идёт за ним, `потолок = бюджет + 1` (`HybridConfig::with_budget_ms`; умолчание — пара 4 / 5, это точка `4`). Флаг `--hybrid-budget-ms`.
+- `prediction_margin_ms` — целое 0…30 (мс): **фиксированный** `cl_prediction_margin`, адаптивный регулятор (D-063) на запуск выключен. Флаг `--prediction-margin-ms` (он существовал и раньше; теперь 0…30 и есть ключ файла).
+- Флаг важнее файла. Значение файла вне диапазона **или не целое число** (отрицательное, дробное, строка, массив, `true`...): предупреждение `settings: <ключ> = <значение> is out of range <a>..=<b>, ignored (the default applies)` либо `… is not a whole number, ignored (the default applies)` в stderr и умолчание; **файл при этом читается целиком и не переименовывается** (поля читаются как произвольное значение TOML, `settings::RawKnob`, судит `timing_knobs::resolve`; без этого опечатка вроде `4.5` или `"5"` была бы ошибкой разбора и уводила бы всё `settings.toml` в `.bad-<ts>`); значение флага вне диапазона — ошибка разбора аргументов.
+  Оба ключа в `KNOWN_KEYS` (тест сверяет список с полями структуры). **Старый бинарник** (без этих полей) с ключами в файле: неизвестный ключ выключает чат владельца (D-094), а первое же сохранение настроек консольной командой (`!brain`, `!wb`...) молча стирает ключи из файла.
+- Старт: stderr — две строки `hybrid budget: <B> ms search, <B+1> ms decision cap (<default|--hybrid-budget-ms|settings file, hybrid_budget_ms>) (task 3.16)` и
+  `prediction margin: fixed <M> ms, adaptive controller off (<источник>) (task 3.16)` либо `prediction margin: adaptive (starts at 10 ms, 3..20; D-063) (task 3.16)`;
+  в `starting the bot` (tracing) поля `hybrid_budget_ms` и `prediction_margin_ms` (`adaptive` или число).
+
+### 48.2 `STATUS`
+
+Два аддитивных поля: `hybrid_budget_ms` (число, 4 по умолчанию; задано и у другого мозга) и `prediction_margin_ms` (число или `null` при адаптивном запасе). Бот старой сборки полей не шлёт.
+
+### 48.3 Отчёт и журнал (`latency_detail_us`, строки `bot status`)
+
+- Ряды `slack` и `ready` (мкс, решения мозга, как `horizon_ticks`): `slack` — от прихода снапшота до срока ближайшего ввода (`next_input_in`, 0 до разгона драйвера); `ready` — сколько, по оценке
+  бота, решению нужно до того, как ввод сможет его унести (очередь + оценка времени решения мозга + подхват). Решение с `ready > slack` целится во второй слот, на тик позже.
+- `horizon_shares` — массив из 5 процентов `[0, 1, 2, 3, ≥4]` тиков горизонта = **лага** (горизонт — на сколько тиков вперёд предсказан мир мозга, это `lag` арены; ввод уходит на тик «снапшот + горизонт + 1»; сумма 100) или `null` до первого решения мозга; в журнале строка
+  `horizon shares (the lag): 0 ticks a% 1 tick b% 2 ticks c% 3 ticks d% >=4 ticks e%`. Строки `slack (…)`, `ready (…)` — формат рядов как у остальных (`name: n=… p50=…us …`).
+
+### 48.4 Трасса вводов
+
+Запись `{"k":"a","snap":T,"pred":P,"slack_us":U}`: на снапшот тика `T` бот приступает к решению, последний отправленный ввод — на тик `P`, ближайший срок через `U` мкс (`-1` до разгона). `first_slot = P + 1`;
+`tools/e2e/lag_shave_trace.py` склеивает запись с идущим за ней решением (`k:d`, `first == P + 1`) и считает лаг (в смысле арены) `exp - T - 1` (план) и `tick - T - 1` (отправлено); ввод уходит на тик `T + лаг + 1`.
+
+### 48.5 Арена: `lag_model` и `live_budget_ms`
+
+- `PlayerSpec::lag_model = { base_ms, extra_ms = 0, jitter_ms = 0, initial_ms = 6 }` (TOML, вместо `lag`; оба сразу — ошибка): лаг каждого решения (`lag` арены = горизонт мозга, тики) = `max(план, ceil((base + extra + стоимость) / 20) − 1)` (лаг решения за 0 мс = `ceil(base / 20) − 1`; ввод уходит на тик «снапшот + лаг + 1»),
+  где стоимость — время решения на часах мозга (`PlanTelemetry::decision_us`: модель соперника + предложения + поиск + щит; при `clock = "work"` — часы работы), план — по скользящему p90 последних 64 стоимостей
+  (мозг получает его как лаг; решение, пришедшее раньше, держится до плана), `jitter_ms` — равномерный джиттер фазы, детерминированный по (сид, слот, тик). `HybridSpec::live_budget_ms` (1…8) —
+  та же ручка, что в боте (бюджет и потолок вместе); только режим `deadline`.
+- Вывод: в строке партии `duel_stats --jsonl` (и в `PlayerReport` игры) поля `lag_hist` (решения по лагу в тиках, индекс = тики, последняя ячейка — «и больше»), `lag_late` (применены позже плана),
+  `lag_cost_hist` (стоимости решений, ячейки по 0,25 мс, последняя — «и больше»); пустые поля не пишутся (старые отчёты и хэши конфигов прежние). `duel_stats` печатает по ним строки `decision cost` и `lag model`.

@@ -446,6 +446,7 @@ fn fixed_mode_reads_no_clock_and_the_shield_still_runs() {
             prev: empty_input(),
             lag_ticks: 0,
             roll_ticks: 0,
+            deadline_ms: None,
         },
     );
     assert!((-1..=1).contains(&out.direction));
@@ -1055,6 +1056,67 @@ fn deadline_budget_bounds_the_search_and_grows_it_monotonically() {
     assert!(tiny < mid && mid < big, "{tiny} {mid} {big}");
     // Even a near-zero budget scores the first candidate (a decision is always produced).
     assert!(tiny >= 3);
+}
+
+/// Task 3.16 (D-115): `Brain::set_decision_deadline_ms` lowers the cap of the next decision only, never raises it.
+#[test]
+fn a_decision_deadline_lowers_the_cap_of_the_next_decision_only() {
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, &FOUR);
+    let world = pw.inner().clone();
+    let cfg = HybridConfig {
+        mode: HybridMode::Deadline { budget_ms: 4.0 },
+        proposals: 0,
+        decision_cap_ms: Some(5.0),
+        shield_reserve_ms_per_tee: 0.25,
+        mirror: false,
+        ..HybridConfig::default()
+    };
+    let mut b = HybridBrain::new(cfg, ClockKind::Step { step_ms: 0.01 }, Box::new(NoProposer)).unwrap();
+    reset(&mut b, &map, 0, 3);
+    let ids: Vec<i32> = FOUR.iter().map(|t| t.0).collect();
+    let obs = observation(&world, &map, 0, &ids, 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let mut budget_after = |deadline: Option<f64>| {
+        b.set_decision_deadline_ms(deadline);
+        let _ = b.decide_in(&obs, Some(&view));
+        b.last_decision().expect("telemetry").budget_ms
+    };
+    assert_eq!(budget_after(None), 4.0, "5 - 4 x 0.25 = 4: the asked budget fits");
+    assert_eq!(budget_after(Some(3.0)), 2.0, "a 3 ms deadline: 3 - 4 x 0.25");
+    assert_eq!(
+        budget_after(None),
+        4.0,
+        "one-shot: the next decision has its own cap again"
+    );
+    assert_eq!(budget_after(Some(9.0)), 4.0, "a deadline above the cap changes nothing");
+    assert_eq!(budget_after(Some(1.2)), 1.0, "never below the search minimum of 1 ms");
+    assert_eq!(budget_after(Some(f64::NAN)), 4.0, "a garbage deadline is ignored");
+    assert_eq!(budget_after(Some(-1.0)), 4.0);
+
+    // Review F6: a decision that returns early (nothing to target) still uses up the deadline it was given.
+    let mut none = obs.clone();
+    none.others.clear();
+    none.target_id = None;
+    b.set_decision_deadline_ms(Some(3.0));
+    let _ = b.decide_in(&none, Some(&view));
+    let _ = b.decide_in(&obs, Some(&view));
+    assert_eq!(
+        b.last_decision().expect("telemetry").budget_ms,
+        4.0,
+        "the early return took the deadline: it must not reach the next decision"
+    );
+    b.set_decision_deadline_ms(Some(3.0));
+    let _ = b.decide(&none);
+    b.set_decision_deadline_ms(None);
+    let _ = b.decide_in(&obs, Some(&view));
+    assert_eq!(b.last_decision().expect("telemetry").budget_ms, 4.0);
 }
 
 #[test]

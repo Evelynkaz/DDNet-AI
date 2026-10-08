@@ -204,6 +204,8 @@ pub struct HybridBrain {
     /// Task 3.15 (`HybridConfig::window_model`): the learned predictor of the victim's inputs through the lag window, and its reused output buffer.
     window: Option<Box<dyn WindowModel>>,
     window_buf: Vec<Option<PredictedInput>>,
+    /// Task 3.16: the one-shot deadline of the next decision ([`Brain::set_decision_deadline_ms`]).
+    deadline_ms: Option<f64>,
 }
 
 impl HybridBrain {
@@ -262,6 +264,7 @@ impl HybridBrain {
             viz_fresh: false,
             window: None,
             window_buf: Vec::new(),
+            deadline_ms: None,
         })
     }
 
@@ -472,6 +475,7 @@ impl HybridBrain {
         target_id: i32,
         in_flight: &[ddai_physics::core::PlayerInput],
         obs: &Observation,
+        deadline_ms: Option<f64>,
     ) -> Action {
         let search = self.search.as_mut().expect("search built");
         search.set_live(&self.spares, &self.spare_vels, &self.spare_ids, self.travel_goal);
@@ -540,6 +544,7 @@ impl HybridBrain {
                 prev: self.prev,
                 lag_ticks: in_flight.len() as u32,
                 roll_ticks,
+                deadline_ms,
             },
         );
         self.totals.add(&tel);
@@ -553,6 +558,29 @@ impl HybridBrain {
         self.last = Some(tel);
         self.prev = out;
         action_from_input(&out)
+    }
+
+    /// `decide` without a view: the planning world is rebuilt from the observation. `deadline` is the caller's one-shot deadline, taken before any early return.
+    fn decide_with(&mut self, obs: &Observation, deadline: Option<f64>) -> Action {
+        self.viz_fresh = false;
+        // A decision that returns early (no target, dead target) leaves no verdict behind: `last_plan` must not
+        // report the previous decision's search as this one's.
+        self.last = None;
+        let Some(target) = self.target_id(obs) else {
+            self.prev = empty_input();
+            return Action::neutral();
+        };
+        // No exact world: rebuild an approximate one from the observation.
+        let map = obs.map.clone();
+        self.ensure_search(&map, || {
+            let mut w = ddai_physics::world::World::<f32>::from_map(&map, 1);
+            let _ = w.init(std::iter::empty::<&str>());
+            w
+        });
+        self.apply_pending_reset();
+        let rebuilt = crate::brains::planning_world_from_observation(&map, obs);
+        *self.search.as_mut().expect("built").world_mut() = rebuilt;
+        self.plan(obs.self_state.id, target, &[], obs, deadline)
     }
 }
 
@@ -578,32 +606,17 @@ impl Brain for HybridBrain {
     }
 
     fn decide(&mut self, obs: &Observation) -> Action {
-        self.viz_fresh = false;
-        // A decision that returns early (no target, dead target) leaves no verdict behind: `last_plan` must not
-        // report the previous decision's search as this one's.
-        self.last = None;
-        let Some(target) = self.target_id(obs) else {
-            self.prev = empty_input();
-            return Action::neutral();
-        };
-        // No exact world: rebuild an approximate one from the observation.
-        let map = obs.map.clone();
-        self.ensure_search(&map, || {
-            let mut w = ddai_physics::world::World::<f32>::from_map(&map, 1);
-            let _ = w.init(std::iter::empty::<&str>());
-            w
-        });
-        self.apply_pending_reset();
-        let rebuilt = crate::brains::planning_world_from_observation(&map, obs);
-        *self.search.as_mut().expect("built").world_mut() = rebuilt;
-        self.plan(obs.self_state.id, target, &[], obs)
+        // The deadline belongs to this call whatever path it takes (review F6): taken first, so an early return cannot leave it for the next decision.
+        let deadline = self.deadline_ms.take();
+        self.decide_with(obs, deadline)
     }
 
     fn decide_in(&mut self, obs: &Observation, view: Option<&WorldView<'_>>) -> Action {
+        let deadline = self.deadline_ms.take();
         self.viz_fresh = false;
         self.last = None;
         let Some(view) = view else {
-            return self.decide(obs);
+            return self.decide_with(obs, deadline);
         };
         let Some(target) = self.target_id(obs) else {
             self.prev = empty_input();
@@ -612,7 +625,11 @@ impl Brain for HybridBrain {
         self.ensure_search(&obs.map, || view.world.clone());
         self.apply_pending_reset();
         self.search.as_mut().expect("built").world_mut().sync_from(view.world);
-        self.plan(view.self_id, target, view.in_flight, obs)
+        self.plan(view.self_id, target, view.in_flight, obs, deadline)
+    }
+
+    fn set_decision_deadline_ms(&mut self, ms: Option<f64>) {
+        self.deadline_ms = ms.filter(|d| d.is_finite() && *d > 0.0);
     }
 
     fn set_live_context(&mut self, ctx: &LiveContext<'_>) {
@@ -647,6 +664,8 @@ impl Brain for HybridBrain {
             candidates: t.evaluated.iter().sum(),
             proposal_us: (t.proposal_ms * 1000.0).clamp(0.0, f64::from(u32::MAX)) as u32,
             search_us: (t.search_ms * 1000.0).clamp(0.0, f64::from(u32::MAX)) as u32,
+            decision_us: ((t.mirror_ms + t.proposal_ms + t.search_ms + t.shield_ms) * 1000.0)
+                .clamp(0.0, f64::from(u32::MAX)) as u32,
         })
     }
 

@@ -135,6 +135,10 @@ pub struct PlanTelemetry {
     /// excluded), as the brain measured them on its own clock; `0` for a brain without them.
     pub proposal_us: u32,
     pub search_us: u32,
+    /// Task 3.16 (D-115): the whole decision as the brain's own clock saw it -- opponent model, proposals, search and shield together, microseconds
+    /// (the work clock's microseconds in the arena's deadline mode with `clock = "work"`); `0` for a brain without it. What the arena's
+    /// coupled input-lag model (`lag_model`) turns into ticks of lag.
+    pub decision_us: u32,
 }
 
 /// The shared decision-maker interface (task 7.3, acceptance criterion 1). Every implementer is
@@ -166,6 +170,13 @@ pub trait Brain {
     ) -> crate::action::Action {
         let _ = world;
         self.decide(obs)
+    }
+
+    /// Task 3.16 (D-115, opt-in): the time (ms) the **next** [`Brain::decide_in`] may take if it is to make the input slot the caller is aiming at, or
+    /// `None` for the brain's own budget. One-shot: it applies to the next decision only. The hybrid lowers its decision cap to it
+    /// (`HybridConfig::decision_cap_ms`, never raising it); the default ignores it.
+    fn set_decision_deadline_ms(&mut self, ms: Option<f64>) {
+        let _ = ms;
     }
 
     /// Task 4.1: the live bot's extra knowledge for the next [`Brain::decide_in`] (see

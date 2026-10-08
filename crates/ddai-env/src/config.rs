@@ -204,6 +204,69 @@ pub struct PlayerSpec {
     /// With `wb`: strong mode (`STRONG_WB` in the hall).
     #[serde(default)]
     pub wb_strong: bool,
+    /// Task 3.16 (D-115): an input lag that follows the cost of each decision ([`crate::sim::LagModel`]) instead of the fixed `lag`. Needs a brain
+    /// that reports its decision cost (`PlanTelemetry::decision_us`: the hybrid; with `clock = "work"` the cost is the work clock's, reproducible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag_model: Option<LagModelSpec>,
+}
+
+/// The `lag_model` of a [`PlayerSpec`]; see [`crate::sim::LagModel`] for the meaning of the numbers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LagModelSpec {
+    /// The lag (arena `lag`, ticks) of a decision that costs nothing is `ceil(base_ms / 20) - 1`; `base_ms` is the live link's `RTT + margin + the phase constant`.
+    pub base_ms: f64,
+    /// What the live path costs that the arena does not charge (queue hop, the driver's pick-up, the fly's proposals), ms. Default 0.
+    #[serde(default)]
+    pub extra_ms: f64,
+    /// Snapshot arrival jitter, ms (uniform `+-`). Default 0.
+    #[serde(default)]
+    pub jitter_ms: f64,
+    /// The decision-cost estimate before the first decision, ms. Default 6 (the live bot's start value).
+    #[serde(default = "d_lag_initial")]
+    pub initial_ms: f64,
+    /// A deadline-aware search (opt-in): when the first slot leaves a decision at least this many ms, the brain is told to finish in them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_floor_ms: Option<f64>,
+}
+
+fn d_lag_initial() -> f64 {
+    6.0
+}
+
+impl LagModelSpec {
+    /// `fixed_lag` is the player's `lag`: a model replaces it, so asking for both is a mistake.
+    pub fn validate(&self, fixed_lag: u32) -> Result<(), String> {
+        let ok = |x: f64| x.is_finite() && x >= 0.0;
+        if !(ok(self.base_ms)
+            && ok(self.extra_ms)
+            && ok(self.jitter_ms)
+            && ok(self.initial_ms)
+            && self.deadline_floor_ms.is_none_or(|f| f.is_finite() && f > 0.0))
+        {
+            return Err("base_ms, extra_ms, jitter_ms and initial_ms must be finite and non-negative".into());
+        }
+        if fixed_lag != 0 {
+            return Err(
+                "the player has both `lag` and `lag_model`; the model replaces the fixed lag, set only one".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn model(&self) -> crate::sim::LagModel {
+        let mut m = crate::sim::LagModel::new(self.base_ms, self.extra_ms, self.jitter_ms, self.initial_ms);
+        m.deadline_floor_ms = self.deadline_floor_ms;
+        m
+    }
+}
+
+/// The input-lag models of a condition's slots (`None` where a slot has no `lag_model`), for [`crate::game::play_game_modeled`].
+pub fn lag_models_of(slots: &[PlayerSpec]) -> Vec<Option<crate::sim::LagModel>> {
+    slots
+        .iter()
+        .map(|s| s.lag_model.as_ref().map(LagModelSpec::model))
+        .collect()
 }
 
 impl PlayerSpec {
@@ -223,6 +286,7 @@ impl PlayerSpec {
             label: None,
             wb: false,
             wb_strong: false,
+            lag_model: None,
         }
     }
 }
@@ -507,6 +571,10 @@ pub struct HybridSpec {
     /// Head ablation of the window model: the comma-separated heads it may use (`dir`, `jump`, `hook`, `press`, `aim`; default all); the others predict hold.
     #[serde(default)]
     pub window_heads: Option<String>,
+    /// Task 3.16 (D-115): the live knob `hybrid_budget_ms` itself (whole ms, 1 to 8): `HybridConfig::with_budget_ms`, applied after every other
+    /// field of this table, so the search budget **and** the decision cap move together exactly as they do in the bot. Deadline mode only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_budget_ms: Option<u32>,
 }
 
 impl HybridSpec {
@@ -836,6 +904,16 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
                 )));
             }
         };
+        if let Some(ms) = h.live_budget_ms {
+            if !ddai_planner::hybrid::BUDGET_MS_RANGE.contains(&ms) || !matches!(cfg.mode, HybridMode::Deadline { .. })
+            {
+                return Err(EnvError::new(format!(
+                    "hybrid: live_budget_ms = {ms} needs deadline mode and a value in {:?}",
+                    ddai_planner::hybrid::BUDGET_MS_RANGE
+                )));
+            }
+            cfg = cfg.with_budget_ms(f64::from(ms));
+        }
     } else {
         cfg.proposals = 0;
     }
@@ -927,6 +1005,12 @@ impl RunConfig {
             }
             if let Some(r) = &c.rules {
                 r.apply(&self.rules).validate()?;
+            }
+            for slot in c.slots() {
+                if let Some(m) = &slot.lag_model {
+                    m.validate(slot.lag)
+                        .map_err(|e| EnvError::new(format!("condition {:?}: lag_model: {e}", c.name)))?;
+                }
             }
         }
         Ok(())

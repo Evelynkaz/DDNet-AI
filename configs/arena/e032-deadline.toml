@@ -1,0 +1,28 @@
+# work-clock: default-rate
+# Task 3.16 (D-115, E-032): deadline-aware search (the hybrid is told the room the first slot leaves, floor F), their lag 1
+# The focal hybrid is the live build's (main defaults, no fly proposer, opponent model on), vs live-v2 (fixed 20x2), joni arena. Seeds 13001.. are fresh
+# (E-026 used 7001, 8001, 10001, 11001; the reviewers' 2001). `hybrid.live_budget_ms = B` is the live knob `hybrid_budget_ms`: search budget B ms AND decision cap B+1.
+# Lag is the arena's `lag` = the live horizon (`to_tick - tick`) = the tick the input goes out for minus the snapshot's tick minus 1.
+name = "E-032 deadline"
+base_seed = 13001
+games = 200
+
+[[condition]]
+name = "B4 m9 dl2.5 vs 1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag_model = { base_ms = 37.5, extra_ms = 0.5, jitter_ms = 2.5, deadline_floor_ms = 2.5 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B4 m7 dl2.5 vs 1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag_model = { base_ms = 35.5, extra_ms = 0.5, jitter_ms = 2.5, deadline_floor_ms = 2.5 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B4 m6 dl2.5 vs 1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag_model = { base_ms = 34.5, extra_ms = 0.5, jitter_ms = 2.5, deadline_floor_ms = 2.5 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "B4 m5 dl2.5 vs 1"
+arena = "joni-duel"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", hybrid = { live_budget_ms = 4 }, lag_model = { base_ms = 33.5, extra_ms = 0.5, jitter_ms = 2.5, deadline_floor_ms = 2.5 } }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]

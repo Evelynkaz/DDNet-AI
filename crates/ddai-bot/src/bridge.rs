@@ -299,6 +299,12 @@ pub struct StatusMessage {
     /// `decisions` / `decisions_real` (predictions for a target while the pre-inputs are played, and those in which the target's newest message
     /// reached past the snapshot: the A/B metric).
     pub preinput_stats: serde_json::Value,
+    /// Additive since task 3.16 (D-115): the hybrid's search budget in ms the process runs with (`--hybrid-budget-ms` / `hybrid_budget_ms`; 4 = the
+    /// default; the decision cap is this plus 1 ms). Set also when the brain is not the hybrid (the value applies if the brain is switched to it).
+    pub hybrid_budget_ms: u32,
+    /// Additive since task 3.16 (D-115): the fixed prediction margin in ms (`--prediction-margin-ms` / `prediction_margin_ms`), `null` while the
+    /// margin is adaptive (the default; the live value is in the `input margin` log line).
+    pub prediction_margin_ms: Option<i32>,
 }
 
 /// Binds a Unix socket at `path` that only its owner can reach: replaces a stale socket file (but refuses to touch
@@ -844,10 +850,14 @@ mod tests {
             window_guard: None,
             preinput: "on".into(),
             preinput_stats: serde_json::json!({"received": 7}),
+            hybrid_budget_ms: 3,
+            prediction_margin_ms: None,
         });
         let (k, p) = read_message(&mut client);
         assert_eq!(k, kind::STATUS);
         let v: serde_json::Value = serde_json::from_slice(&p).unwrap();
+        assert_eq!(v["hybrid_budget_ms"], 3);
+        assert!(v["prediction_margin_ms"].is_null(), "adaptive margin: null");
         assert_eq!(v["target"], 3);
         assert_eq!(v["telemetry"]["x"], 1);
         assert_eq!(v["target_tag"], "c3-deadbeef");

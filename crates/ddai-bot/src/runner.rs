@@ -265,6 +265,15 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
         mode = bot.mode().name(),
         wb = cfg.nav.wb_mode.name(),
         strong = cfg.nav.strong,
+        hybrid_budget_ms = cfg
+            .brain
+            .hybrid_budget_ms
+            .unwrap_or(ddai_planner::hybrid::DEFAULT_BUDGET_MS as u32),
+        prediction_margin_ms = if cfg.client.adaptive_margin {
+            "adaptive".to_string()
+        } else {
+            cfg.client.prediction_margin_ms.to_string()
+        },
         "starting the bot"
     );
     // Task 3.17 (D-111): the learned window model, if asked for (only the hybrid brain uses it). A model that cannot be loaded refuses the
@@ -372,6 +381,9 @@ pub fn run(cfg: RunnerConfig) -> Result<RunReport, RunnerError> {
             );
         }
         if let Some(snap) = pending.take() {
+            if let Some(t) = trace.as_mut() {
+                t.snapshot(snap.tick, snap.pred_tick, snap.next_input_in);
+            }
             let out = bot.on_snapshot(&snap);
             last_tick = snap.tick;
             apply_output(&client, &out, &snap, &mut report);
@@ -892,6 +904,11 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         preinput_stats: preinput_stats(&pre_counts),
         window_model: window_model.to_string(),
         window_guard: window_guard.and_then(|g| serde_json::to_value(g).ok()),
+        hybrid_budget_ms: cfg
+            .brain
+            .hybrid_budget_ms
+            .unwrap_or(ddai_planner::hybrid::DEFAULT_BUDGET_MS as u32),
+        prediction_margin_ms: (!cfg.client.adaptive_margin).then_some(cfg.client.prediction_margin_ms),
     }
 }
 

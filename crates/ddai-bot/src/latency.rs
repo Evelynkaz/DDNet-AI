@@ -194,6 +194,12 @@ impl Series {
         }
     }
 
+    /// Task 3.16: how many of the samples in the ring are at most `us` (exact below 256, from the histogram: for the series that count ticks).
+    pub fn count_at_most(&self, us: u32) -> u64 {
+        let upto = (us.min(EXACT_BELOW - 1) as usize) + 1;
+        self.hist[..upto].iter().map(|&c| u64::from(c)).sum()
+    }
+
     /// The exact `p` quantile (0..=1) of the samples in the ring, microseconds (sorts a copy: for the final report).
     pub fn quantile_us(&self, p: f64) -> u32 {
         if self.samples.is_empty() {
@@ -317,10 +323,33 @@ pub struct LatencyStats {
     /// Task 3.11: the ticks the brain's world was predicted past the snapshot (the horizon; the "microseconds" of this series
     /// are a count of ticks, like `candidates`), brain decisions only.
     pub horizon: Series,
+    /// Task 3.16 (D-115): for the same decisions, the time from the snapshot's arrival to the next input being due (`next_input_in`: the slack of the first
+    /// slot; 0 before the driver's bootstrap) and the time the bot expects the decision to need before that input could carry it (queue hop + the
+    /// decision-time estimate + the driver's pick-up). A decision whose `ready` is above its `slack` is aimed at the second slot, a whole tick later.
+    pub slack: Series,
+    pub ready: Series,
     pub slots: SlotStats,
 }
 
 impl LatencyStats {
+    /// Task 3.16 (D-115): the lag of the brain's decisions in ticks -- the `horizon` series (the ticks the brain's world was predicted past the snapshot, which is the
+    /// arena's `lag`) -- as the share of decisions at 0, 1, 2, 3 and 4 or more ticks, in percent. `None` before the first brain decision.
+    pub fn horizon_shares(&self) -> Option<[f64; 5]> {
+        let n = self.horizon.samples.len() as u64;
+        if n == 0 {
+            return None;
+        }
+        let c = |k: u32| self.horizon.count_at_most(k);
+        let pct = |a: u64| 100.0 * a as f64 / n as f64;
+        Some([
+            pct(c(0)),
+            pct(c(1) - c(0)),
+            pct(c(2) - c(1)),
+            pct(c(3) - c(2)),
+            pct(n - c(3)),
+        ])
+    }
+
     /// One decision's bot-side timing.
     pub fn record(&mut self, total: Duration, brain: Duration) {
         self.total.push(total);
@@ -359,6 +388,8 @@ impl LatencyStats {
             "finish": self.finish.json(), "clip": self.clip.json(), "handed": self.handed.json(), "pickup": self.pickup.json(),
             "proposal": self.proposal.json(), "search": self.search.json(),
             "candidates": self.candidates.json(), "horizon_ticks": self.horizon.json(),
+            "slack": self.slack.json(), "ready": self.ready.json(),
+            "horizon_shares": self.horizon_shares(),
             "slots": {
                 "decisions": self.slots.decisions, "first_slot": self.slots.in_first_slot,
                 "missed_first_slot": self.slots.missed_first_slot, "as_predicted": self.slots.as_predicted,
@@ -392,6 +423,17 @@ impl LatencyStats {
             line("search", self.search.quick_summary()),
             line("brain (decisions made)", self.brain_made.quick_summary()),
             line("horizon (ticks)", self.horizon.quick_summary()),
+            self.horizon_shares().map_or_else(
+                || "horizon shares: none".to_string(),
+                |h| {
+                    format!(
+                        "horizon shares (the lag): 0 ticks {:.1}% 1 tick {:.1}% 2 ticks {:.1}% 3 ticks {:.1}% >=4 ticks {:.1}%",
+                        h[0], h[1], h[2], h[3], h[4]
+                    )
+                },
+            ),
+            line("slack (arrival -> next input due)", self.slack.quick_summary()),
+            line("ready (aimed decision need)", self.ready.quick_summary()),
             line("phase update", self.update.quick_summary()),
             line("phase nav", self.nav.quick_summary()),
             line("phase predict", self.predict.quick_summary()),
@@ -467,6 +509,26 @@ mod tests {
             Duration::from_micros(9),
         );
         assert_eq!((l.candidates.summary().count, l.brain_made.summary().count), (100, 100));
+    }
+
+    /// Task 3.16: the horizon series counts ticks; its shares are exact and add up to 100.
+    #[test]
+    fn the_horizon_shares_split_the_brain_decisions_by_ticks() {
+        let mut l = LatencyStats::default();
+        assert_eq!(l.horizon_shares(), None);
+        for ticks in [1u64, 2, 2, 2, 3, 3, 4, 7, 0, 2] {
+            l.horizon.push(Duration::from_micros(ticks));
+        }
+        let h = l.horizon_shares().unwrap();
+        assert_eq!(h, [10.0, 10.0, 40.0, 20.0, 20.0], "ticks 0 | 1 | 2 | 3 | 4 and more");
+        assert!((h.iter().sum::<f64>() - 100.0).abs() < 1e-9);
+        assert!(
+            l.report()
+                .contains("horizon shares (the lag): 0 ticks 10.0% 1 tick 10.0% 2 ticks 40.0%"),
+            "{}",
+            l.report()
+        );
+        assert_eq!(l.json()["horizon_shares"][2], 40.0);
     }
 
     #[test]

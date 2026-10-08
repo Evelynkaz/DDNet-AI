@@ -35,7 +35,10 @@ pub mod window;
 pub mod work;
 
 pub use brain::HybridBrain;
-pub use config::{FINISH_DRAG_WEIGHT, HybridConfig, HybridMode, RobustMode, hybrid_planner_preset, hybrid_terms};
+pub use config::{
+    BUDGET_MS_RANGE, CAP_HEADROOM_MS, DEFAULT_BUDGET_MS, FINISH_DRAG_WEIGHT, HybridConfig, HybridMode, RobustMode,
+    hybrid_planner_preset, hybrid_terms,
+};
 pub use proposer::{
     ActionDistribution, NoProposer, ProposalOutcome, ProposeCtx, Proposer, ScriptedProposer, plans_from_distribution,
 };

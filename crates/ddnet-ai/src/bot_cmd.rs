@@ -107,8 +107,16 @@ pub struct BotOpts {
     /// moves the input slot later after each snapshot, giving a slow brain time to make it
     /// (`docs/formats.md` §21.6); too small and inputs arrive late (`INPUTTIMING` shows it in the
     /// report's `input_margin`).
-    #[arg(long)]
+    /// Task 3.16 (D-115): 0 to 30; also `prediction_margin_ms = ..` in the settings file (the flag wins). It is an **override**, not a floor:
+    /// the adaptive controller is off for the run.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(0..=30))]
     pub prediction_margin_ms: Option<i32>,
+    /// The hybrid's search budget in whole ms, 1 to 8 (task 3.16, D-115; also `hybrid_budget_ms = ..` in the settings file, the flag wins).
+    /// The decision cap moves with it (budget + 1 ms: the default 4 ms / 5 ms pair is the point `4`); the extension of D-042 in danger is
+    /// untouched. A shorter decision is a smaller share of the input lag the 20 ms tick rounds up (`docs/research/lag-shave.md`); the arena says a
+    /// budget below 3 ms loses strength (E-026 section 4). Without it the default, byte for byte.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=8))]
+    pub hybrid_budget_ms: Option<u32>,
     /// Walk to this tile `X,Y` as soon as the tee has spawned (task 4.2); afterwards the bot returns to
     /// its mode. Crosses freeze tubes where it must (the Copy Love Box wayblock tubes).
     #[arg(long, value_parser = parse_pair, conflicts_with = "follow")]
@@ -483,7 +491,12 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
             Err(e) => eprintln!("timeout code: off ({e})"),
         }
     }
-    match o.prediction_margin_ms {
+    // Task 3.16 (D-115): the two input-lag knobs, the flag over the settings file; nothing set = the behaviour of the build before them.
+    let knobs = ddai_bot::timing_knobs::resolve(o.hybrid_budget_ms, o.prediction_margin_ms, &settings);
+    for w in &knobs.warnings {
+        eprintln!("{w}");
+    }
+    match knobs.prediction_margin_ms {
         Some(m) => client.prediction_margin_ms = m,
         None => client.adaptive_margin = true,
     }
@@ -539,6 +552,10 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
     brain.hybrid_mirror = o.hybrid_mirror;
     brain.hybrid_finish = o.finish.hybrid_drag();
     brain.hybrid_wb_hold = o.finish.hybrid_wb_hold();
+    brain.hybrid_budget_ms = knobs.hybrid_budget_ms;
+    for line in knobs.start_lines(kind == BrainKind::Hybrid) {
+        eprintln!("{line} (task 3.16)");
+    }
     if o.finish.target_logic() {
         // One line at start (the journal of a launch from the site shows that `--finish` reached the bot; STATUS carries it too).
         eprintln!("finish blocks: {} (--finish; D-097)", o.finish.name());
@@ -1223,5 +1240,30 @@ mod search_threads_tests {
         assert!(!get(&["--hybrid-mirror", "off"]).unwrap());
         assert!(get(&["--hybrid-mirror", "maybe"]).is_err());
         assert!(get(&["--hybrid-mirror"]).is_err(), "a value is required");
+    }
+
+    /// Task 3.16 (D-115): the two input-lag flags are absent by default (the old behaviour) and refuse values outside their ranges.
+    #[test]
+    fn the_input_lag_flags_are_off_by_default_and_checked_against_their_ranges() {
+        let get = |args: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v).map(|c| (c.bot.hybrid_budget_ms, c.bot.prediction_margin_ms))
+        };
+        assert_eq!(get(&[]).unwrap(), (None, None));
+        assert_eq!(get(&["--hybrid-budget-ms", "1"]).unwrap().0, Some(1));
+        assert_eq!(get(&["--hybrid-budget-ms", "8"]).unwrap().0, Some(8));
+        for bad in ["0", "9", "-1", "2.5", "x"] {
+            assert!(get(&["--hybrid-budget-ms", bad]).is_err(), "--hybrid-budget-ms {bad}");
+        }
+        assert_eq!(get(&["--prediction-margin-ms", "0"]).unwrap().1, Some(0));
+        assert_eq!(get(&["--prediction-margin-ms", "30"]).unwrap().1, Some(30));
+        for bad in ["31", "-1", "x"] {
+            assert!(
+                get(&["--prediction-margin-ms", bad]).is_err(),
+                "--prediction-margin-ms {bad}"
+            );
+        }
+        assert!(get(&["--prediction-margin-ms=-1"]).is_err());
     }
 }

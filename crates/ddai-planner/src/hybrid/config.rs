@@ -375,7 +375,27 @@ impl Default for HybridConfig {
 /// Task 3.10: the weight of the frozen-victim drag shaping the finishing switch turns on (`PlannerConfig::frozen_drag_weight`).
 pub const FINISH_DRAG_WEIGHT: f64 = 20.0;
 
+/// Task 3.16 (D-115): the default search budget (ms) of the live hybrid, the one `HybridConfig::default()` carries.
+pub const DEFAULT_BUDGET_MS: f64 = 4.0;
+/// Task 3.16 (D-115): the decision cap sits this far above the search budget (the default 4 ms budget under a 5 ms cap).
+pub const CAP_HEADROOM_MS: f64 = 1.0;
+/// Task 3.16 (D-115): the range of the live knob `hybrid_budget_ms` (whole milliseconds in the settings file and on the command line).
+pub const BUDGET_MS_RANGE: std::ops::RangeInclusive<u32> = 1..=8;
+
 impl HybridConfig {
+    /// Task 3.16 (D-115), the live knob `hybrid_budget_ms`: the search budget is `budget_ms` **and the decision cap moves with it**
+    /// (`budget_ms + `[`CAP_HEADROOM_MS`], so the default 4 ms / 5 ms pair is the point `budget_ms = 4`). The cap has to move: the search
+    /// runs for `min(budget, cap - shield reserve - proposals - opponent model)` (D-080), and under the default 5 ms cap that is already only
+    /// about 2.2 ms in a duel with the fly's proposals, so lowering the budget alone changes next to nothing (and raising it nothing at all).
+    /// The extension of D-042 (danger confirmed, up to `adaptive.max_total_ms`) is untouched. `Fixed` mode keeps no budget and is returned as it is.
+    pub fn with_budget_ms(mut self, budget_ms: f64) -> HybridConfig {
+        if let HybridMode::Deadline { .. } = self.mode {
+            self.mode = HybridMode::Deadline { budget_ms };
+            self.decision_cap_ms = Some(budget_ms + CAP_HEADROOM_MS);
+        }
+        self
+    }
+
     /// Task 3.10 (opt-in, `--finish full`): this configuration with the finishing switches of the hybrid on -- the frozen-victim drag
     /// shaping ([`FINISH_DRAG_WEIGHT`]) only. `finish_families` (the offensive techniques against a frozen victim), `frozen_stage_weight` (the staging
     /// point) and `held_forecast_weight` (the exact forecast) stay separate knobs: no gain that holds up in E-021. The bot's target logic has its own switch
@@ -463,6 +483,28 @@ mod tests {
         assert!(c.validate().is_ok());
         assert_eq!(HybridConfig::fixed().mode, HybridMode::Fixed);
         assert!(!HybridConfig::fixed().adaptive.enabled);
+    }
+
+    /// Task 3.16 (D-115): the knob's default point is the library default, byte for byte, and it moves the cap with the budget.
+    #[test]
+    fn the_budget_knob_at_its_default_is_the_default_config_and_moves_the_cap_with_the_budget() {
+        assert_eq!(
+            HybridConfig::default().with_budget_ms(DEFAULT_BUDGET_MS),
+            HybridConfig::default()
+        );
+        for ms in BUDGET_MS_RANGE {
+            let c = HybridConfig::default().with_budget_ms(f64::from(ms));
+            assert_eq!(
+                c.mode,
+                HybridMode::Deadline {
+                    budget_ms: f64::from(ms)
+                }
+            );
+            assert_eq!(c.decision_cap_ms, Some(f64::from(ms) + CAP_HEADROOM_MS));
+            assert!(c.validate().is_ok());
+        }
+        // The fixed-work mode has no budget to set.
+        assert_eq!(HybridConfig::fixed().with_budget_ms(2.0), HybridConfig::fixed());
     }
 
     #[test]
