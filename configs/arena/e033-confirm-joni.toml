@@ -1,0 +1,93 @@
+# work-clock: default-rate
+# Task 3.18 (E-033, D-114), CONFIRMATION, pre-registered in docs/research/wb-hold.md before it was run: held-block share of the hybrid with the target rule of
+# `--finish target` (`hold_target`) against the same plus the wayblock hold (`hybrid.wb_hold`, the hall's wall swings against a frozen victim), on FRESH seeds, 200
+# paired games per arm and condition (both arms play the same games: same seeds and layouts). `wb = true` gives both arms the live bot's wayblock hints (the hybrid
+# ignores them without `wb_hold`: identity checked against the pre-change binary). Opponents: scripted bots and the competitor's live planner (`live-v2`), 1 or 2.
+#   ddnet-ai arena run --config configs/arena/e033-confirm-joni.toml --out ~/aiddnet/data/runs/E-033/joni --threads 3
+name = "E-033 confirmation: joni-wb-left and joni-wb-right (the map of the live session), seeds 83001.."
+base_seed = 83001
+games = 200
+
+[rules]
+after_ticks = 250
+hold_target = true
+
+[[condition]]
+name = "joni-wb-left 1 scripted base"
+arena = "joni-wb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true }, { brain = "scripted" }]
+
+[[condition]]
+name = "joni-wb-left 1 scripted wbhold"
+arena = "joni-wb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true, hybrid = { wb_hold = true } }, { brain = "scripted" }]
+
+[[condition]]
+name = "joni-wb-left 1 live-v2 base"
+arena = "joni-wb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "joni-wb-left 1 live-v2 wbhold"
+arena = "joni-wb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true, hybrid = { wb_hold = true } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "joni-wb-left 2 scripted base"
+arena = "joni-wb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "joni-wb-left 2 scripted wbhold"
+arena = "joni-wb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true, hybrid = { wb_hold = true } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "joni-wb-left 2 live-v2 base"
+arena = "joni-wb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true }, { brain = "planner", mode = "fixed", preset = "live-v2", count = 2 }]
+
+[[condition]]
+name = "joni-wb-left 2 live-v2 wbhold"
+arena = "joni-wb-left"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true, hybrid = { wb_hold = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", count = 2 }]
+
+[[condition]]
+name = "joni-wb-right 1 scripted base"
+arena = "joni-wb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true }, { brain = "scripted" }]
+
+[[condition]]
+name = "joni-wb-right 1 scripted wbhold"
+arena = "joni-wb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true, hybrid = { wb_hold = true } }, { brain = "scripted" }]
+
+[[condition]]
+name = "joni-wb-right 1 live-v2 base"
+arena = "joni-wb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "joni-wb-right 1 live-v2 wbhold"
+arena = "joni-wb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true, hybrid = { wb_hold = true } }, { brain = "planner", mode = "fixed", preset = "live-v2" }]
+
+[[condition]]
+name = "joni-wb-right 2 scripted base"
+arena = "joni-wb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "joni-wb-right 2 scripted wbhold"
+arena = "joni-wb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true, hybrid = { wb_hold = true } }, { brain = "scripted", count = 2 }]
+
+[[condition]]
+name = "joni-wb-right 2 live-v2 base"
+arena = "joni-wb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true }, { brain = "planner", mode = "fixed", preset = "live-v2", count = 2 }]
+
+[[condition]]
+name = "joni-wb-right 2 live-v2 wbhold"
+arena = "joni-wb-right"
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, wb = true, hybrid = { wb_hold = true } }, { brain = "planner", mode = "fixed", preset = "live-v2", count = 2 }]

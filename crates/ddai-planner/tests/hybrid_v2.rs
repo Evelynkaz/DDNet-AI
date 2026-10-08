@@ -440,6 +440,100 @@ fn wall_throws_offer_swings_off_a_wall_beside_us_to_a_frozen_victim() {
     assert_eq!(live_on.generated, live_off.generated);
 }
 
+/// `fixed_decision` with the live bot's wayblock hint (`LiveContext::wb`) set before the decision: `hall` = we stand in the held hall, `wall_dir` = the
+/// side of its freeze wall (task 3.18).
+fn fixed_decision_hinted(
+    tees: &[(i32, f64, f64)],
+    freeze_victim: bool,
+    hall_hint: Option<i32>,
+    tweak: impl FnOnce(&mut HybridConfig),
+) -> DecisionTelemetry {
+    let mut cfg = HybridConfig::fixed();
+    cfg.proposals = 0;
+    tweak(&mut cfg);
+    let map = hall();
+    let mut pw = PhysicsWorld::new(map.clone(), 1);
+    place(&mut pw, tees);
+    if freeze_victim {
+        pw.inner_mut().characters[1].as_mut().expect("victim").freeze_time = 300;
+    }
+    let world = pw.inner().clone();
+    let mut b = HybridBrain::new(cfg, ClockKind::Wall, Box::new(NoProposer)).unwrap();
+    b.reset(&ResetContext {
+        map: map.clone(),
+        self_id: 0,
+        seed: 3,
+    });
+    if let Some(wall_dir) = hall_hint {
+        b.set_live_context(&ddai_brain::LiveContext {
+            wb: ddai_brain::WbHints {
+                in_hall: true,
+                wall_dir,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    let ids: Vec<i32> = tees.iter().map(|t| t.0).collect();
+    let obs = observation(&world, &map, 0, &ids, 1);
+    let view = WorldView {
+        world: &world,
+        self_id: 0,
+        lag_ticks: 0,
+        in_flight: &[],
+    };
+    let _ = b.decide_in(&obs, Some(&view));
+    b.last_decision().expect("telemetry").clone()
+}
+
+#[test]
+fn wb_hold_throws_a_frozen_victim_toward_the_halls_wall_only_with_the_hint_and_the_switch() {
+    // Mid-hall, no wall within 5 tiles (the 3.9 rule finds none), the frozen victim 7 tiles away: only the hall's own side can offer the swings.
+    let open = [(0, 17.5, 9.5), (1, 24.5, 9.5)];
+    let base = |c: &mut HybridConfig| {
+        c.mirror = false;
+        c.throw_cap = 4;
+    };
+    let plain = fixed_decision(&open, true, base);
+    let on = fixed_decision_hinted(&open, true, Some(-1), |c| {
+        base(c);
+        c.wb_hold = true;
+    });
+    assert_eq!(
+        on.generated[THROW] - plain.generated[THROW],
+        6,
+        "two jump steps x three releases"
+    );
+    assert_eq!((on.wall_cands, plain.wall_cands), (6, 0));
+    // The right hall's wall side (+1) offers the same number, the mirrored lines.
+    let right = fixed_decision_hinted(&open, true, Some(1), |c| {
+        base(c);
+        c.wb_hold = true;
+    });
+    assert_eq!(right.wall_cands, 6);
+    // The switch off: the hint alone changes nothing (the default hybrid ignores `WbHints`, as it always did).
+    let hint_only = fixed_decision_hinted(&open, true, Some(-1), base);
+    assert_eq!(hint_only.generated, plain.generated);
+    // The switch on without a hint (outside the hall, the lower shelf: `wall_dir` 0) changes nothing either.
+    let no_hint = fixed_decision(&open, true, |c| {
+        base(c);
+        c.wb_hold = true;
+    });
+    assert_eq!(no_hint.generated, plain.generated);
+    let zero = fixed_decision_hinted(&open, true, Some(0), |c| {
+        base(c);
+        c.wb_hold = true;
+    });
+    assert_eq!(zero.generated, plain.generated);
+    // Only against a frozen victim.
+    let free = fixed_decision_hinted(&open, false, Some(-1), |c| {
+        base(c);
+        c.wb_hold = true;
+    });
+    let free_plain = fixed_decision(&open, false, base);
+    assert_eq!(free.generated, free_plain.generated);
+}
+
 #[test]
 fn the_default_hybrid_ignores_the_v2_fields_it_does_not_use() {
     // Switches off = the 3.7b hybrid: the same work-clock games, with a mirror planner of `None` or an explicit `preset_normal`

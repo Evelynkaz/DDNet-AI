@@ -711,6 +711,7 @@ fn the_wayblock_hints_apply_and_lift_the_hall_overrides() {
             in_hall: true,
             strong: false,
             band: Some((0.0, 0.0, 64.0, 64.0)),
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -733,6 +734,7 @@ fn the_wayblock_hints_apply_and_lift_the_hall_overrides() {
             in_hall: true,
             strong: true,
             band: None,
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -749,6 +751,7 @@ fn the_wayblock_hints_apply_and_lift_the_hall_overrides() {
             in_hall: false,
             strong: true,
             band: Some((0.0, 0.0, 1.0, 1.0)),
+            ..Default::default()
         },
         ..Default::default()
     });

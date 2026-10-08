@@ -518,7 +518,7 @@
     var WB_SMART_LABELS = { on: "вкл", off: "выкл" };
     // Task 3.17 (D-111): the opponent-input predictor of the bot (`window_model` of the status); «hold» = the online guard benched it (it still runs in the shadow).
     var WINDOW_MODEL_LABELS = { off: "выкл", on: "вкл", hold: "выкл (предохранитель: хуже «держит»)", killed: "выкл (флажок)" };
-    var FINISH_LABELS = { off: "выкл", target: "цель", full: "полный (не рекомендуется)" };
+    var FINISH_LABELS = { off: "выкл", target: "цель", wb: "цель + удержание ВБ", full: "полный (не рекомендуется)" };
     var APPLIED_TEXT = {
       applied: "применено к работающему боту (бот перечитал тот же файл)",
       mismatch: "ВНИМАНИЕ: бот перечитал другой файл списков, не тот, что правит сайт (проверьте --relations у бота и сайта): бот может не щадить ваших друзей",

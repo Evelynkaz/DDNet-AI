@@ -1,0 +1,31 @@
+# W2r -- WB hold (right hall of Copy Love Box), task 3.18 (docs/research/wb-hold.md): The victim lies frozen on the upper shelf 6 tiles from the spot, next to the job spot.
+# The victim (slot 1) is frozen for the whole 150 ticks (the moment right after our block) and idle; the subject (slot 0) is the brain under test.
+# Success is the held-block rule of D-059 (amended): the victim is out on EVERY tick of the 250-tick window (a victim that thaws at tick 150 and
+# walks off fails) and the subject is never out. Doing nothing fails: the victim lies off the freeze and thaws.
+id = "W2r"
+name = "WB hold: upper shelf, mid (right)"
+source = "task 3.18; docs/research/wb-hold.md"
+description = "The victim lies frozen on the upper shelf 6 tiles from the spot, next to the job spot."
+horizon = 250
+trials = 20
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[[tee]]
+pos = [151.5, 79.5]
+jitter = [0.4, 0.0]
+
+[[tee]]
+pos = [145.5, 79.5]
+jitter = [0.4, 0.0]
+freeze_ticks = 150
+
+[success]
+kind = "all"
+of = [
+    { kind = "stays_out", tee = 1, from = 1, to = 250 },
+    { kind = "not_out", tee = 0 },
+]

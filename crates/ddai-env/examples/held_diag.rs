@@ -163,18 +163,8 @@ fn trace_game(cfg: &RunConfig, arenas: &BTreeMap<String, Arena>, o: &Orig) -> Re
     let arena = &arenas[&cond.arena];
     let rules = cfg.rules_for(cond);
     let slots: Vec<PlayerSpec> = cond.slots();
-    let players: Vec<PlayerSetup> = slots
-        .iter()
-        .map(|s| {
-            let b = builtin_brain(s).map_err(|e| e.to_string())?;
-            let label = b.name().to_string();
-            Ok(PlayerSetup {
-                brain: b,
-                lag: s.lag,
-                label,
-            })
-        })
-        .collect::<Result<_, String>>()?;
+    // The same players as a run plays (the wayblock hints of a `wb = true` slot included).
+    let players: Vec<PlayerSetup> = ddai_env::run::setups(&slots, &builtin_brain, arena).map_err(|e| e.to_string())?;
     let seed = cfg.base_seed.wrapping_add(u64::from(o.game));
     let victim = o.victim;
     let focal = if victim == 0 { 1 } else { 0 };

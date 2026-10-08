@@ -878,7 +878,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         clips_saved: bot.stats().clips_saved,
         kill_cooldown_ticks: bot.kill_cooldown_ticks(),
         paused: bot.paused(),
-        finish: finish_label(cfg.bot.finish, cfg.brain.hybrid_finish).to_string(),
+        finish: finish_label(cfg.bot.finish, cfg.brain.hybrid_finish, cfg.bot.finish_wb).to_string(),
         selfkill: if bot.no_selfkill() { "off" } else { "on" }.to_string(),
         wb_smart: if cfg.nav.wb_smart { "on" } else { "off" }.to_string(),
         duel: bot.duel().is_some(),
@@ -899,14 +899,16 @@ fn preinput_stats(c: &ddai_world::preinput::PreInputCounts) -> serde_json::Value
     })
 }
 
-/// The finishing mode the process runs with, as `--finish` spells it: `off`, `target` (the bot's target rule) or `full` (the target
-/// rule plus the hybrid's drag shaping). Two independent switches carry it ([`BotConfig::finish`], [`BrainOptions::hybrid_finish`]); the
-/// drag alone (without the target rule) is not a mode the command line can ask for, and reads as `off`.
-fn finish_label(target_rule: bool, hybrid_drag: bool) -> &'static str {
-    match (target_rule, hybrid_drag) {
-        (false, _) => "off",
-        (true, false) => "target",
-        (true, true) => "full",
+/// The finishing mode the process runs with, as `--finish` spells it: `off`, `target` (the bot's target rule), `wb` (the target rule plus the
+/// wayblock hold, task 3.18) or `full` (the target rule plus the hybrid's drag shaping). Three independent switches carry it
+/// ([`BotConfig::finish`], [`BrainOptions::hybrid_finish`], [`BotConfig::finish_wb`]); the drag alone (without the target rule) is not a mode
+/// the command line can ask for, and reads as `off`.
+fn finish_label(target_rule: bool, hybrid_drag: bool, wb_hold: bool) -> &'static str {
+    match (target_rule, hybrid_drag, wb_hold) {
+        (false, _, _) => "off",
+        (true, false, false) => "target",
+        (true, _, true) => "wb",
+        (true, true, false) => "full",
     }
 }
 
@@ -1030,11 +1032,13 @@ mod tests {
 
     #[test]
     fn the_status_names_the_finishing_mode_as_the_command_line_spells_it() {
-        assert_eq!(finish_label(false, false), "off");
-        assert_eq!(finish_label(true, false), "target");
-        assert_eq!(finish_label(true, true), "full");
+        assert_eq!(finish_label(false, false, false), "off");
+        assert_eq!(finish_label(true, false, false), "target");
+        assert_eq!(finish_label(true, true, false), "full");
+        assert_eq!(finish_label(true, false, true), "wb");
         // The drag without the target rule cannot be asked for (`--finish full` sets both): read as off, never as a mode of its own.
-        assert_eq!(finish_label(false, true), "off");
+        assert_eq!(finish_label(false, true, false), "off");
+        assert_eq!(finish_label(false, false, true), "off");
     }
 
     fn table() -> crate::players::PlayerTable {

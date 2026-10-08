@@ -88,6 +88,10 @@ pub struct WbHints {
     /// `wbBand`: the pixel rectangle `(x0, y0, x1, y1)` the planner is penalised for leaving
     /// (`bandCost`, zero by default), only while `in_hall`.
     pub band: Option<(f32, f32, f32, f32)>,
+    /// Task 3.18 (`--finish wb`): the side of the hall's freeze wall -- `-1` the left hall (the wall is to our left), `1` the right one --
+    /// while we hold the upper shelf (the guard's `wallDir` of af49dfb); `0` = none (not in the hall, the lower role, or the mode is off).
+    /// A search brain that knows it may throw a frozen victim toward that wall (the hybrid's `wb_hold`).
+    pub wall_dir: i32,
 }
 
 /// What the bot learned about the map that outlives a decision (task 4.2): the dead-zone grid and the

@@ -199,7 +199,15 @@ pub struct WbHintBrain {
     side: ddai_nav::wayblock::WbSide,
     strong: bool,
     name: String,
+    /// Task 3.18: the guard's role as the live bot's `WbRole` keeps it, reduced to what an arena has: we are the **lower** guard while we stand
+    /// `WB_NO_CLIMB_TILES` or more below the first spot in the hall (`below`), after the same 25-tick debounce. `wall_dir` is 0 in that role.
+    lower: bool,
+    /// The first tick the wanted role differed from `lower` (`-1`: it does not).
+    want_since: i32,
 }
+
+/// `WB_ROLE_DEBOUNCE_TICKS` of `ddai-bot::wb_guard`: how long a change of role must be wanted before it is made.
+const ROLE_DEBOUNCE_TICKS: i32 = 25;
 
 impl WbHintBrain {
     pub fn new(
@@ -215,29 +223,54 @@ impl WbHintBrain {
             side,
             strong,
             name,
+            lower: false,
+            want_since: -1,
         }
     }
 
-    fn hints(&self, pos: ddai_physics::vmath::Vec2<f32>) -> ddai_brain::WbHints {
+    /// The hints for the tee at `pos` at `tick`; advances the guard's role.
+    fn hints(&mut self, pos: ddai_physics::vmath::Vec2<f32>, tick: i32) -> ddai_brain::WbHints {
         let (tx, ty) = ((pos.x / 32.0).trunc() as i32, (pos.y / 32.0).trunc() as i32);
         if !self.def.in_hall(self.side, tx, ty) {
             return ddai_brain::WbHints::default();
+        }
+        let first = self.def.side(self.side).spots[0];
+        let below = ty - first.1 >= ddai_nav::wayblock::WB_NO_CLIMB_TILES;
+        if below == self.lower {
+            self.want_since = -1;
+        } else {
+            if self.want_since < 0 || tick < self.want_since {
+                self.want_since = tick;
+            }
+            if tick - self.want_since >= ROLE_DEBOUNCE_TICKS {
+                self.lower = below;
+                self.want_since = -1;
+            }
         }
         ddai_brain::WbHints {
             in_hall: true,
             strong: self.strong,
             band: ddai_nav::wayblock::wb_band(&self.def, self.side),
+            // The guard on the upper shelf (the live bot's `wb_brain_hints`): the hall's freeze wall is on the side of the hall; on the lower
+            // shelf there is no such throw.
+            wall_dir: match (self.side, self.lower) {
+                (_, true) => 0,
+                (ddai_nav::wayblock::WbSide::Left, false) => -1,
+                (ddai_nav::wayblock::WbSide::Right, false) => 1,
+            },
         }
     }
 }
 
 impl Brain for WbHintBrain {
     fn reset(&mut self, ctx: &ResetContext) {
+        self.lower = false;
+        self.want_since = -1;
         self.inner.reset(ctx);
     }
 
     fn decide(&mut self, obs: &Observation) -> Action {
-        let wb = self.hints(obs.self_state.pos);
+        let wb = self.hints(obs.self_state.pos, obs.tick);
         self.inner.set_live_context(&ddai_brain::LiveContext {
             wb,
             ..Default::default()
@@ -246,7 +279,7 @@ impl Brain for WbHintBrain {
     }
 
     fn decide_in(&mut self, obs: &Observation, world: Option<&WorldView<'_>>) -> Action {
-        let wb = self.hints(obs.self_state.pos);
+        let wb = self.hints(obs.self_state.pos, obs.tick);
         self.inner.set_live_context(&ddai_brain::LiveContext {
             wb,
             ..Default::default()
@@ -284,11 +317,33 @@ mod wb_hint_tests {
     fn hints_exist_only_while_the_tee_stands_in_the_hall() {
         let def = wayblocks().into_iter().next().unwrap();
         let zone = def.left.zone[0];
-        let b = WbHintBrain::new(Box::new(Nothing), def, WbSide::Left, true);
+        let mut b = WbHintBrain::new(Box::new(Nothing), def, WbSide::Left, true);
         assert_eq!(b.name(), "nothing+wb");
-        let inside = b.hints(Vec2::new((zone.x0 * 32 + 40) as f32, (zone.y0 * 32 + 40) as f32));
+        let inside = b.hints(Vec2::new((zone.x0 * 32 + 40) as f32, (zone.y0 * 32 + 40) as f32), 0);
         assert!(inside.in_hall && inside.strong && inside.band.is_some(), "{inside:?}");
-        let outside = b.hints(Vec2::new(100.0, 100.0));
+        let outside = b.hints(Vec2::new(100.0, 100.0), 1);
         assert_eq!(outside, ddai_brain::WbHints::default());
+    }
+
+    /// Task 3.18: the upper guard throws toward the hall's freeze wall (`-1` the left hall, `+1` the right one); after 25 ticks on the lower shelf
+    /// (`WB_NO_CLIMB_TILES` below the first spot) it is the lower guard and has none, and 25 ticks back on the upper shelf restore it.
+    #[test]
+    fn the_wall_side_is_the_upper_guards_and_follows_the_role_with_the_debounce() {
+        for (side, want) in [(WbSide::Left, -1), (WbSide::Right, 1)] {
+            let def = wayblocks().into_iter().next().unwrap();
+            let first = def.side(side).spots[0];
+            let at = |dy: i32| Vec2::new((first.0 * 32 + 16) as f32, ((first.1 + dy) * 32 + 16) as f32);
+            let mut b = WbHintBrain::new(Box::new(Nothing), def, side, false);
+            assert_eq!(b.hints(at(0), 0).wall_dir, want, "on the first spot: the upper guard");
+            // Three tiles down (the lower shelf): still the upper role until the debounce has run out.
+            assert_eq!(b.hints(at(5), 10).wall_dir, want);
+            assert_eq!(b.hints(at(5), 34).wall_dir, want, "24 ticks wanted: not yet");
+            assert_eq!(b.hints(at(5), 35).wall_dir, 0, "25 ticks wanted: the lower guard");
+            // A blink back up does not restore it ...
+            assert_eq!(b.hints(at(0), 40).wall_dir, 0);
+            assert_eq!(b.hints(at(0), 64).wall_dir, 0);
+            // ... 25 ticks do.
+            assert_eq!(b.hints(at(0), 65).wall_dir, want);
+        }
     }
 }

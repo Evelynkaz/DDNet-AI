@@ -1,0 +1,31 @@
+# W7r -- WB hold (right hall of Copy Love Box), task 3.18 (docs/research/wb-hold.md): The victim arrives frozen from the passage above and falls onto the landing of the upper shelf (the way a victim of the tube comes into the hall); the guard stands at the first spot.
+# The victim (slot 1) is frozen for the whole 150 ticks (the moment right after the block) and idle; the subject (slot 0) is the brain under test.
+# Success is the held-block rule of D-059 (amended): the victim is out on EVERY tick of the 250-tick window and the subject is never out.
+id = "W7r"
+name = "WB hold: arrival falling onto the landing (right)"
+source = "task 3.18; docs/research/wb-hold.md"
+description = "The victim arrives frozen from the passage above and falls onto the landing of the upper shelf (the way a victim of the tube comes into the hall); the guard stands at the first spot."
+horizon = 250
+trials = 20
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[[tee]]
+pos = [151.5, 79.5]
+jitter = [0.4, 0.0]
+
+[[tee]]
+pos = [146.5, 69.5]
+jitter = [0.4, 0.4]
+vel = [-0.0, 11.0]
+freeze_ticks = 150
+
+[success]
+kind = "all"
+of = [
+    { kind = "stays_out", tee = 1, from = 1, to = 250 },
+    { kind = "not_out", tee = 0 },
+]

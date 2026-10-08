@@ -452,6 +452,12 @@ pub struct HybridSpec {
     /// `HybridConfig::wall_throws`: wall swings for a frozen victim toward a wall beside us (and, with `air_chain`, air chains).
     #[serde(default)]
     pub wall_throws: Option<bool>,
+    /// Task 3.18: `HybridConfig::wall_dir` (the hall's side the wall swings throw toward, `-1`/`1`; default 0 = the nearer solid wall).
+    #[serde(default)]
+    pub wall_dir: Option<i32>,
+    /// Task 3.18 (`--finish wb`): `HybridConfig::wb_hold` -- the wayblock hall's wall swings against a frozen victim (needs the player's `wb = true`).
+    #[serde(default)]
+    pub wb_hold: Option<bool>,
     #[serde(default)]
     pub air_chain: Option<bool>,
     /// The planner the opponent model runs in the victim's seat: `normal` (default), `normal-v2` or `live-v2`.
@@ -813,6 +819,12 @@ pub fn hybrid_config(spec: &PlayerSpec) -> Result<(HybridConfig, ClockKind), Env
         }
         if let Some(v) = h.wall_throws {
             cfg.wall_throws = v;
+        }
+        if let Some(v) = h.wall_dir {
+            cfg.wall_dir = v;
+        }
+        if let Some(v) = h.wb_hold {
+            cfg.wb_hold = v;
         }
         cfg.mirror_planner = match h.mirror_preset.as_deref() {
             None | Some("normal") => None,

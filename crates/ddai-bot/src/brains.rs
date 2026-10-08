@@ -102,6 +102,8 @@ pub struct BrainOptions {
     pub hybrid_mirror: bool,
     /// Task 3.10 (opt-in, `--finish full`): the hybrid's finishing switches ([`HybridConfig::with_finish`]).
     pub hybrid_finish: bool,
+    /// Task 3.18 (opt-in, `--finish wb`): the hybrid's wayblock hold ([`HybridConfig::wb_hold`]).
+    pub hybrid_wb_hold: bool,
     pub seed: u64,
 }
 
@@ -143,6 +145,7 @@ impl Default for BrainOptions {
             proposal_in_cap: true,
             hybrid_mirror: true,
             hybrid_finish: false,
+            hybrid_wb_hold: false,
             seed: 1,
         }
     }
@@ -162,6 +165,7 @@ pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
         workers: opts.search_threads.unwrap_or_else(auto_search_threads_here).max(1),
         proposal_in_cap: opts.proposal_in_cap,
         mirror: opts.hybrid_mirror,
+        wb_hold: opts.hybrid_wb_hold,
         ..HybridConfig::default()
     };
     if opts.hybrid_finish { cfg.with_finish() } else { cfg }

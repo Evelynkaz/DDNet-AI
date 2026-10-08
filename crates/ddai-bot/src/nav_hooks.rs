@@ -1627,11 +1627,24 @@ impl Core {
     fn wb_brain_hints(&self, ctx: &HookContext<'_>) -> WbHints {
         let tile = tile_of(ctx.own.pos);
         match self.wb.hall_hints(tile, self.wb_holding()) {
-            Some(band) => WbHints {
-                in_hall: true,
-                strong: self.cfg.strong,
-                band: Some(band),
-            },
+            Some(band) => {
+                // Task 3.18: the guard on the upper shelf throws toward the hall's freeze wall (`wbGuardPlan`'s `wallDir`: -1 left, 1 right); on
+                // the lower shelf there is no such throw. Data only: the hybrid reads it with `--finish wb`. The role is only **read** here, as the
+                // target selection (`begin_pick`) and the wander hint last advanced it: advancing it from the hints would change the guard's state (and
+                // its log) of a bot that runs without `--finish wb`, and on ticks where no target is picked.
+                let lower = ddai_nav::wayblock::wb_guard() && self.wb_holding() && self.x.role.lower();
+                let wall_dir = match (self.wb.side(), lower) {
+                    (Some(ddai_nav::wayblock::WbSide::Left), false) => -1,
+                    (Some(ddai_nav::wayblock::WbSide::Right), false) => 1,
+                    _ => 0,
+                };
+                WbHints {
+                    in_hall: true,
+                    strong: self.cfg.strong,
+                    band: Some(band),
+                    wall_dir,
+                }
+            }
             None => WbHints::default(),
         }
     }
@@ -2520,6 +2533,8 @@ mod tests {
         // The brain is told the hall's overrides and band while we stand in it.
         let hints = f.hooks.wayblock.brain_hints(&ctx);
         assert!(hints.in_hall && hints.band.is_some(), "{hints:?}");
+        // Task 3.18: on the upper shelf of the left hall the guard's freeze wall is on the left (the competitor's `wallDir` -1).
+        assert_eq!(hints.wall_dir, -1, "{hints:?}");
         // ...and not when the WB is off.
         f.handle.send(NavCommand::Wb(WbMode::Off));
         f.hooks.navigator.poll(&ctx);
@@ -2892,9 +2907,20 @@ mod tests {
                 t
             };
             let standing_in = tee_at(2, zone.x0 + 3, zone.y0 + 2);
+            // Task 3.18: a frozen tee still falling in the zone (the victim of a ceiling throw) is skipped by the guard's rule, and the skip says so
+            // (`falling`, with the zone flags) -- the one skip `--finish wb` overrides for the current target; one lying frozen is no skip at all.
+            let mut falling_frozen = tee_at(3, zone.x0 + 4, zone.y0 + 3);
+            falling_frozen.frozen = true;
+            falling_frozen.freeze_ticks_left = 140;
+            falling_frozen.vel.y = 8.0;
+            let mut lying_frozen = tee_at(4, zone.x0 + 6, zone.y0 + 3);
+            lying_frozen.frozen = true;
+            lying_frozen.freeze_ticks_left = 140;
             f2.env.tees.set_for_test(tee_at(0, spot.0, spot.1));
             f2.env.tees.set_for_test(falling_outside);
             f2.env.tees.set_for_test(standing_in);
+            f2.env.tees.set_for_test(falling_frozen);
+            f2.env.tees.set_for_test(lying_frozen);
             let own2 = *f2.env.tees.get(0).unwrap();
             let world2 = f2.env.pw.inner().clone();
             let ctx2 = f2.env.ctx(&own2, 1000, &world2);
@@ -2911,6 +2937,60 @@ mod tests {
             assert!(
                 fall.skip || !fall.in_zone,
                 "a tee falling past the approach is not a target for the guard: {fall:?}"
+            );
+            assert!(!fall.falling, "only the frozen falling rule marks `falling`: {fall:?}");
+            let fz = f2.core.wb_filter(&ctx2, f2.env.tees.get(3).unwrap());
+            assert!(
+                fz.skip && fz.falling && fz.in_zone && fz.finish_zone && !fz.leash_only,
+                "a frozen tee still falling in the zone: skipped as `falling`, still a finishing candidate: {fz:?}"
+            );
+            let lz = f2.core.wb_filter(&ctx2, f2.env.tees.get(4).unwrap());
+            assert!(
+                !lz.skip && !lz.falling && lz.finish_zone,
+                "a frozen tee lying in the zone is a finishing candidate: {lz:?}"
+            );
+        });
+    }
+
+    /// Task 3.18 review F1: the hints only READ the guard's role. Asking for them on ticks where no target is picked (a fixed target, the WB walk's foe)
+    /// must not advance the role, flip it or log, whatever `--finish` says; the wall side follows the role the target selection last made.
+    #[test]
+    fn the_brain_hints_read_the_guard_role_and_never_advance_it() {
+        on_big_stack(|| {
+            let Some(map) = clb_map() else {
+                eprintln!("skipping: the Copy Love Box map is not present");
+                return;
+            };
+            let mut f = CoreFx::on(map, "Copy Love Box", &Relations::new());
+            let def = ddai_nav::wayblock::wayblocks().remove(0);
+            let first = def.left.spots[0];
+            // Standing on the lower shelf of the left hall: 5 tiles below the first spot (the role would flip to lower after 25 ticks of being asked).
+            f.env.tees.set_for_test(tee_at(0, first.0 + 10, first.1 + 5));
+            let own = *f.env.tees.get(0).unwrap();
+            let world = f.env.pw.inner().clone();
+            f.core.poll(&f.env.ctx(&own, 1000, &world));
+            f.core.wb.chooser.adopt(ddai_nav::wayblock::WbSide::Left);
+            assert!(f.core.wb_holding());
+            let before = (f.core.x.role.lower(), f.core.x.role.flips);
+            for tick in 1001..1060 {
+                let h = f.core.wb_brain_hints(&f.env.ctx(&own, tick, &world));
+                assert!(h.in_hall, "tick {tick}: {h:?}");
+                assert_eq!(h.wall_dir, -1, "the role was not advanced: still the upper guard");
+            }
+            assert_eq!(
+                (f.core.x.role.lower(), f.core.x.role.flips),
+                before,
+                "asking for hints changed the role"
+            );
+            // The target selection advances it (as before 3.18); the hints then follow.
+            for tick in 1060..1100 {
+                f.core.role_lower(&f.env.ctx(&own, tick, &world));
+            }
+            assert!(f.core.x.role.lower() && f.core.x.role.flips == before.1 + 1);
+            assert_eq!(
+                f.core.wb_brain_hints(&f.env.ctx(&own, 1100, &world)).wall_dir,
+                0,
+                "the lower guard has no wall throw"
             );
         });
     }

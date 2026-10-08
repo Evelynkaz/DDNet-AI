@@ -1,0 +1,31 @@
+# W8 -- WB hold (left hall of Copy Love Box), task 3.18 (docs/research/wb-hold.md): The victim has just been frozen at the hall's ceiling freeze (rising slowly) and falls 11 tiles onto the upper shelf; the guard stands at the first spot (the state after our own ceiling throw).
+# The victim (slot 1) is frozen for the whole 150 ticks (the moment right after the block) and idle; the subject (slot 0) is the brain under test.
+# Success is the held-block rule of D-059 (amended): the victim is out on EVERY tick of the 250-tick window and the subject is never out.
+id = "W8"
+name = "WB hold: thrown at the ceiling and falling (left)"
+source = "task 3.18; docs/research/wb-hold.md"
+description = "The victim has just been frozen at the hall's ceiling freeze (rising slowly) and falls 11 tiles onto the upper shelf; the guard stands at the first spot (the state after our own ceiling throw)."
+horizon = 250
+trials = 20
+
+[map]
+kind = "file"
+file = "copy-love-box/Copy Love Box_6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25.map"
+sha256 = "6e79ef4319e553f904777e56c2a66ac243ea155c331d8665ed58919b11bdfd25"
+
+[[tee]]
+pos = [83.5, 79.5]
+jitter = [0.4, 0.0]
+
+[[tee]]
+pos = [86.5, 68.5]
+jitter = [0.4, 0.4]
+vel = [2.5, -6.0]
+freeze_ticks = 150
+
+[success]
+kind = "all"
+of = [
+    { kind = "stays_out", tee = 1, from = 1, to = 250 },
+    { kind = "not_out", tee = 0 },
+]

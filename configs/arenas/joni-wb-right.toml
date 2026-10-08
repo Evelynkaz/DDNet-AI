@@ -1,0 +1,23 @@
+# Copy Love Box JoniTee, right wayblock hold (task 3.18, E-033): the same hold as `clb-wb-right` on the map the live bot played on 2026-10-07 (the
+# F-DDrace map "Copy Love Box JoniTee", sha256 5c3e207b...d7d5bd, kept in ~/aiddnet/data/maps/cache). The hall sits at +0,+0 of the original
+# (the nav log of that session: "WB: this map has one (Copy Love Box hall at +0,+0)"), so the spawn boxes are the ones of `clb-wb-right`.
+# Slot 0 stands on the hall's first WB spot, intruders on the standing tiles of the two hall boxes 3..14 tiles away.
+name = "joni-wb-right"
+tag = "holdout"
+description = "Copy Love Box JoniTee right WB hold: slot 0 on the first WB spot, intruders in the hall boxes."
+
+[map]
+kind = "file"
+file = "cache/Copy Love Box JoniTee_5c3e207b88b45ac762649f990199ee370e911a0cef6eb3c27362ad23f0d7d5bd.map"
+sha256 = "5c3e207b88b45ac762649f990199ee370e911a0cef6eb3c27362ad23f0d7d5bd"
+
+[spawn]
+min_tiles = 3.0
+max_tiles = 14.0
+boxes = [
+    { x0 = 130, y0 = 67, x1 = 155, y1 = 79 },
+    { x0 = 130, y0 = 79, x1 = 156, y1 = 87 },
+]
+
+[wayblock]
+side = "right"

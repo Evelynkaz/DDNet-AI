@@ -641,7 +641,12 @@ impl Core {
                 return skip;
             }
             if cand.frozen && cand.vel.y > WB_FALLING_PX {
-                return skip;
+                return WbFilter {
+                    falling: true,
+                    in_zone,
+                    finish_zone: me_in_leash && in_zone,
+                    ..skip
+                };
             }
         }
         if let Some(g) = guard
@@ -663,6 +668,7 @@ impl Core {
             finish_zone: me_in_leash && in_zone,
             corridor,
             leash_only: false,
+            falling: false,
         }
     }
 }

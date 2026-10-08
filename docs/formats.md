@@ -5051,9 +5051,12 @@ trek/пути как `LiveContext::travel_goal` и подсказки ВБ `Live
 
 ### 23.4 `WbHints` и `MapKnowledge` (`ddai-brain`)
 
-`LiveContext::wb: WbHints { in_hall, strong, band: Option<(x0,y0,x1,y1)> }` — «мы в зале удерживаемого ВБ» (применить
+`LiveContext::wb: WbHints { in_hall, strong, band: Option<(x0,y0,x1,y1)>, wall_dir: i32 }` — «мы в зале удерживаемого ВБ» (применить
 `WB_PLAN_OVERRIDES`, при `strong` и популяции < 40 — `STRONG_WB`) и прямоугольник `wbBand` в пикселях (штраф `bandCost`, по
-умолчанию 0). `MapKnowledge { width, height, dead_zone: Option<Vec<u8>>, freeze_memory: Option<FreezeMemoryData> }` — карта-уровневые
+умолчанию 0). **`wall_dir`** (задача 3.18, D-114; аддитивно, умолчание 0): сторона фриз-стены зала — `-1` левый зал, `1` правый — пока мы в зале в роли
+верхней полки стража (`wallDir` плана `wbGuardPlan` конкурента); `0` — вне зала, в роли нижней полки или без ВБ. Читает его только гибрид с
+`HybridConfig::wb_hold` (`--finish wb`): шесть линий качелей к стене против замороженной жертвы; остальные мозги и гибрид без `wb_hold` его
+игнорируют. `MapKnowledge { width, height, dead_zone: Option<Vec<u8>>, freeze_memory: Option<FreezeMemoryData> }` — карта-уровневые
 данные, передаваемые `Brain::set_map_knowledge`.
 
 ## 24. Клипы бота, консольные команды, выбор сервера (задача 4.3, `crates/ddai-clip`, `ddai-bot::{clipper, command, console, settings}`, `ddai-client::server_list`)
@@ -5298,7 +5301,7 @@ BotRec  { target, brain (0 hybrid 1 planner 2 scripted 3 idle 4 fly), flags (BIT
 `connected` (сессия в игре), `server` (`ip:port`), `map`, `name` / `clan` / `skin` (облик самого бота), `target_tag` (метка цели, не ник), `wb` (строка вейблока `!wb`), `goto` (ход ходьбы), `deaths`, `clips_saved`,
 `kill_cooldown_ticks` (тиков сервера до разрешённого `Cl_Kill`, 50 в секунду: кулдаун 500 тиков = 10 с). `mode` теперь читается из бота, а не из снапшота (меняется сразу после `!mode`).
 
-(5.13, D-097: поле `finish` — `"off"` | `"target"` | `"full"`, режим дожима, с которым запущен процесс (`ddnet-ai play --finish`; правило цели действует у любого мозга, подтягивание `full` — только пока мозг гибрид). Карточка «Бот» показывает его строкой «Дожим»; бот старой сборки поля не шлёт — строка «—», не «выкл». Бот печатает при старте одну строку `finish blocks: <режим>` для `target`/`full`.)
+(5.13, D-097: поле `finish` — `"off"` | `"target"` | `"full"`, режим дожима, с которым запущен процесс (`ddnet-ai play --finish`; правило цели действует у любого мозга, подтягивание `full` — только пока мозг гибрид). Карточка «Бот» показывает его строкой «Дожим»; бот старой сборки поля не шлёт — строка «—», не «выкл». Бот печатает при старте одну строку `finish blocks: <режим>` для `target`/`full`. **3.18, D-114: четвёртое значение `"wb"`** — `target` плюс удержание на ВБ (`--finish wb`); карточка «Бот» показывает «цель + удержание ВБ»; запустить его можно только с командной строки / из окружения юнита (`BOT_FINISH=wb` в `/etc/ddnet-ai/bot-launch.env` вручную): закрытый список помощника и карточка «Запуск» по-прежнему знают три слова.)
 
 (4.11, D-102: поле `selfkill` — `"off"`, пока включён дуэльный выключатель (`--no-selfkill` или файл `bot/selfkill.off`: бот сам себя не убивает), иначе `"on"` (по умолчанию). Аддитивное; старый сайт его игнорирует.)
 

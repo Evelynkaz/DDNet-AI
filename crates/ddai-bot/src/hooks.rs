@@ -222,6 +222,9 @@ pub struct WbFilter {
     /// Task 3.10: `skip` is only the hall's leash (we are inside the hall and the candidate is outside it) -- not the walk in, not a guard rule (a lower-shelf
     /// tee, a frozen one still falling). The one skip `--finish target` may override for a frozen victim we are finishing.
     pub leash_only: bool,
+    /// Task 3.18: `skip` is the guard's "a frozen tee still falling is no target yet" rule (`WB_FALLING_PX`) -- the other skip `--finish wb` may override,
+    /// for the frozen victim that is already our target (it fell from the ceiling we froze it at, and the 30 ticks of the fall are the first of its 150).
+    pub falling: bool,
 }
 
 /// Trek / path goals (task 4.2).

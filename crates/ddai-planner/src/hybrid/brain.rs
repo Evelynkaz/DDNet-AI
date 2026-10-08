@@ -195,6 +195,8 @@ pub struct HybridBrain {
     spare_vels: Vec<crate::vmath::Vec2>,
     spare_ids: Vec<i32>,
     travel_goal: Option<crate::vmath::Vec2>,
+    /// Task 3.18: the hall wall side the live bot's wayblock hints name (`wb_hold` only); holds until replaced.
+    wb_wall_dir: i32,
     /// Task 7.4: the decision just made went through the search with a proposer, so the proposer's frame is of *this*
     /// decision. Cleared at the start of every decision (watched or not), set only when the proposer was consulted: a
     /// viewer that subscribes later never gets an older decision's frame labelled with the current verdict.
@@ -256,6 +258,7 @@ impl HybridBrain {
             spare_vels: Vec::new(),
             spare_ids: Vec::new(),
             travel_goal: None,
+            wb_wall_dir: 0,
             viz_fresh: false,
             window: None,
             window_buf: Vec::new(),
@@ -472,6 +475,7 @@ impl HybridBrain {
     ) -> Action {
         let search = self.search.as_mut().expect("search built");
         search.set_live(&self.spares, &self.spare_vels, &self.spare_ids, self.travel_goal);
+        search.set_wb_wall_dir(self.wb_wall_dir);
         let world = search.world_mut();
         let (Some(me), Some(target)) = (world.get_tee(self_id), world.get_tee(target_id)) else {
             return action_from_input(&self.prev);
@@ -567,6 +571,7 @@ impl Brain for HybridBrain {
         self.spare_vels.clear();
         self.spare_ids.clear();
         self.travel_goal = None;
+        self.wb_wall_dir = 0;
         if let Some(w) = self.window.as_mut() {
             w.reset();
         }
@@ -625,6 +630,7 @@ impl Brain for HybridBrain {
         self.spare_ids.clear();
         self.spare_ids.extend_from_slice(ctx.spare_ids);
         self.set_travel_goal(ctx.travel_goal.as_ref().map(to64));
+        self.wb_wall_dir = if self.cfg.wb_hold { ctx.wb.wall_dir } else { 0 };
     }
 
     fn name(&self) -> &str {

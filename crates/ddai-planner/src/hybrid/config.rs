@@ -262,6 +262,14 @@ pub struct HybridConfig {
     /// height (the nearer side; none without a wall). Unlike the competitor's `wallDir` (a hall's side, set by role) the side
     /// is found per decision.
     pub wall_throws: bool,
+    /// Task 3.18: the side (`-1` left, `1` right) the wall swings of `wall_throws` throw toward, fixed by the caller instead of being found
+    /// per decision (a diagnostic knob of the arena: the competitor's `wallDir` of a hall's side); `0` = the nearer solid wall (the 3.9 rule).
+    pub wall_dir: i32,
+    /// Task 3.18 (`--finish wb`, opt-in): against a frozen victim, inside a held wayblock hall, offer the guard's wall swings toward the hall's
+    /// freeze wall (`LiveContext::wb.wall_dir`: the competitor's `wallDir`, `-1` for the left hall and `1` for the right one, on the upper
+    /// shelf) -- the swings that carry a victim lying on the shelf into the wall's freeze. Without a hint (outside the hall, the lower role)
+    /// it does nothing; `false` = the old behaviour.
+    pub wb_hold: bool,
     /// Task 3.9: the planner the opponent model ("mirror") runs in the victim's seat; `None` = [`preset_normal`] (the old planner,
     /// what the model has always been). `Some(preset_normal_v2())` models the competitor's current planner. Its steps layout is
     /// always the hybrid's own.
@@ -350,6 +358,8 @@ impl Default for HybridConfig {
             mirror_samples: 12,
             polish: false,
             wall_throws: false,
+            wall_dir: 0,
+            wb_hold: false,
             mirror_planner: None,
             lag_mirror: false,
             window_model: false,

@@ -92,6 +92,8 @@ pub struct TargetPicker {
     last_pick: Pick,
     /// Task 3.10 (`--finish target`): keep a frozen current target until it is held (see [`TargetPicker::set_finish`]).
     finish: bool,
+    /// Task 3.18 (`--finish wb`): also keep the frozen current target the wayblock guard would skip while it is still falling (see [`TargetPicker::set_finish_wb`]).
+    finish_wb: bool,
 }
 
 impl TargetPicker {
@@ -117,6 +119,7 @@ impl TargetPicker {
             fixed_name: fixed_target.map(fold_name).filter(|n| !n.is_empty()),
             last_pick: Pick { id: -1, score: 0.0 },
             finish: false,
+            finish_wb: false,
         }
     }
 
@@ -130,6 +133,14 @@ impl TargetPicker {
         for s in self.seal.iter_mut() {
             s.valid = false;
         }
+    }
+
+    /// Task 3.18 (`--finish wb`, needs [`TargetPicker::set_finish`]): in the held wayblock hall the guard skips a frozen tee that is still falling
+    /// (`vel.y > WB_FALLING_PX`: it is "no target yet"). For the frozen **current** target that rule dropped the victim for the whole fall (the ceiling
+    /// freeze of the hall is 12 tiles above the shelf: ~30 of the victim's 150 ticks) and the bot went after somebody else; with this on the rule does not
+    /// apply to it while it is being finished (frozen, within [`FINISH_MAX_HOLD_TICKS`]).
+    pub fn set_finish_wb(&mut self, on: bool) {
+        self.finish_wb = on;
     }
 
     /// `!target <nick>` / `!target -`: fight only this player (folded), or pick automatically again.
@@ -269,7 +280,15 @@ impl TargetPicker {
                 && is_current
                 && tee.frozen
                 && frozen_for <= FINISH_MAX_HOLD_TICKS;
-            if wb.skip && !leash_kept {
+            // Task 3.18 (`--finish wb`): the guard's "still falling" skip does not drop the frozen victim we are finishing.
+            let falling_kept = wb.skip
+                && wb.falling
+                && self.finish
+                && self.finish_wb
+                && is_current
+                && tee.frozen
+                && frozen_for <= FINISH_MAX_HOLD_TICKS;
+            if wb.skip && !leash_kept && !falling_kept {
                 continue;
             }
             let near_freeze = ctx.grid.near_freeze(tee.pos.x, tee.pos.y, SEAL_NEAR_TILES);
@@ -918,6 +937,72 @@ mod tests {
         assert_eq!(g.pick(), -1);
     }
 
+    /// The hall's "a frozen tee still falling is no target yet" rule: a mock whose only skip is that rule for the listed tees.
+    struct Falling(Vec<i32>);
+    impl WayBlock for Falling {
+        fn holding(&self) -> bool {
+            true
+        }
+        fn filter(&mut self, _c: &crate::hooks::HookContext<'_>, t: &Tee) -> WbFilter {
+            let falling = self.0.contains(&t.id);
+            WbFilter {
+                skip: falling,
+                falling,
+                ..WbFilter::default()
+            }
+        }
+    }
+
+    /// Task 3.18: the victim we froze at the hall's ceiling falls 12 tiles; the guard's falling rule dropped it for the fall (clips of 2026-10-07: the
+    /// target changed on the very frame the victim began to fall). With `--finish wb` the frozen CURRENT target stays while it is being finished; every
+    /// other candidate (not current, not frozen, `--finish target` only, past the 600-tick hold) is skipped as before.
+    #[test]
+    fn finish_wb_keeps_the_frozen_current_target_the_guard_would_skip_while_it_falls() {
+        let ticks = [1000, 1002, 1300, 1590, 1601, 1700];
+        let run = |finish: bool, wb: bool| -> Vec<i32> {
+            let mut f = finish_fx(finish);
+            f.picker.set_finish_wb(wb);
+            f.rel.add(ListKind::War, "foe");
+            f.rel.add(ListKind::War, "other");
+            f.set_players(&[(0, "me"), (1, "foe"), (2, "other")]);
+            f.hooks.wayblock = Box::new(Falling(vec![1]));
+            ticks
+                .iter()
+                .map(|&t| {
+                    f.tick = t;
+                    f.put(*f.tees.get(1).unwrap());
+                    let got = f.pick();
+                    f.picker.set_target(got);
+                    got
+                })
+                .collect()
+        };
+        // `wb` on: kept for the 600 ticks of the hold (ticks 1000..=1590 are 0..=590 frozen); then the guard's rule rules (the free player is taken).
+        assert_eq!(run(true, true), vec![1, 1, 1, 1, 2, 2]);
+        // `--finish target` only (or off): the falling rule drops the victim at once, as before 3.18.
+        assert_eq!(run(true, false), vec![2; 6]);
+        assert_eq!(run(false, false), vec![2; 6]);
+        // `wb` without `finish` does nothing (the target logic is its precondition).
+        assert_eq!(run(false, true), vec![2; 6]);
+        // Not the current target: skipped even with `wb`.
+        let mut g = finish_fx(true);
+        g.picker.set_finish_wb(true);
+        g.hooks.wayblock = Box::new(Falling(vec![1]));
+        g.picker.set_target(2);
+        g.tick = 1002;
+        assert_eq!(g.pick(), 2);
+        // Not frozen any more (it landed and thawed): the rule is the guard's again.
+        let mut h = finish_fx(true);
+        h.picker.set_finish_wb(true);
+        h.hooks.wayblock = Box::new(Falling(vec![1]));
+        let mut t = *h.tees.get(1).unwrap();
+        t.frozen = false;
+        t.freeze_ticks_left = 0;
+        h.put(t);
+        h.tick = 1002;
+        assert_eq!(h.pick(), 2);
+    }
+
     /// The leash override ends when the victim is held: a victim lying frozen in a pit needs nothing more, and the bot must not stay with it.
     /// A free tee that hooks us (or hit us lately) outranks the frozen victim: the hold bonus is suspended while there is one.
     #[test]
@@ -1113,6 +1198,7 @@ mod tests {
                 finish_zone: false,
                 corridor: false,
                 leash_only: self.leash,
+                falling: false,
             }
         }
     }

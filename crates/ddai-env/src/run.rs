@@ -18,7 +18,7 @@ use crate::game::{GameReport, Layout, play_game};
 use crate::sim::PlayerSetup;
 
 /// Builds the players of one game from the condition's slot specs.
-fn setups(slots: &[PlayerSpec], factory: &BrainFactory, arena: &Arena) -> Result<Vec<PlayerSetup>, EnvError> {
+pub fn setups(slots: &[PlayerSpec], factory: &BrainFactory, arena: &Arena) -> Result<Vec<PlayerSetup>, EnvError> {
     slots
         .iter()
         .map(|spec| {

@@ -184,6 +184,9 @@ pub struct BotConfig {
     /// Task 3.10 (`--finish target`, opt-in): finish blocks -- the target selection keeps a frozen current target until it is held
     /// ([`crate::target::TargetPicker::set_finish`]).
     pub finish: bool,
+    /// Task 3.18 (`--finish wb`, opt-in; implies `finish`): the target selection also keeps the frozen current target the wayblock guard would skip
+    /// while it is falling ([`crate::target::TargetPicker::set_finish_wb`]).
+    pub finish_wb: bool,
     /// `--no-selfkill` (D-102): the bot never kills itself ([`Bot::set_no_selfkill`]); the owner's `!kill` stays. The runner also
     /// re-reads [`BotConfig::selfkill_marker`] once a second ([`crate::selfkill`]).
     pub no_selfkill: bool,
@@ -251,6 +254,7 @@ impl Default for BotConfig {
             strong: false,
             console_names: false,
             finish: false,
+            finish_wb: false,
             no_selfkill: false,
             selfkill_marker: None,
             selfkill_policy: SelfKillPolicy::Legacy,
@@ -589,6 +593,7 @@ impl Bot {
         let mode = cfg.mode;
         let mut picker = TargetPicker::new(cfg.fixed_target.as_deref());
         picker.set_finish(cfg.finish);
+        picker.set_finish_wb(cfg.finish_wb);
         let policy = cfg.selfkill_policy;
         let mut bot = Bot {
             players: PlayerTable::new(cfg.salt),

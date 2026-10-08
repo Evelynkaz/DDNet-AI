@@ -1,0 +1,29 @@
+# work-clock: default-rate
+# Task 3.18 (E-033): the WB-hold scenarios of the left hall (configs/scenarios-wb, W1..W8 with the suffix `r` for the right hall), 100 trials per arm and scenario,
+# the hybrid at 4 ms of work. `base` is the hybrid as it plays today; `wall` is the competitor's hall plan for it (`wall_throws` with the hall's wall side
+# fixed to -1: the stand-in of the `LiveContext::wb.wall_dir` hint that `--finish wb` gives the hybrid on the upper shelf; the scenario runner has no wayblock hints).
+# A trial is a success when the victim (frozen for 150 ticks at the start, idle) is out on EVERY tick of the 250-tick window and the subject is never out.
+#   mkdir -p /tmp/wbs-left && cp configs/scenarios-wb/w[0-9]-*.toml /tmp/wbs-left/
+#   ddnet-ai arena scenarios --dir /tmp/wbs-left --config configs/arena/e033-scenarios-left.toml --out ~/aiddnet/data/runs/E-033/scenarios-left
+name = "E-033 WB hold scenarios, left hall"
+seed = 91
+trials = 100
+
+[[brain]]
+label = "idle"
+brain = "idle"
+
+[[brain]]
+label = "base"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+
+[[brain]]
+label = "wall"
+brain = "hybrid"
+mode = "deadline"
+clock = "work"
+budget_ms = 4.0
+hybrid = { wall_throws = true, wall_dir = -1 }

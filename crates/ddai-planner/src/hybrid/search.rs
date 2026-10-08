@@ -572,6 +572,8 @@ pub struct HybridSearch {
     spare_vels: Vec<crate::vmath::Vec2>,
     spare_ids: Vec<i32>,
     travel_goal: Option<crate::vmath::Vec2>,
+    /// Task 3.18: the hall wall the guard's swings throw toward (`LiveContext::wb.wall_dir`, only with `HybridConfig::wb_hold`); 0 = none.
+    wb_wall_dir: i32,
     /// Distance to the hazards the physics sees, front layer included, for the shield skip; per map (collision identity).
     skip_field: Option<(u64, Arc<HazardField>)>,
 }
@@ -654,8 +656,14 @@ impl HybridSearch {
             spare_vels: Vec::new(),
             spare_ids: Vec::new(),
             travel_goal: None,
+            wb_wall_dir: 0,
             skip_field: None,
         }
+    }
+
+    /// Task 3.18: the wayblock hall's wall side for the next decisions (`0` = none; ignored without `HybridConfig::wb_hold`).
+    pub fn set_wb_wall_dir(&mut self, dir: i32) {
+        self.wb_wall_dir = dir.signum();
     }
 
     /// The live bot's spared tees (friends, ignored, AFK: the rope and the hammer must not catch them,
@@ -1773,8 +1781,15 @@ impl HybridSearch {
                 push(&mut throw_c, &mut tel, p, Source::Throw);
             }
             // Task 3.9: the wayblock guard's wall swings / air chains toward a wall beside us, for a frozen victim.
-            if cfg.wall_throws && frozen_case {
-                let wall_dir = wall_side(self.world.collision(), me.pos);
+            let hall_dir = if cfg.wb_hold { self.wb_wall_dir } else { 0 };
+            if (cfg.wall_throws || hall_dir != 0) && frozen_case {
+                let wall_dir = if hall_dir != 0 {
+                    hall_dir
+                } else if cfg.wall_dir != 0 {
+                    cfg.wall_dir.signum()
+                } else {
+                    wall_side(self.world.collision(), me.pos)
+                };
                 for p in self
                     .planner
                     .wall_throw_lines(&*self.world, &me, at, wall_dir, cfg.planner.air_chain)
