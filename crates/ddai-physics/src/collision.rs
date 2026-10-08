@@ -701,14 +701,15 @@ impl<R: Real> Collision<R> {
     ///   `to_i32_trunc` is `i32::MIN` (the C++ "integer indefinite"), whose quotient clamps to `0`.
     #[inline(always)]
     fn tile_of(v: R, limit: R, last: i32) -> i32 {
-        if !(v > R::ZERO) {
-            return 0;
-        }
-        let t = v + R::from_f64(0.5);
-        if t < limit {
-            t.to_i32_trunc() >> 5
-        } else if t < R::from_f64(2147483648.0) {
-            last
+        if v > R::ZERO {
+            let t = v + R::from_f64(0.5);
+            if t < limit {
+                t.to_i32_trunc() >> 5
+            } else if t < R::from_f64(2147483648.0) {
+                last
+            } else {
+                0
+            }
         } else {
             0
         }
