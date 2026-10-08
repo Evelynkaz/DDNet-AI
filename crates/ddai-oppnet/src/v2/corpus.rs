@@ -22,6 +22,9 @@ pub struct CorpusCfg {
     pub known_p: [f32; 5],
     /// Ablation: only the newest `hist_keep` history frames are read, the older slots repeat the oldest kept one (default [`K_HIST`]).
     pub hist_keep: usize,
+    /// Arena fire label: a real **swing** (the opponent's `attack_age` is 1 in the frame after the step: the weapon went off) instead of a fresh press of the fire
+    /// counter (a press during the reload does nothing). Clips can only show swings, so this makes the two sources teach the same thing (3.21 review F3).
+    pub swing_label: bool,
 }
 
 impl Default for CorpusCfg {
@@ -30,6 +33,7 @@ impl Default for CorpusCfg {
             clip_lag: 2,
             known_p: [1.0, 0.0, 0.0, 0.0, 0.0],
             hist_keep: K_HIST,
+            swing_label: false,
         }
     }
 }
@@ -241,6 +245,12 @@ impl Corpus {
                 // A frozen or dead opponent's inputs do nothing: no label.
                 if f.alive && f.freeze_left == 0 {
                     label_tick(&mut label, k, &prev, &cur, base);
+                    if self.cfg.swing_label {
+                        // The step `T + k` swung when the frame it led to shows the weapon used one tick ago.
+                        label.press &= !(1 << k);
+                        // (not in the first 30 ticks: a tee that never swung has `attack_tick` 0, so the first tick of a game reads as a use)
+                        label.press |= u8::from(f.attack_age == 1 && g.tick0 + (i + 1 + k) as i32 >= 30) << k;
+                    }
                 }
                 prev = cur;
             }
@@ -415,6 +425,42 @@ mod tests {
             idx: 4,
         };
         assert_eq!(c.label(r).press, 0b0010);
+    }
+
+    #[test]
+    fn a_swing_label_counts_weapon_uses_not_presses_during_the_reload() {
+        let mut g = arena_game(20, 2);
+        g.tick0 = 100;
+        // Presses (fire 0 -> 1) at ticks[6] and ticks[10]; only the first one swung: the frame of ticks[6] shows the weapon used one tick ago, the one of ticks[10] does not.
+        for t in 0..20 {
+            g.ticks[t].applied[1].fire = if t == 6 || t == 10 { 1 } else { 0 };
+            g.ticks[t].frames[1].attack_age = if t == 6 { 1 } else { 50 };
+        }
+        let by_press = Corpus::new(vec![g.clone()], vec![], CorpusCfg::default());
+        let by_swing = Corpus::new(
+            vec![g],
+            vec![],
+            CorpusCfg {
+                swing_label: true,
+                ..CorpusCfg::default()
+            },
+        );
+        // The sample at index 4 reads ticks[5..=8] as window ticks 0..3: the swing is window tick 1.
+        let r = SampleRef {
+            src: 0,
+            game: 0,
+            idx: 4,
+        };
+        assert_eq!(by_press.label(r).press, 0b0010);
+        assert_eq!(by_swing.label(r).press, 0b0010);
+        // The sample at index 8 reads ticks[9..=12]: the press of ticks[10] (window tick 1) is not a swing.
+        let r = SampleRef {
+            src: 0,
+            game: 0,
+            idx: 8,
+        };
+        assert_eq!(by_press.label(r).press, 0b0010);
+        assert_eq!(by_swing.label(r).press, 0);
     }
 
     #[test]

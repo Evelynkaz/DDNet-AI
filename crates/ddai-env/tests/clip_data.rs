@@ -95,3 +95,51 @@ fn a_real_duel_clip_becomes_consecutive_labelled_runs_that_agree_with_its_record
         "most swings fall in labelled samples: {labelled} of {changes}"
     );
 }
+
+/// 3.21 review F5: two ring clips of one life that overlap hold the same snapshots twice; the overlap is kept once. The same tick numbers with other content (a
+/// restarted server) are not an overlap.
+#[test]
+fn overlapping_clips_keep_each_frame_once() {
+    let Some((clip, _)) = clip() else {
+        eprintln!("skipped: the duel clip is not on this machine");
+        return;
+    };
+    let n = clip.frames.len();
+    let mut early = clip.clone();
+    early.frames.truncate(n * 2 / 3);
+    let mut late = clip.clone();
+    late.frames.drain(..n / 3);
+    // Handed over in the wrong order on purpose: the earlier clip is the one that keeps its frames.
+    let mut v = vec![
+        (std::path::PathBuf::from("late"), late, 0u8),
+        (std::path::PathBuf::from("early"), early, 0u8),
+    ];
+    convert::drop_overlap(&mut v);
+    let mut ticks: Vec<i32> = v.iter().flat_map(|(_, c, _)| c.frames.iter().map(|f| f.tick)).collect();
+    let total = ticks.len();
+    ticks.sort_unstable();
+    ticks.dedup();
+    assert_eq!(
+        (total, ticks.len()),
+        (n, n),
+        "every frame of the whole clip exactly once"
+    );
+    // Same ticks, another life: nothing is cut.
+    let mut moved = clip.clone();
+    for f in &mut moved.frames {
+        for t in &mut f.tees {
+            t.ch.x += 64;
+        }
+    }
+    let mut v = vec![
+        (std::path::PathBuf::from("a"), clip.clone(), 0u8),
+        (std::path::PathBuf::from("b"), moved, 0u8),
+    ];
+    convert::drop_overlap(&mut v);
+    // Only frames with no tee at all look the same after the shift.
+    let empty = clip.frames.iter().filter(|f| f.tees.is_empty()).count();
+    assert_eq!(
+        v.iter().map(|(_, c, _)| c.frames.len()).collect::<Vec<_>>(),
+        vec![n, n - empty]
+    );
+}

@@ -572,7 +572,7 @@ pub struct HybridSpec {
     #[serde(default)]
     pub window_heads: Option<String>,
     /// Task 3.21 (E-036): decoding thresholds of a v2 window model, `"press=-1.5,jump=0.5,hook=0,dir_margin=1"` (logits; the keys given replace the model file's own).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_decode: Option<String>,
     /// Task 3.16 (D-115): the live knob `hybrid_budget_ms` itself (whole ms, 1 to 8): `HybridConfig::with_budget_ms`, applied after every other
     /// field of this table, so the search budget **and** the decision cap move together exactly as they do in the bot. Deadline mode only.
@@ -1085,18 +1085,32 @@ pub fn builtin_brain(spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
                     Some(rest) => std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest),
                     None => std::path::PathBuf::from(path),
                 };
-                let gate = spec.hybrid.as_ref().and_then(|h| h.window_gate).unwrap_or(0.0);
-                let heads = match spec.hybrid.as_ref().and_then(|h| h.window_heads.as_deref()) {
-                    Some(list) => ddai_oppnet::predictor::parse_heads(list).map_err(EnvError::new)?,
-                    None => ddai_oppnet::predictor::HEAD_ALL,
-                };
+                let h = spec.hybrid.as_ref();
                 let model = match ddai_oppnet::AnyPredictor::load(&path).map_err(EnvError::new)? {
                     ddai_oppnet::AnyPredictor::V1(m) => {
+                        // Task 3.21: a key that belongs to the other generation is an error, not a silent no-op.
+                        if h.is_some_and(|h| h.window_decode.is_some()) {
+                            return Err(EnvError::new(format!(
+                                "hybrid: window_decode is for a v2 window model, {} is a v1 one",
+                                path.display()
+                            )));
+                        }
+                        let gate = h.and_then(|h| h.window_gate).unwrap_or(0.0);
+                        let heads = match h.and_then(|h| h.window_heads.as_deref()) {
+                            Some(list) => ddai_oppnet::predictor::parse_heads(list).map_err(EnvError::new)?,
+                            None => ddai_oppnet::predictor::HEAD_ALL,
+                        };
                         ddai_oppnet::AnyPredictor::V1(Box::new((*m).with_gate(gate as f32).with_heads(heads)))
                     }
                     ddai_oppnet::AnyPredictor::V2(m) => {
+                        if h.is_some_and(|h| h.window_gate.is_some() || h.window_heads.is_some()) {
+                            return Err(EnvError::new(format!(
+                                "hybrid: window_gate and window_heads are for a v1 window model, {} is a v2 one (use window_decode)",
+                                path.display()
+                            )));
+                        }
                         let mut d = *m.decode();
-                        if let Some(list) = spec.hybrid.as_ref().and_then(|h| h.window_decode.as_deref()) {
+                        if let Some(list) = h.and_then(|h| h.window_decode.as_deref()) {
                             ddai_oppnet::v2::predictor::apply_decode_overrides(&mut d, list).map_err(EnvError::new)?;
                         }
                         ddai_oppnet::AnyPredictor::V2(Box::new((*m).with_decode(d)))
@@ -1193,6 +1207,61 @@ players = [
             .to_string();
         assert!(err.contains("m.oppnet"), "{err}");
         assert!(builtin_brain(&spec("workers = 1")).is_ok());
+    }
+
+    /// Task 3.21 review F1: the new `window_decode` key leaves the canonical JSON (so the hash) of every config that does not set it as it was; F6: a window key
+    /// of the other model generation is an error.
+    #[test]
+    fn window_decode_keeps_old_hashes_and_keys_of_the_other_generation_are_refused() {
+        let text = |hybrid: &str| {
+            format!(
+                "name = \"t\"\n[[condition]]\nname = \"c\"\narena = \"a\"\nplayers = [{{ brain = \"hybrid\", clock = \"work\", hybrid = {{ {hybrid} }} }}, {{ brain = \"scripted\" }}]\n"
+            )
+        };
+        let plain = RunConfig::parse(&text("workers = 1")).unwrap();
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("window_decode"), "{json}");
+        let set = RunConfig::parse(&text("workers = 1, window_decode = \"press=1\"")).unwrap();
+        assert_ne!(plain.hash(), set.hash(), "a config that sets it hashes differently");
+
+        let dir = tempfile::tempdir().unwrap();
+        let (p1, p2) = (dir.path().join("a.oppnet"), dir.path().join("b.oppnet"));
+        ddai_oppnet::OppBundle::new(
+            ddai_oppnet::net::Mlp::new(ddai_oppnet::feature::INPUT_DIM, 4, 4, ddai_oppnet::feature::OUT_DIM, 1),
+            1,
+            1,
+            0.0,
+            "v1".into(),
+        )
+        .save(&p1)
+        .unwrap();
+        {
+            use ddai_oppnet::v2::{feature as f, predictor as p};
+            p::Bundle::new(
+                ddai_oppnet::net::Mlp::new(f::INPUT_DIM, 4, 4, f::OUT_DIM, 1),
+                p::Decode::default(),
+                1,
+                1,
+                0.0,
+                "v2".into(),
+            )
+            .save(&p2)
+            .unwrap();
+        }
+        let brain = |hybrid: String| {
+            let c = RunConfig::parse(&text(&hybrid)).unwrap();
+            builtin_brain(&c.condition[0].players[0]).err().map(|e| e.to_string())
+        };
+        let (m1, m2) = (p1.display(), p2.display());
+        assert!(brain(format!("window_model = \"{m1}\", window_gate = 1.0")).is_none());
+        assert!(brain(format!("window_model = \"{m2}\", window_decode = \"press=1\"")).is_none());
+        let e =
+            brain(format!("window_model = \"{m1}\", window_decode = \"press=1\"")).expect("v1 refuses window_decode");
+        assert!(e.contains("window_decode"), "{e}");
+        let e = brain(format!("window_model = \"{m2}\", window_gate = 1.0")).expect("v2 refuses window_gate");
+        assert!(e.contains("window_gate"), "{e}");
+        let e = brain(format!("window_model = \"{m2}\", window_heads = \"dir\"")).expect("v2 refuses window_heads");
+        assert!(e.contains("window_heads"), "{e}");
     }
 
     /// Task 3.7a (D-080): search threads now go with the work clock (the helpers only speculate), and the proposer's

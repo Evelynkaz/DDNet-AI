@@ -31,6 +31,7 @@ struct Args {
     known_p: [f32; 5],
     clip_lag: usize,
     hist_keep: usize,
+    swing_label: bool,
     notes: String,
     /// The fire threshold set by hand (otherwise tuned on the validation set).
     press_thr: Option<f32>,
@@ -53,6 +54,7 @@ fn parse() -> Result<Args, String> {
         known_p: [1.0, 0.0, 0.0, 0.0, 0.0],
         clip_lag: 2,
         hist_keep: ddai_oppnet::v2::feature::K_HIST,
+        swing_label: false,
         notes: String::new(),
         press_thr: None,
         decode: String::new(),
@@ -106,6 +108,7 @@ fn parse() -> Result<Args, String> {
             }
             "--clip-lag" => a.clip_lag = u(v()?)?,
             "--hist-keep" => a.hist_keep = u(v()?)?,
+            "--swing-label" => a.swing_label = true,
             "--notes" => a.notes = v()?,
             "--press-thr" => a.press_thr = Some(f(v()?)?),
             "--decode" => a.decode = v()?,
@@ -131,7 +134,7 @@ fn load_arena(paths: &[PathBuf]) -> Result<Vec<GameRec>, String> {
                 .map_err(|e| format!("{}: {e}", p.display()))?
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "opp"))
+                .filter(|p| p.extension().is_some_and(|x| x == "opp2"))
                 .collect();
             v.sort();
             v
@@ -277,11 +280,13 @@ fn main() -> Result<(), String> {
         clip_lag: a.clip_lag,
         known_p: a.known_p,
         hist_keep: a.hist_keep,
+        swing_label: a.swing_label,
     };
     let cfg_val = CorpusCfg {
         clip_lag: a.clip_lag,
         known_p: [1.0, 0.0, 0.0, 0.0, 0.0],
         hist_keep: a.hist_keep,
+        swing_label: a.swing_label,
     };
     let c_train = Corpus::new(tr_arena, tr_clips, cfg_train);
     let c_val = Corpus::new(va_arena, va_clips, cfg_val.clone());

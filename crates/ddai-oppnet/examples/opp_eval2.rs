@@ -15,7 +15,7 @@ use ddai_oppnet::v2::train::evaluate;
 
 fn main() -> Result<(), String> {
     let (mut model, mut arena, mut clips) = (PathBuf::new(), Vec::new(), Vec::new());
-    let (mut known, mut decode) = (0usize, String::new());
+    let (mut known, mut decode, mut swing) = (0usize, String::new(), false);
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut v = || it.next().ok_or_else(|| format!("{k} needs a value"));
@@ -25,6 +25,7 @@ fn main() -> Result<(), String> {
             "--clips" => clips.push(PathBuf::from(v()?)),
             "--known" => known = v()?.parse().map_err(|e| format!("--known: {e}"))?,
             "--decode" => decode = v()?,
+            "--swing-label" => swing = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -35,6 +36,7 @@ fn main() -> Result<(), String> {
     known_p[known.min(4)] = 1.0;
     let cfg = CorpusCfg {
         known_p,
+        swing_label: swing,
         ..CorpusCfg::default()
     };
     let mut files: Vec<PathBuf> = Vec::new();
@@ -44,7 +46,7 @@ fn main() -> Result<(), String> {
                 .map_err(|e| e.to_string())?
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "opp"))
+                .filter(|p| p.extension().is_some_and(|x| x == "opp2"))
                 .collect();
             v.sort();
             files.extend(v);

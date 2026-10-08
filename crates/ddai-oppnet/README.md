@@ -91,6 +91,6 @@ opp_record --v2 --config configs/arena/e036-data-train.toml --out <dir> --thread
 opp_train2 --train-arena <dir> --train-clips s0.clipgames --val-arena <dir> --clip-weight 5 --out m2.oppnet
 opp_eval2 --model m2.oppnet --arena <dir> --clips s1.clipgames [--known N]            # точность по головам, AUC удара, известные тики
 live_eval --clips <каталоги> --model name=m2.oppnet --sessions 1 --lag 2             # (ddai-env) живой путь на клипах: направление/хук/положение/удар против «держит»
-clip_stats <s0.clipgames>... / opp_stats <*.opp>...                  # поведение соперника в клипах и в арене
+clip_stats <s0.clipgames>... / opp_stats <*.opp2>...                  # поведение соперника в клипах и в арене
 opp_bench2 --model m2.oppnet                                         # цена вызова
 ```

@@ -2,7 +2,7 @@
 //!
 //! Plays the games of every condition (same seeds and layouts as `ddnet-ai arena run`) and keeps, for every world tick up to the first freeze
 //! (which decides a 1v1 game), the snapshot-observable state of both tees, the inputs they applied, and the rays around slot 1 (the opponent).
-//! One file per condition in `--out`: `<condition>.opp`, a `Vec<GameRec>` (see `ddai_oppnet::data`; with `--v2` the task 3.21 record of `ddai_oppnet::v2::data`).
+//! One file per condition in `--out`: `<condition>.opp`, a `Vec<GameRec>` (see `ddai_oppnet::data`; with `--v2` the task 3.21 record of `ddai_oppnet::v2::data`, in `<condition>.opp2`: another record layout, so another extension).
 //!
 //! ```text
 //! cargo run --release -p ddai-env --example opp_record -- --config configs/arena/e028-data-joni.toml --out ~/aiddnet/data/runs/E-028/data/train --threads 3
@@ -164,7 +164,11 @@ fn main() -> Result<(), String> {
         }
         let ticks: usize =
             games1.iter().map(|g| g.ticks.len()).sum::<usize>() + games2.iter().map(|g| g.ticks.len()).sum::<usize>();
-        let path = a.out.join(format!("{}.opp", file_name(&cond.name)));
+        let path = a.out.join(format!(
+            "{}.{}",
+            file_name(&cond.name),
+            if a.v2 { "opp2" } else { "opp" }
+        ));
         if a.v2 {
             ddai_oppnet::blob::write_blob(&path, &games2, 3)?;
         } else {

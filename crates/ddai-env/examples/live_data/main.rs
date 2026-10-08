@@ -1,11 +1,11 @@
 //! Task 3.21 (E-036): builds the real-opponent data set from live clips (read-only) -- `ClipGame`s per session, through `LiveWorld` as the live bot does.
 //!
 //! Sessions (the unit of the train / held-out split; clips are never mixed between them):
-//! * `0` -- the 06.10 duels on the JoniTee map (the competitor's bot);
+//! * `0` -- every clip on the JoniTee map: the 06.10 duels (the competitor's bot) and, among them, 6 clips of the 07.10 evening wayblock session (18:05-18:14) recorded after the test duel;
 //! * `1` -- the 07.10 test duel (the competitor's bot; ticks below 200 000, not a `manual` rehearsal clip);
 //! * `2` -- everything else (public-server clips with humans; only the frames the regime gate admits are duel frames).
 //!
-//! Identical clips (same map, own id, first and last tick) found in several directories are taken once. No names: a game carries `s<session>c<n>p<part>`.
+//! Identical clips (same map, own id, first and last tick) found in several directories are taken once, and frames that two overlapping ring clips of one life both hold are kept in the earlier clip only. No names: a game carries `s<session>c<n>p<part>`.
 //!
 //! ```text
 //! cargo run --release -p ddai-env --example live_data -- build --out ~/aiddnet/data/runs/E-036/live DIR...

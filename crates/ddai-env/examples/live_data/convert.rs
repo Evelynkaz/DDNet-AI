@@ -182,10 +182,48 @@ pub fn collect_clips(dirs: &[PathBuf]) -> Result<Vec<(PathBuf, Clip, u8)>, Strin
             out.push((f, clip, session));
         }
     }
+    drop_overlap(&mut out);
     Ok(out)
 }
 
-/// Session `0`: the 06.10 duels on the JoniTee map; `1`: the 07.10 test duel (ticks below 200 000); `2`: everything else (public servers).
+/// Clips are 30 s rings saved at different moments, so two of one life can overlap (the same snapshots twice): of every pair the frames the earlier clip already
+/// holds are cut from the later one. A frame is "the same" when map, own id, tick and the recorded state of the tees (their sum) are all equal (a server restart that reuses
+/// tick numbers does not match). Without this those frames weigh double, and a pair split between a training and a validation set leaks (3.21 review F5).
+/// Clips left without a frame are dropped.
+pub fn drop_overlap(clips: &mut Vec<(PathBuf, Clip, u8)>) {
+    let mut order: Vec<usize> = (0..clips.len()).collect();
+    order.sort_by_key(|&i| {
+        let c = &clips[i].1;
+        (
+            c.header.map_sha256,
+            c.header.own_id,
+            c.frames.first().map_or(0, |f| f.tick),
+        )
+    });
+    type Key = ([u8; 32], i32, i32, [i32; 4], usize);
+    let mut seen: std::collections::BTreeSet<Key> = Default::default();
+    for i in order {
+        let c = &mut clips[i].1;
+        let (sha, own) = (c.header.map_sha256, c.header.own_id);
+        let key = |f: &ddai_clip::format::Frame| -> Key {
+            let mut t = [0i32; 4];
+            for tee in &f.tees {
+                for (a, b) in t.iter_mut().zip([tee.ch.x, tee.ch.y, tee.ch.vel_x, tee.ch.vel_y]) {
+                    *a = a.wrapping_add(b);
+                }
+            }
+            (sha, own, f.tick, t, f.tees.len())
+        };
+        let before: Vec<Key> = c.frames.iter().map(key).collect();
+        let mut keep = before.iter().map(|k| !seen.contains(k));
+        c.frames.retain(|_| keep.next().unwrap_or(false));
+        seen.extend(before);
+    }
+    clips.retain(|(_, c, _)| !c.frames.is_empty());
+}
+
+/// Session `0`: every clip on the JoniTee map (the 06.10 duels, and 6 clips of the 07.10 evening wayblock session after the test duel); `1`: the 07.10 test duel (ticks
+/// below 200 000, another map); `2`: everything else (public servers). `manual` rehearsal clips have none.
 pub fn session_of(clip: &Clip) -> Option<u8> {
     if clip.header.reason.kind == "manual" {
         return None;
