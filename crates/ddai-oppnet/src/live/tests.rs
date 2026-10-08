@@ -548,3 +548,57 @@ fn the_regime_gate_admits_the_duel_and_refuses_a_crowd_or_a_far_target() {
     let mut off = live(constant_model(2, false, 0.0)).with_gate(RegimeGate::off());
     assert_eq!(ask(&mut off, &pw, 3, &mut victim), WindowUse::Model);
 }
+
+/// Task 3.21: a v2 network whose output is the same at every input (direction class, hook).
+fn constant_v2(dir_class: usize, hook: bool) -> crate::v2::predictor::Predictor {
+    use crate::v2::feature::{HEAD_DIM, HORIZON, INPUT_DIM, OUT_DIM};
+    use crate::v2::predictor::{Bundle, Decode, Predictor};
+    let mut net = Mlp::new(INPUT_DIM, 8, 8, OUT_DIM, 1);
+    net.params.iter_mut().for_each(|p| *p = 0.0);
+    let n = net.params.len();
+    for k in 0..HORIZON {
+        let o = n - OUT_DIM + k * HEAD_DIM;
+        net.params[o + dir_class] = 5.0;
+        if hook {
+            net.params[o + 4] = 5.0;
+        }
+    }
+    Predictor::new(Bundle::new(net, Decode::default(), 1, 1, 0.0, "const2".into()), "const2").unwrap()
+}
+
+#[test]
+fn a_v2_model_serves_windows_up_to_its_own_length_and_does_not_allocate() {
+    let mut pw = pair();
+    let mut l = live(constant_v2(2, true));
+    let mut victim = vec![Wire::default(); 5];
+    drive(&mut pw, 4, |_| 0, |_| {});
+    // A window of 5 is longer than the v2 model knows (4) although the v1 model would serve it.
+    assert_eq!(ask(&mut l, &pw, 5, &mut victim), WindowUse::Hold);
+    assert_eq!(l.counts().skipped_window, 1);
+    assert_eq!(ask(&mut l, &pw, 2, &mut victim), WindowUse::Model);
+    assert_eq!(victim.len(), 2);
+    assert!(victim.iter().all(|w| w.direction == 1 && w.hook == 1), "the constant model's inputs are played");
+    // Known pre-inputs are used by one window only and never break the pipeline; a v1 model ignores them.
+    l.set_known(&[Some(Wire {
+        direction: -1,
+        ..Wire::default()
+    })]);
+    assert_eq!(ask(&mut l, &pw, 2, &mut victim), WindowUse::Model);
+    let mut worlds = Vec::new();
+    drive(&mut pw, 80, |_| 1, |pw| worlds.push(pw.inner().clone()));
+    let own = vec![Wire::default(); 2];
+    for w in &worlds[..20] {
+        l.window(&pair_of(w, "c1-aabbccdd"), &own, &Wire::default(), &mut victim);
+    }
+    let known = [Some(Wire::default()), None];
+    let info = allocation_counter::measure(|| {
+        for w in &worlds[20..] {
+            l.set_known(&known);
+            l.window(&pair_of(w, "c1-aabbccdd"), &own, &Wire::default(), &mut victim);
+        }
+    });
+    assert_eq!(info.count_total, 0, "{info:?}");
+    let mut v1 = live(constant_model(2, true, 0.0));
+    v1.set_known(&known);
+    assert_eq!(ask(&mut v1, &pw, 2, &mut victim), WindowUse::Model, "v1 ignores known ticks");
+}

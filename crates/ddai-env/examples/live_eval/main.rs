@@ -100,6 +100,9 @@ struct Agg {
     hook_n: u64,
     hook_hold: u64,
     hook_model: u64,
+    /// Paired counts for the exact sign test: (model right, hold wrong) and (hold right, model wrong), for direction and hook.
+    dir_pair: [u64; 2],
+    hook_pair: [u64; 2],
     aim_n: u64,
     aim_hold: f64,
     aim_model: f64,
@@ -355,6 +358,23 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
+/// Exact two-sided sign-test p-value of `b` against `c` discordant pairs.
+fn sign_p(b: u64, c: u64) -> f64 {
+    let n = b + c;
+    if n == 0 {
+        return 1.0;
+    }
+    let k = b.min(c);
+    // P(X <= k) for X ~ Binomial(n, 1/2), via log-gamma-free summation in f64.
+    let mut term = 0.5f64.powi(n as i32);
+    let mut sum = term;
+    for i in 0..k {
+        term *= (n - i) as f64 / (i + 1) as f64;
+        sum += term;
+    }
+    (2.0 * sum).min(1.0)
+}
+
 fn merge(p: &mut Agg, a: &Agg) {
     p.n += a.n;
     p.dir_n += a.dir_n;
@@ -363,6 +383,10 @@ fn merge(p: &mut Agg, a: &Agg) {
     p.hook_n += a.hook_n;
     p.hook_hold += a.hook_hold;
     p.hook_model += a.hook_model;
+    for i in 0..2 {
+        p.dir_pair[i] += a.dir_pair[i];
+        p.hook_pair[i] += a.hook_pair[i];
+    }
     p.aim_n += a.aim_n;
     p.aim_hold += a.aim_hold;
     p.aim_model += a.aim_model;
@@ -425,6 +449,12 @@ fn accumulate(g: &ClipGame, ps: &[Option<Pred>], lag: usize, thrs: &[f32], aggs:
                         a.dir_model += u64::from(o.direction == i32::from(a_dir));
                         a.hook_model += u64::from(o.hook == a_hook);
                         a.aim_model += wrap_angle(o.aim - a_aim).abs();
+                        let (dm, dh) = (o.direction == i32::from(a_dir), hold_dir == a_dir);
+                        a.dir_pair[0] += u64::from(dm && !dh);
+                        a.dir_pair[1] += u64::from(dh && !dm);
+                        let (hm, hh) = (o.hook == a_hook, hold_hook == a_hook);
+                        a.hook_pair[0] += u64::from(hm && !hh);
+                        a.hook_pair[1] += u64::from(hh && !hm);
                     }
                     None => {}
                 }
@@ -489,6 +519,18 @@ fn report(names: &[String], v: &mut [Agg]) {
             am / a.aim_n.max(1) as f64,
             st(&mut eo),
             st(&mut em)
+        );
+    }
+    println!("\nPaired sign tests against hold at k = 1 (model right and hold wrong / hold right and model wrong, exact two-sided p):\n");
+    for (name, a) in names.iter().zip(v.iter()).skip(1) {
+        println!(
+            "- {name}: direction {} / {} (p = {:.3}), hook {} / {} (p = {:.3})",
+            a.dir_pair[0],
+            a.dir_pair[1],
+            sign_p(a.dir_pair[0], a.dir_pair[1]),
+            a.hook_pair[0],
+            a.hook_pair[1],
+            sign_p(a.hook_pair[0], a.hook_pair[1])
         );
     }
     println!(
