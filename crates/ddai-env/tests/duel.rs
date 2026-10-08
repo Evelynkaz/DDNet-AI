@@ -474,3 +474,33 @@ fn the_live_view_predicts_our_own_tee_through_its_inputs_in_flight() {
         assert_eq!(worst, 0.0, "lag {lag}: the prediction is {worst} px off");
     }
 }
+
+/// Review 3.19 F3: a `lag_model` (3.16) in a duel game with the round rules and the live view is not silently dropped: the lag of every decision comes from the
+/// model (the report's lag histogram is filled, with lag 1 or 2 only for a 37.5 ms base) and the game still plays.
+#[test]
+fn a_lag_model_drives_the_lag_in_a_duel_game_with_the_live_view() {
+    let arena = ring(14, 22);
+    let spec = DuelSpec {
+        live_view: vec![0],
+        ..DuelSpec::default()
+    };
+    let me = puppet("me", vec![(0, act(1, false, [300, 0])), (260, act(-1, false, [-300, 0]))]);
+    let r = play_game_duel_watched(
+        &arena,
+        &Rules {
+            max_ticks: 150,
+            ..Rules::default()
+        },
+        Some(&spec),
+        2,
+        Layout::default(),
+        vec![me, idle()],
+        vec![Some(ddai_env::sim::LagModel::new(37.5, 0.5, 2.5, 6.0))],
+        &mut |_, _| true,
+    )
+    .unwrap();
+    let hist = &r.players[0].lag_hist;
+    assert!(!hist.is_empty() && hist.iter().sum::<u32>() > 50, "{hist:?}");
+    assert_eq!(hist[0], 0, "no decision at lag 0 for a 37.5 ms base");
+    assert!(r.players[1].lag_hist.is_empty(), "the opponent has no model");
+}

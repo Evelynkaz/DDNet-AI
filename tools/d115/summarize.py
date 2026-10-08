@@ -46,6 +46,30 @@ def paired_diff(a_wins, b_wins):
     return only_a, only_b, 100 * d, 100 * Z * math.sqrt(max(var, 0.0))
 
 
+def pairs(rows, spec):
+    """`--pairs a:b,c:d`: arm a against arm b (not only against the base arm), per cell and pooled."""
+    pooled = defaultdict(lambda: ([], []))
+    print("| contrast | cell | n | arm wins | other wins | only arm / only other | diff pp | McNemar p |")
+    print("|---|---|---:|---:|---:|---|---:|---:|")
+    for pair in spec.split(","):
+        a_name, b_name = pair.split(":")
+        for cell in sorted(rows):
+            arms = rows[cell]
+            if a_name not in arms or b_name not in arms:
+                continue
+            common = sorted(set(arms[a_name]) & set(arms[b_name]))
+            a = [arms[a_name][g]["result"] == "W" for g in common]
+            b = [arms[b_name][g]["result"] == "W" for g in common]
+            oa, ob, dpp, hw = paired_diff(a, b)
+            pooled[pair][0].extend(a)
+            pooled[pair][1].extend(b)
+            print(f"| {a_name} vs {b_name} | {cell} | {len(common)} | {sum(a)} | {sum(b)} | {oa} / {ob} | {dpp:+.1f} ± {hw:.1f} | {mcnemar_exact(oa, ob):.3f} |")
+        a, b = pooled[pair]
+        if a:
+            oa, ob, dpp, hw = paired_diff(a, b)
+            print(f"| **{pair.replace(':', ' vs ')}** | **pooled** | {len(a)} | {sum(a)} | {sum(b)} | {oa} / {ob} | **{dpp:+.1f} ± {hw:.1f}** | **{mcnemar_exact(oa, ob):.4f}** |")
+
+
 def main():
     path = sys.argv[1]
     base_arm = "base"
@@ -57,6 +81,9 @@ def main():
         cell, _, arm = r["condition"].partition(" ")
         rows[cell].setdefault(arm, {})[r["game"]] = r
     pooled = defaultdict(lambda: ([], []))
+    if "--pairs" in sys.argv:
+        pairs(rows, sys.argv[sys.argv.index("--pairs") + 1])
+        return
     print("| cell | arm | n | W:L:D:T | credited wins | decided share W/(W+L) | vs base: only arm / only base | diff pp | McNemar p |")
     print("|---|---|---:|---|---|---|---|---:|---:|")
     for cell in sorted(rows):
