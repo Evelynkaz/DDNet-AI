@@ -484,7 +484,10 @@ fn a_lag_model_drives_the_lag_in_a_duel_game_with_the_live_view() {
         live_view: vec![0],
         ..DuelSpec::default()
     };
-    let me = puppet("me", vec![(0, act(1, false, [300, 0])), (260, act(-1, false, [-300, 0]))]);
+    let me = puppet(
+        "me",
+        vec![(0, act(1, false, [300, 0])), (260, act(-1, false, [-300, 0]))],
+    );
     let r = play_game_duel_watched(
         &arena,
         &Rules {
