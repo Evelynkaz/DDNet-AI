@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! cargo run --release -p ddai-env --example pm1008_replay -- --clip <file.clip> --window <from>..<to> [--window ...] [--rate-us 2.1]
-//!     [--budget-ms 4] [--seeds 4] [--lag 2] [--drag 20] [--warm 20] [--opp 0] [--live-path] [--no-mirror] [--dump] [--static-push] [--counter] [--belief P] [--protect] [--finish-push] [--no-hammer] > out.jsonl
+//!     [--budget-ms 4] [--seeds 4] [--lag 2] [--drag 20] [--warm 20] [--opp 0] [--live-path] [--no-mirror] [--dump] [--wall] [--all-fixes] [--static-push] [--counter] [--belief P] [--protect] [--finish-push] [--no-hammer] > out.jsonl
 //! ```
 //! `--rate-us` is the work clock's cost of one tee-tick in microseconds (2.1 = the live-like starved search of E-034 §2.2, 1.25 = the arena default);
 //! `--budget-ms 40` with `--rate-us 1.25` is an "oracle" with ten times the search.
@@ -51,6 +51,7 @@ fn main() -> Result<(), String> {
     let mut live_path = false;
     let mut mirror = true;
     let mut dump = false;
+    let mut wall = false;
     let mut fixes = DuelFixSpec::default();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -76,6 +77,20 @@ fn main() -> Result<(), String> {
             "--live-path" => live_path = true,
             "--no-mirror" => mirror = false,
             "--dump" => dump = true,
+            // The wall clock instead of the work clock (the decision's real time, D-042) and every fix of 3.23 at once.
+            "--wall" => wall = true,
+            "--all-fixes" => {
+                fixes = DuelFixSpec {
+                    static_push: Some(true),
+                    counter_release: Some(true),
+                    hooked_belief: Some(0.8),
+                    protect_defence: Some(true),
+                    finish_push: Some(true),
+                    finish_approach: Some(6),
+                    no_hammer_frozen: Some(true),
+                    ..DuelFixSpec::default()
+                };
+            }
             "--static-push" => fixes.static_push = Some(true),
             "--counter" => fixes.counter_release = Some(true),
             "--protect" => fixes.protect_defence = Some(true),
@@ -109,9 +124,11 @@ fn main() -> Result<(), String> {
         for s in 0..seeds {
             let mut spec = PlayerSpec::simple("hybrid");
             spec.mode = Some("deadline".into());
-            spec.clock = Some("work".into());
+            if !wall {
+                spec.clock = Some("work".into());
+                spec.step_ms = Some(rate_us / 1000.0);
+            }
             spec.budget_ms = Some(budget_ms);
-            spec.step_ms = Some(rate_us / 1000.0);
             let mut h = HybridSpec::default();
             if drag > 0.0 {
                 h.frozen_drag_weight = Some(drag);
@@ -189,14 +206,16 @@ fn main() -> Result<(), String> {
                     lag_ticks: view_lag,
                     in_flight: view_flight,
                 };
+                let t_decide = std::time::Instant::now();
                 let a = b.decide_in(&obs, Some(&view));
+                let wall_ms = t_decide.elapsed().as_secs_f64() * 1000.0;
                 if t < w0 {
                     continue;
                 }
                 let tel = b.telemetry().unwrap_or_else(|| "null".into());
                 println!(
                     "{{\"clip\":\"{name}\",\"tick\":{t},\"seed\":{si},\"rate_us\":{rate_us},\"budget_ms\":{budget_ms},\"lag\":{lag},\"drag\":{drag},\
-\"live_path\":{live_path},\"act\":[{},{},{},{}],\"tel\":{tel}}}",
+\"live_path\":{live_path},\"wall_ms\":{wall_ms:.3},\"act\":[{},{},{},{}],\"tel\":{tel}}}",
                     a.direction,
                     u8::from(a.jump),
                     u8::from(a.hook),

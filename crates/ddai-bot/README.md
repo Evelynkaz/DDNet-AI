@@ -354,6 +354,8 @@ STATUS несёт аддитивный объект `search_window`: сколь�
 * **Клип на каждый проигранный раунд.** В дуэли раунд, закончившийся нашей заморозкой, сохраняется клипом `duel-loss-<тик>.clip` без отката 45 с (≤ 40 за запуск бота, ≤ 60 файлов и 12 МиБ на диске; рабочий поток занят — клип ждёт кадра). `tests/clips.rs`.
 * **Окно дуэли.** Раз в 30 с детектированной дуэли строка журнала `duel window: hammer presses …, jump presses …, hammer hits by us … / on us …` (протокол живой проверки).
 * **`--duel-hammer off|reflex|reflex-all|envelope|both`** / `duel_hammer` в `settings.toml` — рефлекс молота (`reflex`: бить, если удар бросает соперника во фриз; `reflex-all`: бить при любой возможности — в арене хуже, чем ничего) и «конверт» гибрида, только в детектированной дуэли; по умолчанию выключено. **Ни одно плечо не прошло предрегистрированные планки** (`docs/research/duel-3.19.md`): это инструменты живого замера, не рекомендация.
+* **Окно дуэли (расширено, задача 3.23).** К строке добавлено «inputs that pressed nothing S of D decisions»: доля вводов, где не нажато ничего (`BotStats.still_inputs`) — признак неподвижной точки.
+* **`--duel-fixes off|all|static,counter,finish`** (задача 3.23, D-121; `docs/formats.md` §55): `static` — соперник дуэли не отбрасывается фильтром АФК (`BotConfig::duel_afk`, `PickCtx::duel_opponent`, `DuelDetector::opponent()`; тест `tests/duel_afk.rs`), остальное — ручки гибрида (`ddai-planner::hybrid::duelfix`). Выключено по умолчанию.
 
 ## Потоки поиска в STATUS: `search_threads` (задача 5.17, D-125; `docs/formats.md` §57)
 
