@@ -67,6 +67,14 @@ pub trait PlanCollision {
 
     fn test_box(&self, pos: Vec2, size: Vec2) -> bool;
 
+    /// Task 4.13: `true` only when it is certain that a 28 px tee box centred anywhere within 16 px of `(x, y)` overlaps no
+    /// solid cell *and* that `is_hazard` is `false` at any point within 16 px of `(x, y)`, so the ballistic flight probes of
+    /// `fields` may skip their `test_box` / `is_hazard` calls for a step that short. `false` means "run the probes" and is
+    /// always allowed (the default; the TS-parity backend never skips).
+    fn flight_clear(&self, _x: f64, _y: f64) -> bool {
+        false
+    }
+
     fn intersect_line(&self, pos0: Vec2, pos1: Vec2) -> LineHit;
     fn intersect_line_hook(&self, pos0: Vec2, pos1: Vec2) -> LineHit;
 

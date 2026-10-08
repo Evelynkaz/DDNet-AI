@@ -291,9 +291,28 @@ pub fn hypot(xs: &[f64]) -> f64 {
 }
 
 /// `Math.hypot(a, b)`, the overwhelmingly common 2-argument case (the old bot's ~37 call sites are
-/// all 2-argument distance computations) — a thin, allocation-free wrapper over [`hypot`].
+/// all 2-argument distance computations) — bit-identical to [`hypot`]`(&[a, b])`.
+///
+/// Task 4.13: the closed form of the general loop for two finite, not both zero arguments. With
+/// `max = max(|a|, |b|)` the loop computes `n1 = |a| / max`, `n2 = |b| / max`, and its Kahan
+/// compensation is `+0.0` after the first term (`(s - 0.0) - s` for the first summand `s >= 0`), so
+/// the sum is `n1 * n1 + n2 * n2` and the result `sqrt(sum) * max`. The larger argument divided by
+/// itself is exactly `1.0`, so its division is skipped. NaN, infinities and the all-zero case take
+/// the general path (their precedence rules are in [`hypot`]).
+#[inline]
 pub fn hypot2(a: f64, b: f64) -> f64 {
-    hypot(&[a, b])
+    let (aa, ab) = (a.abs(), b.abs());
+    // `<= MAX` is false for NaN and for infinity.
+    if !(aa <= f64::MAX && ab <= f64::MAX) || (aa == 0.0 && ab == 0.0) {
+        return hypot(&[a, b]);
+    }
+    if aa >= ab {
+        let n2 = ab / aa;
+        (1.0 + n2 * n2).sqrt() * aa
+    } else {
+        let n1 = aa / ab;
+        (n1 * n1 + 1.0).sqrt() * ab
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +391,61 @@ mod tests {
         assert_eq!(hypot(&[f64::NAN, f64::INFINITY]), f64::INFINITY);
         assert!(hypot(&[f64::NAN, 1.0]).is_nan());
         assert_eq!(hypot(&[0.0, 0.0, 0.0]), 0.0);
+    }
+
+    /// Task 4.13: the closed form of `hypot2` is the general loop, bit for bit, including the special values.
+    #[test]
+    fn hypot2_closed_form_equals_the_general_loop() {
+        let specials = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            3.0,
+            4.0,
+            1e-310,
+            -1e-310,
+            5e-324,
+            1e-160,
+            1e160,
+            1e300,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+        for &a in &specials {
+            for &b in &specials {
+                let (x, y) = (hypot2(a, b), hypot(&[a, b]));
+                assert!(
+                    x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+                    "hypot2({a}, {b}) = {x} vs {y}"
+                );
+            }
+        }
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..200_000 {
+            let scale = |bits: u64| {
+                let mant = (bits >> 11) as f64 / (1u64 << 53) as f64;
+                let exp = ((bits & 0x7ff) as i32 - 1023) / 4;
+                let v = mant * 2f64.powi(exp);
+                if bits & 0x800 != 0 { -v } else { v }
+            };
+            let (a, b) = (scale(next()), scale(next()));
+            let (x, y) = (hypot2(a, b), hypot(&[a, b]));
+            assert_eq!(x.to_bits(), y.to_bits(), "hypot2({a}, {b})");
+            // The common case of the planner: two comparable magnitudes.
+            let (c, d) = (a, a * 0.5 + b * 1e-3);
+            assert_eq!(hypot2(c, d).to_bits(), hypot(&[c, d]).to_bits(), "hypot2({c}, {d})");
+        }
     }
 
     #[test]

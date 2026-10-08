@@ -233,12 +233,58 @@ fn score_tick<W: PlanWorld>(
     launch_memo: Option<&mut LaunchMemo>,
     ceiling: Option<&CeilingField>,
 ) -> f64 {
+    let me = world.get_tee(self_id);
+    let en = world.get_tee(enemy_id);
+    score_tick_of(
+        world,
+        me.as_ref(),
+        en.as_ref(),
+        self_id,
+        enemy_id,
+        events,
+        field,
+        unfreeze,
+        cfg,
+        drag,
+        goal,
+        dead,
+        memory,
+        thirds,
+        band,
+        launch_memo,
+        ceiling,
+    )
+}
+
+/// [`score_tick`] for a caller that already holds the two tees' states (`world.get_tee(self_id)` / `get_tee(enemy_id)`
+/// as of now: reading a tee is pure, and each read copies a ~250 B `TeeState`, which the rollout loop paid four times a tick
+/// before task 4.13).
+#[allow(clippy::too_many_arguments)]
+fn score_tick_of<W: PlanWorld>(
+    world: &W,
+    me: Option<&TeeState>,
+    en: Option<&TeeState>,
+    self_id: i32,
+    enemy_id: i32,
+    events: &[crate::types::WorldEvent],
+    field: &HazardField,
+    unfreeze: &HazardField,
+    cfg: &PlannerConfig,
+    drag: &mut DragTracker,
+    goal: Option<Vec2>,
+    dead: Option<&DeadZoneGrid>,
+    memory: Option<&FreezeMemory>,
+    thirds: &[Vec2],
+    band: Option<&Band>,
+    launch_memo: Option<&mut LaunchMemo>,
+    ceiling: Option<&CeilingField>,
+) -> f64 {
     use crate::types::WorldEvent;
 
-    let Some(me) = world.get_tee(self_id) else {
+    let Some(me) = me else {
         return -1000.0;
     };
-    let Some(en) = world.get_tee(enemy_id) else {
+    let Some(en) = en else {
         return -1000.0;
     };
     let mut s = 0.0;
@@ -3544,8 +3590,8 @@ impl<W: PlanWorld> Planner<W> {
                         hook_grabbed = false;
                     }
                 }
+                let en_now = world.get_tee(enemy_id);
                 if self.track_rollout {
-                    let en_now = world.get_tee(enemy_id);
                     if en_now.is_some_and(|e| e.frozen || !e.alive) {
                         self.rollout_enemy_out += 1;
                     }
@@ -3565,8 +3611,10 @@ impl<W: PlanWorld> Planner<W> {
                         self.rollout_min_gap = gap;
                     }
                 }
-                let mut tick_score = score_tick(
+                let mut tick_score = score_tick_of(
                     world,
+                    me_now.as_ref(),
+                    en_now.as_ref(),
                     self_id,
                     enemy_id,
                     &events,

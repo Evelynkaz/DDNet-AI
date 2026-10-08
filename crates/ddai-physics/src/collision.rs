@@ -149,6 +149,10 @@ type TeleNumber = u8;
 /// coordinate's own `ulp` (0.5 px at 2^23) well below the 1 px pads.
 pub(crate) const EARLY_OUT_COORD_LIMIT: f64 = 4_194_304.0;
 
+/// A map whose width and height in pixels stay within this (2^24: every such integer is exact in an
+/// `f32`) takes the float-compare tile conversion of [`Collision::col_of`].
+const FAST_TILE_PX_LIMIT: i64 = 1 << 24;
+
 /// Samples per run the `IntersectNoLaser[NoWalls]` marches try to skip as a unit (see
 /// [`Collision::intersect_no_laser`]).
 const NO_LASER_RUN: i32 = 16;
@@ -203,6 +207,11 @@ fn dilate(flags: &[bool], width: i32, height: i32) -> Vec<bool> {
 pub struct Collision<R: Real> {
     width: i32,
     height: i32,
+    /// `width * 32` / `height * 32` as an `R` and whether both are exactly representable (task 4.13, see
+    /// [`Collision::col_of`]); `false` (a map wider than 2^19 tiles) keeps the textbook conversion.
+    limit_x: R,
+    limit_y: R,
+    tile_fast: bool,
     /// `IsSolid`/`CheckPoint`'s answer for every cell, precomputed once here instead of
     /// recomputed (`GetTile`'s range check + two equality comparisons) on every call — review
     /// round 2, finding F4 ("cheap, bit-exactness-safe wins"): `CheckPoint` is the single
@@ -270,6 +279,9 @@ pub struct Collision<R: Real> {
     /// ... and per cell: the planner's "freeze or death" hazard test (game or front freeze, a heart's
     /// reach, game death), see [`Collision::hazard_tile`].
     hazard: Vec<bool>,
+    /// ... and per cell: whether any cell in the 3x3 block around it is solid or a hazard (task 4.13,
+    /// [`Collision::flight_clear_tile`]).
+    flight_near: Vec<bool>,
     /// `false` whenever a layer changed after the tables were last built (`set_collision_at`,
     /// `set_door_collision_at`); the fast paths that read them then fall back to the exact code.
     derived_ok: bool,
@@ -285,6 +297,9 @@ impl<R: Real> Collision<R> {
         Collision {
             width: 0,
             height: 0,
+            limit_x: R::ZERO,
+            limit_y: R::ZERO,
+            tile_fast: false,
             solid: Vec::new(),
             solid_sat: Vec::new(),
             no_laser_sat: Vec::new(),
@@ -310,6 +325,7 @@ impl<R: Real> Collision<R> {
             exists_sat: Vec::new(),
             hook_sat: Vec::new(),
             hazard: Vec::new(),
+            flight_near: Vec::new(),
             derived_ok: false,
         }
     }
@@ -380,9 +396,13 @@ impl<R: Real> Collision<R> {
             .collect();
         let solid_sat = build_solid_sat(&solid, width, height);
 
+        let tile_fast = i64::from(width) * 32 <= FAST_TILE_PX_LIMIT && i64::from(height) * 32 <= FAST_TILE_PX_LIMIT;
         let mut result = Collision {
             width,
             height,
+            limit_x: if tile_fast { R::from_i32(width * 32) } else { R::ZERO },
+            limit_y: if tile_fast { R::from_i32(height * 32) } else { R::ZERO },
+            tile_fast,
             solid,
             solid_sat,
             no_laser_sat: Vec::new(),
@@ -408,6 +428,7 @@ impl<R: Real> Collision<R> {
             exists_sat: Vec::new(),
             hook_sat: Vec::new(),
             hazard: Vec::new(),
+            flight_near: Vec::new(),
             derived_ok: false,
         };
         // Every layer `tile_exists_uncached` reads is already in place above, so it's safe to
@@ -478,7 +499,25 @@ impl<R: Real> Collision<R> {
                     || self.pickup_freeze.get(i).copied().unwrap_or(false)
             })
             .collect();
+        let flight: Vec<bool> = (0..n).map(|i| self.solid[i] || self.hazard[i]).collect();
+        self.flight_near = dilate(&flight, self.width, self.height);
         self.derived_ok = true;
+    }
+
+    /// `true` only if nothing in the 3x3 block of cells around tile `(tx, ty)` is solid (as `is_solid` sees it) or a
+    /// planner hazard ([`Collision::hazard_tile`]), and the tile is on the map. A point probe or a tee box
+    /// (28 px, so up to 14.6 px from its centre once `round_to_int` has had its say) whose centre lies within 16 px of
+    /// a point in tile `(tx, ty)` falls entirely in that block, so for such a probe `test_box` is `false` and
+    /// `hazard_tile` of its centre cell is `false`. `false` ("don't know") when the derived tables are stale
+    /// ([`Collision::set_collision_at`]) or the tile is off the map.
+    #[inline]
+    pub fn flight_clear_tile(&self, tx: i32, ty: i32) -> bool {
+        if !self.derived_ok || tx < 0 || ty < 0 || tx >= self.width || ty >= self.height {
+            return false;
+        }
+        self.flight_near
+            .get((ty * self.width + tx) as usize)
+            .is_some_and(|&near| !near)
     }
 
     /// The planner's tile-based hazard test: a freeze tile (game or front layer), a heart pickup's
@@ -642,7 +681,57 @@ impl<R: Real> Collision<R> {
 
     /// `CCollision::CheckPoint(float x, float y)`: `IsSolid(round_to_int(x), round_to_int(y))`.
     pub fn check_point(&self, x: R, y: R) -> bool {
-        self.is_solid(vmath::round_to_int(x), vmath::round_to_int(y))
+        if self.solid.is_empty() {
+            return false;
+        }
+        self.solid[(self.row_of(y) * self.width + self.col_of(x)) as usize]
+    }
+
+    /// `clamp(round_to_int(v) / 32, 0, extent - 1)`: the tile column (`limit` = `width * 32`, `last` =
+    /// `width - 1`) or row a pixel coordinate falls in, as [`Collision::is_solid`] maps it. Task 4.13: the
+    /// textbook form (`round_to_int`, then `to_i32_trunc`'s range test, `/ 32`, `clamp`) is ~15 instructions;
+    /// this is the same function by cases, in the float domain first.
+    ///
+    /// * `v <= 0` or NaN: `round_to_int` is `trunc(v - 0.5) <= 0` (or `i32::MIN` for a NaN / a magnitude
+    ///   past `-2^31`), `/ 32` stays `<= 0`, the clamp gives `0`.
+    /// * `v > 0`, `t = v + 0.5` (the very sum `round_to_int` forms, in `R`): `trunc(t) >= 0`, and
+    ///   `trunc(t) / 32 = trunc(t) >> 5`. Below `limit = extent * 32` (an integer `R` holds exactly)
+    ///   `trunc(t) < limit`, so the shift is at most `last` and the clamp is a no-op; from `limit` up to
+    ///   `2^31` the quotient is `>= last + 1` and the clamp gives `last`; at `2^31` and beyond
+    ///   `to_i32_trunc` is `i32::MIN` (the C++ "integer indefinite"), whose quotient clamps to `0`.
+    #[inline(always)]
+    fn tile_of(v: R, limit: R, last: i32) -> i32 {
+        if !(v > R::ZERO) {
+            return 0;
+        }
+        let t = v + R::from_f64(0.5);
+        if t < limit {
+            t.to_i32_trunc() >> 5
+        } else if t < R::from_f64(2147483648.0) {
+            last
+        } else {
+            0
+        }
+    }
+
+    /// The tile column of pixel `x`, see [`Collision::tile_of`].
+    #[inline(always)]
+    fn col_of(&self, x: R) -> i32 {
+        if self.tile_fast {
+            Self::tile_of(x, self.limit_x, self.width - 1)
+        } else {
+            (vmath::round_to_int(x) / 32).clamp(0, self.width - 1)
+        }
+    }
+
+    /// The tile row of pixel `y`, see [`Collision::tile_of`].
+    #[inline(always)]
+    fn row_of(&self, y: R) -> i32 {
+        if self.tile_fast {
+            Self::tile_of(y, self.limit_y, self.height - 1)
+        } else {
+            (vmath::round_to_int(y) / 32).clamp(0, self.height - 1)
+        }
     }
 
     /// `CCollision::CheckPoint(vec2 Pos)`.
@@ -661,12 +750,21 @@ impl<R: Real> Collision<R> {
     }
 
     /// `CCollision::TestBox(vec2 Pos, vec2 Size)`.
+    ///
+    /// The four corners share two x and two y values, so each is rounded and mapped to a tile
+    /// column / row once (task 4.13: four conversions instead of eight, the corner lookups
+    /// unchanged -- every value is the one `check_point` would compute for that corner, so the
+    /// answer is bit-for-bit the same).
     pub fn test_box(&self, pos: Vec2<R>, size: Vec2<R>) -> bool {
+        if self.solid.is_empty() {
+            return false;
+        }
         let half = size * R::from_f64(0.5);
-        self.check_point(pos.x - half.x, pos.y - half.y)
-            || self.check_point(pos.x + half.x, pos.y - half.y)
-            || self.check_point(pos.x - half.x, pos.y + half.y)
-            || self.check_point(pos.x + half.x, pos.y + half.y)
+        let (x0, x1) = (self.col_of(pos.x - half.x), self.col_of(pos.x + half.x));
+        let (y0, y1) = (self.row_of(pos.y - half.y), self.row_of(pos.y + half.y));
+        let (r0, r1) = ((y0 * self.width) as usize, (y1 * self.width) as usize);
+        let solid = &self.solid[..];
+        solid[r0 + x0 as usize] || solid[r0 + x1 as usize] || solid[r1 + x0 as usize] || solid[r1 + x1 as usize]
     }
 
     /// `CCollision::IsOnGround(vec2 Pos, float Size)`.
@@ -2413,6 +2511,77 @@ mod tests {
         // Pixel (32*1 - 1)=31 is still tile 0 (border, solid); 32.4 rounds to 32 -> tile 1 (air).
         assert!(c.check_point(31.0, 32.4)); // tile x=0 (border)
         assert!(!c.check_point(48.0, 48.0)); // well inside, tile (1,1), air
+    }
+
+    /// Task 4.13: `tile_of` is `clamp(round_to_int(v) / 32, 0, extent - 1)` for every input class: all the
+    /// representable boundaries around `0`, `limit` and `2^31`, plus a few million random bit patterns and
+    /// random in-map values.
+    fn tile_of_matches_the_textbook_conversion<R: Real>(from_bits: impl Fn(u64) -> R) {
+        let reference = |v: R, last: i32| (vmath::round_to_int(v) / 32).clamp(0, last);
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for extent in [1i32, 2, 3, 10, 306, 425, 4096, 8192, 100_000, 524_287] {
+            let last = extent - 1;
+            let limit = R::from_i32(extent * 32);
+            let check = |v: R| {
+                assert_eq!(
+                    Collision::<R>::tile_of(v, limit, last),
+                    reference(v, last),
+                    "extent {extent}, v {v:?}"
+                );
+            };
+            // Boundaries: every half-integer around 0, the map edge and 2^31, and the neighbours of each.
+            let mut anchors = vec![0.0f64, 0.5, 1.0, 31.5, 32.0, 31.4999, 32.5, 2147483647.5, 2147483648.0];
+            for k in [-2i32, -1, 0, 1, 2] {
+                anchors.push(f64::from(extent * 32 + k));
+                anchors.push(f64::from(extent * 32 + k) - 0.5);
+                anchors.push(f64::from(extent * 32 + k) + 0.5);
+            }
+            for a in anchors {
+                for sign in [1.0, -1.0] {
+                    let base = R::from_f64(sign * a);
+                    check(base);
+                    let bits = base.to_f64().to_bits();
+                    for d in [1u64, 2, 3] {
+                        check(R::from_f64(f64::from_bits(bits.wrapping_add(d))));
+                        check(R::from_f64(f64::from_bits(bits.wrapping_sub(d))));
+                    }
+                }
+            }
+            for special in [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                -0.0,
+                0.0,
+                f64::MAX,
+                f64::MIN,
+                1e-40,
+            ] {
+                check(R::from_f64(special));
+            }
+            for _ in 0..400_000 {
+                check(from_bits(next()));
+                // In-map values, with the fractional parts a rollout produces.
+                let u = (next() >> 11) as f64 / (1u64 << 53) as f64;
+                check(R::from_f64((u * 1.2 - 0.1) * f64::from(extent * 32)));
+            }
+        }
+    }
+
+    #[test]
+    fn tile_of_f32_matches_the_textbook_conversion() {
+        tile_of_matches_the_textbook_conversion::<f32>(|b| f32::from_bits(b as u32));
+    }
+
+    #[test]
+    fn tile_of_f64_matches_the_textbook_conversion() {
+        tile_of_matches_the_textbook_conversion::<f64>(f64::from_bits);
     }
 
     #[test]
