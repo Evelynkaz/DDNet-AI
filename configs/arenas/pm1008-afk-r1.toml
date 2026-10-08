@@ -1,0 +1,16 @@
+# Post-mortem of the 2026-10-08 duel against a human: the box of `pm1007-clb-duel` (Copy Love Box f9793b34) with the two tees placed where they
+# stood in round 1 while the human was idle for ~70 s: our tee at px (2764, 5777), his at (2805, 5777), 41 px apart on the no-hook floor in the
+# middle of the box. The arena spawns on tile centres: tiles (86, 180) and (87, 180), 32 px apart. Sides alternate by game parity.
+name = "pm1008-afk-r1"
+tag = "holdout"
+description = "Copy Love Box (f9793b34) 1vs1 box, round-1 idle geometry of 2026-10-08: spawns (86,180) and (87,180)."
+
+[map]
+kind = "file"
+file = "cache/Copy Love Box_f9793b3416f04eafc1c05c1ca43f6107dff34bf9eb3d5c9ba26ad9ef6317abcb.map"
+sha256 = "f9793b3416f04eafc1c05c1ca43f6107dff34bf9eb3d5c9ba26ad9ef6317abcb"
+
+[spawn]
+min_tiles = 1.0
+max_tiles = 1.0
+rows = [{ y = 180, x0 = 86, x1 = 86 }, { y = 180, x0 = 87, x1 = 87 }]
