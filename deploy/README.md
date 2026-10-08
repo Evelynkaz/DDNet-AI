@@ -201,7 +201,7 @@ systemctl is-enabled ddnet-ai-web.service caddy.service   # оба должны 
 ```bash
 mkdir -p -m 700 ~/aiddnet/data/bot      # уже есть, если стоит веб-юнит (его создаёт deploy/install.sh); юнит бота требует, чтобы он был
 mkdir -p ~/aiddnet/data/run ~/aiddnet/data/logs/play ~/aiddnet/data/logs/bot ~/aiddnet/data/maps/cache
-sudo install -m 0644 deploy/systemd/ddnet-ai-bot.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/ddnet-ai-bot.service deploy/systemd/ddnetaibot.slice /etc/systemd/system/   # слайс — приоритет CPU, см. «Приоритет CPU» ниже
 sudo systemctl daemon-reload
 sudo systemctl start ddnet-ai-bot            # НЕ enable
 journalctl -u ddnet-ai-bot -f                # лог (нужен sudo или группа systemd-journal)
@@ -342,6 +342,58 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
 `--data-dir ~/aiddnet/data`, настоящий `data/bot`, боевой веб-юнит читает его мост; на время прогона нужны только `ddnet-local.service` и запущенный `ddnet-ai-web.service`. Стенд ставит юнит, запускает его, в конце останавливает
 и **убирает юнит и drop-in** (после репетиции бот снова не установлен). Сверка после прогона: ни одна запись `data/bot` не пропала и не сменила права, `relations.json` владельца тот же. Для прогона ≥ 5,5 часов анализ судит наклон памяти
 за последние 5 часов (< 50 МиБ за 7 суток). `--fly-bundle <bundle>` добавляет `--fly-bundle` в команду бота (вкладка «Муха», `hybrid:fly`). Результаты — `docs/EXPERIMENTS.md`, E-010.
+
+### Приоритет CPU бота над работой агентов (задача 4.14, D-124)
+
+**Зачем.** Сборки, тесты, арена и обучение агентов делят 8 vCPU с живым ботом. Под такой нагрузкой бот оценивал вдвое меньше кандидатов за решение (≈ 14 вместо ≈ 28 в арене) и в 46–59 % решений
+отдавал ввод не в первый слот (5,7 % на тихой машине; 08.10). Подробные замеры и оговорки — `docs/research/cpu-priority.md`, решение — D-124.
+
+**Что ставится** (всё вместе с юнитом, `deploy/install-launcher.sh`; ничего реального времени: `RestrictRealtime=true` остался, `CPUSchedulingPolicy=` не задан; вся прежняя изоляция юнита на месте):
+
+| Где | Ключ | Значение | Почему |
+|---|---|---|---|
+| `ddnetaibot.slice` (новый файл) | `CPUWeight=` | 1000 | cgroup v2 делит процессор только между *соседями* (`systemd.resource-control(5)`: «split up among all units within one slice»). Агенты живут в `user.slice` (вес 100), юнит в `system.slice` (тоже 100): вес на самом юните сравнивает его только с соседями по `system.slice`. Собственный верхний слайс с весом 1000 сравнивается с `user.slice` напрямую (в 10 раз выше); на тихой машине ничего не меняет, потолка и квоты нет |
+| `ddnetaibot.slice` | `IOWeight=` | 1000 | бот пишет мало (отчёт, клипы, память). **Сейчас ничего не меняет:** `io.weight` действует только под планировщиком BFQ или контроллером iocost, а у диска этой VPS планировщик `none`; оставлено как дешёвое умолчание, замеры его не включали |
+| `ddnet-ai-bot.service` | `Slice=ddnetaibot.slice` | | юнит едет в этом слайсе (в слайсе больше никого нет). Имя **без дефиса**: systemd читает `a-b.slice` как потомка `a.slice`, и на верхнем уровне соревновался бы вес родителя (100), а не наш |
+| `ddnet-ai-bot.service` | `CPUWeight=1000`, `IOWeight=1000` | | то же на самом юните: страховка, если юнит когда-нибудь окажется в общей cgroup (ручной запуск, `Slice=` убран) |
+| `ddnet-ai-bot.service` | `Nice=-5` | | `systemd.exec(5)`: −20…19, при нехватке ресурсов меньшее значение даёт больше. −5 мягко: вес планировщика 3121 против 1024; −20 вредило бы игровому серверу. Отрицательный nice требует `CAP_SYS_NICE`: systemd применяет его до сброса набора возможностей, поэтому пустой `CapabilityBoundingSet=` остаётся (проверено на VPS: процесс бота идёт с NI −5). Под cgroup v2 `Nice` ранжирует потоки только внутри одной cgroup, поэтому **один он бота от других cgroup не защищает** (замеры: «как без настроек»); оставлен как дешёвая страховка внутри cgroup |
+
+**Развёртывание** (боевой `/etc` трогает только лид; бот остановлен, `install-launcher.sh` иначе откажется):
+
+```bash
+cd ~/aiddnet/DDNet-AI
+deploy/install-launcher.sh          # кладёт ddnetaibot.slice и новый ddnet-ai-bot.service (прежние — в /var/backups/ddnet-ai-launcher/<метка>/), daemon-reload
+#   в конце печатает для юнита и слайса: «Slice=ddnetaibot.slice», «CPUWeight=1000», «Nice=-5», «IOWeight=1000» — или WARNING, если drop-in что-то переопределил
+sudo systemctl start ddnet-ai-bot   # (или «Запустить» на сайте); настройки применяются со следующего запуска
+# проверка работающего бота:
+systemctl show -p Slice,CPUWeight,Nice,IOWeight ddnet-ai-bot            # Slice=ddnetaibot.slice, CPUWeight=1000, Nice=-5, IOWeight=1000
+cat /sys/fs/cgroup/ddnetaibot.slice/cpu.weight                           # 1000 (рядом /sys/fs/cgroup/user.slice/cpu.weight = 100)
+ps -o pid,ni,args -p "$(systemctl show -p MainPID --value ddnet-ai-bot)" # NI −5
+```
+
+Откат: `deploy/install-launcher.sh --uninstall` возвращает прежний юнит бота и убирает слайс, либо скопировать прежний `ddnet-ai-bot.service` из резервной копии, `sudo rm /etc/systemd/system/ddnetaibot.slice`,
+`daemon-reload`. Юнит без слайса запускается и сам (systemd создаёт слайс неявно, с весом 100), просто без приоритета; поэтому `tools/e2e/soak.sh --unit` работает как прежде.
+
+**Что агентам.** Бота защищает **только его слайс** (или рычаг на самом `user.slice`, см. `docs/research/cpu-priority.md` §6): всё, что запускают агенты, живёт в `user.slice`, а бот соревнуется с
+`user.slice` целиком; никакая обёртка *внутри* `user.slice` долю бота не меняет. Поэтому `tools/lowprio.sh` — это справедливость между задачами агентов плюс привычка к малому числу потоков (`-j 3`), а не защита бота:
+
+```bash
+tools/lowprio.sh cargo build --release -j 3
+tools/lowprio.sh cargo test --workspace --locked
+tools/lowprio.sh target/release/examples/duel_stats --config … --threads 3
+LOWPRIO_IDLE=1 tools/lowprio.sh <команда>   # + SCHED_IDLE: ниже любого nice внутри вашей cgroup (две такие задачи делят процессор между собой, но уступают всем остальным)
+# без обёртки — то же:  nice -n 15 <команда>
+```
+
+Обёртка делает (каждый шаг пропускается, если инструмента нет; команда запускается всегда, через `exec`: статус выхода, потоки, окружение и **cgroup** — её собственные):
+`chrt --idle 0` (только с `LOWPRIO_IDLE=1`), `ionice -c2 -n7` (на этой VPS без эффекта: планировщик диска `none`, нужен BFQ), `nice -n 15`. Настройки: `LOWPRIO_NICE` (0…19), `LOWPRIO_IDLE=1`, `LOWPRIO_DRYRUN=1`.
+**Не использовать `systemd-run --user --scope` для «низкого приоритета»:** он переносит команду из `session-*.scope` в `user@1000.service/app.slice`, который соревнуется с сессией на равных, и команда получает *больше*
+процессора, чем обычный `nice -n 15` в сессии (проверка ревью 4.14: 1372 против 122 тиков у «самого низкого» процесса). Не больше 3 потоков, `-j 6` и больше — по согласованию с лидом.
+
+**Замер.** `tools/e2e/cpu_priority.sh <метка> 600 old|new|slice none|normal|low [потоков]` — бот и скриптовый соперник на **частном** сервере `127.0.0.1:8479` как транзитные системные юниты
+(`sudo systemd-run`, живут в `/run`, `/etc` не трогается), таблица — `tools/e2e/cpu_priority_table.py`; зонды — `tools/e2e/cpu_priority_probe.sh`. Никогда не 8303 и не публичный сервер.
+
+**Поиск в 2 потока** (`--search-threads 2`) под этими настройками выгоден и на тихой машине, и под нагрузкой (+3…+5 кандидатов, p99 не хуже); умолчание CLI пока 1 — рекомендация в D-124, правку делает лид.
 
 ## Запуск бота с сайта (задача 5.9, D-089)
 
