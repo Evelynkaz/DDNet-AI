@@ -1092,14 +1092,14 @@ pub fn builtin_brain(spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
                 };
                 let model = match ddai_oppnet::AnyPredictor::load(&path).map_err(EnvError::new)? {
                     ddai_oppnet::AnyPredictor::V1(m) => {
-                        ddai_oppnet::AnyPredictor::V1(m.with_gate(gate as f32).with_heads(heads))
+                        ddai_oppnet::AnyPredictor::V1(Box::new((*m).with_gate(gate as f32).with_heads(heads)))
                     }
                     ddai_oppnet::AnyPredictor::V2(m) => {
                         let mut d = *m.decode();
                         if let Some(list) = spec.hybrid.as_ref().and_then(|h| h.window_decode.as_deref()) {
                             ddai_oppnet::v2::predictor::apply_decode_overrides(&mut d, list).map_err(EnvError::new)?;
                         }
-                        ddai_oppnet::AnyPredictor::V2(m.with_decode(d))
+                        ddai_oppnet::AnyPredictor::V2(Box::new((*m).with_decode(d)))
                     }
                 };
                 brain.set_window_model(Box::new(model));

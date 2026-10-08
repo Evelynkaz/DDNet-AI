@@ -305,8 +305,16 @@ fn main() -> Result<(), String> {
     let samples = c_val.samples();
     // The thresholds are tuned for the real opponent when there are clips to tune on, else on the arena.
     let clip_samples: Vec<SampleRef> = samples.iter().copied().filter(|r| r.src == 1).collect();
-    let tune_on = if clip_samples.is_empty() { &samples } else { &clip_samples };
-    println!("tuning the decoding on {} {} samples", tune_on.len(), if clip_samples.is_empty() { "arena" } else { "clip" });
+    let tune_on = if clip_samples.is_empty() {
+        &samples
+    } else {
+        &clip_samples
+    };
+    println!(
+        "tuning the decoding on {} {} samples",
+        tune_on.len(),
+        if clip_samples.is_empty() { "arena" } else { "clip" }
+    );
     let mut decode = tune(&net, &c_val, tune_on, a.press_thr);
     ddai_oppnet::v2::predictor::apply_decode_overrides(&mut decode, &a.decode)?;
     println!("decoding used: {decode:?}");

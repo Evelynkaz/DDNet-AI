@@ -8,8 +8,8 @@ use rayon::prelude::*;
 
 use super::data::GameRec;
 use super::feature::{
-    FD, HORIZON, IF_DIM, IF_SLOTS, INPUT_DIM, K_HIST, KnownTick, Label, STRIDE, assemble, frame_features, inflight_features,
-    label_tick,
+    FD, HORIZON, IF_DIM, IF_SLOTS, INPUT_DIM, K_HIST, KnownTick, Label, STRIDE, assemble, frame_features,
+    inflight_features, label_tick,
 };
 use crate::clipdata::{ClipGame, labels_at};
 use crate::frame::{InputRec, TeeFrame};

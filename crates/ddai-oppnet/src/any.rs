@@ -19,8 +19,8 @@ struct Head {
 }
 
 pub enum AnyPredictor {
-    V1(OppPredictor),
-    V2(Predictor),
+    V1(Box<OppPredictor>),
+    V2(Box<Predictor>),
 }
 
 impl AnyPredictor {
@@ -28,8 +28,8 @@ impl AnyPredictor {
     pub fn load(path: &Path) -> Result<AnyPredictor, String> {
         let head: Head = read_blob(path)?;
         match (head.format_version, head.feature_version) {
-            (1, 1) => OppPredictor::load(path).map(AnyPredictor::V1),
-            (2, 2) => Predictor::load(path).map(AnyPredictor::V2),
+            (1, 1) => OppPredictor::load(path).map(|p| AnyPredictor::V1(Box::new(p))),
+            (2, 2) => Predictor::load(path).map(|p| AnyPredictor::V2(Box::new(p))),
             (f, v) => Err(format!(
                 "{}: opponent model of format {f}, feature layout {v}: this build reads 1/1 and 2/2",
                 path.display()
@@ -63,13 +63,13 @@ impl AnyPredictor {
 
 impl From<OppPredictor> for AnyPredictor {
     fn from(p: OppPredictor) -> AnyPredictor {
-        AnyPredictor::V1(p)
+        AnyPredictor::V1(Box::new(p))
     }
 }
 
 impl From<Predictor> for AnyPredictor {
     fn from(p: Predictor) -> AnyPredictor {
-        AnyPredictor::V2(p)
+        AnyPredictor::V2(Box::new(p))
     }
 }
 

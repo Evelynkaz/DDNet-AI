@@ -85,7 +85,7 @@ fn cfg() -> GuardConfig {
 }
 
 /// A live predictor with no regime gate: the scripted opponents walk far (the gate has its own test).
-fn live(model: OppPredictor) -> LiveOpp {
+fn live(model: impl Into<crate::any::AnyPredictor>) -> LiveOpp {
     LiveOpp::new(model, cfg(), [7; 32])
         .unwrap()
         .with_gate(RegimeGate::off())
@@ -563,7 +563,11 @@ fn constant_v2(dir_class: usize, hook: bool) -> crate::v2::predictor::Predictor 
             net.params[o + 4] = 5.0;
         }
     }
-    Predictor::new(Bundle::new(net, Decode::default(), 1, 1, 0.0, "const2".into()), "const2").unwrap()
+    Predictor::new(
+        Bundle::new(net, Decode::default(), 1, 1, 0.0, "const2".into()),
+        "const2",
+    )
+    .unwrap()
 }
 
 #[test]
@@ -577,7 +581,10 @@ fn a_v2_model_serves_windows_up_to_its_own_length_and_does_not_allocate() {
     assert_eq!(l.counts().skipped_window, 1);
     assert_eq!(ask(&mut l, &pw, 2, &mut victim), WindowUse::Model);
     assert_eq!(victim.len(), 2);
-    assert!(victim.iter().all(|w| w.direction == 1 && w.hook == 1), "the constant model's inputs are played");
+    assert!(
+        victim.iter().all(|w| w.direction == 1 && w.hook == 1),
+        "the constant model's inputs are played"
+    );
     // Known pre-inputs are used by one window only and never break the pipeline; a v1 model ignores them.
     l.set_known(&[Some(Wire {
         direction: -1,
@@ -600,5 +607,9 @@ fn a_v2_model_serves_windows_up_to_its_own_length_and_does_not_allocate() {
     assert_eq!(info.count_total, 0, "{info:?}");
     let mut v1 = live(constant_model(2, true, 0.0));
     v1.set_known(&known);
-    assert_eq!(ask(&mut v1, &pw, 2, &mut victim), WindowUse::Model, "v1 ignores known ticks");
+    assert_eq!(
+        ask(&mut v1, &pw, 2, &mut victim),
+        WindowUse::Model,
+        "v1 ignores known ticks"
+    );
 }

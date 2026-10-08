@@ -365,8 +365,7 @@ impl Metrics {
         let mut s = format!("samples: {}\n\n", self.samples);
         s.push_str("| head | k | n | model % | hold(snapshot) % | n (arena) | model % | hold(true) % |\n|---|---:|---:|---:|---:|---:|---:|---:|\n");
         for (name, cells) in [("direction", &self.dir), ("hook", &self.hook), ("jump", &self.jump)] {
-            for k in 0..HORIZON {
-                let c = &cells[k];
+            for (k, c) in cells.iter().enumerate() {
                 if c.n == 0 {
                     continue;
                 }

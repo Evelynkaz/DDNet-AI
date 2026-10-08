@@ -220,7 +220,14 @@ fn run(seed: u64, ours: &Script, theirs: &Script, stride: i32, reckoned: bool) -
         use ddai_oppnet::v2::feature::{INPUT_DIM, OUT_DIM};
         use ddai_oppnet::v2::predictor::{Bundle, Decode, Predictor};
         Predictor::new(
-            Bundle::new(Mlp::new(INPUT_DIM, 32, 16, OUT_DIM, s), Decode::default(), s, 1, 0.0, "t".into()),
+            Bundle::new(
+                Mlp::new(INPUT_DIM, 32, 16, OUT_DIM, s),
+                Decode::default(),
+                s,
+                1,
+                0.0,
+                "t".into(),
+            ),
             "t",
         )
         .unwrap()
@@ -316,7 +323,11 @@ fn run(seed: u64, ours: &Script, theirs: &Script, stride: i32, reckoned: bool) -
                     o,
                 );
             }
-            let same = pa.logits().iter().zip(pl.logits()).all(|(x, y)| x.to_bits() == y.to_bits());
+            let same = pa
+                .logits()
+                .iter()
+                .zip(pl.logits())
+                .all(|(x, y)| x.to_bits() == y.to_bits());
             out.v2_logit_mismatch += u32::from(!same || oa != ol);
         }
         true
@@ -378,7 +389,10 @@ fn the_world_a_snapshot_rebuilds_gives_the_arena_features() {
         assert_eq!(o.feature_mismatch, 0);
         assert_eq!(o.ray_mismatch, 0);
         assert_eq!(o.v2_feature_mismatch, 0);
-        assert_eq!(o.v2_logit_mismatch, 0, "the v2 network sees the same input from the arena world and from the rebuilt one");
+        assert_eq!(
+            o.v2_logit_mismatch, 0,
+            "the v2 network sees the same input from the arena world and from the rebuilt one"
+        );
         assert!(
             o.hooked_frames > 2 && o.attack_frames > 3 && (reckoned || o.frozen_frames > 3),
             "the scripts exercise the hook, the hammer and (in the exact-core runs) the freeze"

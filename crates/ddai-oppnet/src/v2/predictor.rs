@@ -139,7 +139,12 @@ impl Bundle {
             );
         }
         let d = &self.decode;
-        if ![d.jump, d.hook, d.hook_margin, d.press, d.dir_margin].iter().all(|v| v.is_finite()) || d.dir_margin < 0.0 || d.hook_margin < 0.0 {
+        if ![d.jump, d.hook, d.hook_margin, d.press, d.dir_margin]
+            .iter()
+            .all(|v| v.is_finite())
+            || d.dir_margin < 0.0
+            || d.hook_margin < 0.0
+        {
             return Err(
                 "opponent model: a decoding threshold is not a finite number (or the direction margin is negative)"
                     .into(),
@@ -259,7 +264,14 @@ pub fn decode_dir(o: &[f32], margin: f32, hold_dir: u8) -> u8 {
 }
 
 /// One tick of a prediction from the logits.
-pub fn decode_tick(out: &[f32], k: usize, d: &Decode, hold_dir: u8, hold_hook: bool, base_angle: f64) -> PredictedInput {
+pub fn decode_tick(
+    out: &[f32],
+    k: usize,
+    d: &Decode,
+    hold_dir: u8,
+    hold_hook: bool,
+    base_angle: f64,
+) -> PredictedInput {
     let o = &out[k * HEAD_DIM..(k + 1) * HEAD_DIM];
     let dir = decode_dir(o, d.dir_margin, hold_dir);
     PredictedInput {
@@ -333,7 +345,14 @@ impl WindowModel for Predictor {
         let hold_dir = (i32::from(opp.direction) + 1) as u8;
         let hold_hook = opp.hook_state > 0;
         for (k, slot) in out.iter_mut().enumerate().take(HORIZON) {
-            *slot = Some(decode_tick(&self.scratch.out, k, &self.decode, hold_dir, hold_hook, base));
+            *slot = Some(decode_tick(
+                &self.scratch.out,
+                k,
+                &self.decode,
+                hold_dir,
+                hold_hook,
+                base,
+            ));
         }
     }
 
@@ -489,9 +508,15 @@ mod tests {
         };
         assert!(decode_hook(1.5, &d, false), "above the margin: out");
         assert!(!decode_hook(-1.5, &d, true), "below it: in");
-        assert!(decode_hook(0.5, &d, true) && !decode_hook(0.5, &d, false), "in between: hold");
+        assert!(
+            decode_hook(0.5, &d, true) && !decode_hook(0.5, &d, false),
+            "in between: hold"
+        );
         let plain = Decode::default();
-        assert!(decode_hook(0.1, &plain, false) && !decode_hook(-0.1, &plain, true), "no margin: the logit decides");
+        assert!(
+            decode_hook(0.1, &plain, false) && !decode_hook(-0.1, &plain, true),
+            "no margin: the logit decides"
+        );
     }
 
     #[test]
@@ -504,7 +529,10 @@ mod tests {
             dir_margin: 4.0,
         };
         apply_decode_overrides(&mut d, "press=-1.5, dir_margin=0, hook_margin=1").unwrap();
-        assert_eq!((d.jump, d.hook, d.press, d.dir_margin, d.hook_margin), (1.0, 2.0, -1.5, 0.0, 1.0));
+        assert_eq!(
+            (d.jump, d.hook, d.press, d.dir_margin, d.hook_margin),
+            (1.0, 2.0, -1.5, 0.0, 1.0)
+        );
         assert!(apply_decode_overrides(&mut d, "press").is_err());
         assert!(apply_decode_overrides(&mut d, "foot=1").is_err());
         assert!(apply_decode_overrides(&mut d, "press=nan").is_err());

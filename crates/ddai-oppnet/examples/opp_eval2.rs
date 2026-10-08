@@ -56,13 +56,21 @@ fn main() -> Result<(), String> {
         let games: Vec<GameRec> = read_blob(&f)?;
         let c = Corpus::new(games, vec![], cfg.clone());
         let s = c.samples();
-        println!("\n## {} (known ticks {known}), decode {dec:?}\n\n{}", f.display(), evaluate(&b.net, &c, &s, &dec).table());
+        println!(
+            "\n## {} (known ticks {known}), decode {dec:?}\n\n{}",
+            f.display(),
+            evaluate(&b.net, &c, &s, &dec).table()
+        );
     }
     for f in clips {
         let g: Vec<ClipGame> = read_blob(&f)?;
         let c = Corpus::new(vec![], g, cfg.clone());
         let s = c.samples();
-        println!("\n## clips {}\n\n{}", f.display(), evaluate(&b.net, &c, &s, &dec).table());
+        println!(
+            "\n## clips {}\n\n{}",
+            f.display(),
+            evaluate(&b.net, &c, &s, &dec).table()
+        );
     }
     Ok(())
 }

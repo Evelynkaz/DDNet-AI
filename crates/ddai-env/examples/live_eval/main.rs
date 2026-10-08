@@ -209,7 +209,7 @@ fn main() -> Result<(), String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if clips.is_empty() || lag == 0 || lag % 2 != 0 || lag > 2 * (H / 2) {
+    if clips.is_empty() || lag == 0 || !lag.is_multiple_of(2) || lag > 2 * (H / 2) {
         return Err(
             "usage: live_eval --clips DIR... --model name=path[,..] [--lag 2|4] [--sessions 0,1] [--thr 0]".into(),
         );
@@ -233,7 +233,7 @@ fn main() -> Result<(), String> {
                     AnyPredictor::V2(m) => {
                         let mut d = *m.decode();
                         ddai_oppnet::v2::predictor::apply_decode_overrides(&mut d, &decode)?;
-                        AnyPredictor::V2(m.with_decode(d))
+                        AnyPredictor::V2(Box::new((*m).with_decode(d)))
                     }
                     other => other,
                 };
@@ -521,7 +521,9 @@ fn report(names: &[String], v: &mut [Agg]) {
             st(&mut em)
         );
     }
-    println!("\nPaired sign tests against hold at k = 1 (model right and hold wrong / hold right and model wrong, exact two-sided p):\n");
+    println!(
+        "\nPaired sign tests against hold at k = 1 (model right and hold wrong / hold right and model wrong, exact two-sided p):\n"
+    );
     for (name, a) in names.iter().zip(v.iter()).skip(1) {
         println!(
             "- {name}: direction {} / {} (p = {:.3}), hook {} / {} (p = {:.3})",

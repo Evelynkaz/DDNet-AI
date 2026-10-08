@@ -25,9 +25,9 @@ use ddai_physics::world::World;
 use ddai_planner::hybrid::window::{PredictedInput, WindowCtx, WindowModel};
 
 use crate::any::AnyPredictor;
-use crate::v2::feature::KnownTick;
 use crate::feature::{HORIZON, IF_SLOTS, wrap_angle};
 use crate::frame::TeeFrame;
+use crate::v2::feature::KnownTick;
 use guard::{Guard, GuardConfig, GuardState, GuardStatus, Transition};
 
 /// The longest window the model is asked about (its in-flight slots and its one-hot length).
