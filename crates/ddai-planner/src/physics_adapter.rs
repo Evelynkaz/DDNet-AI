@@ -784,7 +784,7 @@ impl PlanWorld for PhysicsWorld {
                         .enumerate()
                         .filter(|&(j, &other)| other != id && alive_before[j])
                         .filter_map(|(j, &other)| {
-                            pos_before[j].map(|p| (other, (p.x - origin.x).hypot(p.y - origin.y)))
+                            pos_before[j].map(|p| (other, ddai_libm::hypotf(p.x - origin.x, p.y - origin.y)))
                         })
                         .min_by(|a, b| a.1.total_cmp(&b.1));
                     victims.extend(nearest.map(|(other, _)| other));

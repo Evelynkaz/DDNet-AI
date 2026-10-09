@@ -415,7 +415,7 @@ fn settles_safe<W: PlanWorld>(
         // row: settled, the rope keeps us up. (Tile hooks never time out; the risk is the swing before
         // the rest, so a grabbed hook alone proves nothing.)
         if hang_ok && coast.hook != 0 && me.hook_state == crate::types::HOOK_GRABBED && me.hooked_player < 0 {
-            if me.vel.x.hypot(me.vel.y) <= HANG_SPEED {
+            if ddai_libm::hypot(me.vel.x, me.vel.y) <= HANG_SPEED {
                 calm += 1;
                 if calm >= calm_needed {
                     return Bounded::Done(true);

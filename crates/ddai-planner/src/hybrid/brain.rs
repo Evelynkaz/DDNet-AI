@@ -24,7 +24,7 @@ use crate::plan_world::PlanWorld;
 use crate::types::{PlayerInput, empty_input};
 
 fn dist_f32(a: ddai_physics::vmath::Vec2<f32>, b: ddai_physics::vmath::Vec2<f32>) -> f64 {
-    f64::from(a.x - b.x).hypot(f64::from(a.y - b.y))
+    ddai_libm::hypot(f64::from(a.x - b.x), f64::from(a.y - b.y))
 }
 
 /// Sums over a brain's decisions since its last reset (the arena JSONL carries this).

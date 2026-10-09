@@ -26,6 +26,8 @@ ts-parity = ["dep:ddai-tsworld"]
 ddai-jsmath = { path = "../ddai-jsmath" }
 ddai-brain = { path = "../ddai-brain" }
 ddai-physics = { path = "../ddai-physics" }
+# glibc-exact `hypot` (D-127): the same bits on every platform.
+ddai-libm = { path = "../ddai-libm" }
 ddai-tsworld = { path = "../ddai-tsworld", optional = true }
 
 [dev-dependencies]

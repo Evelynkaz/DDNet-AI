@@ -59,6 +59,8 @@ pub fn summarize_first_step(elites: &[Vec<PlanStep>], track_aim: bool, aim_at: f
         hook += f64::from(s.hook != 0);
         fire += f64::from(s.fire != 0);
         let abs = if track_aim { aim_at + s.aim } else { s.aim };
+        // libm-census: f64 sin/cos have no ddai-libm port yet (the elite's mean direction is a soft training target for the fly, not a live
+        // decision; D-127 lists it)
         ax += abs.cos();
         ay += abs.sin();
     }
@@ -72,8 +74,8 @@ pub fn summarize_first_step(elites: &[Vec<PlanStep>], track_aim: bool, aim_at: f
         jump: (jump / n) as f32,
         hook: (hook / n) as f32,
         fire: (fire / n) as f32,
-        aim_mean: my.atan2(mx) as f32,
-        aim_spread: (-2.0 * resultant.ln()).max(0.0).sqrt() as f32,
+        aim_mean: ddai_libm::atan2(my, mx) as f32,
+        aim_spread: (-2.0 * ddai_libm::log(resultant)).max(0.0).sqrt() as f32,
     })
 }
 

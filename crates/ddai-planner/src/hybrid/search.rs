@@ -2496,7 +2496,7 @@ impl HybridSearch {
                 self.skip_field = Some((id, Arc::new(crate::fields::hazard_field_full(col))));
             }
             let sf = &self.skip_field.as_ref().expect("just built").1;
-            let reach_tiles = me.vel.x.hypot(me.vel.y) * SKIP_LOOKAHEAD_TICKS / 32.0;
+            let reach_tiles = ddai_libm::hypot(me.vel.x, me.vel.y) * SKIP_LOOKAHEAD_TICKS / 32.0;
             f64::from(hazard_tiles(sf, me.pos.x, me.pos.y)) >= f64::from(cfg.shield_skip_tiles) + reach_tiles
         };
         tel.shield_skipped = cfg.planner.shield && !me.frozen && far_from_hazard;
@@ -2778,7 +2778,7 @@ fn threat_rank(t: &TeeState, me: &TeeState) -> (u8, i32, i32, i32) {
         x: t.pos.x - me.pos.x,
         y: t.pos.y - me.pos.y,
     };
-    let d = rel.x.hypot(rel.y).max(1e-6);
+    let d = ddai_libm::hypot(rel.x, rel.y).max(1e-6);
     let closing = -(rel.x * (t.vel.x - me.vel.x) + rel.y * (t.vel.y - me.vel.y)) / d;
     let class = if hook_flying_at(t, me) {
         0
@@ -2796,7 +2796,7 @@ fn hook_flying_at(t: &TeeState, me: &TeeState) -> bool {
         return false;
     }
     let (dx, dy) = (me.pos.x - t.hook_pos.x, me.pos.y - t.hook_pos.y);
-    let len = t.hook_dir.x.hypot(t.hook_dir.y);
+    let len = ddai_libm::hypot(t.hook_dir.x, t.hook_dir.y);
     if len < 1e-9 {
         return false;
     }
