@@ -4,6 +4,9 @@
 //! characters, a leading `/`) are refused here and cost no rate-limit slot; the route has its own rate limit; the generic command route
 //! does not take a chat line; the bot's refusals map to statuses; the page's two assets are served.
 
+// Task 5.5a: talks to the bot over a Unix-domain socket, which Windows has no counterpart of yet (ddai_os::ipc, task 5.5b).
+#![cfg(unix)]
+
 mod support;
 
 use std::path::Path;

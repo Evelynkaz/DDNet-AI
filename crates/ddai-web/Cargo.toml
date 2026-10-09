@@ -52,8 +52,9 @@ ddai-client = { path = "../ddai-client" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Task 5.8: `config.toml` of a training run (already a dependency of the workspace).
 toml = "1.1.6"
-# Task 5.8: the `O_NOFOLLOW` / `O_NONBLOCK` constants for `OpenOptionsExt::custom_flags` when opening run files (a transitive dependency already).
-libc = "0.2"
+# Task 5.5a (D-127): the OS seam: owner-only secrets (mode / ACL), opening run files without following a symlink (`O_NOFOLLOW` /
+# `O_NONBLOCK` on Unix), the default data directory. Replaces the direct `libc` dependency.
+ddai-os = { path = "../ddai-os" }
 
 [dev-dependencies]
 tempfile = "3.14"

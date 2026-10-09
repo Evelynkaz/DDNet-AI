@@ -145,7 +145,7 @@ pub fn closest_point_on_line<R: Real>(a: Vec2<R>, b: Vec2<R>, target: Vec2<R>) -
 
 /// `direction(float angle)` (`vmath.h`): `(cos(angle), sin(angle))`.
 pub fn direction<R: Real>(angle: R) -> Vec2<R> {
-    Vec2::new(angle.cos(), angle.sin())
+    Vec2::new(angle.cos(), angle.sin()) // libm-census: `Real::cos`/`sin` (ddai_libm for f32)
 }
 
 /// `angle(const vector2_base<float>&)` (`vmath.h`).
@@ -159,7 +159,7 @@ pub fn angle<R: Real>(a: Vec2<R>) -> R {
             R::PI / R::from_i32(2)
         }
     } else {
-        let mut result = (a.y / a.x).atan();
+        let mut result = (a.y / a.x).atan(); // libm-census: `Real::atan` (ddai_libm for f32)
         if a.x < R::ZERO {
             result += R::PI;
         }

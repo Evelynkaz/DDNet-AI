@@ -22,8 +22,12 @@ default = []
 ts-parity = ["ddai-planner/ts-parity", "dep:ddai-tsworld"]
 
 [dependencies]
+# The OS seam (task 5.5a, D-127): default data directories, owner-only files, load average, Unix sockets where they exist.
+ddai-os = { path = "../ddai-os" }
 ddai-jsmath = { path = "../ddai-jsmath" }
 ddai-physics = { path = "../ddai-physics" }
+# glibc-exact `hypot`/`hypotf`/`log` (D-127), the same bits on every platform.
+ddai-libm = { path = "../ddai-libm" }
 ddai-planner = { path = "../ddai-planner" }
 ddai-tsworld = { path = "../ddai-tsworld", optional = true }
 serde = { version = "1", features = ["derive"] }

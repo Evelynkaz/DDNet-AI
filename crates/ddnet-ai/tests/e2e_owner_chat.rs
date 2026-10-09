@@ -21,6 +21,9 @@
 //! 5. the bot's outgoing audit counts `Cl_Say(owner)` apart (accepted, none refused) and no other chat label; its log has "owner chat
 //!    sent (len N)" lines and never the text.
 
+// Task 5.5a: an ignored end-to-end test against a local DDNet server driven by python3/bash/POSIX tools: Linux only.
+#![cfg(unix)]
+
 mod owner_chat_rig;
 
 use std::time::Duration;

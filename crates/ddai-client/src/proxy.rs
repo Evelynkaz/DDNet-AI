@@ -21,7 +21,6 @@ use crate::live_servers::{LiveServers, ProxyBindingError};
 use std::fmt;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// A string that never prints: `Debug` and `Display` both show `<redacted>`. The only way to see the
@@ -409,14 +408,10 @@ pub fn load_proxy(secrets_dir: &Path, name: &str) -> Result<ProxyConfig, ProxyLo
     let path = proxy_file_path(secrets_dir, name)?;
     // Task 5.12: the web unit can now create files in the secrets directory, and the root launcher helper reads them: a symlink
     // there is refused (`O_NOFOLLOW`) and a FIFO cannot block the reader (`O_NONBLOCK`).
-    let mut file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
-    {
+    let mut file = match ddai_os::nofollow::open_read_nofollow(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(ProxyLoadError::Missing { path }),
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(ProxyLoadError::NotAFile { path }),
+        Err(e) if ddai_os::nofollow::is_symlink_refusal(&e) => return Err(ProxyLoadError::NotAFile { path }),
         Err(e) => return Err(ProxyLoadError::Io { path, kind: e.kind() }),
     };
     // The mode is read from the opened handle, so the file checked is the file read.
@@ -435,6 +430,8 @@ pub fn load_proxy(secrets_dir: &Path, name: &str) -> Result<ProxyConfig, ProxyLo
             return Err(ProxyLoadError::Permissions { path, mode });
         }
     }
+    // Windows has no mode bits to read back: the file sits in the user's profile (`%USERPROFILE%\ddnet-ai\data\secrets`, made private by
+    // `ddai_os::private`), which the system keeps closed to other users.
     let mut bytes = Vec::new();
     // A proxy file is a few hundred bytes; refuse anything absurd before parsing it.
     if let Err(e) = (&mut file).take(64 * 1024).read_to_end(&mut bytes) {
@@ -893,6 +890,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_proxy_file_that_is_a_symlink_or_a_fifo_is_refused() {
         let dir = tempfile::tempdir().unwrap();

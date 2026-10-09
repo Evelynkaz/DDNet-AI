@@ -44,12 +44,10 @@ pub const DUEL_MAX_BYTES: u64 = 12 << 20;
 /// Task 3.19: the duel clips one session of the bot saves at most (a clip is about 50 KB; a 20-round duel is 1 MB).
 pub const DUEL_SESSION_MAX: usize = 40;
 
-/// `~/aiddnet/data/bot/clips`; `None` when `HOME` is unset (never a relative path).
+/// `<data dir>/bot/clips` (`~/aiddnet/data/bot/clips` on Linux, see `ddai_os::dirs`); `None` when there is no home directory (never a
+/// relative path).
 pub fn default_clip_dir() -> Option<PathBuf> {
-    match std::env::var_os("HOME") {
-        Some(h) if !h.is_empty() => Some(PathBuf::from(h).join("aiddnet/data/bot/clips")),
-        _ => None,
-    }
+    ddai_os::dirs::data_root().map(|d| d.join("bot/clips"))
 }
 
 /// The severity an incident of `kind` needs to be worth a clip.

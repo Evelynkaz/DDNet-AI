@@ -34,12 +34,9 @@ pub struct ProxyCheckArgs {
     pub secrets_dir: Option<PathBuf>,
 }
 
-/// `~/aiddnet/data`, same fallback as the other commands.
+/// `~/aiddnet/data` (Linux; `ddai_os::dirs` for Windows and the override), same fallback as the other commands.
 fn default_data_dir() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home).join("aiddnet").join("data"),
-        _ => PathBuf::from("data"),
-    }
+    ddai_os::dirs::data_root_or_relative()
 }
 
 /// What `proxy-check` prints for a finished check and the exit code that goes with it. Pure, so the wording
@@ -327,7 +324,6 @@ mod tests {
     // --- task 5.12: the favourites are `ready` entries for the bot's own gate --------------------------------------------
 
     fn favourites_dir(favs: &serde_json::Value, profile: bool) -> tempfile::TempDir {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("launch")).unwrap();
         std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
@@ -339,7 +335,7 @@ mod tests {
                 "host = \"198.51.100.7\"\nport = 1080\nuser = \"u\"\npass = \"p\"\n",
             )
             .unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            ddai_os::private::restrict_file(&path).unwrap();
         }
         dir
     }

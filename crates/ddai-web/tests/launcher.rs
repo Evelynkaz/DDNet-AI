@@ -3,6 +3,9 @@
 //! other mutating routes (nothing is written when any fails); the request file's content and atomicity; the same choices the
 //! root helper allows (and nothing else); the web's own rate limit, a pending request and a stale one; and what the page is told.
 
+// Task 5.5a: the launcher contract uses POSIX permission bits, ownership and symlinks (VPS deployment, D-089).
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;

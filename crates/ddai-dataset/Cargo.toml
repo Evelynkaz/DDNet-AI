@@ -21,6 +21,8 @@ ddai-demo = { path = "../ddai-demo" }
 ddai-map = { path = "../ddai-map" }
 ddai-net = { path = "../ddai-net" }
 ddai-physics = { path = "../ddai-physics" }
+# glibc-exact `hypot`/`hypotf`/`log` (D-127), the same bits on every platform.
+ddai-libm = { path = "../ddai-libm" }
 ddai-recorder = { path = "../ddai-recorder" }
 ddai-world = { path = "../ddai-world" }
 serde = { version = "1.0.229", features = ["derive"] }

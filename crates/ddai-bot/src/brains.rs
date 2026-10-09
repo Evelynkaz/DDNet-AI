@@ -129,22 +129,21 @@ pub fn auto_search_threads(cores: usize, load1: Option<f64>) -> usize {
     free.clamp(1, AUTO_SEARCH_THREADS_CAP)
 }
 
-/// [`auto_search_threads`] for this machine (`/proc/loadavg` where it exists).
+/// [`auto_search_threads`] for this machine (the load average where the OS has one: `/proc/loadavg` on Linux, nothing on Windows).
 pub fn auto_search_threads_here() -> usize {
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    let load1 = std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|t| t.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()));
+    let load1 = ddai_os::host::load_average().map(|l| l[0]);
     auto_search_threads(cores, load1)
 }
 
 impl Default for BrainOptions {
     fn default() -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         BrainOptions {
             planner_budget_ms: 5.0,
             planner_preset: PlannerPreset::Normal,
-            fly_flyg: home.join("aiddnet/data/connectome/compiled/fly-S-v1.flyg"),
+            fly_flyg: ddai_os::dirs::data_root()
+                .unwrap_or_default()
+                .join("connectome/compiled/fly-S-v1.flyg"),
             fly_config: PathBuf::from("configs/fly/S-brain.toml"),
             fly_bundle: None,
             search_threads: Some(1),

@@ -128,7 +128,7 @@ pub fn velocity_ramp<R: Real>(value: R, start: R, range: R, curvature: R) -> R {
     if value < start {
         return R::ONE;
     }
-    R::ONE / curvature.powf((value - start) / range)
+    R::ONE / curvature.powf((value - start) / range) // libm-census: `Real::powf` (ddai_libm for f32)
 }
 
 /// `m_Angle`'s computation (`gamecore.cpp` `Tick`): `std::atan2(m_Input.m_TargetY,

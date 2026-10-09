@@ -964,10 +964,12 @@ dependencies = [
  "ddai-clip",
  "ddai-fly",
  "ddai-flyg",
+ "ddai-libm",
  "ddai-map",
  "ddai-nav",
  "ddai-net",
  "ddai-oppnet",
+ "ddai-os",
  "ddai-physics",
  "ddai-planner",
  "ddai-web",
@@ -988,6 +990,7 @@ name = "ddai-botctl"
 version = "0.1.0"
 dependencies = [
  "ddai-net",
+ "ddai-os",
  "serde",
  "serde_json",
  "tempfile",
@@ -1008,8 +1011,8 @@ dependencies = [
  "ddai-client",
  "ddai-map",
  "ddai-net",
+ "ddai-os",
  "fd-lock",
- "libc",
  "proptest",
  "serde",
  "serde_json",
@@ -1026,7 +1029,9 @@ name = "ddai-clip"
 version = "0.1.0"
 dependencies = [
  "allocation-counter",
+ "ddai-libm",
  "ddai-net",
+ "ddai-os",
  "ddai-physics",
  "ddai-world",
  "postcard",
@@ -1075,6 +1080,7 @@ dependencies = [
  "ddai-brain",
  "ddai-dataset",
  "ddai-demo",
+ "ddai-libm",
  "ddai-map",
  "ddai-net",
  "ddai-physics",
@@ -1112,6 +1118,7 @@ dependencies = [
  "ddai-nav",
  "ddai-net",
  "ddai-oppnet",
+ "ddai-os",
  "ddai-physics",
  "ddai-planner",
  "ddai-world",
@@ -1183,7 +1190,9 @@ name = "ddai-nav"
 version = "0.1.0"
 dependencies = [
  "ddai-jsmath",
+ "ddai-libm",
  "ddai-map",
+ "ddai-os",
  "ddai-physics",
  "ddai-planner",
  "ddai-tsworld",
@@ -1214,6 +1223,7 @@ dependencies = [
  "ddai-clip",
  "ddai-jsmath",
  "ddai-map",
+ "ddai-os",
  "ddai-physics",
  "ddai-planner",
  "postcard",
@@ -1223,6 +1233,15 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "zstd",
+]
+
+[[package]]
+name = "ddai-os"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+ "tempfile",
 ]
 
 [[package]]
@@ -1243,6 +1262,7 @@ dependencies = [
  "allocation-counter",
  "ddai-brain",
  "ddai-jsmath",
+ "ddai-libm",
  "ddai-map",
  "ddai-physics",
  "ddai-trace",
@@ -1324,6 +1344,7 @@ dependencies = [
  "ddai-botctl",
  "ddai-client",
  "ddai-map",
+ "ddai-os",
  "ddai-physics",
  "ddai-trace",
  "ddai-web",
@@ -1331,7 +1352,6 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hmac",
- "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1354,6 +1374,7 @@ dependencies = [
  "allocation-counter",
  "ddai-brain",
  "ddai-client",
+ "ddai-libm",
  "ddai-map",
  "ddai-net",
  "ddai-physics",
@@ -1377,9 +1398,11 @@ dependencies = [
  "ddai-env",
  "ddai-fly",
  "ddai-flyg",
+ "ddai-libm",
  "ddai-map",
  "ddai-net",
  "ddai-oppnet",
+ "ddai-os",
  "ddai-physics",
  "ddai-planner",
  "ddai-recorder",

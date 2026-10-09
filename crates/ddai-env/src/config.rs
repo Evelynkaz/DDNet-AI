@@ -1147,10 +1147,7 @@ pub fn builtin_brain(spec: &PlayerSpec) -> Result<Box<dyn Brain>, EnvError> {
             let proposer = builtin_proposer(spec.hybrid.as_ref().map_or("none", HybridSpec::proposer_name))?;
             let mut brain = HybridBrain::new(cfg, clock, proposer).map_err(EnvError::new)?;
             if let Some(path) = spec.hybrid.as_ref().and_then(|h| h.window_model.as_deref()) {
-                let path = match path.strip_prefix("~/") {
-                    Some(rest) => std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest),
-                    None => std::path::PathBuf::from(path),
-                };
+                let path = ddai_os::dirs::expand_tilde(path).unwrap_or_else(|| std::path::PathBuf::from(path));
                 let h = spec.hybrid.as_ref();
                 let model = match ddai_oppnet::AnyPredictor::load(&path).map_err(EnvError::new)? {
                     ddai_oppnet::AnyPredictor::V1(m) => {

@@ -4,6 +4,18 @@
 Подробный журнал задач — [docs/HISTORY.md](docs/HISTORY.md); решения — [docs/DECISIONS.md](docs/DECISIONS.md);
 эксперименты и замеры — [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
 
+## [Не выпущено]
+
+### Добавлено
+- **Windows (задача 5.5a, D-047, D-127).** Бот собирается и играет на Windows с теми же числами, что на Linux: `crates/ddai-libm` — побитно
+  точные порты `sinf`, `cosf`, `atanf`, `atan2f`, `powf`, `hypotf`, `log`, `atan2`, `pow`, `hypot` из glibc 2.39 (сверены с glibc: все 2³² входа
+  для `sinf`/`cosf`/`atanf`, ≥ 10⁹ проб для остальных); `Real` физики, `ddai-jsmath::pow` и прицел бота зовут их вместо `std`.
+  `crates/ddai-os` — шов ОС (каталог данных `%USERPROFILE%\ddnet-ai\data`, секреты только для пользователя через ACL, открытие без symlink,
+  сокеты Unix как «недоступно»). Задача CI `windows`. README: «Запуск на Windows».
+
+### Изменено
+- Сокеты Unix (канал управления и мост к сайту) и команда `launch` на Windows недоступны (решит 5.5b); тесты, привязанные к Unix, помечены `cfg(unix)`.
+
 ## [0.1.0] — 2026-10-08
 
 Первый релиз Rust-версии. Это изменённая версия [Wranked1/DDNet-AI](https://github.com/Wranked1/DDNet-AI)
@@ -31,7 +43,7 @@
 ### Известные ограничения
 - Под нагрузкой машины бот заметно слабеет: держите машину с ботом тихой.
 - Муха пока не превосходит контроль без коннектома.
-- Только Linux x86-64 (AVX2). Windows-версия запланирована (D-047).
+- Только Linux x86-64 (AVX2) в релизе 0.1.0. Windows-версия — в [Не выпущено] (задача 5.5a, D-127); упаковка и связь «бот → сайт» на Windows — 5.5b.
 - Веса, данные коннектома, карты и демки в релиз не входят.
 
 [0.1.0]: https://github.com/Evelynkaz/DDNet-AI/releases/tag/v0.1.0

@@ -85,7 +85,7 @@ pub enum ClipCmd {
 }
 
 fn default_cache() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("aiddnet/data/maps/cache")
+    ddai_os::dirs::data_root_or_relative().join("maps/cache")
 }
 
 fn read(path: &Path) -> Result<Clip, String> {
@@ -253,7 +253,7 @@ fn held(files: &[PathBuf], track: bool) -> Result<ExitCode, String> {
                     let (me, v) = (fr.tee(c.header.own_id), fr.tee(b.victim));
                     let dist = me.zip(v).map(|(m, v)| {
                         let (a, b2) = (m.pos(), v.pos());
-                        ((a.0 - b2.0).hypot(a.1 - b2.1)).round()
+                        ddai_libm::hypot(a.0 - b2.0, a.1 - b2.1).round()
                     });
                     println!(
                         "    +{dt:>3}: victim {} our dist {:?} target {} our hook {}/{}",

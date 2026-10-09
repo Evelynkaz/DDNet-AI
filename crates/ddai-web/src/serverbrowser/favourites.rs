@@ -108,10 +108,13 @@ mod tests {
             })
             .unwrap();
         assert_eq!(store.load().unwrap().favourites.len(), 1);
-        let mode = std::os::unix::fs::PermissionsExt::mode(
-            &std::fs::metadata(dir.path().join(FILE_NAME)).unwrap().permissions(),
-        );
-        assert_eq!(mode & 0o777, 0o644);
+        #[cfg(unix)]
+        {
+            let mode = std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(dir.path().join(FILE_NAME)).unwrap().permissions(),
+            );
+            assert_eq!(mode & 0o777, 0o644);
+        }
         // An invalid result is refused and the file stays as it was.
         let before = std::fs::read(dir.path().join(FILE_NAME)).unwrap();
         let err = store

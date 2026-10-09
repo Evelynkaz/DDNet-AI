@@ -9,14 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use tracing_subscriber::prelude::*;
 
-/// `~/aiddnet/data`, per `CLAUDE.md`'s folder layout, falling back to a relative `data`
-/// directory if `$HOME` isn't set (e.g. some minimal container/CI environments) rather than
-/// failing outright — `--data-dir` overrides this either way.
+/// `~/aiddnet/data` on Linux, per `CLAUDE.md`'s folder layout (`%USERPROFILE%\ddnet-ai\data` on Windows, `DDNET_AI_DATA_DIR` overrides
+/// both: see `ddai_os::dirs`), falling back to a relative `data` directory if there is no home (e.g. some minimal container/CI
+/// environments) rather than failing outright — `--data-dir` overrides this either way.
 fn default_data_dir() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home).join("aiddnet").join("data"),
-        _ => PathBuf::from("data"),
-    }
+    ddai_os::dirs::data_root_or_relative()
 }
 
 #[derive(Debug, Args)]

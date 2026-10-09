@@ -500,11 +500,7 @@ mod tests {
         // cache, not a security boundary).
         secrets::ensure_secrets_dir(&paths).expect("ensure dir");
         std::fs::write(paths.devices_file(), b"\x00\x01\xffnot even close to the format\n").expect("write garbage");
-        std::fs::set_permissions(
-            paths.devices_file(),
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .expect("set perms");
+        ddai_os::private::restrict_file(&paths.devices_file()).expect("set perms");
         let store2 = DeviceStore::load_or_empty(&paths, Duration::from_secs(3600));
         // Garbage bytes still parse to "zero valid lines" under decode_devices's lenient
         // line-by-line parsing (no line looks like a valid record), not a hard I/O error, so this

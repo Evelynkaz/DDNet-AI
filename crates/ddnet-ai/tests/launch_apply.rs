@@ -3,6 +3,9 @@
 //! the real systemd, a game server or any production file: the checks are the environment file the bot unit would read, the
 //! cgroup drop-in, the exact `systemctl` commands, the status the web would read, and every refusal.
 
+// Task 5.5a: the launcher's root helper is a Unix (systemd) feature; its command is not compiled on Windows.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

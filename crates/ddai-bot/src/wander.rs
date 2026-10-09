@@ -116,7 +116,7 @@ impl Wander {
             self.aim = self.look * std::f32::consts::PI;
         }
         if let Some(at) = c.look_at {
-            self.aim = (at.y - me.pos.y).atan2(at.x - me.pos.x) + self.look * 0.2;
+            self.aim = ddai_libm::atan2f(at.y - me.pos.y, at.x - me.pos.x) + self.look * 0.2;
         }
         let still_at = c.anchor_x.filter(|_| c.still);
         if let Some(ax) = still_at {
@@ -189,12 +189,12 @@ impl Wander {
             hook = safe.hook;
             if hook {
                 self.hook_until = self.hook_until.max(tick + 20);
-                self.aim = (safe.target.y as f32).atan2(safe.target.x as f32);
+                self.aim = ddai_libm::atan2f(safe.target.y as f32, safe.target.x as f32);
             }
             self.until = tick + 25;
         }
 
-        let cur = (c.prev_aim.1 as f32).atan2(c.prev_aim.0 as f32);
+        let cur = ddai_libm::atan2f(c.prev_aim.1 as f32, c.prev_aim.0 as f32);
         let mut d = self.aim - cur;
         while d > std::f32::consts::PI {
             d -= 2.0 * std::f32::consts::PI;
@@ -204,8 +204,8 @@ impl Wander {
         }
         let a = cur + d.clamp(-WANDER_AIM_STEP, WANDER_AIM_STEP);
         let (mut tx, mut ty) = (
-            (a.cos() * WANDER_AIM_RADIUS).round() as i32,
-            (a.sin() * WANDER_AIM_RADIUS).round() as i32,
+            (ddai_libm::cosf(a) * WANDER_AIM_RADIUS).round() as i32,
+            (ddai_libm::sinf(a) * WANDER_AIM_RADIUS).round() as i32,
         );
         if guarded && hook {
             tx = safe.target.x;

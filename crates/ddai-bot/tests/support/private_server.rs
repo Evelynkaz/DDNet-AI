@@ -118,11 +118,11 @@ pub fn start_private_server(scratch: &Path, game_port: u16, econ_port: u16, extr
     let econ_password = random_hex();
     let secrets = scratch.join("secrets.cfg");
     {
-        use std::os::unix::fs::OpenOptionsExt;
+        use ddai_os::private::OwnerOnly;
         let mut f = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .mode(0o600)
+            .owner_only()
             .open(&secrets)
             .unwrap();
         writeln!(f, "ec_password \"{econ_password}\"").unwrap();

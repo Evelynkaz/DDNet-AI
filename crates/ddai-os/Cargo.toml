@@ -1,0 +1,27 @@
+[package]
+name = "ddai-os"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The operating-system seam of DDNet-AI (task 5.5a, D-127): where the data lives, owner-only files and directories (0600/0700 on Unix, an ACL on Windows), opening a file without following a symlink, the host load average, OS random bytes. One implementation per OS behind one API, no unsafe."
+
+[lib]
+name = "ddai_os"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# OS random bytes (the bot's timeout seed); already in the tree via ddai-web.
+getrandom = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` / `O_NONBLOCK` / `ELOOP` for `open_read_nofollow` (the values differ between architectures); already in the tree.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.14"

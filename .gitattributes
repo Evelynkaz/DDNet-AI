@@ -1,0 +1,4 @@
+# Task 5.5a (D-127): the working tree has Unix line endings on every platform. On Windows, git's default (autocrlf) would turn the text
+# fixtures, the golden hash files and the scripts into CRLF and some tests compare or hash their bytes. Binary files (rawmaps, captures,
+# weights fixtures) are detected by git (a NUL byte) and left alone.
+* text=auto eol=lf

@@ -8,9 +8,8 @@
 //! This module is plain data and file helpers: no policy lives here except the *shape* of a request (strict schema, size
 //! limit). The policy (allow-lists, rate limits, bans) is the helper's, in `ddnet-ai`'s `launch_cmd`.
 
-use std::fs::OpenOptions;
+use ddai_os::nofollow;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -415,23 +414,20 @@ pub enum ReadError {
     Io,
 }
 
-/// Reads a regular file of at most `max` bytes. A symlink is refused (`O_NOFOLLOW`), a FIFO cannot block the reader
-/// (`O_NONBLOCK`), and the type is checked on the opened descriptor, so the file checked is the file read.
+/// Reads a regular file of at most `max` bytes. A symlink is refused (`O_NOFOLLOW`; Windows: the reparse point is opened itself and
+/// is not a regular file), a FIFO cannot block the reader (`O_NONBLOCK`), and the type is checked on the opened descriptor, so the
+/// file checked is the file read.
 pub fn read_regular_nofollow(path: &Path, max: usize) -> Result<Vec<u8>, ReadError> {
     read_regular_nofollow_with_mtime(path, max).map(|(bytes, _)| bytes)
 }
 
 /// [`read_regular_nofollow`], also giving the file's modification time in unix seconds (from the opened descriptor).
 pub fn read_regular_nofollow_with_mtime(path: &Path, max: usize) -> Result<(Vec<u8>, u64), ReadError> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => ReadError::Missing,
-            _ if e.raw_os_error() == Some(libc::ELOOP) => ReadError::NotRegular,
-            _ => ReadError::Io,
-        })?;
+    let mut file = nofollow::open_read_nofollow(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ReadError::Missing,
+        _ if nofollow::is_symlink_refusal(&e) => ReadError::NotRegular,
+        _ => ReadError::Io,
+    })?;
     let meta = file.metadata().map_err(|_| ReadError::Io)?;
     if !meta.is_file() {
         return Err(ReadError::NotRegular);
@@ -439,7 +435,7 @@ pub fn read_regular_nofollow_with_mtime(path: &Path, max: usize) -> Result<(Vec<
     if meta.len() > max as u64 {
         return Err(ReadError::TooLarge);
     }
-    let mtime = u64::try_from(meta.mtime()).unwrap_or(0);
+    let mtime = nofollow::mtime_unix(&meta);
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
     (&mut file)
         .take(max as u64 + 1)
@@ -457,16 +453,11 @@ pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> std::io:
     let suffix = crate::rand_util::encode_b64(&crate::rand_util::random_bytes::<9>());
     let tmp = dir.join(format!(".{name}.tmp-{suffix}"));
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&tmp)?;
+        let mut file = nofollow::create_new_nofollow(&tmp, mode)?;
         file.write_all(bytes)?;
         // The mode is set explicitly: the creation mode is cut by the umask (the bot unit's stop hook runs under UMask=0077, which
-        // made a status unreadable for the web).
-        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        // made a status unreadable for the web). Windows has no mode bits.
+        nofollow::set_unix_mode(&file, mode)?;
         file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, dir.join(name))
@@ -484,9 +475,10 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The owner of `path` (its uid), without following a symlink.
+/// The owner of `path` (its uid), without following a symlink. `None` where files have no uid (Windows).
 pub fn owner_uid(path: &Path) -> Option<u32> {
-    std::fs::symlink_metadata(path).ok().map(|m| m.uid())
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    nofollow::unix_mode_and_owner(&meta).map(|(_, uid)| uid)
 }
 
 #[cfg(test)]
@@ -850,14 +842,20 @@ mod tests {
             read_regular_nofollow(&dir.path().join("none"), 16),
             Err(ReadError::Missing)
         );
-        let link = dir.path().join("link.json");
-        std::os::unix::fs::symlink(&file, &link).unwrap();
-        assert_eq!(read_regular_nofollow(&link, 16), Err(ReadError::NotRegular));
-        assert_eq!(read_regular_nofollow(dir.path(), 16), Err(ReadError::NotRegular));
+        // (Unix only: making a symlink on Windows needs a privilege, and a directory opens differently there.)
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.json");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert_eq!(read_regular_nofollow(&link, 16), Err(ReadError::NotRegular));
+            assert_eq!(read_regular_nofollow(dir.path(), 16), Err(ReadError::NotRegular));
+        }
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_atomic_write_replaces_a_symlink_instead_of_following_it() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim");
         std::fs::write(&victim, b"keep").unwrap();

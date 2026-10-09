@@ -121,7 +121,7 @@ impl PlanScratch {
         tees: impl IntoIterator<Item = &'a Tee>,
         before: Option<&Tee>,
     ) -> bool {
-        let n = f32::hypot(aim.x as f32, aim.y as f32);
+        let n = ddai_libm::hypotf(aim.x as f32, aim.y as f32);
         if n == 0.0 {
             return false;
         }
@@ -136,7 +136,7 @@ impl PlanScratch {
         };
         let hit = self.world.collision().intersect_line_hook(start, to);
         let mut stop = if hit.collision != 0 {
-            ((hit.out_pos.x - start.x).hypot(hit.out_pos.y - start.y)) as f32
+            ddai_libm::hypot(hit.out_pos.x - start.x, hit.out_pos.y - start.y) as f32
         } else {
             HOOK_LENGTH_PX
         };

@@ -87,7 +87,7 @@ pub const FORECAST_HORIZON_TICKS: i32 = ddai_planner::forecast::HELD_HORIZON_TIC
 pub fn kill_cost_ticks(spawns: &[(f64, f64)], pos: (f32, f32)) -> i32 {
     let walk = spawns
         .iter()
-        .map(|&(x, y)| (f64::from(pos.0) - x).hypot(f64::from(pos.1) - y) as f32)
+        .map(|&(x, y)| ddai_libm::hypot(f64::from(pos.0) - x, f64::from(pos.1) - y) as f32)
         .fold(f32::INFINITY, f32::min);
     if walk.is_finite() {
         RESPAWN_TICKS + (walk / WALK_PX_PER_TICK).ceil() as i32

@@ -2,6 +2,9 @@
 //! messages are written here by hand, independent of `ddai-bot`): the chat frame round trip, hostile chat text, the bounded
 //! in-memory chat ring, the look and numbers of players, the visual scene and its images, and the DDNet graphics route.
 
+// Task 5.5a: talks to the bot over a Unix-domain socket, which Windows has no counterpart of yet (ddai_os::ipc, task 5.5b).
+#![cfg(unix)]
+
 mod support;
 
 use std::path::Path;

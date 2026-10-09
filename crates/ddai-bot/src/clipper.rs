@@ -834,8 +834,8 @@ fn derive_events(
             if a.attack_tick != p.attack && a.holding_hammer() {
                 let r = a.aim_rad();
                 let point = Vec2::new(
-                    a.pos.x + r.cos() * HAMMER_REACH_AHEAD_PX,
-                    a.pos.y + r.sin() * HAMMER_REACH_AHEAD_PX,
+                    a.pos.x + ddai_libm::cosf(r) * HAMMER_REACH_AHEAD_PX,
+                    a.pos.y + ddai_libm::sinf(r) * HAMMER_REACH_AHEAD_PX,
                 );
                 let mut hits = 0u8;
                 for b in tees.iter() {

@@ -16,6 +16,8 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+# The OS seam (task 5.5a, D-127): default data directories, owner-only files, load average, Unix sockets where they exist.
+ddai-os = { path = "../ddai-os" }
 ddai-brain = { path = "../ddai-brain" }
 ddai-client = { path = "../ddai-client" }
 ddai-clip = { path = "../ddai-clip" }
@@ -27,6 +29,8 @@ ddai-flyg = { path = "../ddai-flyg" }
 ddai-map = { path = "../ddai-map" }
 ddai-net = { path = "../ddai-net" }
 ddai-physics = { path = "../ddai-physics" }
+# glibc-exact `sinf`/`cosf`/`atan2f`/`hypot` (D-127), the same bits on every platform.
+ddai-libm = { path = "../ddai-libm" }
 ddai-planner = { path = "../ddai-planner" }
 ddai-world = { path = "../ddai-world" }
 serde = { version = "1.0.229", features = ["derive"] }

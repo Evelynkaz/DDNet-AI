@@ -10,9 +10,10 @@
 //! [`crate::ClientConfig::timeout_seed`] empty), as it did before the timeout code existed.
 
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use ddai_os::private::{self, OwnerOnly, Protection};
 
 use ddai_net::timeout_code::{SEED_LEN, TimeoutSeed};
 
@@ -41,9 +42,8 @@ pub enum SeedError {
 /// read is tightened to `0600`.
 pub fn load_or_create(path: &Path) -> Result<TimeoutSeed, SeedError> {
     let seed = load_or_create_unprotected(path)?;
-    let meta = fs::metadata(path).map_err(|_| SeedError::Io)?;
-    if meta.permissions().mode() & 0o077 != 0 {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|_| SeedError::Io)?;
+    if !private::is_restricted(path).map_err(|_| SeedError::Io)? {
+        warn_if_inherited(private::restrict_file(path).map_err(|_| SeedError::Io)?, path);
     }
     Ok(seed)
 }
@@ -57,13 +57,13 @@ fn load_or_create_unprotected(path: &Path) -> Result<TimeoutSeed, SeedError> {
         fs::create_dir_all(dir).map_err(|_| SeedError::Io)?;
     }
     let mut random = [0u8; SEED_LEN];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut random))
-        .map_err(|_| SeedError::Io)?;
+    ddai_os::random::fill(&mut random).map_err(|_| SeedError::Io)?;
     let seed = TimeoutSeed::from_random(random);
     // `create_new` is `O_EXCL`: it fails on an existing path (a symlink included) instead of following it.
-    match OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
+    match OpenOptions::new().write(true).create_new(true).owner_only().open(path) {
         Ok(mut file) => {
+            // Windows: the ACL is set before the seed is written (on Unix the mode was given at creation).
+            warn_if_inherited(private::restrict_file(path).map_err(|_| SeedError::Io)?, path);
             file.write_all(format!("{}\n", seed.as_str()).as_bytes())
                 .and_then(|()| file.sync_all())
                 .map_err(|_| SeedError::Io)?;
@@ -72,6 +72,13 @@ fn load_or_create_unprotected(path: &Path) -> Result<TimeoutSeed, SeedError> {
         // Another process made it first: use theirs.
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read(path).map_err(into_error).and_then(finish),
         Err(_) => Err(SeedError::Io),
+    }
+}
+
+/// The seed file is a secret: if the owner-only protection could not be applied exactly (Windows ACL), say so, once, without the seed.
+fn warn_if_inherited(protection: Protection, path: &Path) {
+    if let Protection::ParentInherited { reason } = protection {
+        tracing::warn!(path = %path.display(), %reason, "could not restrict the timeout seed file to this user; it keeps the permissions of its folder");
     }
 }
 
@@ -97,18 +104,24 @@ fn finish(file: safe_file::SafeRead) -> Result<TimeoutSeed, SeedError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
 
+    #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
         fs::metadata(path).unwrap().permissions().mode() & 0o7777
     }
 
     #[test]
-    fn the_first_call_makes_a_0600_file_and_later_calls_read_the_same_seed() {
+    fn the_first_call_makes_an_owner_only_file_and_later_calls_read_the_same_seed() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(dir.path());
         assert!(!path.exists());
         let a = load_or_create(&path).unwrap();
+        assert!(
+            private::is_restricted(&path).unwrap(),
+            "owner only (Unix 0600, Windows ACL)"
+        );
+        #[cfg(unix)]
         assert_eq!(mode(&path), 0o600);
         assert_eq!(
             fs::read_to_string(&path).unwrap().len(),
@@ -127,8 +140,10 @@ mod tests {
         assert_ne!(a, b, "the seed comes from OS randomness");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_file_others_can_read_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seed");
         fs::write(&path, "ABCDEFGHKLMNPRST\n").unwrap();
@@ -159,8 +174,10 @@ mod tests {
         assert_eq!(load_or_create(&big).unwrap_err(), SeedError::Io);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_is_never_followed_for_reading_or_creating() {
+        use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         fs::write(&target, "ABCDEFGHKLMNPRST\n").unwrap();

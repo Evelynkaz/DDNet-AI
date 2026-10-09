@@ -55,10 +55,13 @@ mod tests {
         let cache = MasterCache::from_rows(&rows, 77, 1);
         std::fs::write(dir.path().join(CACHE_FILE), cache.to_bytes().unwrap()).unwrap();
         assert_eq!(read_master(dir.path()).unwrap(), cache);
-        // A symlink in place of the file is not followed.
-        std::fs::rename(dir.path().join(CACHE_FILE), dir.path().join("real.json")).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("real.json"), dir.path().join(CACHE_FILE)).unwrap();
-        assert_eq!(read_master(dir.path()).unwrap_err(), CacheProblem::Invalid);
+        // A symlink in place of the file is not followed. (Unix only: making a symlink on Windows needs a privilege.)
+        #[cfg(unix)]
+        {
+            std::fs::rename(dir.path().join(CACHE_FILE), dir.path().join("real.json")).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("real.json"), dir.path().join(CACHE_FILE)).unwrap();
+            assert_eq!(read_master(dir.path()).unwrap_err(), CacheProblem::Invalid);
+        }
     }
 
     #[test]

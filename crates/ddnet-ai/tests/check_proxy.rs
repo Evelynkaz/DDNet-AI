@@ -3,6 +3,9 @@
 //! numbers and never an address, a user name or a password; a bad, stale, oversized or symlinked request and a missing or unsafe profile
 //! each end in a code, never in a crash or a leak.
 
+// Task 5.5a: relies on POSIX permission bits and symlinks; the Windows equivalents (ACLs) are tested in ddai-os.
+#![cfg(unix)]
+
 use ddai_client::socks5_testserver::{Auth, Config, TestSocks5Server};
 use serde_json::{Value, json};
 use std::fs;

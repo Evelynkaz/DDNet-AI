@@ -1,7 +1,8 @@
 //! Everything under `<data_dir>/secrets`: the owner's password hash, the plaintext handed to the
 //! owner once, and the session-cookie signing key. All three live outside the git repository (see
 //! `CLAUDE.md` "Никогда не коммитить"), in files created with `0600` permissions inside a `0700`
-//! directory, never logged.
+//! directory, never logged. (On Windows "owner only" is an ACL granting the current user alone, set with the system's `icacls`; if
+//! that cannot be done a warning says so and the files keep what their folder in the user's profile gives them: see `ddai_os::private`.)
 //!
 //! File formats are the tiny [`crate::toml_kv`] subset, not a full TOML parser (see its module
 //! doc for why).
@@ -11,9 +12,9 @@ use crate::toml_kv::{self, Value};
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
+use ddai_os::private::{self, OwnerOnly, Protection};
 use std::fs;
 use std::io;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Explicit argon2id parameters (acceptance criterion 1: "explicit params, e.g. m=64 MiB, t=3,
@@ -123,30 +124,44 @@ fn io_err(path: &Path, source: io::Error) -> SecretsError {
     }
 }
 
-/// Creates `<data_dir>/secrets` (and `data_dir` itself) if missing, and (re)asserts `0700` on the
-/// secrets directory regardless of the umask that created it.
+/// Creates `<data_dir>/secrets` (and `data_dir` itself) if missing, and (re)asserts owner-only access (`0700`; on Windows an ACL for the
+/// current user alone) on the secrets directory regardless of the umask that created it.
 pub fn ensure_secrets_dir(paths: &SecretsPaths) -> Result<(), SecretsError> {
     fs::create_dir_all(paths.dir()).map_err(|e| io_err(paths.dir(), e))?;
-    fs::set_permissions(paths.dir(), fs::Permissions::from_mode(0o700)).map_err(|e| io_err(paths.dir(), e))?;
+    restrict(paths.dir(), true)
+}
+
+/// Makes `path` owner-only; a Windows ACL that could not be set is a warning, not an error (see the module docs).
+fn restrict(path: &Path, dir: bool) -> Result<(), SecretsError> {
+    let protection = if dir {
+        private::restrict_dir(path)
+    } else {
+        private::restrict_file(path)
+    }
+    .map_err(|e| io_err(path, e))?;
+    if let Protection::ParentInherited { reason } = protection {
+        tracing::warn!(
+            path = %path.display(),
+            %reason,
+            "could not restrict a secrets path to this user; it keeps the permissions of its folder"
+        );
+    }
     Ok(())
 }
 
-/// Checks that `path` has no group/other permission bits set; if it does, fixes it in place and
-/// logs a warning rather than silently trusting a secrets path that other local users might be
-/// able to read or (for the directory) list (review finding F6). This runs on every *load*, not
-/// just on write, so it also catches a directory/file that predates this check, sits on a
+/// Checks that `path` is owner-only (Unix: no group/other permission bits set; Windows: an ACL with the current user's entry alone);
+/// if it is not, fixes it in place and logs a warning rather than silently trusting a secrets path that other local users might be
+/// able to read or (for the directory) list (review finding F6). `dir` says whether `path` is the directory (`0700`) or a file
+/// (`0600`). This runs on every *load*, not just on write, so it also catches a directory/file that predates this check, sits on a
 /// misconfigured filesystem, or was loosened by an external tool.
-pub(crate) fn enforce_private_permissions(path: &Path, expected_mode: u32) -> Result<(), SecretsError> {
-    let metadata = fs::metadata(path).map_err(|e| io_err(path, e))?;
-    let actual_mode = metadata.permissions().mode() & 0o777;
-    if actual_mode & 0o077 != 0 {
+pub(crate) fn enforce_private_permissions(path: &Path, dir: bool) -> Result<(), SecretsError> {
+    if !private::is_restricted(path).map_err(|e| io_err(path, e))? {
         tracing::warn!(
             path = %path.display(),
-            actual_mode = format!("{actual_mode:o}"),
-            expected_mode = format!("{expected_mode:o}"),
-            "secrets path had group/other permission bits set; fixing to private"
+            expected = if dir { "0700 / owner-only ACL" } else { "0600 / owner-only ACL" },
+            "secrets path was accessible to others; fixing to private"
         );
-        fs::set_permissions(path, fs::Permissions::from_mode(expected_mode)).map_err(|e| io_err(path, e))?;
+        restrict(path, dir)?;
     }
     Ok(())
 }
@@ -175,9 +190,16 @@ pub(crate) fn write_secret_file(path: &Path, contents: &str) -> Result<(), Secre
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .owner_only()
             .open(&tmp_path)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        // Unix: the mode in case of an unusual umask; Windows: the ACL, before any secret byte is written.
+        if let Protection::ParentInherited { reason } = private::restrict_file(&tmp_path)? {
+            tracing::warn!(
+                path = %path.display(),
+                %reason,
+                "could not restrict a secrets file to this user; it keeps the permissions of its folder"
+            );
+        }
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
         drop(file);
@@ -260,9 +282,9 @@ pub fn load_password_auth(paths: &SecretsPaths) -> Result<Option<PasswordAuth>, 
         return Ok(None);
     }
     if paths.dir().exists() {
-        enforce_private_permissions(paths.dir(), 0o700)?;
+        enforce_private_permissions(paths.dir(), true)?;
     }
-    enforce_private_permissions(&path, 0o600)?;
+    enforce_private_permissions(&path, false)?;
     let text = read_to_string_checked(&path)?;
     let kv = toml_kv::parse_kv(&text).map_err(|e| SecretsError::Parse(e, path.clone()))?;
     let hash_phc = kv
@@ -339,9 +361,9 @@ pub fn load_or_create_session_key(paths: &SecretsPaths) -> Result<[u8; SESSION_K
     let path = paths.session_key_file();
     if path.exists() {
         if paths.dir().exists() {
-            enforce_private_permissions(paths.dir(), 0o700)?;
+            enforce_private_permissions(paths.dir(), true)?;
         }
-        enforce_private_permissions(&path, 0o600)?;
+        enforce_private_permissions(&path, false)?;
         let text = read_to_string_checked(&path)?;
         let kv = toml_kv::parse_kv(&text).map_err(|e| SecretsError::Parse(e, path.clone()))?;
         let b64 = kv.str("key_b64").ok_or_else(|| SecretsError::MissingField {
@@ -481,9 +503,9 @@ pub fn load_devices(paths: &SecretsPaths) -> Result<Vec<PersistedDevice>, Secret
         return Ok(Vec::new());
     }
     if paths.dir().exists() {
-        enforce_private_permissions(paths.dir(), 0o700)?;
+        enforce_private_permissions(paths.dir(), true)?;
     }
-    enforce_private_permissions(&path, 0o600)?;
+    enforce_private_permissions(&path, false)?;
     let text = read_to_string_checked(&path)?;
     Ok(decode_devices(&text))
 }
@@ -492,7 +514,21 @@ pub fn load_devices(paths: &SecretsPaths) -> Result<Vec<PersistedDevice>, Secret
 mod tests {
     use super::*;
 
-    fn perms(path: &Path) -> u32 {
+    /// `path` is owner-only; on Unix also exactly `mode` (`0600` for files, `0700` for the directory).
+    fn assert_private(path: &Path, mode: u32) {
+        assert!(
+            private::is_restricted(path).expect("stat"),
+            "{} must be owner-only",
+            path.display()
+        );
+        #[cfg(unix)]
+        assert_eq!(unix_perms(path), mode, "{}", path.display());
+        let _ = mode;
+    }
+
+    #[cfg(unix)]
+    fn unix_perms(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
         fs::metadata(path).expect("stat").permissions().mode() & 0o777
     }
 
@@ -535,9 +571,9 @@ mod tests {
         };
         let generated = generate_and_store_password(&paths, params).expect("generate");
 
-        assert_eq!(perms(paths.dir()), 0o700);
-        assert_eq!(perms(&paths.auth_file()), 0o600);
-        assert_eq!(perms(&paths.password_file()), 0o600);
+        assert_private(paths.dir(), 0o700);
+        assert_private(&paths.auth_file(), 0o600);
+        assert_private(&paths.password_file(), 0o600);
 
         let plaintext_on_disk = fs::read_to_string(paths.password_file()).expect("read password file");
         assert_eq!(plaintext_on_disk.trim_end(), generated.plaintext);
@@ -578,7 +614,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = SecretsPaths::new(tmp.path());
         let key1 = load_or_create_session_key(&paths).expect("create");
-        assert_eq!(perms(&paths.session_key_file()), 0o600);
+        assert_private(&paths.session_key_file(), 0o600);
         let key2 = load_or_create_session_key(&paths).expect("load existing");
         assert_eq!(key1, key2, "session key must not change across loads");
     }
@@ -588,11 +624,13 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = SecretsPaths::new(tmp.path());
         let _ = load_or_create_session_key(&paths).expect("create");
-        assert_eq!(perms(paths.dir()), 0o700);
+        assert_private(paths.dir(), 0o700);
     }
 
+    #[cfg(unix)]
     #[test]
     fn loading_a_loosened_auth_file_fixes_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = SecretsPaths::new(tmp.path());
         let params = Argon2Params {
@@ -604,36 +642,40 @@ mod tests {
 
         // Simulate an external tool (or a pre-fix version of this code) loosening the file.
         fs::set_permissions(paths.auth_file(), fs::Permissions::from_mode(0o644)).expect("loosen perms");
-        assert_eq!(perms(&paths.auth_file()), 0o644);
+        assert_eq!(unix_perms(&paths.auth_file()), 0o644);
 
         // Loading it must notice and fix it back to private, not just silently trust it.
         load_password_auth(&paths).expect("load").expect("some");
         assert_eq!(
-            perms(&paths.auth_file()),
+            unix_perms(&paths.auth_file()),
             0o600,
             "load should have re-tightened permissions"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn loading_a_loosened_session_key_file_fixes_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = SecretsPaths::new(tmp.path());
         load_or_create_session_key(&paths).expect("create");
 
         fs::set_permissions(paths.session_key_file(), fs::Permissions::from_mode(0o640)).expect("loosen perms");
-        assert_eq!(perms(&paths.session_key_file()), 0o640);
+        assert_eq!(unix_perms(&paths.session_key_file()), 0o640);
 
         load_or_create_session_key(&paths).expect("load existing");
         assert_eq!(
-            perms(&paths.session_key_file()),
+            unix_perms(&paths.session_key_file()),
             0o600,
             "load should have re-tightened permissions"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn loosened_secrets_dir_is_fixed_on_load() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = SecretsPaths::new(tmp.path());
         let params = Argon2Params {
@@ -644,11 +686,11 @@ mod tests {
         generate_and_store_password(&paths, params).expect("generate");
 
         fs::set_permissions(paths.dir(), fs::Permissions::from_mode(0o750)).expect("loosen dir perms");
-        assert_eq!(perms(paths.dir()), 0o750);
+        assert_eq!(unix_perms(paths.dir()), 0o750);
 
         load_password_auth(&paths).expect("load").expect("some");
         assert_eq!(
-            perms(paths.dir()),
+            unix_perms(paths.dir()),
             0o700,
             "load should have re-tightened the directory too"
         );
@@ -737,8 +779,8 @@ mod tests {
         let devices = vec![device(1), device(2)];
         save_devices(&paths, &devices).expect("save");
 
-        assert_eq!(perms(paths.dir()), 0o700);
-        assert_eq!(perms(&paths.devices_file()), 0o600);
+        assert_private(paths.dir(), 0o700);
+        assert_private(&paths.devices_file(), 0o600);
 
         let loaded = load_devices(&paths).expect("load");
         assert_eq!(loaded, devices);

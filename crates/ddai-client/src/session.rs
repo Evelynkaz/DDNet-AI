@@ -250,17 +250,10 @@ pub struct ClientConfig {
     pub precise_wakeups: bool,
 }
 
-/// `~/aiddnet/data/maps/cache`, per `CLAUDE.md`'s folder layout, falling back to a relative
-/// `data/maps/cache` if `$HOME` isn't set — same fallback pattern `ddai-web`'s CLI uses.
+/// `<data dir>/maps/cache` (`~/aiddnet/data/maps/cache` per `CLAUDE.md`'s folder layout on Linux, see `ddai_os::dirs`), falling back to
+/// a relative `data/maps/cache` if there is no home directory — same fallback pattern `ddai-web`'s CLI uses.
 pub fn default_cache_dir() -> std::path::PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => std::path::PathBuf::from(home)
-            .join("aiddnet")
-            .join("data")
-            .join("maps")
-            .join("cache"),
-        _ => std::path::PathBuf::from("data").join("maps").join("cache"),
-    }
+    ddai_os::dirs::data_root_or_relative().join("maps").join("cache")
 }
 
 impl Default for ClientConfig {

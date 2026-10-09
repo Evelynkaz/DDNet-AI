@@ -17,6 +17,8 @@ workspace = true
 
 [dependencies]
 ddai-physics = { path = "../ddai-physics" }
+# glibc-exact `sinf`/`cosf`/`atan2f`/`hypot` (D-127), the same bits on every platform.
+ddai-libm = { path = "../ddai-libm" }
 ddai-net = { path = "../ddai-net" }
 ddai-brain = { path = "../ddai-brain" }
 

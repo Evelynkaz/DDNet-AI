@@ -72,7 +72,8 @@ fn extract_ddrace(p: &objects::DDRaceProjectile, collision: &Collision<f32>) -> 
     }
     ProjectileData {
         start_pos,
-        start_vel: Vec2::new((-angle).sin(), (-angle).cos()),
+        // glibc's `sinf`/`cosf` as DDNet's `vec2(sinf(-Angle), cosf(-Angle))` (D-127: `ddai-libm`, the same bits on every platform).
+        start_vel: Vec2::new(ddai_libm::sinf(-angle), ddai_libm::cosf(-angle)),
         weapon_type: p.type_,
         start_tick: p.start_tick,
         extra_info: true,

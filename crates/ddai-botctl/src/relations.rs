@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use ddai_os::private::OwnerOnly;
 use serde::{Deserialize, Serialize};
 
 use crate::names::fold_name;
@@ -140,16 +141,11 @@ pub enum RelationsError {
     },
 }
 
-/// `~/aiddnet/data/bot/relations.json`.
+/// `<data dir>/bot/relations.json` (`~/aiddnet/data/bot/relations.json` on Linux, see `ddai_os::dirs`).
 pub fn default_path() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home)
-            .join("aiddnet")
-            .join("data")
-            .join("bot")
-            .join("relations.json"),
-        _ => PathBuf::from("data").join("bot").join("relations.json"),
-    }
+    ddai_os::dirs::data_root_or_relative()
+        .join("bot")
+        .join("relations.json")
 }
 
 impl Relations {
@@ -373,12 +369,13 @@ impl Relations {
         // The file holds real nicknames: owner-only (0600), like the sockets and the secrets.
         let written = (|| -> io::Result<()> {
             use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .mode(0o600)
+                .owner_only()
                 .open(&tmp)?;
+            // Windows: the ACL goes on before the nicknames are written (Unix: the mode was given at creation).
+            ddai_os::private::restrict_file(&tmp)?;
             f.write_all(&serde_json::to_vec_pretty(&file).map_err(io::Error::other)?)?;
             f.sync_all()
         })();
@@ -407,7 +404,6 @@ impl RelationsLock {
     }
 
     pub fn acquire_within(path: &Path, wait: Duration) -> io::Result<RelationsLock> {
-        use std::os::unix::fs::OpenOptionsExt;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -418,7 +414,7 @@ impl RelationsLock {
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(0o600)
+            .owner_only()
             .open(PathBuf::from(lock_name))?;
         let started = Instant::now();
         loop {
@@ -581,15 +577,22 @@ mod tests {
 
     #[test]
     fn the_saved_file_is_private() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("relations.json");
         let mut r = Relations::new();
         r.add(ListKind::Friend, "x");
         r.save(&path).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(
+            ddai_os::private::is_restricted(&path).unwrap(),
+            "owner only (Unix 0600, Windows ACL)"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         r.save(&path).unwrap(); // and again over the existing file
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(ddai_os::private::is_restricted(&path).unwrap());
     }
 
     #[test]
@@ -728,11 +731,14 @@ mod tests {
             RelationsLock::acquire_within(&path, Duration::from_millis(100)).is_ok(),
             "released on drop"
         );
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir.path().join("relations.json.lock"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("relations.json.lock"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

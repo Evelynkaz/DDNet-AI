@@ -19,12 +19,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing_subscriber::prelude::*;
 
-/// `~/aiddnet/data`, per `CLAUDE.md`'s folder layout — same fallback pattern as `ddai-web`'s CLI.
+/// `~/aiddnet/data` on Linux, per `CLAUDE.md`'s folder layout (`%USERPROFILE%\ddnet-ai\data` on Windows; `ddai_os::dirs`) — same fallback
+/// pattern as `ddai-web`'s CLI.
 fn default_data_dir() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home).join("aiddnet").join("data"),
-        _ => PathBuf::from("data"),
-    }
+    ddai_os::dirs::data_root_or_relative()
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

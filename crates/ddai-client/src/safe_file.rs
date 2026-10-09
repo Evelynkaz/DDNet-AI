@@ -2,11 +2,11 @@
 //!
 //! The root launcher helper, the bot and the web all read files that the web process can create (the favourites, the proxy
 //! profiles). A symlink swapped in, a FIFO that would block the reader, or a huge file must never matter: the file is opened
-//! with `O_NOFOLLOW | O_NONBLOCK`, its type and size are checked on the opened descriptor, and at most `max` bytes are read.
+//! with `O_NOFOLLOW | O_NONBLOCK` (Windows: `FILE_FLAG_OPEN_REPARSE_POINT`, see `ddai_os::nofollow`), its type and size are checked on
+//! the opened descriptor, and at most `max` bytes are read.
 
-use std::fs::OpenOptions;
+use ddai_os::nofollow;
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 /// Why a file could not be read as a small regular file.
@@ -26,24 +26,20 @@ pub enum SafeReadError {
 pub struct SafeRead {
     pub bytes: Vec<u8>,
     pub mtime: u64,
-    /// The file's mode bits (`st_mode & 0o7777`).
-    pub mode: u32,
-    /// The file's owner.
-    pub uid: u32,
+    /// The file's mode bits (`st_mode & 0o7777`); `None` where the OS has none (Windows).
+    pub mode: Option<u32>,
+    /// The file's owner (Unix uid); `None` where the OS has none (Windows).
+    pub uid: Option<u32>,
 }
 
 /// Reads a regular file of at most `max` bytes. A symlink is refused (`O_NOFOLLOW`), a FIFO cannot block the reader
 /// (`O_NONBLOCK`), and the type is checked on the opened descriptor, so the file checked is the file read.
 pub fn read_regular_nofollow(path: &Path, max: usize) -> Result<SafeRead, SafeReadError> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => SafeReadError::Missing,
-            _ if e.raw_os_error() == Some(libc::ELOOP) => SafeReadError::NotRegular,
-            _ => SafeReadError::Io,
-        })?;
+    let mut file = nofollow::open_read_nofollow(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => SafeReadError::Missing,
+        _ if nofollow::is_symlink_refusal(&e) => SafeReadError::NotRegular,
+        _ => SafeReadError::Io,
+    })?;
     let meta = file.metadata().map_err(|_| SafeReadError::Io)?;
     if !meta.is_file() {
         return Err(SafeReadError::NotRegular);
@@ -61,9 +57,9 @@ pub fn read_regular_nofollow(path: &Path, max: usize) -> Result<SafeRead, SafeRe
     }
     Ok(SafeRead {
         bytes,
-        mtime: u64::try_from(meta.mtime()).unwrap_or(0),
-        mode: meta.mode() & 0o7777,
-        uid: meta.uid(),
+        mtime: nofollow::mtime_unix(&meta),
+        mode: nofollow::unix_mode_and_owner(&meta).map(|(mode, _)| mode),
+        uid: nofollow::unix_mode_and_owner(&meta).map(|(_, uid)| uid),
     })
 }
 
@@ -83,12 +79,15 @@ mod tests {
             read_regular_nofollow(&dir.path().join("none"), 16),
             Err(SafeReadError::Missing)
         ));
-        let link = dir.path().join("l");
-        std::os::unix::fs::symlink(&file, &link).unwrap();
-        assert!(matches!(
-            read_regular_nofollow(&link, 16),
-            Err(SafeReadError::NotRegular)
-        ));
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("l");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(matches!(
+                read_regular_nofollow(&link, 16),
+                Err(SafeReadError::NotRegular)
+            ));
+        }
         assert!(matches!(
             read_regular_nofollow(dir.path(), 16),
             Err(SafeReadError::NotRegular)

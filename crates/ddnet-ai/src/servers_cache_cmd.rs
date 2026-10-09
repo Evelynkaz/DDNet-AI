@@ -176,10 +176,10 @@ fn http_fetch(url: &str, fixture: bool) -> Result<String, FetchError> {
 }
 
 pub fn run(args: ServersCacheArgs) -> ExitCode {
-    let data_dir = args.data_dir.clone().unwrap_or_else(|| match std::env::var_os("HOME") {
-        Some(h) if !h.is_empty() => PathBuf::from(h).join("aiddnet").join("data"),
-        _ => PathBuf::from("data"),
-    });
+    let data_dir = args
+        .data_dir
+        .clone()
+        .unwrap_or_else(ddai_os::dirs::data_root_or_relative);
     let out = args.out.clone().unwrap_or_else(|| data_dir.join("servers"));
     let fixture = args.fixture_url.is_some();
     let masters: Vec<String> = match &args.fixture_url {
@@ -229,6 +229,7 @@ mod tests {
         let note: RefreshStatus =
             serde_json::from_slice(&std::fs::read(dir.path().join(REFRESH_FILE)).unwrap()).unwrap();
         assert!(note.ok && note.reason.is_none());
+        #[cfg(unix)]
         for f in [CACHE_FILE, REFRESH_FILE] {
             let mode =
                 std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.path().join(f)).unwrap().permissions());
@@ -310,6 +311,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // making a symlink on Windows needs a privilege
     #[test]
     fn the_write_goes_through_a_temp_file_and_never_follows_a_symlink() {
         let dir = tempfile::tempdir().unwrap();

@@ -201,9 +201,9 @@ impl Core {
             return false;
         }
         let (dx, dy) = (own.pos.x - him.pos.x, own.pos.y - him.pos.y);
-        let d = dx.hypot(dy);
+        let d = ddai_libm::hypotf(dx, dy);
         let aim = him.aim_rad();
-        d < 1.0 || aim.cos() * dx + aim.sin() * dy >= d * HARASS_AIM_RAD.cos()
+        d < 1.0 || ddai_libm::cosf(aim) * dx + ddai_libm::sinf(aim) * dy >= d * ddai_libm::cosf(HARASS_AIM_RAD)
     }
 
     /// `noteWbFreeze(by, me, tick)`: a player froze us on the way to the WB; three times in three minutes make

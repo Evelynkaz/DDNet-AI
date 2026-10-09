@@ -33,6 +33,9 @@
 //!
 //! The control test (no seed) shows the old tee dropped by the timeout and a ghost that times out by itself.
 
+// Task 5.5a: an ignored end-to-end test against a local DDNet server driven by python3/bash/POSIX tools: Linux only.
+#![cfg(unix)]
+
 mod owner_chat_rig;
 
 use std::collections::BTreeMap;

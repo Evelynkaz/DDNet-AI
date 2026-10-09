@@ -233,7 +233,7 @@ pub fn run_walk<W: PlanWorld>(
                 .iter()
                 .any(|&dy| col.is_freeze(me.pos.x + dx, me.pos.y + dy))
         });
-        let speed = me.vel.x.hypot(me.vel.y);
+        let speed = ddai_libm::hypot(me.vel.x, me.vel.y);
         let lying =
             me.frozen && in_freeze_tile && !in_zone && me_hooked_by.is_none() && speed < 0.5 && frozen_run >= WB_LYING;
         let mut kill = lying || frozen_run >= FROZEN_HARD;

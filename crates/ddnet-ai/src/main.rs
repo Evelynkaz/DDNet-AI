@@ -12,6 +12,8 @@ mod demo_cmd;
 mod es_cmd;
 mod fly_cmd;
 mod fly_watch;
+// The web launcher's root helper (systemd units, `/proc`, Unix file ownership): a Linux-only deployment feature (D-089, D-127).
+#[cfg(unix)]
 mod launch_cmd;
 mod map_cmd;
 mod oppnet_cmd;
@@ -81,7 +83,8 @@ enum Command {
     ProxyCheck(proxy_cmd::ProxyCheckArgs),
     /// The root-side helper of the web launcher (task 5.9, D-089): `launch apply` consumes the web's request file and starts or
     /// stops the bot unit; `launch exited` is the bot unit's stop hook. Never takes a path, address or command line from the
-    /// request: every value is checked against fixed allow-lists.
+    /// request: every value is checked against fixed allow-lists. (Linux and other Unix only.)
+    #[cfg(unix)]
     Launch(launch_cmd::LaunchArgs),
     /// The live window model's log (task 3.17, D-111): `oppnet-live report <file>...` prints the accuracy of the model against hold by tick of the
     /// window and by our lag. Reads files only.
@@ -140,6 +143,7 @@ fn main() -> ExitCode {
         Some(Command::ServersCache(args)) => servers_cache_cmd::run(args),
         Some(Command::Clip(args)) => clip_cmd::run(args),
         Some(Command::ProxyCheck(args)) => proxy_cmd::run(args),
+        #[cfg(unix)]
         Some(Command::Launch(args)) => launch_cmd::run(args),
         Some(Command::OppnetLive(args)) => oppnet_cmd::run(args),
     }

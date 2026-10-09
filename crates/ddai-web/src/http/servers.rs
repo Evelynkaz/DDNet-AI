@@ -226,14 +226,7 @@ pub async fn refresh_post(
         // Rewritten in place (truncate, write, close): the path unit's `PathChanged=` fires on the close after a write. The content
         // means nothing. Never through a symlink.
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(launch_dir.join(REFRESH_TRIGGER_FILE))
+        let mut file = ddai_os::nofollow::create_truncate_nofollow(&launch_dir.join(REFRESH_TRIGGER_FILE), 0o644)
             .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "refresh_write_failed"))?;
         file.write_all(unix_now().to_string().as_bytes())
             .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "refresh_write_failed"))?;

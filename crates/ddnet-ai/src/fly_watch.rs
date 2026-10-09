@@ -82,17 +82,14 @@ const STATUS_EVERY_TICKS: i32 = 50;
 const IDLE_POLL: Duration = Duration::from_millis(100);
 
 fn expand_home(p: &Path) -> PathBuf {
-    match (p.strip_prefix("~"), std::env::var_os("HOME")) {
-        (Ok(rest), Some(h)) => PathBuf::from(h).join(rest),
+    match (p.strip_prefix("~"), ddai_os::dirs::home_dir()) {
+        (Ok(rest), Some(h)) => h.join(rest),
         _ => p.to_path_buf(),
     }
 }
 
 fn home_data(sub: &str) -> PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from(sub),
-        |h| PathBuf::from(h).join("aiddnet/data").join(sub),
-    )
+    ddai_os::dirs::data_root().map_or_else(|| PathBuf::from(sub), |d| d.join(sub))
 }
 
 /// The focal and opponent specs of a watch (slot 0 is the fly).

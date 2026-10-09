@@ -10,6 +10,9 @@
 //! does; see `~/aiddnet/data/logs/e2e-8.4a/<timestamp>/` for that run's own logs and recordings
 //! afterwards regardless of pass/fail.
 
+// Task 5.5a: an ignored end-to-end test against a local DDNet server driven by python3/bash/POSIX tools: Linux only.
+#![cfg(unix)]
+
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;

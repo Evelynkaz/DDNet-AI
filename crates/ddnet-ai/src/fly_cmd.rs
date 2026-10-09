@@ -235,10 +235,9 @@ fn pin_this_thread_to_one_core() -> bool {
         .unwrap_or(false)
 }
 
+/// The kernel's load average text (`/proc/loadavg`); `None` on Windows, which has none (the report then simply omits the line).
 fn read_load_average() -> Option<String> {
-    let text = std::fs::read_to_string("/proc/loadavg").ok()?;
-    let fields: Vec<&str> = text.split_whitespace().take(3).collect();
-    (fields.len() == 3).then(|| fields.join(" "))
+    ddai_os::host::load_average_text()
 }
 
 /// Rough estimate of one `FlyState`'s scratch memory (not counting the `FlyModel` it points at,

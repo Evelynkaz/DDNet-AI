@@ -31,13 +31,12 @@ struct File {
     pval: Vec<f64>,
 }
 
-/// `~/aiddnet/data/bot/memory`; `None` when `HOME` is unset or empty (never a relative path: it could
-/// land inside a repository checkout).
+/// `<data dir>/bot/memory` (`~/aiddnet/data/bot/memory` on Linux, see `ddai_os::dirs`); `None` when there is no (absolute) home
+/// directory (never a relative path: it could land inside a repository checkout).
 pub fn default_memory_dir() -> Option<PathBuf> {
-    match std::env::var_os("HOME") {
-        Some(h) if !h.is_empty() => Some(PathBuf::from(h).join("aiddnet/data/bot/memory")).filter(|p| p.is_absolute()),
-        _ => None,
-    }
+    ddai_os::dirs::data_root()
+        .map(|d| d.join("bot/memory"))
+        .filter(|p| p.is_absolute())
 }
 
 /// The memory file of the map with this sha256 (lowercase hex).
@@ -93,15 +92,10 @@ pub fn save(mem: &mut FreezeMemory, file: &Path) -> std::io::Result<()> {
     std::fs::rename(&tmp, file)
 }
 
-#[cfg(unix)]
+/// The memory directory is owner-only: mode `0700` on Unix, an ACL for the current user on Windows (`ddai_os::private`; a failure to set
+/// the ACL is not fatal, the folder is inside the user's profile).
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
+    ddai_os::private::create_dir_all_restricted(dir).map(drop)
 }
 
 /// `FreezeMemory.load(file, width, height)`: a missing, unreadable or mismatching file is an empty memory.

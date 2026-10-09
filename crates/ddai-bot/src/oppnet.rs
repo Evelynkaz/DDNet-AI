@@ -397,8 +397,12 @@ mod tests {
         std::fs::write(&m, "").unwrap();
         assert!(marker_present(&m), "an empty file counts");
         std::fs::remove_file(&m).unwrap();
-        std::os::unix::fs::symlink("/nonexistent", &m).unwrap();
-        assert!(marker_present(&m), "a dangling symlink counts too");
+        // (Unix only: making a symlink on Windows needs a privilege.)
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/nonexistent", &m).unwrap();
+            assert!(marker_present(&m), "a dangling symlink counts too");
+        }
         // A path below a regular file: ENOTDIR is not "not found": present.
         let f = dir.path().join("file");
         std::fs::write(&f, "x").unwrap();

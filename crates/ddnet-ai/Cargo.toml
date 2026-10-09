@@ -15,6 +15,10 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+# The OS seam (task 5.5a, D-127): default data directories, owner-only files, load average, Unix sockets where they exist.
+ddai-os = { path = "../ddai-os" }
+# glibc-exact `hypot` (D-127).
+ddai-libm = { path = "../ddai-libm" }
 clap = { workspace = true }
 ddai-bot = { path = "../ddai-bot" }
 ddai-oppnet = { path = "../ddai-oppnet" }

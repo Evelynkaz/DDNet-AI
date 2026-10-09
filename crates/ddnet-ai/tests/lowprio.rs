@@ -3,6 +3,9 @@
 //! stdin arrive unchanged, the niceness is really raised, the command stays in the CALLER'S cgroup (a user-scope step once gave the "low
 //! priority" command more CPU than a plain nice-15 process, review 4.14 F1), SCHED_IDLE is opt-in, and bad settings are refused.
 
+// Task 5.5a: tests tools/lowprio.sh (nice, chrt, cgroups): Linux only.
+#![cfg(target_os = "linux")]
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

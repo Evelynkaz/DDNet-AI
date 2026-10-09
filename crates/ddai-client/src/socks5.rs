@@ -1376,6 +1376,7 @@ mod tests {
 
     /// Task 4.10 (D-100): the control connection carries TCP keepalive with short idle/interval/retries, so an idle-TCP drop by the
     /// proxy provider is avoided and a silently dead connection is detected after about 105 s, never before the game's own 100 s silence timeout.
+    #[cfg(unix)] // `socket2` reads the keepalive timers back on Unix only; the setters are what production uses
     #[test]
     fn the_control_connection_has_tcp_keepalive_with_short_timers() {
         let server = TestSocks5Server::start(Default::default());

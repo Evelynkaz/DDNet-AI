@@ -336,6 +336,8 @@ impl CharacterGen {
         let rad = angle_deg * PI / 180.0;
         // Fixed magnitude 1000 (an arbitrary "far away" cursor distance, matching a real
         // client's typical target vector magnitude) guarantees (target_x, target_y) != (0, 0).
+        // libm-census: the integer is robust against the last bit of the platform's f64 cos/sin: no 1000*cos/sin(k degrees) lies within
+        // 0.004 of a rounding boundary (test `aim_vectors_do_not_depend_on_the_last_bit_of_the_math_library`)
         self.aim_target_or_noise = ((1000.0 * rad.cos()).round() as i32, (1000.0 * rad.sin()).round() as i32);
     }
 
@@ -400,6 +402,21 @@ fn hold_ticks(rng: &mut SplitMix64, lo: i32, hi: i32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    /// D-127: the aim vector is `round(1000 * cos/sin(k degrees))`, computed with the platform's f64 `cos`/`sin` (no port in `ddai-libm`). It
+    /// is the same integer on every platform because no value lies near a rounding boundary: a library would have to be wrong by
+    /// 4e-3 / 1000 = 4e-6 relative to change one. (Every libm is accurate to ~1e-16.)
+    #[test]
+    fn aim_vectors_do_not_depend_on_the_last_bit_of_the_math_library() {
+        let mut closest = f64::MAX;
+        for k in 0..360 {
+            let rad = f64::from(k) * PI / 180.0;
+            for v in [1000.0 * rad.cos(), 1000.0 * rad.sin()] {
+                closest = closest.min((v - v.floor() - 0.5).abs());
+            }
+        }
+        assert!(closest > 1e-3, "closest to a rounding boundary: {closest}");
+    }
+
     use super::*;
     use crate::scenario::resolve_input;
 

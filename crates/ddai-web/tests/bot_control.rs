@@ -4,6 +4,9 @@
 //! and its reply comes back; the lists editor round-trips through the file and tells the bot to reload; nothing outside
 //! the closed command vocabulary gets through; and no name is ever logged.
 
+// Task 5.5a: talks to the bot over a Unix-domain socket, which Windows has no counterpart of yet (ddai_os::ipc, task 5.5b).
+#![cfg(unix)]
+
 mod support;
 
 use std::io::Write as _;

@@ -331,8 +331,8 @@ impl ActivityClock {
             }
             let r = a.aim_rad();
             let hp = Vec2::new(
-                a.pos.x + r.cos() * HAMMER_REACH_AHEAD_PX,
-                a.pos.y + r.sin() * HAMMER_REACH_AHEAD_PX,
+                a.pos.x + ddai_libm::cosf(r) * HAMMER_REACH_AHEAD_PX,
+                a.pos.y + ddai_libm::sinf(r) * HAMMER_REACH_AHEAD_PX,
             );
             for b in tees.iter() {
                 if b.id != a.id && dist(hp, b.pos) < HAMMER_REACH_PX {

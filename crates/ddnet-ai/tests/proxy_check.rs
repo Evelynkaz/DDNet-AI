@@ -1,6 +1,9 @@
 //! Task 2.6: `ddnet-ai proxy-check` and the proxy gate of `play`, run as the real binary against the in-process
 //! loopback SOCKS5 server (127.0.0.1 only; no game server involved, no network).
 
+// Task 5.5a: relies on POSIX permission bits and symlinks; the Windows equivalents (ACLs) are tested in ddai-os.
+#![cfg(unix)]
+
 use ddai_client::socks5_testserver::{Auth, Bnd, Config, TestSocks5Server};
 use std::net::UdpSocket;
 use std::path::Path;

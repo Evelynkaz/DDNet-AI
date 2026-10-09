@@ -209,6 +209,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // making a symlink on Windows needs a privilege
     #[test]
     fn a_symlink_that_leads_out_of_the_directory_is_not_followed() {
         let tmp = tempfile::tempdir().unwrap();

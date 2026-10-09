@@ -35,10 +35,7 @@ const EXIT_HANDSHAKE_TIMEOUT: u8 = 4;
 
 /// `~/aiddnet/data`, per `CLAUDE.md`'s folder layout — same fallback pattern as `ddnet-ai play`.
 fn default_data_dir() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home).join("aiddnet").join("data"),
-        _ => PathBuf::from("data"),
-    }
+    ddai_os::dirs::data_root_or_relative()
 }
 
 #[derive(Debug, Args)]

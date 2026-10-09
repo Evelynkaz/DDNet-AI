@@ -12,6 +12,9 @@
 //! DDAI_E2E=1 cargo test -p ddnet-ai --test e2e_owner_pause_still -- --ignored --nocapture --test-threads=1
 //! ```
 
+// Task 5.5a: an ignored end-to-end test against a local DDNet server driven by python3/bash/POSIX tools: Linux only.
+#![cfg(unix)]
+
 mod owner_chat_rig;
 
 use std::time::Duration;

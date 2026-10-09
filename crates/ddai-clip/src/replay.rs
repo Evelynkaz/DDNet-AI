@@ -312,7 +312,7 @@ fn compare(replayed: &NetCharacterCore, recon: &NetCharacterCore) -> Vec<(&'stat
 }
 
 fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
-    (a.0 - b.0).hypot(a.1 - b.1)
+    ddai_libm::hypot(a.0 - b.0, a.1 - b.1)
 }
 
 /// Nobody the clip cannot see into could touch us in the step (see [`Report::isolated_steps`]).
@@ -367,7 +367,7 @@ fn flying_hook_reaches(frame: &Frame, later: bool, tee: &TeeRec, me: (f64, f64),
     }
     let tip = (f64::from(tee.ch.hook_x), f64::from(tee.ch.hook_y));
     let (dx, dy) = (f64::from(tee.ch.hook_dx) / 256.0, f64::from(tee.ch.hook_dy) / 256.0);
-    let norm = dx.hypot(dy);
+    let norm = ddai_libm::hypot(dx, dy);
     let (ux, uy) = if norm > 1e-9 {
         (dx / norm, dy / norm)
     } else {

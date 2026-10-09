@@ -12,7 +12,22 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Windows gives the main thread of a binary 1 MiB of stack by default, Linux 8 MiB. The commands run their work on the main thread and
+/// were only ever exercised with the Linux size, so the Windows binary asks the linker for the same 8 MiB (task 5.5a, D-127).
+fn main_thread_stack() {
+    const EIGHT_MIB: u32 = 8 * 1024 * 1024;
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+        Ok("msvc") => println!("cargo:rustc-link-arg-bins=/STACK:{EIGHT_MIB}"),
+        Ok("gnu") => println!("cargo:rustc-link-arg-bins=-Wl,--stack,{EIGHT_MIB}"),
+        _ => {}
+    }
+}
+
 fn main() {
+    main_thread_stack();
     let commit = git(&["rev-parse", "HEAD"])
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| "unknown".to_string());

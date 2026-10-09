@@ -621,7 +621,7 @@ pub fn forecast_samples(clip: &Clip, map: &Arc<MapData>, clip_name: &str, ages: 
                     fr.tees.iter().filter(|t| t.id != own_id).any(|t| {
                         t.ch.hooked_player == own_id
                             || me.ch.hooked_player == t.id
-                            || (f64::from(t.ch.x - me.ch.x)).hypot(f64::from(t.ch.y - me.ch.y)) < 60.0
+                            || ddai_libm::hypot(f64::from(t.ch.x - me.ch.x), f64::from(t.ch.y - me.ch.y)) < 60.0
                     })
                 });
                 out.push(ForecastSample {

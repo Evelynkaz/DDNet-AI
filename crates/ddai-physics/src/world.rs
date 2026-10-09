@@ -1844,7 +1844,7 @@ fn scan_entity<R: Real>(
             if (map::ENTITY_LASER_SHORT as i32..=map::ENTITY_LASER_LONG as i32).contains(&side) {
                 let rotation = R::from_f64(std::f64::consts::PI) / R::from_i32(4) * R::from_i32(i);
                 let length = 32 * 3 + 32 * (side - map::ENTITY_LASER_SHORT as i32) * 3;
-                let direction = Vec2::new(rotation.sin(), rotation.cos());
+                let direction = Vec2::new(rotation.sin(), rotation.cos()); // libm-census: `Real::sin`/`cos`
                 switch::place_door_collision(collision, pos, direction, length, number);
                 doors.push(DoorFixture { pos });
             }
@@ -1862,7 +1862,7 @@ fn scan_entity<R: Real>(
             3
         };
         let deg = R::from_f64(std::f64::consts::FRAC_PI_2) * R::from_i32(dir);
-        let direction = Vec2::new(deg.sin(), deg.cos());
+        let direction = Vec2::new(deg.sin(), deg.cos()); // libm-census: `Real::sin`/`cos`
         crazy_shotguns.push((
             pos,
             direction,
@@ -2590,6 +2590,7 @@ fn apply_speedup<R: Real>(
             let tee_speed_f64 = temp_vel.x.to_f64().powi(2) + temp_vel.y.to_f64().powi(2);
             let tee_speed = R::from_f64(tee_speed_f64.sqrt());
             let diff_angle = speeder_angle - tee_angle;
+            // libm-census: `Real::cos` (ddai_libm for f32)
             let speed_left = R::from_i32(max_speed) / R::from_i32(5) - diff_angle.cos() * tee_speed;
             let force = R::from_i32(info.force);
             // `absolute((int)SpeedLeft)` (`character.cpp:1562-1567`): truncate to `int` *then*
@@ -2661,9 +2662,9 @@ fn max_ramp_speed<R: Real>(velramp_range: R, velramp_curvature: R) -> R {
 fn old_speedup_angle<R: Real>(x: R, y: R) -> R {
     let half_pi = R::from_f64(std::f64::consts::FRAC_PI_2);
     let mut angle = if x > R::from_f64(0.0000001) {
-        -(y / x).atan()
+        -(y / x).atan() // libm-census: `Real::atan`
     } else if x < R::from_f64(0.0000001) {
-        (y / x).atan() + R::from_i32(2) * half_pi
+        (y / x).atan() + R::from_i32(2) * half_pi // libm-census: `Real::atan`
     } else if y > R::from_f64(0.0000001) {
         half_pi
     } else {

@@ -742,11 +742,15 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let real = dir.path().join("real.json");
         std::fs::write(&real, file(vec![fav("93.184.216.35:8308")]).to_bytes(rules).unwrap()).unwrap();
-        std::os::unix::fs::symlink(&real, &path).unwrap();
-        let (m, why) = LiveServers::load_with_favourites(LiveServers::default(), &path, rules);
-        assert!(m.servers.is_empty());
-        assert_eq!(why, Some("favourites_unreadable"));
-        std::fs::remove_file(&path).unwrap();
+        // (Unix only: making a symlink on Windows needs a privilege.)
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &path).unwrap();
+            let (m, why) = LiveServers::load_with_favourites(LiveServers::default(), &path, rules);
+            assert!(m.servers.is_empty());
+            assert_eq!(why, Some("favourites_unreadable"));
+            std::fs::remove_file(&path).unwrap();
+        }
         std::fs::create_dir(&path).unwrap();
         assert_eq!(load(&path, rules), Err(LoadError::Unreadable));
         std::fs::remove_dir(&path).unwrap();

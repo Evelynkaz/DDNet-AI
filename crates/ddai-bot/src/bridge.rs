@@ -37,9 +37,8 @@
 //! `HELLO`, the current `MAP` and `PLAYERS` again). A slow web unit can therefore never stall the
 //! bot's decisions: every call here is non-blocking and bounded.
 
+use ddai_os::ipc::{UnixListener, UnixStream};
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -338,14 +337,17 @@ impl SearchWindowStatus {
 /// anything that is not a socket, and never steals a live bot's socket), with the directory `0700` and the socket
 /// `0600`. Shared by the live bridge and the control channel (`crate::control`), which live side by side.
 pub fn bind_private_socket(path: &Path) -> io::Result<UnixListener> {
+    if !ddai_os::ipc::SUPPORTED {
+        // Windows: no Unix-domain sockets; `bind` says so (`ErrorKind::Unsupported`) and the caller runs without the channel.
+        return UnixListener::bind(path);
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        ddai_os::private::restrict_dir(dir)?;
     }
     match std::fs::symlink_metadata(path) {
         Ok(m) => {
-            use std::os::unix::fs::FileTypeExt;
-            if !m.file_type().is_socket() {
+            if !is_socket(&m) {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!("{} exists and is not a socket", path.display()),
@@ -365,8 +367,22 @@ pub fn bind_private_socket(path: &Path) -> io::Result<UnixListener> {
     }
     // The socket file is created with the process umask; close the window in which it is looser than 0600.
     let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    ddai_os::private::restrict_file(path)?;
     Ok(listener)
+}
+
+/// Whether `meta` is a socket file (never on a platform without Unix-domain sockets).
+fn is_socket(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        meta.file_type().is_socket()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
 }
 
 struct Client {
@@ -730,8 +746,11 @@ fn flush(c: &mut Client) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
     use super::*;
     use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn read_message(s: &mut UnixStream) -> (u8, Vec<u8>) {
         let mut len = [0u8; 4];
@@ -792,6 +811,7 @@ mod tests {
         assert_eq!(out[12 + 24], 0xFF, "-1 is 0xFF");
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn clients_get_hello_map_and_players_then_frames_and_status() {
         let dir = tempfile::tempdir().unwrap();
@@ -930,6 +950,7 @@ mod tests {
         assert_eq!(v["brain_p90_us"], 4125);
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn a_client_that_never_reads_is_dropped_instead_of_blocking_the_bot() {
         let dir = tempfile::tempdir().unwrap();
@@ -974,6 +995,7 @@ mod tests {
         bridge.accept_pending();
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn the_fly_stream_goes_only_to_subscribers_and_only_while_there_is_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -1022,6 +1044,7 @@ mod tests {
 
     /// Task 5.7: `watched` is true while any client has any subscription bit set; the view bit alone does not subscribe the
     /// client to the fly stream, and a client that is only connected does not count.
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn watched_means_some_client_said_it_is_looking_and_the_view_bit_is_not_the_fly_stream() {
         let dir = tempfile::tempdir().unwrap();
@@ -1057,6 +1080,7 @@ mod tests {
     }
 
     /// Task 5.7: the demo's own status object goes out as a plain `STATUS` message, and nothing is queued without a client.
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn a_prebuilt_status_object_is_sent_as_a_status_message() {
         let dir = tempfile::tempdir().unwrap();
@@ -1069,6 +1093,7 @@ mod tests {
         assert_eq!((k, p.as_slice()), (kind::STATUS, &b"{\"demo\":true}"[..]));
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn a_closed_subscriber_stops_the_demand_and_other_client_messages_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
@@ -1091,6 +1116,7 @@ mod tests {
         assert!(!bridge.fly_wanted());
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn a_client_that_sends_an_oversized_message_or_floods_is_dropped() {
         let dir = tempfile::tempdir().unwrap();
@@ -1108,6 +1134,7 @@ mod tests {
         assert_eq!(bridge.clients(), 0, "a zero length is not a message");
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn a_client_that_toggles_its_subscription_and_never_reads_is_dropped_not_grown_without_bound() {
         use std::io::Write as _;
@@ -1139,6 +1166,7 @@ mod tests {
         assert!(polls < 2000);
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn a_burst_of_small_subscriptions_between_two_polls_is_not_a_violation() {
         use std::io::Write as _;
@@ -1167,6 +1195,7 @@ mod tests {
         assert!(bridge.fly_wanted(), "the two halves made one subscription");
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn a_second_bot_does_not_steal_a_live_socket_but_a_stale_one_is_replaced() {
         let dir = tempfile::tempdir().unwrap();
@@ -1187,6 +1216,7 @@ mod tests {
 
     /// Task 5.10: a chat line reaches every client as a `CHAT` message, is cut at the caps (on a character boundary),
     /// is not remembered for a client that connects later, and is not queued when nobody is connected.
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn chat_lines_are_forwarded_cut_to_the_caps_and_never_kept() {
         let dir = tempfile::tempdir().unwrap();
@@ -1232,6 +1262,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn player_info_reaches_clients_as_one_json_message() {
         let dir = tempfile::tempdir().unwrap();
@@ -1268,6 +1299,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // a Unix-domain socket test (no such sockets on Windows, `ddai_os::ipc`)
     #[test]
     fn the_socket_file_is_removed_when_the_bridge_is_dropped() {
         let dir = tempfile::tempdir().unwrap();

@@ -2355,13 +2355,13 @@ fn compute_keep(
     }
     // The directions we are likely to travel: our velocity, and toward the target (the plan's goal).
     let mut lanes: [Option<(f32, f32)>; 2] = [None, None];
-    let speed = own.vel.x.hypot(own.vel.y);
+    let speed = ddai_libm::hypotf(own.vel.x, own.vel.y);
     if speed >= SPARE_BODY_MIN_SPEED {
         lanes[0] = Some((own.vel.x / speed, own.vel.y / speed));
     }
     if let Some(tt) = tees.get(target) {
         let (dx, dy) = (tt.pos.x - own.pos.x, tt.pos.y - own.pos.y);
-        let len = dx.hypot(dy);
+        let len = ddai_libm::hypotf(dx, dy);
         if len > 1.0 {
             lanes[1] = Some((dx / len, dy / len));
         }
@@ -2446,7 +2446,7 @@ fn hammer_veto(action: &mut Action, own: &Tee, own_then: Vec2<f32>, ahead: f32, 
         return false;
     }
     let (ax, ay) = (action.target.x as f32, action.target.y as f32);
-    let len = ax.hypot(ay);
+    let len = ddai_libm::hypotf(ax, ay);
     if len < 1e-6 {
         return false;
     }
@@ -2457,7 +2457,7 @@ fn hammer_veto(action: &mut Action, own: &Tee, own_then: Vec2<f32>, ahead: f32, 
         spared.iter().any(|t| {
             [0.0, 2.0, ahead, ahead + 2.0]
                 .into_iter()
-                .any(|k| (t.pos.x + t.vel.x * k - sx).hypot(t.pos.y + t.vel.y * k - sy) < reach)
+                .any(|k| ddai_libm::hypotf(t.pos.x + t.vel.x * k - sx, t.pos.y + t.vel.y * k - sy) < reach)
         })
     });
     if would_hit {

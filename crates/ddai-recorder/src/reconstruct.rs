@@ -215,6 +215,8 @@ fn aim_from_ddnet_or_angle(character: &CharacterRecord) -> ((i32, i32), Confiden
 fn aim_from_angle(angle_raw: i32) -> (i32, i32) {
     const NOMINAL_MAGNITUDE: f64 = 1000.0;
     let angle_rad = f64::from(angle_raw) / 256.0;
+    // libm-census: robust against the last bit of the platform's f64 cos/sin over the wire-angle range (|angle| <= 1608 = pi * 256: no
+    // 1000*cos/sin lies within 2e-6 of a rounding boundary; test `aim_from_angle_does_not_depend_on_the_last_bit_of_the_math_library`)
     (
         (angle_rad.cos() * NOMINAL_MAGNITUDE).round() as i32,
         (angle_rad.sin() * NOMINAL_MAGNITUDE).round() as i32,
@@ -711,6 +713,21 @@ pub fn resolve_name_to_stints(frames: &[Frame], name: &str) -> Vec<(i32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    /// D-127: `aim_from_angle` rounds `1000 * cos/sin(angle / 256)` computed with the platform's f64 `cos`/`sin` (no port in `ddai-libm`). Over
+    /// the wire-angle range (|angle| <= 1608 = pi * 256) no value lies within 2e-6 of a rounding boundary, so the integer is the same on
+    /// every platform: a library would have to be wrong by 2e-9 relative to change one (every libm is accurate to ~1e-16).
+    #[test]
+    fn aim_from_angle_does_not_depend_on_the_last_bit_of_the_math_library() {
+        let mut closest = f64::MAX;
+        for angle in -1608..=1608 {
+            let a = f64::from(angle) / 256.0;
+            for v in [1000.0 * a.cos(), 1000.0 * a.sin()] {
+                closest = closest.min((v - v.floor() - 0.5).abs());
+            }
+        }
+        assert!(closest > 1e-6, "closest to a rounding boundary: {closest}");
+    }
+
     use super::*;
     use ddai_net::generated::objects;
 

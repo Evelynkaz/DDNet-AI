@@ -23,10 +23,10 @@
 //! The server runs on its own threads; the bot's thread only drains the `CommandBus` between snapshots, as for the
 //! console, so a slow or hostile client can never stall a decision.
 
+use ddai_os::ipc::{UnixListener, UnixStream};
+use ddai_os::private::OwnerOnly;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -224,7 +224,11 @@ pub struct FileAudit {
 }
 
 fn open_audit(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).append(true).mode(0o600).open(path)
+    let file = OpenOptions::new().create(true).append(true).owner_only().open(path)?;
+    // Windows: the ACL (Unix: the mode was given at creation); best effort, the folder is the user's own.
+    #[cfg(not(unix))]
+    let _ = ddai_os::private::restrict_file(path);
+    Ok(file)
 }
 
 impl FileAudit {
@@ -592,6 +596,10 @@ impl Drop for ControlServer {
 
 #[cfg(test)]
 mod tests {
+    // The control channel is a Unix-domain socket (no Windows equivalent yet, `ddai_os::ipc`); the owner-chat census
+    // (`tests/owner_chat_census.rs`) recognises test code by the exact `#[cfg(test)]` above, so the platform gate sits inside.
+    #![cfg(unix)]
+
     use super::*;
     use crate::command::{CommandBus, CommandInbox, CommandReply};
     use std::os::unix::fs::PermissionsExt;

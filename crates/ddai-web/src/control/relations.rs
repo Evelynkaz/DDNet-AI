@@ -228,7 +228,6 @@ impl RelationsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn store() -> (tempfile::TempDir, RelationsStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -254,8 +253,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // POSIX directory permissions
     #[tokio::test]
     async fn a_directory_that_cannot_be_written_is_a_write_error_and_leaves_the_file_alone() {
+        use std::os::unix::fs::PermissionsExt;
         let (d, s) = store();
         s.add(ListKind::Friend, "pal").await.unwrap();
         let bot = d.path().join("bot");
@@ -293,9 +294,8 @@ mod tests {
         assert!(loaded.contains(ListKind::Friend, "SOME nick"));
         assert!(!loaded.contains(ListKind::Friend, "some"), "no substring matching");
         assert!(!loaded.contains(ListKind::Friend, "some nicks"));
-        assert_eq!(
-            std::fs::metadata(s.path()).unwrap().permissions().mode() & 0o777,
-            0o600,
+        assert!(
+            ddai_os::private::is_restricted(s.path()).unwrap(),
             "the file holds nicknames: owner only"
         );
         // Adding the same (differently spelled) name again changes nothing.

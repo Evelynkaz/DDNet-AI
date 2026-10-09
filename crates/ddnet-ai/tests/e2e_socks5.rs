@@ -41,6 +41,9 @@
 //! DDAI_E2E=1 cargo test -p ddnet-ai --test e2e_socks5 e2e_client_through_a_relay -- --ignored --nocapture
 //! ```
 
+// Task 5.5a: an ignored end-to-end test against a local DDNet server driven by python3/bash/POSIX tools: Linux only.
+#![cfg(unix)]
+
 use ddai_client::live_servers::{LiveServerEntry, LiveServers};
 use ddai_client::proxy::{ProxyConfig, RelayMode};
 use ddai_client::socks5_testserver::{Auth, Config, TestSocks5Server};

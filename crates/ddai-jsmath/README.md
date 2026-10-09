@@ -25,7 +25,8 @@ V8 и `Rng` старого TS-бота
   из `src/base/ieee754.cc` (fdlibm, V8 13.6, тег Node 24.21.0). См. «Какая реализация у каждой
   функции» ниже — почему это fdlibm, а не glibc.
 - `pow` — единственная не-fdlibm функция: V8 зовёт `std::pow` напрямую (см. ниже), поэтому портирован
-  только тонкий слой спец-случаев поверх `f64::powf`.
+  только тонкий слой спец-случаев поверх `ddai_libm::pow` — переносимого порта `pow` из glibc (D-127; раньше был
+  `f64::powf`, то есть C-библиотека хоста: на Windows это UCRT с другими последними битами).
 - `Rng` — порт `src/nn/rng.ts` (`splitmix32` для сидирования, `xoshiro128**`, `nextFloat`,
   Box–Muller `nextGaussian` со «спаром»), плюс `opp_seed_next` — LCG-шаг планировщика для
   `oppSeed` (`src/plan/planner.ts:1044`).
@@ -147,8 +148,8 @@ ported to Rust for DDNet-AI» — см. заголовки файлов и `NOTI
   `two54`/`twom54`/`huge`/`tiny` и те же guard'ы `±50000`, что в оригинале; V8 сам этот файл не
   портирует — зовёт платформенный `scalbn` — поэтому источник цитаты не «V8 13.6», а сам fdlibm).
 
-Никакого кода glibc не скопировано (`sin`/`cos` — fdlibm, не glibc; `pow` зовёт системный `pow` в
-рантайме, как и `f64::powf`, — это не копирование исходников).
+Код glibc здесь не копируется (`sin`/`cos` — fdlibm, не glibc); `pow` — `ddai_libm::pow` (D-127), порт алгоритма glibc `pow` из ARM
+optimized-routines (MIT), лицензии — в `NOTICE` и в `crates/ddai-libm`.
 
 ## Доказательство (`tools/jsmath-oracle`)
 

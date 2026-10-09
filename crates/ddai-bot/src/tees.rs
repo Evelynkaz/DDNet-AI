@@ -97,7 +97,7 @@ pub fn keys_neutral(keys: i32) -> bool {
 
 /// Euclidean distance.
 pub fn dist(a: Vec2<f32>, b: Vec2<f32>) -> f32 {
-    (a.x - b.x).hypot(a.y - b.y)
+    ddai_libm::hypotf(a.x - b.x, a.y - b.y)
 }
 
 /// All tees of one snapshot.

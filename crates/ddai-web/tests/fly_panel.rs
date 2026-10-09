@@ -4,6 +4,9 @@
 //! watches), the layout and the frames come back as `fly_meta` and binary `DFLY` messages, malformed frames never reach a
 //! browser, and the per-connection rate is capped.
 
+// Task 5.5a: talks to the bot over a Unix-domain socket, which Windows has no counterpart of yet (ddai_os::ipc, task 5.5b).
+#![cfg(unix)]
+
 mod support;
 
 use std::path::Path;

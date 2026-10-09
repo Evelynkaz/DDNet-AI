@@ -56,17 +56,11 @@ pub enum LiveServersLoadError {
 }
 
 impl LiveServers {
-    /// `~/aiddnet/data/live-servers.toml`, falling back to a relative `data/live-servers.toml` if
-    /// `$HOME` isn't set — same fallback pattern as every other `default_*` helper in this crate
-    /// (`session::default_cache_dir`, `ddnet-ai`'s `default_data_dir`).
+    /// `<data dir>/live-servers.toml` (`~/aiddnet/data/live-servers.toml` on Linux, see `ddai_os::dirs`), falling back to a relative
+    /// `data/live-servers.toml` if there is no home directory — same fallback pattern as every other `default_*` helper in this
+    /// crate (`session::default_cache_dir`, `ddnet-ai`'s `default_data_dir`).
     pub fn default_path() -> PathBuf {
-        match std::env::var_os("HOME") {
-            Some(home) if !home.is_empty() => PathBuf::from(home)
-                .join("aiddnet")
-                .join("data")
-                .join("live-servers.toml"),
-            _ => PathBuf::from("data").join("live-servers.toml"),
-        }
+        ddai_os::dirs::data_root_or_relative().join("live-servers.toml")
     }
 
     /// A missing file is treated as "no non-loopback server is allowed" (an empty list), not an

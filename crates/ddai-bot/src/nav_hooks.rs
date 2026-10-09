@@ -1623,7 +1623,7 @@ impl Core {
             && ctx.grid.is_freeze(own.pos.x, own.pos.y)
             && !hooked
             && !crate::unstick::helper_near(own, ctx.tees, ctx.players)
-            && own.vel.x.hypot(own.vel.y) < 0.5
+            && ddai_libm::hypotf(own.vel.x, own.vel.y) < 0.5
             && frozen_for >= WB_LYING_TICKS
     }
 

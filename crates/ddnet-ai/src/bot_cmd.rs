@@ -746,7 +746,16 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
             tracing::warn!(error = %e, "failed to install a SIGINT/SIGTERM handler");
         }
     }
-    let bridge_path = if o.no_bridge {
+    // Windows has no Unix-domain sockets yet (`ddai_os::ipc`): the live-view socket and the web control socket are then off, as if
+    // `--no-bridge --no-control` had been given, instead of refusing to start.
+    let no_bridge = o.no_bridge || !ddai_os::ipc::SUPPORTED;
+    let no_control = o.no_control || !ddai_os::ipc::SUPPORTED;
+    if !ddai_os::ipc::SUPPORTED && !(o.no_bridge && o.no_control) {
+        println!(
+            "this platform has no Unix-domain sockets: playing without the live-view socket and the web control socket"
+        );
+    }
+    let bridge_path = if no_bridge {
         None
     } else {
         Some(
@@ -781,7 +790,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         None
     };
     // Held until the bot has stopped: dropping it closes and removes the socket.
-    let _control = if o.no_control {
+    let _control = if no_control {
         // No control socket means no chat; the channel is burnt so that nothing else in this process can claim it later.
         ddai_bot::control::forgo_owner_chat();
         None

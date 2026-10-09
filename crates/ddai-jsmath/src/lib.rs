@@ -31,9 +31,9 @@
 //!   `third_party/glibc` — see the crate README "Какая реализация у каждой функции"). `pow` is the
 //!   one exception: V8's `Math.pow` (`src/numbers/ieee754.cc`, guarded by the
 //!   `v8_flags.use_std_math_pow` runtime flag, default `true`) calls `std::pow` directly (with two
-//!   special cases), which on this glibc/Linux target is bit-identical to Rust's `f64::powf` —
-//!   both ultimately call the same libm `pow` symbol — so [`pow::pow`] does not need an fdlibm
-//!   port, only the two special cases and the NaN/Infinity-exponent pre-checks V8 adds.
+//!   special cases), which on this glibc/Linux target is the glibc `pow` — so [`pow::pow`] does not need an fdlibm
+//!   port, only the two special cases and the NaN/Infinity-exponent pre-checks V8 adds, over [`ddai_libm::pow`]
+//!   (D-127), the portable port of glibc's `pow` (the same bits on Linux and Windows).
 //!
 //! [`rng`] ports `Rng` from `src/nn/rng.ts` (splitmix32 seeding, xoshiro128**, `nextFloat`,
 //! Box-Muller `nextGaussian` with the carried spare) plus the planner's separate opponent-seed LCG

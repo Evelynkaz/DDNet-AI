@@ -4,6 +4,9 @@
 //! cleanly. Needs a trained bundle (E-005's `final.bundle` or `DDAI_FLY_BUNDLE`), the S graph and the CLB map on disk;
 //! without them the test says so and passes (the data never lives in git).
 
+// Task 5.5a: talks to the bot over a Unix-domain socket, which Windows has no counterpart of yet (ddai_os::ipc, task 5.5b).
+#![cfg(unix)]
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;

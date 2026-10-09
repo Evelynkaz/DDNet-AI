@@ -76,6 +76,11 @@ fn candidate_filename(untrusted_path: &str) -> Option<String> {
     if name.is_empty() || name == ".." || name == "." || name.contains('/') {
         return None;
     }
+    // Windows: `\` is a separator `Path` has already cut at, but `:` names an alternate data stream (`map.map:stream`) and a drive;
+    // neither belongs in a map file name.
+    if cfg!(windows) && name.contains(['\\', ':']) {
+        return None;
+    }
     Some(name.to_string())
 }
 

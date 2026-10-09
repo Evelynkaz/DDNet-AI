@@ -263,7 +263,7 @@ flowchart TB
 
 ## Быстрый старт
 
-Нужны Linux и Rust (версия закреплена в `rust-toolchain.toml`, ставится через `rustup`). Node.js для бота и сайта не нужен.
+Нужны Linux (Windows — раздел «Запуск на Windows» ниже) и Rust (версия закреплена в `rust-toolchain.toml`, ставится через `rustup`). Node.js для бота и сайта не нужен.
 
 **1. Сборка.**
 
@@ -351,6 +351,59 @@ tools/ci/no-weights.sh        # в git нет весов, демок, карт �
 Паритет с TypeScript (нужен Node ≥ 24 и `npm ci` в `tools/ts-reference`): тесты с `--features ts-parity -- --ignored`, команды — в
 [crates/ddai-planner/README.md](crates/ddai-planner/README.md) и [crates/ddai-nav/README.md](crates/ddai-nav/README.md).
 
+## Запуск на Windows
+
+Бот собирается и работает на Windows 10/11 (x86-64) и считает ровно то же, что на Linux: математика физики (`sinf`, `cosf`, `atanf`, `atan2f`,
+`powf` и в `double` `atan2`, `log`) больше не берётся из C-библиотеки системы, а вшита в бота как побитно точные порты glibc
+([crates/ddai-libm](crates/ddai-libm/README.md), решение D-127). Задача `windows` в CI собирает всё, гоняет clippy и тесты на `windows-latest`, и
+среди них хэши результатов, записанные на Linux с настоящей glibc, должны совпасть на Windows бит в бит. Это нужно, чтобы клиентскую часть можно
+было запускать с домашнего IP (D-016, D-047): правила игры те же, что на Linux (только разрешённые серверы, один бот, бот сам не пишет в чат,
+кик или бан — стоп без обхода).
+
+**Что работает.** Всё из «Быстрого старта», кроме запуска через systemd: `play`, `record`, `arena`, `web`, `web-passwd`, `servers`, `clip`, `map`,
+`dataset`, обучение мухи и т. д. Бот останавливается по Ctrl-C или закрытием окна консоли.
+
+**Чего пока нет.** (1) Команды `launch` и карточки «Запуск» на сайте: это корневой помощник systemd на VPS, он собирается только под Unix.
+(2) Связи «бот → сайт» (живая карта игры и управление ботом с сайта): сейчас она идёт по сокетам Unix, а как её сделать на Windows, решает
+задача 5.5b (там же упаковка и простой запуск). Сайт на Windows запускается и слушает только `127.0.0.1`, но «бота нет на связи». Бот с флагами
+`--no-bridge --no-control` играет без этого.
+
+**Сборка из исходников.** Нужны [rustup](https://rustup.rs/) (версия Rust закреплена в `rust-toolchain.toml`), Visual Studio Build Tools
+(компилятор MSVC, набор «Разработка классических приложений на C++») и Git; для TLS-библиотеки (`aws-lc-sys`) либо NASM в `PATH`, либо
+переменная `AWS_LC_SYS_PREBUILT_NASM=1`.
+
+```powershell
+git clone https://github.com/Evelynkaz/DDNet-AI; cd DDNet-AI
+$env:AWS_LC_SYS_PREBUILT_NASM = "1"          # если NASM не установлен
+cargo build --release --locked -p ddnet-ai   # -> target\release\ddnet-ai.exe
+target\release\ddnet-ai.exe --help
+```
+
+Готовый `.exe` в релизах и простой запуск — задача 5.5b (упаковка); пока `ddnet-ai.exe` собирается из исходников.
+
+**Где лежат данные.** Вместо `~/aiddnet/data` — `%USERPROFILE%\ddnet-ai\data` (карты, настройки, память о фризах, клипы, секреты сайта). Любая команда
+берёт другой каталог через `--data-dir`, а переменная окружения `DDNET_AI_DATA_DIR` меняет умолчание сразу для всех. Секреты (`secrets\`, файл
+`timeout-seed`, списки соперников) создаются доступными только текущему пользователю: список доступа (ACL) выставляется системной командой
+`icacls`; если это не удалось, бот пишет предупреждение, и файл остаётся с правами папки профиля.
+
+**Сайт.**
+
+```powershell
+target\release\ddnet-ai.exe web-passwd --data-dir "$env:USERPROFILE\ddnet-ai\data"
+target\release\ddnet-ai.exe web --listen 127.0.0.1:7788 --data-dir "$env:USERPROFILE\ddnet-ai\data"
+```
+
+Сайт слушает только loopback (`127.0.0.1`), наружу его не выставляйте; откройте `http://127.0.0.1:7788`.
+
+**Бот.**
+
+```powershell
+target\release\ddnet-ai.exe play --server 127.0.0.1:8303 --brain hybrid --name Muha --duration 0 --no-bridge --no-control
+```
+
+Остальное (локальный сервер DDNet 20.1 для проб, обучение) — как в «Быстром старте»; сервер DDNet для Windows собирается по инструкции самого DDNet.
+Для проверки равенства с Linux на своей машине: `cargo test -p ddai-libm --test golden` и `cargo test -p ddai-physics`.
+
 ## Развёртывание
 
 Боевая раскладка: `ddnet-ai-web` (сайт на `127.0.0.1`) за Caddy с HTTPS и паролем, бот отдельным systemd-юнитом, который сам не запускается
@@ -400,6 +453,7 @@ tools/ci/no-weights.sh        # в git нет весов, демок, карт �
 | `crates/ddai-env`, `ddai-train`, `ddai-controls` | арена, обучение BC и DAgger, контроли MLP и GRU |
 | `crates/ddai-demo`, `ddai-recorder`, `ddai-dataset` | демки DDNet, запись наблюдателем, датасет |
 | `crates/ddai-trace`, `ddai-tsworld`, `ddai-jsmath` | паритет: трассы, Rust-порт старого TS-мира, математика V8 |
+| `crates/ddai-libm`, `ddai-os` | кроссплатформенность: побитно точные порты математики glibc (одни числа на Linux и Windows), шов ОС (каталоги данных, секреты, сокеты) |
 | `configs/` | арены, сценарии, обучение, муха |
 | `manifests/` | закреплённый список файлов коннектома (sha256) |
 | `deploy/` | Caddy, systemd, установка |

@@ -24,6 +24,9 @@
 //!    its tick keeps running, one log line per pause and per resume) and plays again when the owner types the command again;
 //! 4. the bot's own log has "owner chat sent (len N)" and never a command's text.
 
+// Task 5.5a: an ignored end-to-end test against a local DDNet server driven by python3/bash/POSIX tools: Linux only.
+#![cfg(unix)]
+
 mod owner_chat_rig;
 
 use std::time::Duration;

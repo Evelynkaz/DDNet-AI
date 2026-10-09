@@ -2,6 +2,9 @@
 //! drains the command bus between snapshots exactly like the runner does and keeps deciding, and a "web" that writes
 //! the lists file and sends typed requests. No network, no game server. Every nickname is a `p<id>` test string.
 
+// Task 5.5a: talks to the bot over a Unix-domain socket, which Windows has no counterpart of yet (ddai_os::ipc, task 5.5b).
+#![cfg(unix)]
+
 mod support;
 
 use std::io::{BufRead, BufReader, Write};

@@ -8,9 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::local_socket::UnixStream;
 use ddai_botctl::proto::{ControlCommand, ControlReply, ControlRequest, MAX_REPLY_BYTES, VERSION};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
@@ -105,6 +105,9 @@ impl ControlClient {
 
 #[cfg(test)]
 mod tests {
+    // The tests serve a scripted bot on a real Unix-domain socket (none on Windows, `crate::local_socket`).
+    #![cfg(unix)]
+
     use super::*;
     use ddai_botctl::proto::{ModeArg, ReplyCode};
     use tokio::net::UnixListener;

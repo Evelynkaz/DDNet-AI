@@ -645,7 +645,9 @@ impl<'a> Builder<'a> {
                     .map(|a| {
                         (0..starts.len())
                             .filter(|&b| {
-                                b != a && (starts[a][0] - starts[b][0]).hypot(starts[a][1] - starts[b][1]) <= 100.0
+                                b != a
+                                    && ddai_libm::hypotf(starts[a][0] - starts[b][0], starts[a][1] - starts[b][1])
+                                        <= 100.0
                             })
                             .collect()
                     })
@@ -874,11 +876,28 @@ impl<'a> Builder<'a> {
 /// Direction of the wire angle (1/256 rad) as a nominal-magnitude integer vector.
 fn aim_from_angle(angle: i32) -> (i32, i32) {
     let a = f64::from(angle) / 256.0;
+    // libm-census: robust against the last bit of the platform's f64 cos/sin over the wire-angle range (|angle| <= 1608 = pi * 256: no
+    // 1000*cos/sin lies within 2e-6 of a rounding boundary; test `aim_from_angle_does_not_depend_on_the_last_bit_of_the_math_library`)
     ((a.cos() * 1000.0).round() as i32, (a.sin() * 1000.0).round() as i32)
 }
 
 #[cfg(test)]
 mod tests {
+    /// D-127: `aim_from_angle` rounds `1000 * cos/sin(angle / 256)` computed with the platform's f64 `cos`/`sin` (no port in `ddai-libm`). Over
+    /// the wire-angle range (|angle| <= 1608 = pi * 256) no value lies within 2e-6 of a rounding boundary, so the integer is the same on
+    /// every platform: a library would have to be wrong by 2e-9 relative to change one (every libm is accurate to ~1e-16).
+    #[test]
+    fn aim_from_angle_does_not_depend_on_the_last_bit_of_the_math_library() {
+        let mut closest = f64::MAX;
+        for angle in -1608..=1608 {
+            let a = f64::from(angle) / 256.0;
+            for v in [1000.0 * a.cos(), 1000.0 * a.sin()] {
+                closest = closest.min((v - v.floor() - 0.5).abs());
+            }
+        }
+        assert!(closest > 1e-6, "closest to a rounding boundary: {closest}");
+    }
+
     use super::*;
     use crate::testutil::{arena_with_pit, client_info, player_info, wire_character};
     use ddai_net::generated::objects;

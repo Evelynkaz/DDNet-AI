@@ -30,10 +30,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::local_socket::{OwnedReadHalf, OwnedWriteHalf, UnixStream};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
-use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::{mpsc, watch};
 
 use super::map_resolve::{self, MapCache};
@@ -572,7 +571,7 @@ pub(super) async fn demand_changed(demand: &mut Option<watch::Receiver<bool>>) -
 }
 
 /// `u32 LE len | u8 SUBSCRIBE | u8 mask`.
-async fn write_subscription(wr: &mut tokio::net::unix::OwnedWriteHalf, want: Want) -> Result<(), String> {
+async fn write_subscription(wr: &mut OwnedWriteHalf, want: Want) -> Result<(), String> {
     let msg = [2, 0, 0, 0, SUBSCRIBE, want.mask()];
     match tokio::time::timeout(WRITE_TIMEOUT, wr.write_all(&msg)).await {
         Ok(Ok(())) => Ok(()),
@@ -624,7 +623,9 @@ pub fn diff_events(prev: &HashMap<u8, CharacterState>, now: &WorldFrame) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::net::UnixListener;
 
     fn char_state(id: u8, frozen: bool, hooked: Option<u8>) -> CharacterState {
@@ -695,6 +696,7 @@ mod tests {
         assert_eq!(parse_sha256(&"a".repeat(63)), None);
     }
 
+    #[cfg(unix)] // only the Unix-domain socket tests use it
     fn message(kind: u8, payload: &[u8]) -> Vec<u8> {
         let mut out = ((payload.len() + 1) as u32).to_le_bytes().to_vec();
         out.push(kind);
@@ -704,6 +706,7 @@ mod tests {
 
     /// The bot's wire format, written by hand here (independent of `ddai-bot`): a scripted "bot" on
     /// a real Unix socket feeds the source; the source must produce the hub events.
+    #[cfg(unix)] // a Unix-domain socket (none on Windows, `crate::local_socket`)
     #[tokio::test]
     async fn a_scripted_bot_socket_produces_map_players_frames_events_and_status() {
         use crate::live::frame;
@@ -802,6 +805,7 @@ mod tests {
 
     /// Task 5.7: the link is up only after a valid greeting and down when the connection ends; a socket that connects and
     /// says something else never links, whatever it goes on to send.
+    #[cfg(unix)] // a Unix-domain socket (none on Windows, `crate::local_socket`)
     #[tokio::test]
     async fn the_link_follows_a_valid_greeting_and_a_bad_one_never_links() {
         let dir = tempfile::tempdir().unwrap();
@@ -851,6 +855,7 @@ mod tests {
 
     /// Task 5.7: the subscription carries the fly bit and the view bit, and is re-sent when either changes.
     // Multi-threaded: the test blocks on a std channel while the source runs.
+    #[cfg(unix)] // a Unix-domain socket (none on Windows, `crate::local_socket`)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_subscription_carries_the_fly_and_view_bits() {
         use std::io::Read;
@@ -893,6 +898,7 @@ mod tests {
         drop(server); // detached: it ends when the connection closes
     }
 
+    #[cfg(unix)] // a Unix-domain socket (none on Windows, `crate::local_socket`)
     #[tokio::test]
     async fn a_missing_socket_is_reported_once_and_retried_and_a_hostile_length_disconnects() {
         let dir = tempfile::tempdir().unwrap();

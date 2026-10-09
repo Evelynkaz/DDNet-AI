@@ -36,13 +36,10 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-/// `~/aiddnet/data/run`, falling back to a relative `data/run` if `$HOME` isn't set — same
-/// fallback pattern as every other `default_*` helper in this crate.
+/// `<data dir>/run` (`~/aiddnet/data/run` on Linux, `%USERPROFILE%\ddnet-ai\data\run` on Windows, see `ddai_os::dirs`), falling back to
+/// a relative `data/run` if there is no home directory — same fallback pattern as every other `default_*` helper in this crate.
 pub fn default_run_dir() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home).join("aiddnet").join("data").join("run"),
-        _ => PathBuf::from("data").join("run"),
-    }
+    ddai_os::dirs::data_root_or_relative().join("run")
 }
 
 /// The lock file name for `(addr, name)`: the address alone for a real (non-loopback) server, the

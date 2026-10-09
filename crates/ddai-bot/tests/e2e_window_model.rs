@@ -22,6 +22,9 @@
 //! **Phase B, the guard**: a deliberately wrong model (a constant "walks left"; it loses to hold, which follows what the snapshots show) with a short
 //! guard span: the guard benches it (STATUS `hold`, a `guard` line in the log), and the model keeps being scored in the shadow.
 
+// Task 5.5a: an ignored end-to-end test that starts a private DDNet server and reads the bot's Unix-domain socket: Linux only.
+#![cfg(unix)]
+
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

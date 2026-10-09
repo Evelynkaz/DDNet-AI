@@ -350,6 +350,59 @@ tools/ci/no-weights.sh        # no weights, demos, maps or large files in git
 Parity with TypeScript (needs Node >= 24 and `npm ci` in `tools/ts-reference`): tests with `--features ts-parity -- --ignored`; the commands are in
 [crates/ddai-planner/README.md](crates/ddai-planner/README.md) and [crates/ddai-nav/README.md](crates/ddai-nav/README.md).
 
+## Running on Windows
+
+The bot builds and runs on Windows 10/11 (x86-64) and computes exactly what it computes on Linux: the physics math (`sinf`, `cosf`, `atanf`,
+`atan2f`, `powf`, and in `double` `atan2` and `log`) is no longer taken from the operating system's C library but built into the bot as bit-exact
+ports of glibc ([crates/ddai-libm](crates/ddai-libm/README.md), decision D-127). The CI job `windows` builds everything, runs clippy and the tests
+on `windows-latest`, and among them hashes of results recorded on Linux with the real glibc must come out identical on Windows. This is what makes
+it possible to run the client side from a home IP (D-016, D-047); the rules of play are the same as on Linux (allowed servers only, one bot, the
+bot never writes in chat, a kick or ban means stop, no evasion).
+
+**What works.** Everything in the quick start except launching through systemd: `play`, `record`, `arena`, `web`, `web-passwd`, `servers`, `clip`,
+`map`, `dataset`, fly training, and so on. The bot stops on Ctrl-C or when the console window is closed.
+
+**What is not there yet.** (1) The `launch` command and the site's launcher card: that is the root-side systemd helper of the VPS and builds on
+Unix only. (2) The bot-to-site link (the live map and the bot controls on the site): it runs over Unix-domain sockets today, and how it works on
+Windows is for task 5.5b to decide (together with packaging and an easy start). The site starts on Windows and listens on `127.0.0.1` only, but
+shows "the bot is not connected"; the bot plays without it with `--no-bridge --no-control`.
+
+**Building from source.** You need [rustup](https://rustup.rs/) (the Rust version is pinned in `rust-toolchain.toml`), the Visual Studio Build Tools
+(the MSVC compiler, workload "Desktop development with C++") and Git; for the TLS library (`aws-lc-sys`) either NASM on `PATH` or the environment
+variable `AWS_LC_SYS_PREBUILT_NASM=1`.
+
+```powershell
+git clone https://github.com/Evelynkaz/DDNet-AI; cd DDNet-AI
+$env:AWS_LC_SYS_PREBUILT_NASM = "1"          # if NASM is not installed
+cargo build --release --locked -p ddnet-ai   # -> target\release\ddnet-ai.exe
+target\release\ddnet-ai.exe --help
+```
+
+A ready-made `.exe` in the releases and an easy start are task 5.5b (packaging); for now `ddnet-ai.exe` is built from source.
+
+**Where the data lives.** `%USERPROFILE%\ddnet-ai\data` instead of `~/aiddnet/data` (maps, settings, freeze memory, clips, the site's secrets). Every
+command takes another directory with `--data-dir`, and the environment variable `DDNET_AI_DATA_DIR` changes the default for all of them. Secrets
+(`secrets\`, the `timeout-seed` file, the opponent lists) are created accessible to the current user only: the access-control list is set with the
+system's `icacls`; if that fails the bot logs a warning and the file keeps the permissions of the profile folder.
+
+**The site.**
+
+```powershell
+target\release\ddnet-ai.exe web-passwd --data-dir "$env:USERPROFILE\ddnet-ai\data"
+target\release\ddnet-ai.exe web --listen 127.0.0.1:7788 --data-dir "$env:USERPROFILE\ddnet-ai\data"
+```
+
+The site listens on loopback (`127.0.0.1`) only; do not expose it. Open `http://127.0.0.1:7788`.
+
+**The bot.**
+
+```powershell
+target\release\ddnet-ai.exe play --server 127.0.0.1:8303 --brain hybrid --name Muha --duration 0 --no-bridge --no-control
+```
+
+The rest (a local DDNet 20.1 server for tries, training) is as in the quick start; the DDNet server for Windows is built as DDNet's own instructions say.
+To check on your machine that the numbers equal Linux's: `cargo test -p ddai-libm --test golden` and `cargo test -p ddai-physics`.
+
 ## Deployment
 
 The production layout: `ddnet-ai-web` (the site on `127.0.0.1`) behind Caddy with HTTPS and a password, the bot as a separate systemd unit that never starts by itself
@@ -397,6 +450,7 @@ These rules are written down as decisions ([docs/DECISIONS.md](docs/DECISIONS.md
 | `crates/ddai-env`, `ddai-train`, `ddai-controls` | the arena, BC and DAgger training, MLP and GRU controls |
 | `crates/ddai-demo`, `ddai-recorder`, `ddai-dataset` | DDNet demos, observer recording, the dataset |
 | `crates/ddai-trace`, `ddai-tsworld`, `ddai-jsmath` | parity: traces, the Rust port of the old TS world, V8 math |
+| `crates/ddai-libm`, `ddai-os` | cross-platform: bit-exact ports of glibc's math (the same numbers on Linux and Windows), the OS seam (data directories, secrets, sockets) |
 | `configs/` | arenas, scenarios, training, the fly |
 | `manifests/` | the pinned list of connectome files (sha256) |
 | `deploy/` | Caddy, systemd, installation |

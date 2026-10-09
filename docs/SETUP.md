@@ -435,6 +435,22 @@ Ubuntu-origin'ы остаются как есть. Проверено живьё
   cargo использует инкрементальную сборку, а её sccache не кэширует).
 - Статистика: `sccache --show-stats`, остановить сервер: `sccache --stop-server`.
 
+## Windows: что поставлено для проверки сборки под Windows с Linux (задача 5.5a, 2026-10-09)
+
+Через `apt` ничего не ставилось. В пользовательском каталоге и во временной папке агента:
+
+- `rustup target add x86_64-pc-windows-gnu x86_64-pc-windows-msvc x86_64-unknown-linux-musl --toolchain 1.98.1` (только `rust-std`, без линкера):
+  даёт `cargo check/clippy --target x86_64-pc-windows-gnu --workspace --all-targets` (проверка, что всё компилируется под Windows и нет предупреждений)
+  и `x86_64-unknown-linux-musl` как «не glibc libm» для проверки, что тесты не зависят от битов glibc.
+- Для крейтов с C-кодом (`aws-lc-sys`, `zstd-sys`) нужен кросс-компилятор C. Использован `zig cc` (Zig 0.13.0 с ziglang.org, распакован в
+  временную папку, не установлен в систему) под именами `x86_64-w64-mingw32-gcc/-ar/-g++`: обёртки отбрасывают `--target=...`, который добавляет
+  `cc-rs`, и зовут `zig cc -target x86_64-windows-gnu`. Для `aws-lc-sys` ещё `AWS_LC_SYS_NO_JITTER_ENTROPY=1` (в mingw-заголовках Zig нет `sched.h`).
+  Это нужно только для проверки с Linux; настоящая сборка идёт на `windows-latest` (MSVC) в CI-задаче `windows`.
+- Запустить Windows-бинарники здесь нельзя (нет Wine): запуск тестов под Windows происходит только в CI.
+
+Сборка на самой Windows: `rustup` + Visual Studio Build Tools (MSVC) + Git; для `aws-lc-sys` либо NASM в `PATH`, либо `AWS_LC_SYS_PREBUILT_NASM=1`.
+Подробности для пользователя — в README, раздел «Запуск на Windows».
+
 ## Пакеты, поставленные 2026-10-01
 
 - `git-lfs` 3.4.1 (`sudo apt-get install -y git-lfs`). Нужен, чтобы скачивать LFS-архивы демок ChillerDragon по

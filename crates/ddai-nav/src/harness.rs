@@ -402,7 +402,11 @@ pub fn mcnemar_worse_p(only_ts: usize, only_rust: usize) -> f64 {
         return 1.0;
     }
     // P(X >= only_ts), X ~ Binomial(n, 1/2), summed in log space.
-    let ln_choose = |n: usize, k: usize| -> f64 { (1..=k).map(|i| ((n - k + i) as f64).ln() - (i as f64).ln()).sum() };
+    let ln_choose = |n: usize, k: usize| -> f64 {
+        (1..=k)
+            .map(|i| ddai_libm::log((n - k + i) as f64) - ddai_libm::log(i as f64))
+            .sum()
+    };
     (only_ts..=n)
         .map(|k| (ln_choose(n, k) - n as f64 * std::f64::consts::LN_2).exp())
         .sum::<f64>()

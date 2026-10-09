@@ -2,7 +2,7 @@
 // `sysdeps/ieee754/dbl-64/e_hypot.c` (the latter implements the correction of "An Improved Algorithm for
 // hypot(a,b)" by Carlos F. Borges, arXiv:1904.09481, MyHypot3).
 //
-// Copyright (C) 2018-2024 Free Software Foundation, Inc.
+// Copyright (C) 2012-2024 (hypotf) and 2021-2024 (hypot) Free Software Foundation, Inc.
 // This file is part of the GNU C Library.
 //
 // The GNU C Library is free software; you can redistribute it and/or

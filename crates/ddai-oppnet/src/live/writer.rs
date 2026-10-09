@@ -4,9 +4,9 @@
 //! to `<path>.1` (the older ones shift to `.2`, ...; at most `keep` files exist, the oldest is deleted) and a new file starts with the
 //! header line, so every file says what produced it. [`LogWriter`] feeds one from a bounded channel.
 
+use ddai_os::private::OwnerOnly;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,9 +54,14 @@ impl RotatingFile {
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
-            .mode(0o600)
+            .owner_only()
             .open(&self.path)?;
         self.size = f.metadata()?.len();
+        // Windows: the ACL (Unix: the mode was given at creation); best effort, the folder is the user's own.
+        #[cfg(not(unix))]
+        if self.size == 0 {
+            let _ = ddai_os::private::restrict_file(&self.path);
+        }
         if self.size == 0 || !self.announced {
             f.write_all(self.header.as_bytes())?;
             self.size += self.header.len() as u64;
@@ -204,8 +209,12 @@ mod tests {
             let l = lines(Path::new(&format!("{}{s}", path.display())));
             assert_eq!(l[0], header.trim_end(), "file {s:?} starts with the header");
         }
-        let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777;
-        assert_eq!(mode, 0o600);
+        #[cfg(unix)]
+        {
+            let mode =
+                std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     #[test]

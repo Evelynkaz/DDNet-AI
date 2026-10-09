@@ -50,6 +50,51 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+  # Task 5.5a (D-047, D-127): the bot also runs on Windows (the owner's PC, a home IP). Same pinned toolchain, same three steps as the
+  # Linux job, on the MSVC target. What this job proves that the Linux one cannot: the portable glibc-exact math (`ddai-libm`) gives the
+  # same bits on Windows (`crates/ddai-libm/tests/golden.rs`: hashes recorded from glibc on Linux, plus the physics golden fixtures of
+  # `ddai-physics`), and that nothing in the workspace needs Unix. Tests that need Linux-only resources (a local DDNet server, Node, the
+  # oracle corpora, Unix sockets, POSIX permission bits) are `cfg(unix)` or `#[ignore]` with a reason in the test itself.
+  windows:
+    name: windows (build / clippy / test)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      CARGO_INCREMENTAL: "0"
+      # aws-lc-sys (rustls, via reqwest) assembles with NASM on x86-64 Windows; if the runner has none on PATH it falls back to the
+      # object files that ship in the crate. (No effect where NASM is found.)
+      AWS_LC_SYS_PREBUILT_NASM: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The same pinned channel and components as the Linux job (rust-toolchain.toml), installed for the runner's default host
+      # (x86_64-pc-windows-msvc).
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Show active toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # Several tests find their optional data (maps, corpora) under `$HOME/aiddnet/data` and skip when it is missing; Windows has no
+      # HOME, so give them one (the profile directory). Nothing is under it, so they skip exactly as on the Linux runner.
+      - name: Set HOME for the tests that look for optional data
+        shell: pwsh
+        run: echo "HOME=$env:USERPROFILE" >> $env:GITHUB_ENV
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
   # Second layer behind .gitignore: no trained weights, demos, maps or files over 2 MB in git (tools/ci/no-weights.sh).
   no-weights:
     name: no weights / big files in git

@@ -4,6 +4,9 @@
 //! commands never reach anything while only the demo is up, the demo is asked for viewers only while a browser is open and
 //! the bot is not up, and what the demo sends is validated like what the bot sends.
 
+// Task 5.5a: talks to the bot over a Unix-domain socket, which Windows has no counterpart of yet (ddai_os::ipc, task 5.5b).
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

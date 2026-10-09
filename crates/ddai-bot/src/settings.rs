@@ -117,12 +117,9 @@ impl Settings {
     }
 }
 
-/// `~/aiddnet/data/bot/settings.toml`.
+/// `<data dir>/bot/settings.toml` (`~/aiddnet/data/bot/settings.toml` on Linux, see `ddai_os::dirs`).
 pub fn default_path() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home).join("aiddnet/data/bot/settings.toml"),
-        _ => PathBuf::from("data/bot/settings.toml"),
-    }
+    ddai_os::dirs::data_root_or_relative().join("bot/settings.toml")
 }
 
 /// The keys of [`Settings`], for [`unknown_keys`]. A test keeps this list equal to the struct's fields.

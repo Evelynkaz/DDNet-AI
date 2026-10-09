@@ -59,12 +59,12 @@ pub struct Incident {
 fn dist(a: &TeeRec, b: &TeeRec) -> f64 {
     let (ax, ay) = a.pos();
     let (bx, by) = b.pos();
-    (ax - bx).hypot(ay - by)
+    ddai_libm::hypot(ax - bx, ay - by)
 }
 
 fn speed(t: &TeeRec) -> f64 {
     let (vx, vy) = t.vel();
-    vx.hypot(vy)
+    ddai_libm::hypot(vx, vy)
 }
 
 /// The nearest other tee (`free`: not frozen).

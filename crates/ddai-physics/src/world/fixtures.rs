@@ -709,7 +709,7 @@ fn light_move<R: Real>(l: &mut Light<R>) {
 /// `CLight::Step()` (`light.cpp:73-79`).
 fn light_step<R: Real>(world: &World<R>, l: &mut Light<R>) {
     light_move(l);
-    let direction = Vec2::new(l.rotation.sin(), l.rotation.cos());
+    let direction = Vec2::new(l.rotation.sin(), l.rotation.cos()); // libm-census: `Real::sin`/`cos`
     let next_position = l.pos + vmath::normalize(direction) * R::from_i32(l.curve_length);
     l.to = world.collision.intersect_no_laser(l.pos, next_position).collision;
 }

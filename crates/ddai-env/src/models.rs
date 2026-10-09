@@ -128,10 +128,7 @@ pub fn label_of_arg(arg: &str) -> String {
 }
 
 fn expand_home(p: &str) -> PathBuf {
-    match (p.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(h)) => PathBuf::from(h).join(rest),
-        _ => PathBuf::from(p),
-    }
+    ddai_os::dirs::expand_tilde(p).unwrap_or_else(|| PathBuf::from(p))
 }
 
 impl ModelBrains {

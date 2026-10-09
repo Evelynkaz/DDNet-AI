@@ -17,6 +17,8 @@ workspace = true
 
 [dependencies]
 ddai-jsmath = { path = "../ddai-jsmath" }
+# Task 5.5a (D-127): owner-only files on Unix and Windows.
+ddai-os = { path = "../ddai-os" }
 ddai-physics = { path = "../ddai-physics" }
 ddai-planner = { path = "../ddai-planner" }
 rayon = "1.10"

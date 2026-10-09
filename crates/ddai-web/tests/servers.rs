@@ -4,6 +4,9 @@
 //! written; the owner's consent; ban -> closed until the explicit re-open; **the password never in any response or log line**; and that
 //! the web only writes the files it is meant to.
 
+// Task 5.5a: the server browser's refresh trigger and proxy files use POSIX permission bits and symlinks (VPS launcher deployment, D-089, D-099).
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;
