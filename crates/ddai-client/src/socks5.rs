@@ -1759,14 +1759,18 @@ mod tests {
             .port();
         let cfg = ProxyConfig::new("t", "127.0.0.1", port, None).unwrap();
         let err = associate(&cfg, &fast()).unwrap_err();
+        // Windows retries a refused loopback connect for about two seconds before it reports it, so within the 500 ms bound of
+        // `fast()` the same dead port is a timeout of the connect step there: also a plain, non-fatal connect error.
+        let windows_timeout = cfg!(windows) && matches!(err, Socks5Error::Timeout { step: Step::Connect });
         assert!(
-            matches!(
-                err,
-                Socks5Error::Io {
-                    step: Step::Connect,
-                    ..
-                }
-            ),
+            windows_timeout
+                || matches!(
+                    err,
+                    Socks5Error::Io {
+                        step: Step::Connect,
+                        ..
+                    }
+                ),
             "{err:?}"
         );
         assert!(!err.is_fatal());

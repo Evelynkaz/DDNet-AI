@@ -1,6 +1,9 @@
 //! Task 4.9 (D-094, review F6): with the owner chat switched off, `ControlServer::start_with_owner_chat(.., false)` burns the process's
 //! one `OwnerChannel`: a later `claim()` gets `None`. Its own test binary (= its own process): nothing else may have claimed first.
 
+// The control server listens on a Unix-domain socket; on Windows there is none (`ddai_os::ipc`, D-127), so there is nothing to claim the channel.
+#![cfg(unix)]
+
 use std::sync::Arc;
 
 use ddai_bot::command::CommandBus;

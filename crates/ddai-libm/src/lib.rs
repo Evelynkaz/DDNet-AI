@@ -42,18 +42,19 @@
 //!
 //! * No `unsafe`, no `target_feature` tricks, no dependency (not even `libm`).
 //! * Which `fma` runs is decided once per process by [`fma_mode`]: the instruction when the build has the
-//!   `fma` target feature (`-C target-feature=+fma`; then the functions are as fast as glibc's); else, on a
-//!   CPU without FMA, the crate's own integer [`soft_fma`] (a correctly rounded fused multiply-add in safe
-//!   Rust, written for this crate); else the C library's `fma` after it has agreed with [`soft_fma`] on a
-//!   self-check of a few tens of thousands of corner-case operands (overflow, underflow, subnormals,
-//!   cancellation, ties, signed zeros), falling back to [`soft_fma`] if it does not. The reason: the C
-//!   library's `fma` is glibc's on Linux (correct), but mingw-w64's is known to be wrong in corner cases and
-//!   nobody has checked the UCRT's software path on CPUs without FMA3. The results never depend on which of
-//!   the three runs; [`self_test`] checks that, and the bot refuses to play if it fails.
-//!   Without `+fma` each fused operation is a library call, so the functions are 2 to 5 times slower than glibc's
-//!   on the `fma`-heavy ones (no measurable effect on `World::step`), and on a CPU without FMA, where [`soft_fma`] runs
-//!   (about 54 ns per fused operation), 14 to 39 times slower (0.2 to 1 microsecond per call; measured in D-127).
-//!   The choice is made once per call of `sinf`, `powf`, ... (a generic parameter, not a branch per fused operation).
+//!   `fma` target feature (`-C target-feature=+fma`; then the functions are as fast as glibc's); else, on
+//!   `linux-gnu` with an FMA CPU, glibc's own `fma` after it has agreed with [`soft_fma`] on a self-check of a few
+//!   tens of thousands of corner-case operands; else (Windows, musl, macOS, a CPU without FMA) the crate's own
+//!   integer [`soft_fma`], a correctly rounded fused multiply-add in safe Rust written for this crate. The reason:
+//!   glibc's `fma` is the reference, but mingw-w64's is known to be wrong in corner cases and the MSVC UCRT's
+//!   gave other bits than glibc on `windows-latest` (the first Windows CI run), so no other C library's `fma` is
+//!   trusted. The results never depend on which of the three runs; [`self_test`] checks that, and the bot
+//!   refuses to play if it fails.
+//!   Without `+fma` on `linux-gnu` each fused operation is a library call, so the functions are 2 to 5 times slower
+//!   than glibc's on the `fma`-heavy ones (no measurable effect on `World::step`); with [`soft_fma`] (about 54 ns per
+//!   fused operation: always on Windows without `+fma`) 14 to 39 times slower (0.2 to 1 microsecond per call, about
+//!   +7% on `World::step`; measured in D-127). The choice is made once per call of `sinf`, `powf`, ... (a generic
+//!   parameter, not a branch per fused operation).
 //! * [`f32::mul_add`]-style fusion is *not* applied anywhere else in the repository; the physics
 //!   arithmetic stays un-fused exactly like DDNet's C++ (see `ddai-physics`'s `real.rs`).
 //!

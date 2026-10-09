@@ -575,12 +575,12 @@ fn config_text(f: &Fx, run: &str, iterations: u64, bc_dir: Option<&Path>) -> Str
     format!(
         r#"
 name = "tiny"
-flyg = "{flyg}"
-init_bundle = "{bundle}"
-arenas_dir = "{arenas}"
+flyg = '{flyg}'
+init_bundle = '{bundle}'
+arenas_dir = '{arenas}'
 map_dir = "/nonexistent"
-run_dir = "{run}"
-bank = "{bank}"
+run_dir = '{run}'
+bank = '{bank}'
 seed = 7
 iterations = {iterations}
 train_arenas = ["pit"]
@@ -611,7 +611,7 @@ holdout_arenas = []
         run = f.dir.join(run).display(),
         bank = f.dir.join("bank.bin").display(),
         bc = if bc_dir.is_some() { "0.5" } else { "0.0" },
-        bcdir = bc_dir.map_or(String::new(), |d| format!("\"{}\"", d.display())),
+        bcdir = bc_dir.map_or(String::new(), |d| format!("'{}'", d.display())),
     )
 }
 
@@ -856,7 +856,7 @@ fn a_run_with_the_curriculum_and_dagger_is_deterministic_resumable_and_moves_the
         let mut t = config_text(&f, run, it, None);
         t = t.replace("bc_coef = 0.0", "bc_coef = 0.5");
         t.push_str(&format!(
-            "[curriculum]\nenabled = true\ndemos = \"{}\"\nstart_offsets = [200, 200, 200]\nstep = 100\nthreshold = 0.0\nmin_episodes = 2\nshare = 0.5\nmix = [1.0, 1.0, 1.0]\n[dagger]\nevery = 1\nstarts = 3\nmix = [1.0, 1.0, 1.0]\n",
+            "[curriculum]\nenabled = true\ndemos = '{}'\nstart_offsets = [200, 200, 200]\nstep = 100\nthreshold = 0.0\nmin_episodes = 2\nshare = 0.5\nmix = [1.0, 1.0, 1.0]\n[dagger]\nevery = 1\nstarts = 3\nmix = [1.0, 1.0, 1.0]\n",
             f.dir.join("demos.bin").display()
         ));
         t

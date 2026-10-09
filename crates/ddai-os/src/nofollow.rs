@@ -20,6 +20,15 @@ pub fn open_read_nofollow(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// Whether `path` exists and is neither a regular file nor a symlink (a directory, a device...), without following a symlink. Windows cannot
+/// open a directory with a plain `File::open` (it fails with "access denied"), so when [`open_read_nofollow`] fails the caller asks
+/// this to tell "a directory" (a truthful `NotRegular`) from a real I/O error; on Unix the open succeeds and the metadata of the
+/// opened file tells, so this is not needed there but gives the same answer.
+#[must_use]
+pub fn is_existing_non_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| !m.is_file() && !m.file_type().is_symlink())
+}
+
 /// Creates `path` for writing, exclusively (it must not exist), never through a symlink at the last component. `unix_mode` is the
 /// permission bits it is created with on Unix (cut by the umask: follow up with [`set_unix_mode`]); Windows ignores it.
 pub fn create_new_nofollow(path: &Path, unix_mode: u32) -> io::Result<File> {
@@ -128,6 +137,22 @@ mod imp {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn only_a_directory_or_the_like_is_an_existing_non_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("f");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(!is_existing_non_file(&f), "a regular file");
+        assert!(!is_existing_non_file(&dir.path().join("none")), "a missing path");
+        assert!(is_existing_non_file(dir.path()), "a directory");
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("l");
+            std::os::unix::fs::symlink(&f, &link).unwrap();
+            assert!(!is_existing_non_file(&link), "a symlink is its own case (ELOOP)");
+        }
+    }
 
     #[test]
     fn a_regular_file_opens_and_reads() {

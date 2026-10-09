@@ -157,12 +157,12 @@ fn config(f: &Fixture, run: &str, generations: u64) -> EsConfig {
     let text = format!(
         r#"
 name = "tiny"
-flyg = "{flyg}"
-init_bundle = "{bundle}"
-arenas_dir = "{arenas}"
+flyg = '{flyg}'
+init_bundle = '{bundle}'
+arenas_dir = '{arenas}'
 map_dir = "/nonexistent"
-run_dir = "{run}"
-bank = "{bank}"
+run_dir = '{run}'
+bank = '{bank}'
 seed = 7
 pairs = 3
 generations = {generations}

@@ -3,23 +3,29 @@
 //!
 //! The ports in this crate reproduce glibc's FMA variants, so they need `fma(a, b, c) = round(a * b + c)` with
 //! a single, correct rounding. `f64::mul_add` is that on a target that has the instruction; on a target
-//! without it (the default `x86_64-pc-windows-*` build, and `x86_64-unknown-linux-gnu`, see D-001) it is a call
-//! to the C library's `fma`. glibc's is correct; mingw-w64's is known to be wrong in corner cases (Rust issue
-//! 140515, mingw-w64 bug 848); the UCRT's software path (used on CPUs without FMA3: Intel before Haswell,
-//! AMD before Piledriver, Pentium/Celeron up to about 2020) has not been checked by anyone. A wrong `fma`
-//! would change the last bit of `sinf`/`powf`/`log`/`atan2`/`pow` for a few inputs and the physics would
-//! silently drift from the server. So this module carries its own implementation, and
-//! [`mode`] decides once per process which one the ports use:
+//! without it (the default x86-64 builds, see D-001) it is a call to the C library's `fma`, and C libraries
+//! differ: glibc's is correct (and is what the reference results come from); mingw-w64's is known to be wrong
+//! in corner cases (Rust issue 140515, mingw-w64 bug 848); the MSVC UCRT's was found wrong on ordinary inputs
+//! by the first Windows CI run of this crate (`log` gave other bits than glibc on `windows-latest`, which has
+//! FMA hardware: the UCRT's `fma` is not reliable even there). A wrong `fma` changes the last bit of
+//! `sinf`/`powf`/`log`/`atan2`/`pow` for a few inputs and the physics silently drifts from the server. So
+//! [`mode`] decides once per process which `fma` the ports use, and **the C library's is used only where it is
+//! known to be glibc's**:
 //!
-//! * the target has the `fma` feature at compile time: the instruction, no check (nothing can be wrong);
-//! * the CPU has no FMA (x86, runtime detection with `std`): the software `fma`;
-//! * otherwise the C library's `fma` is compared with the software one on a fixed set of operands that
-//!   includes the corner cases (overflow, underflow, subnormals, cancellation, ties, signed zeros). If it
-//!   agrees everywhere it is used (it is faster), else the software `fma` is.
+//! * the target has the `fma` feature at compile time (`-C target-feature=+fma`): the instruction, no check;
+//! * `linux-gnu` (glibc), on a CPU with FMA: glibc's `fma`, after it agreed with the software one on a fixed
+//!   set of corner-case operands (overflow, underflow, subnormals, cancellation, ties, signed zeros);
+//! * everywhere else (Windows, musl, macOS, a CPU without FMA, the `force-soft-fma` feature): the software
+//!   `fma` of this module.
+//!
+//! The software `fma` costs about 54 ns per call instead of 5 ns (D-127 has the numbers, about +7% on
+//! `World::step`). A faster path on Windows needs `unsafe` (a `#[target_feature(enable = "fma")]` copy of every port,
+//! entered after `is_x86_feature_detected!`), which this crate does not have; a build for CPUs known to have FMA can
+//! use `-C target-feature=+fma` instead.
 //!
 //! The software `fma` is written from scratch (exact 128-bit integer arithmetic, one rounding at the end); it
-//! is not derived from musl's or any other implementation. `tests/soft_fma.rs` probes it against the
-//! hardware instruction on Linux (10^8 operand triples, edge cases included).
+//! is not derived from musl's or any other implementation. Its unit tests probe it against the hardware
+//! instruction on Linux (10^9 operand triples, edge cases included, `--ignored`).
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -28,10 +34,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub enum FmaMode {
     /// Compiled with the `fma` target feature: `mul_add` is the instruction.
     Instruction,
-    /// The C library's `fma` (checked against the software one at first use).
+    /// glibc's `fma` on `linux-gnu` (checked against the software one at first use).
     CLibrary,
-    /// The software `fma` of this module: the CPU has no FMA, the C library's `fma` failed the check, or the
-    /// `force-soft-fma` feature is on.
+    /// The software `fma` of this module: any platform but `linux-gnu`, a CPU without FMA, a glibc `fma` that failed the
+    /// check, or the `force-soft-fma` feature.
     Software,
 }
 
@@ -57,15 +63,17 @@ pub fn mode() -> FmaMode {
     }
 }
 
-/// Why the software `fma` was chosen, for the start-up log; empty when it was not.
+/// What the ports use and why, for the start-up log.
 #[must_use]
 pub fn mode_description() -> &'static str {
     match mode() {
         FmaMode::Instruction => "fma instruction (compile-time target feature)",
-        FmaMode::CLibrary => "C library fma (agrees with the software fma on the self-check)",
+        FmaMode::CLibrary => "glibc fma (agrees with the software fma on the self-check)",
         FmaMode::Software => {
             if cfg!(feature = "force-soft-fma") {
                 "software fma (forced by the force-soft-fma feature)"
+            } else if !C_LIBRARY_IS_GLIBC {
+                "software fma (the C library of this platform is not glibc; its fma is not trusted)"
             } else if cpu_lacks_fma() {
                 "software fma (this CPU has no FMA)"
             } else {
@@ -74,6 +82,9 @@ pub fn mode_description() -> &'static str {
         }
     }
 }
+
+/// Whether the C library behind `f64::mul_add` is glibc's (the only one whose `fma` is known to be correct).
+const C_LIBRARY_IS_GLIBC: bool = cfg!(all(target_os = "linux", target_env = "gnu"));
 
 fn cpu_lacks_fma() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -90,7 +101,11 @@ fn cpu_lacks_fma() -> bool {
 
 #[cold]
 fn decide() {
-    let mode = if cfg!(feature = "force-soft-fma") || cpu_lacks_fma() || !library_fma_agrees(f64::mul_add) {
+    let mode = if cfg!(feature = "force-soft-fma")
+        || !C_LIBRARY_IS_GLIBC
+        || cpu_lacks_fma()
+        || !library_fma_agrees(f64::mul_add)
+    {
         SOFTWARE
     } else {
         LIBRARY

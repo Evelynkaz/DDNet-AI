@@ -1,6 +1,9 @@
 //! Task 4.9 (D-094): with the owner chat on, `ControlServer::start` claims the process's one `OwnerChannel` (the dispatcher holds it,
 //! so nobody else can get it). Its own test binary (= its own process).
 
+// The control server listens on a Unix-domain socket; on Windows there is none (`ddai_os::ipc`, D-127), so there is nothing to claim the channel.
+#![cfg(unix)]
+
 use std::sync::Arc;
 
 use ddai_bot::command::CommandBus;

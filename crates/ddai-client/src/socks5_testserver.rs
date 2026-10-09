@@ -130,6 +130,9 @@ impl TestSocks5Server {
                 while !accept_shared.stop.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((conn, _)) => {
+                            // An accepted socket inherits the listener's non-blocking mode on Windows (and the BSDs), not on Linux: the
+                            // handler reads with blocking calls, so undo it.
+                            let _ = conn.set_nonblocking(false);
                             accept_shared.tcp_accepts.fetch_add(1, Ordering::SeqCst);
                             if let Ok(clone) = conn.try_clone() {
                                 accept_shared.controls.lock().unwrap().push(clone);

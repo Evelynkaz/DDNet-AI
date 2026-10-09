@@ -1381,14 +1381,13 @@ players = [
             builtin_brain(&c.condition[0].players[0]).err().map(|e| e.to_string())
         };
         let (m1, m2) = (p1.display(), p2.display());
-        assert!(brain(format!("window_model = \"{m1}\", window_gate = 1.0")).is_none());
-        assert!(brain(format!("window_model = \"{m2}\", window_decode = \"press=1\"")).is_none());
-        let e =
-            brain(format!("window_model = \"{m1}\", window_decode = \"press=1\"")).expect("v1 refuses window_decode");
+        assert!(brain(format!("window_model = '{m1}', window_gate = 1.0")).is_none());
+        assert!(brain(format!("window_model = '{m2}', window_decode = \"press=1\"")).is_none());
+        let e = brain(format!("window_model = '{m1}', window_decode = \"press=1\"")).expect("v1 refuses window_decode");
         assert!(e.contains("window_decode"), "{e}");
-        let e = brain(format!("window_model = \"{m2}\", window_gate = 1.0")).expect("v2 refuses window_gate");
+        let e = brain(format!("window_model = '{m2}', window_gate = 1.0")).expect("v2 refuses window_gate");
         assert!(e.contains("window_gate"), "{e}");
-        let e = brain(format!("window_model = \"{m2}\", window_heads = \"dir\"")).expect("v2 refuses window_heads");
+        let e = brain(format!("window_model = '{m2}', window_heads = \"dir\"")).expect("v2 refuses window_heads");
         assert!(e.contains("window_heads"), "{e}");
     }
 
