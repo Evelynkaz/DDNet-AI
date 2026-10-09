@@ -38,6 +38,8 @@ UNIT_DST="/etc/systemd/system/ddnet-ai-web.service"
 CADDY_KEYRING="/etc/apt/keyrings/caddy-stable-archive-keyring.gpg"
 CADDY_SOURCES_LIST="/etc/apt/sources.list.d/caddy-stable.list"
 CADDY_REPO_URL="https://dl.cloudsmith.io/public/caddy/stable/deb/debian"
+UNATTENDED_UPGRADES_SRC="$SCRIPT_DIR/apt/51unattended-upgrades-caddy.conf"
+UNATTENDED_UPGRADES_DST="/etc/apt/apt.conf.d/51unattended-upgrades-caddy"
 # How long (seconds) a first install waits for the apt/dpkg lock before giving up: unattended-upgrades
 # can hold it for minutes (task 5.19). `DPkg::Lock::Timeout` covers the dpkg frontend lock only; the
 # lists lock of `apt-get update` is not covered (apt 2.8.3 fails at once), so `apt_run` also retries

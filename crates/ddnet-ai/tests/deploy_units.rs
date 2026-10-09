@@ -940,3 +940,75 @@ fn the_installer_apt_section_behaves_on_a_redeploy_a_first_install_and_a_broken_
         "{log}"
     );
 }
+
+#[test]
+fn every_variable_the_installer_reads_is_assigned_in_it_or_comes_from_the_environment() {
+    // The script runs under `set -u`: a deleted assignment (as in review round 2 of 5.19) kills every run, and neither shellcheck nor the
+    // apt-section harness sees it. Every ALL-CAPS `$NAME` / `${NAME...}` outside comments must be assigned somewhere in the script
+    // (`NAME=`, `local NAME`, `for NAME in`) or be a variable the shell or the caller provides.
+    let script = fs::read_to_string(deploy().join("install.sh")).unwrap();
+    let provided = ["HOME", "SECONDS", "PIPESTATUS", "BASH_SOURCE", "PATH", "EUID"];
+    let is_name = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    };
+    let mut assigned = std::collections::BTreeSet::new();
+    let mut used = std::collections::BTreeMap::new();
+    for (n, line) in script.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        // Assignments: `NAME=` at a word start (also after `local`, `;`, `&&`, a space), and `for NAME in`.
+        for (i, c) in line.char_indices() {
+            if c == '=' {
+                let name: String = line[..i]
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                if is_name(&name) {
+                    assigned.insert(name);
+                }
+            }
+            if c == '$' {
+                let rest = &line[i + 1..];
+                let rest = rest.strip_prefix('{').unwrap_or(rest);
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                // `$$`, `$1`, `$@`, `${#x}` and mixed-case names (`${Status}` in a dpkg format string) are not what this checks.
+                if is_name(&name) && !name.starts_with(|c: char| c.is_ascii_digit()) {
+                    used.entry(name).or_insert(n + 1);
+                }
+            }
+        }
+        if let Some((name, _)) = t.strip_prefix("for ").and_then(|rest| rest.split_once(" in ")) {
+            assigned.insert(name.trim().to_string());
+        }
+    }
+    let missing: Vec<_> = used
+        .iter()
+        .filter(|(name, _)| {
+            !assigned.contains(*name) && !provided.contains(&name.as_str()) && !name.starts_with("DDAI_")
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "variables read but never assigned (line of first use): {missing:?}"
+    );
+    // Sanity: the check really sees the two variables whose loss broke round 2.
+    for v in [
+        "UNATTENDED_UPGRADES_SRC",
+        "UNATTENDED_UPGRADES_DST",
+        "CADDY_REPO_URL",
+        "APT_LOCK_TIMEOUT",
+    ] {
+        assert!(assigned.contains(v) && used.contains_key(v), "{v}");
+    }
+}
