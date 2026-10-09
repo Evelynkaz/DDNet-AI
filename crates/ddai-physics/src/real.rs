@@ -289,18 +289,23 @@ impl Real for f64 {
     }
     fn powf(self, exp: Self) -> Self {
         // See `impl Real for f32`'s `powf` and the module doc comment.
+        // libm-census: `Real<f64>` is the instantiation without a parity claim (tests, D-002/D-003); D-127 lists f64 math as not ported
         f64::powf(std::hint::black_box(self), std::hint::black_box(exp))
     }
     fn sin(self) -> Self {
+        // libm-census: as above (Real<f64>)
         f64::sin(std::hint::black_box(self))
     }
     fn cos(self) -> Self {
+        // libm-census: as above (Real<f64>)
         f64::cos(std::hint::black_box(self))
     }
     fn atan(self) -> Self {
+        // libm-census: as above (Real<f64>)
         f64::atan(std::hint::black_box(self))
     }
     fn atan2(self, x: Self) -> Self {
+        // libm-census: as above (Real<f64>)
         f64::atan2(std::hint::black_box(self), std::hint::black_box(x))
     }
     fn abs(self) -> Self {

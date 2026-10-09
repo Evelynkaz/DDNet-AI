@@ -408,6 +408,7 @@ pub fn mcnemar_worse_p(only_ts: usize, only_rust: usize) -> f64 {
             .sum()
     };
     (only_ts..=n)
+        // libm-census: a binomial tail for the harness's statistics report, not a bot decision
         .map(|k| (ln_choose(n, k) - n as f64 * std::f64::consts::LN_2).exp())
         .sum::<f64>()
         .min(1.0)
