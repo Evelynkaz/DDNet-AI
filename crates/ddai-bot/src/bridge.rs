@@ -308,6 +308,11 @@ pub struct StatusMessage {
     /// Additive since task 5.16 (D-120): the search of the last 30 s of game time (see [`SearchWindowStatus`]), for the site's "machine
     /// quietness" row. A bot of an older build sends no such field.
     pub search_window: SearchWindowStatus,
+    /// Additive since task 5.17 (D-125): the threads that score the hybrid's candidates, the deciding thread included (`--search-threads`; 1 = the
+    /// default), as the process was started; `null` when the count was left to "auto" at brain build time (the `ddnet-ai play` command always
+    /// decides it, so only a library caller can leave it open). Set also when the brain is not the hybrid. A bot of an older build sends no such
+    /// field; the site's «Бот» card shows «—» for it.
+    pub search_threads: Option<u32>,
 }
 
 /// STATUS `search_window` (task 5.16, D-120): what the hybrid's searching decisions of the last `window_s` seconds of game time looked like.
@@ -877,6 +882,7 @@ mod tests {
             window_guard: None,
             preinput: "on".into(),
             preinput_stats: serde_json::json!({"received": 7}),
+            search_threads: Some(3),
             hybrid_budget_ms: 3,
             prediction_margin_ms: None,
             search_window: SearchWindowStatus {
@@ -890,6 +896,7 @@ mod tests {
         assert_eq!(k, kind::STATUS);
         let v: serde_json::Value = serde_json::from_slice(&p).unwrap();
         assert_eq!(v["hybrid_budget_ms"], 3);
+        assert_eq!(v["search_threads"], 3);
         assert!(v["prediction_margin_ms"].is_null(), "adaptive margin: null");
         assert_eq!(v["target"], 3);
         assert_eq!(v["telemetry"]["x"], 1);

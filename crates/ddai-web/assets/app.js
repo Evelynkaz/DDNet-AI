@@ -697,7 +697,7 @@
                 ? "бот не запущен: сейчас на сайте показ (муха на арене), настоящей игры нет"
                 : "бот не запущен (нет живого статуса)";
         setText("bot-conn-text", why);
-        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-wbsmart", "bs-windowmodel", "bs-preinput", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
+        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-wbsmart", "bs-windowmodel", "bs-preinput", "bs-searchthreads", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
           setText(id, "—");
         });
         el("bs-selfkill").classList.remove("kv-warn");
@@ -728,6 +728,13 @@
       }
       setText("bs-windowmodel", wm);
       setText("bs-preinput", preinputText(s));
+      // Task 5.17 (D-125): the threads that score the hybrid's candidates (1 = the default); a bot of an older build sends none, and a null (left to «auto») is not a number: «—».
+      setText(
+        "bs-searchthreads",
+        typeof s.search_threads === "number" && s.search_threads >= 1 && s.search_threads <= 16 && Math.floor(s.search_threads) === s.search_threads
+          ? String(s.search_threads)
+          : "—"
+      );
       // A status without the field (an older bot) shows «—», never «вкл».
       setText("bs-selfkill", Object.prototype.hasOwnProperty.call(SELFKILL_LABELS, s.selfkill) ? SELFKILL_LABELS[s.selfkill] : "—");
       el("bs-selfkill").classList.toggle("kv-warn", s.selfkill === "off");

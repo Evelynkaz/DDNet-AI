@@ -500,3 +500,51 @@ fn the_launcher_installer_installs_the_bot_slice_and_checks_that_the_bot_unit_re
         assert_eq!(values(&sl, key).len(), 1, "{key}");
     }
 }
+
+#[test]
+fn the_bot_unit_passes_the_search_threads_as_two_words_and_it_is_one_by_default() {
+    // Task 5.17 (D-125): `--search-threads ${BOT_SEARCH_THREADS}` (a digit 1 to 4), the form of `--preinput`; the helper always writes the line.
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    let env = values(&s, "Environment");
+    assert!(env.contains(&"BOT_SEARCH_THREADS=1"), "{env:?}");
+    let exec = values(&s, "ExecStart");
+    assert_eq!(exec.len(), 1);
+    assert!(
+        exec[0].contains(" --search-threads ${BOT_SEARCH_THREADS} "),
+        "{}",
+        exec[0]
+    );
+    // Once; never split by `$VAR`, never the equals form, never hard-coded, never `auto` (the free cores are not the owner's choice here).
+    assert_eq!(exec[0].matches("--search-threads").count(), 1, "{}", exec[0]);
+    assert!(
+        !exec[0].contains("$BOT_SEARCH_THREADS")
+            && !exec[0].contains("--search-threads=")
+            && !exec[0].contains("--search-threads auto")
+            && !exec[0].contains("--search-threads 1")
+            && !exec[0].contains("--search-threads 3"),
+        "{}",
+        exec[0]
+    );
+    // The earlier switches are untouched.
+    assert!(exec[0].contains(" --preinput ${BOT_PREINPUT} "), "{}", exec[0]);
+    assert!(exec[0].contains(" --finish ${BOT_FINISH} "), "{}", exec[0]);
+}
+
+#[test]
+fn the_launcher_installer_refuses_a_binary_without_the_search_threads_flag() {
+    let script = fs::read_to_string(deploy().join("install-launcher.sh")).unwrap();
+    let check = script
+        .find("grep -q -- '--search-threads' <<<\"$play_help\"")
+        .expect("install-launcher.sh checks the binary for --search-threads");
+    assert!(
+        script[check..]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("run deploy/install.sh first")
+    );
+    for later in ["daemon-reload", "install -o root -g root -m 0644"] {
+        let first_use = script.rfind(later).unwrap();
+        assert!(check < first_use, "the binary check must come before `{later}`");
+    }
+}

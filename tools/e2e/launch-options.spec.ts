@@ -26,6 +26,10 @@
 //      leads to has exactly the old fields; «полный» is labelled for the duel and not for crowds; the «Бот» card's «Машина» rows and warning (load above 6, or
 //      fewer than 20 candidates per decision over at least 25 decisions) against scripted STATUS answers, and the real run's STATUS carries `search_window`.
 //
+//   6. (task 5.17, D-125) «Потоки поиска» (1–4): 1 by default, an honest hint (the numbers of 4.13, the quiet machine only, strength not measured), hidden for
+//      the pure fly, `search_threads` sent only above 1; the «Дуэль» preset sets 3 (and the request it leads to carries `search_threads: 3`); the real run with 3
+//      (env `BOT_SEARCH_THREADS="3"`, the bot's log line, STATUS `search_threads`, the «Бот» row «Потоки поиска», the «Запуск» detail), then the default 1.
+//
 // Needs the env of options-e2e.sh (else it skips). Screenshots: <scratch dir of the run>/screenshots/5.15-*.png (never in git).
 
 import { test, expect, type Dialog, type Page } from "@playwright/test";
@@ -199,7 +203,7 @@ test("the card: «Умный ВБ» and «Без самоубийств (дуэ�
 
 async function startOnPrivateServer(
   page: Page,
-  opts: { wb: "off" | "on"; duel: "off" | "on"; finish?: "off" | "target" | "wb" | "full"; preinput?: "off" | "on" },
+  opts: { wb: "off" | "on"; duel: "off" | "on"; finish?: "off" | "target" | "wb" | "full"; preinput?: "off" | "on"; threads?: "1" | "2" | "3" | "4" },
 ) {
   await openBotTab(page);
   await expect(field(page, "Сервер")).toBeVisible();
@@ -212,6 +216,7 @@ async function startOnPrivateServer(
   await field(page, "Без самоубийств \\(дуэль\\)").selectOption(opts.duel);
   if (opts.finish) await field(page, "Дожим").selectOption(opts.finish);
   if (opts.preinput) await field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)").selectOption(opts.preinput);
+  if (opts.threads) await field(page, "Потоки поиска").selectOption(opts.threads);
   // The site takes at most 6 requests a minute (4 starts and 4 stops come close): when the page says «Слишком часто», wait and click again.
   const accept = (d: Dialog) => void d.accept();
   page.on("dialog", accept);
@@ -445,26 +450,35 @@ test("the card: «Дожим» offers «ВБ (эксперимент)» with an 
   await page.screenshot({ path: path.join(SHOTS, "3.20b-card-phone.png"), fullPage: true });
 });
 
-test("the real run on the private server: `--finish wb` and `--preinput on` reach the bot (env, log lines, STATUS, both cards), then the defaults", async ({ page }) => {
+test("the real run on the private server: `--finish wb`, `--preinput on` and `--search-threads 3` reach the bot (env, log lines, STATUS, both cards), then the defaults", async ({ page }) => {
   test.setTimeout(600_000);
   await login(page);
   expect(muhaIds()).toHaveLength(0);
   const startsBefore = readFileSync(path.join(DIR, "systemctl.log"), "utf8")
     .split("\n")
     .filter((l) => l.startsWith("start ddnet-ai-bot")).length;
+  // The bot's log is shared with the earlier real runs of this file (their default is one thread): count against what is there now.
+  const oneThreadBefore = count(botLog(), "hybrid search threads: 1 (--search-threads)");
+  const threeThreadsBefore = count(botLog(), "hybrid search threads: 3 (--search-threads)");
 
   // 1. both on
   ageHelperState(900);
-  await startOnPrivateServer(page, { wb: "off", duel: "off", finish: "wb", preinput: "on" });
+  await startOnPrivateServer(page, { wb: "off", duel: "off", finish: "wb", preinput: "on", threads: "3" });
   expect(muhaIds()).toHaveLength(1);
   expect(envFile()).toContain('BOT_FINISH="wb"');
   expect(envFile()).toContain('BOT_PREINPUT="on"');
+  // Task 5.17 (D-125): the threads reach the bot as the unit's `--search-threads ${BOT_SEARCH_THREADS}`.
+  expect(envFile()).toContain('BOT_SEARCH_THREADS="3"');
+  await expect.poll(() => botLog(), { timeout: 30_000 }).toContain("hybrid search threads: 3 (--search-threads)");
+  await expect.poll(async () => (await botStatus(page))?.search_threads, { timeout: 30_000 }).toBe(3);
   await expect.poll(() => botLog(), { timeout: 30_000 }).toContain("finish blocks: wb (--finish; D-097)");
   await expect.poll(() => botLog(), { timeout: 30_000 }).toContain("pre-inputs: on (--preinput");
   await expect.poll(async () => (await botStatus(page))?.preinput, { timeout: 30_000 }).toBe("on");
   expect((await botStatus(page)).finish).toBe("wb");
   const st = JSON.parse(readFileSync(path.join(DIR, "status", "status.json"), "utf8"));
-  expect([st.finish, st.preinput]).toEqual(["wb", true]);
+  expect([st.finish, st.preinput, st.search_threads]).toEqual(["wb", true, 3]);
+  await expect(card(page).locator(".lc-detail")).toContainText("потоки поиска: 3");
+  await expect(page.locator("#bs-searchthreads")).toHaveText("3", { timeout: 15_000 });
   await expect(card(page).locator(".lc-detail")).toContainText("дожим: ВБ");
   await expect(card(page).locator(".lc-detail")).toContainText("ходы соперника от сервера");
   await expect(page.locator("#bs-finish")).toHaveText("цель + удержание ВБ", { timeout: 15_000 });
@@ -489,9 +503,15 @@ test("the real run on the private server: `--finish wb` and `--preinput on` reac
 
   // 2. the defaults: the env says off, the bot counts without playing, the row says so.
   ageHelperState(900);
-  await startOnPrivateServer(page, { wb: "off", duel: "off", finish: "off", preinput: "off" });
+  await startOnPrivateServer(page, { wb: "off", duel: "off", finish: "off", preinput: "off", threads: "1" });
   expect(envFile()).toContain('BOT_FINISH="off"');
   expect(envFile()).toContain('BOT_PREINPUT="off"');
+  expect(envFile()).toContain('BOT_SEARCH_THREADS="1"');
+  await expect.poll(async () => (await botStatus(page))?.search_threads, { timeout: 30_000 }).toBe(1);
+  await expect(page.locator("#bs-searchthreads")).toHaveText("1", { timeout: 15_000 });
+  await expect(card(page).locator(".lc-detail")).not.toContainText("потоки поиска");
+  expect(count(botLog(), "hybrid search threads: 3 (--search-threads)")).toBe(threeThreadsBefore + 1); // the first run's line only
+  expect(count(botLog(), "hybrid search threads: 1 (--search-threads)")).toBe(oneThreadBefore + 1);
   await expect.poll(async () => (await botStatus(page))?.preinput, { timeout: 30_000 }).toBe("off");
   expect((await botStatus(page)).finish).toBe("off");
   await expect(page.locator("#bs-preinput")).toContainText("выкл (только счёт)", { timeout: 15_000 });
@@ -506,7 +526,7 @@ test("the real run on the private server: `--finish wb` and `--preinput on` reac
   expect(starts).toHaveLength(startsBefore + 2);
 });
 
-test("the card: the «Дуэль» preset fills the form in one click, sends nothing by itself, leaves server / duration / sparring alone, and the request it leads to has only the old fields", async ({ page }) => {
+test("the card: the «Дуэль» preset fills the form in one click (three search threads included), sends nothing by itself, leaves server / duration / sparring alone, and the request it leads to has only the request's own fields", async ({ page }) => {
   test.setTimeout(120_000);
   await login(page);
   // Task 5.16 (D-120). The POST is answered here: nothing may start.
@@ -545,6 +565,7 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
   await field(page, "Длительность").selectOption("60m");
   await field(page, "Спарринг \\(только локальный сервер\\)").selectOption("1");
   await field(page, "Предсказание соперника").selectOption("off");
+  await field(page, "Потоки поиска").selectOption("4");
   await expect(preset).not.toHaveClass(/current/);
   await expect(preset).toHaveAttribute("aria-pressed", "false");
   await expect(done).toBeHidden();
@@ -556,6 +577,7 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
   await expect(field(page, "Настоящие ходы соперника от сервера \\(эксперимент\\)")).toHaveValue("off");
   await expect(field(page, "Предсказатель соперника \\(эксперимент\\)")).toHaveValue("off");
   await expect(field(page, "Умный ВБ")).toHaveValue("off");
+  await expect(field(page, "Потоки поиска")).toHaveValue("3");
   // Not touched: the server, the duration, the sparring and the hybrid's own opponent model.
   await expect(field(page, "Сервер")).toHaveValue("local");
   await expect(field(page, "Длительность")).toHaveValue("60m");
@@ -583,11 +605,12 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
   await expect(card(page).locator(".lc-preinput-hint")).toContainText("Выключено: ходы соперника сервер присылает");
   await expect(card(page).locator(".lc-model-hint")).toContainText("Предсказатель выключен");
   await expect(card(page).locator(".lc-wb-hint")).toContainText("Умный ВБ выключен");
+  await expect(card(page).locator(".lc-search-threads-hint")).toContainText("Три потока: около 38 кандидатов на решение на тихой машине. Это ставит «Дуэль»");
   const info = card(page).locator(".lc-preset-info");
   await expect(info).not.toHaveAttribute("open", "");
   await info.locator("summary").click();
   const items = card(page).locator(".lc-preset-list li");
-  await expect(items).toHaveCount(7);
+  await expect(items).toHaveCount(8);
   const text = await card(page).locator(".lc-preset-list").innerText();
   for (const needle of [
     "Мозг: Гибрид",
@@ -601,6 +624,9 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
     "включать только для опыта",
     "Предсказатель соперника: выкл",
     "Умный ВБ: выкл",
+    "Потоки поиска: 3",
+    "кандидатов на решение вживую 24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках",
+    "Под нагрузкой потоки отнимают процессор у сборок и могут не помочь: выберите 1",
     "Тихая машина",
     "14,2 кандидата на решение при нагрузке 18–30 против ≈ 27 в арене при часах тихой машины (вживую на тихой машине ещё не измерено)",
   ]) {
@@ -620,6 +646,7 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
     mirror: "off",
     finish: "full",
     no_selfkill: true,
+    search_threads: 3,
   });
 
   // «полный» without the duel switch is flagged as not looking like a duel, and a change by hand takes the preset's mark and message back.
@@ -642,6 +669,82 @@ test("the card: the «Дуэль» preset fills the form in one click, sends not
   await page.setViewportSize({ width: 360, height: 740 });
   await noHorizontalScroll(page);
   await page.screenshot({ path: path.join(SHOTS, "5.16-preset-phone.png"), fullPage: true });
+});
+
+test("the card: «Потоки поиска» is 1 by default, says what the threads buy and what they cost, is hidden for the pure fly, and is sent only above 1", async ({ page }) => {
+  test.setTimeout(120_000);
+  await login(page);
+  // Task 5.17 (D-125). The POST is answered here: nothing may start.
+  const posted: any[] = [];
+  await page.route("**/api/bot/launch", async (route) => {
+    if (route.request().method() === "POST") {
+      posted.push(JSON.parse(route.request().postData() ?? "{}"));
+      await route.fulfill({ status: 429, contentType: "application/json", body: JSON.stringify({ error: "rate_limited" }) });
+    } else {
+      await route.continue();
+    }
+  });
+  await openBotTab(page);
+  await expect(card(page).locator(".lc-state-text")).toHaveText("Бот остановлен", { timeout: 20_000 });
+  await field(page, "Мозг").selectOption("hybrid");
+  await field(page, "Сервер").selectOption("local");
+
+  const threads = field(page, "Потоки поиска");
+  const hint = card(page).locator(".lc-search-threads-hint");
+  await expect(threads).toBeVisible();
+  await expect(threads).toHaveValue("1");
+  expect(await threads.locator("option").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value))).toEqual(["1", "2", "3", "4"]);
+  expect(await threads.locator("option").allTextContents()).toEqual(["1 (по умолчанию)", "2", "3", "4"]);
+  // The hint of each value carries the numbers of the quiet machine and the cost under load, and does not promise strength.
+  const wanted: Record<string, string> = { "1": "24–25", "2": "29", "3": "38", "4": "44" };
+  for (const v of ["1", "2", "3", "4"]) {
+    await threads.selectOption(v);
+    await expect(hint).toContainText("около " + wanted[v] + " кандидатов на решение на тихой машине");
+    await expect(hint).toContainText("24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках");
+    await expect(hint).toContainText("каждый помощник занимает около 5% ядра");
+    await expect(hint).toContainText("пул конечен (≈ 55–62 кандидата)");
+    await expect(hint).toContainText("Только на тихой машине: под нагрузкой больше потоков отнимает процессор у сборок и может не помочь");
+    await expect(hint).toContainText("Больше кандидатов не значит больше побед");
+  }
+  await threads.selectOption("3");
+  await expect(hint).toContainText("Это ставит «Дуэль»");
+  await page.screenshot({ path: path.join(SHOTS, "5.17-card-3.png"), fullPage: true });
+  await noHorizontalScroll(page);
+
+  // 1 is the absence of the field (an older helper with a strict format still takes a default start); 2 to 4 are JSON integers.
+  await threads.selectOption("1");
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(Object.keys(posted[0])).not.toContain("search_threads");
+  for (const [i, v] of [[1, 2], [2, 4]] as const) {
+    await threads.selectOption(String(v));
+    await card(page).locator(".lc-start").click();
+    await expect.poll(() => posted.length).toBe(i + 1);
+    expect(posted[i]).toMatchObject({ action: "start", brain: "hybrid", server: "local", search_threads: v });
+    expect(typeof posted[i].search_threads).toBe("number");
+  }
+  // The pure fly does not search: the control and its hint are hidden and nothing is sent, even if a value was chosen. Back to the hybrid, it is still chosen.
+  await threads.selectOption("4");
+  await field(page, "Мозг").selectOption("fly");
+  await expect(threads).toBeHidden();
+  await expect(hint).toBeHidden();
+  await card(page).locator(".lc-start").click();
+  await expect.poll(() => posted.length).toBe(4);
+  expect(Object.keys(posted[3])).not.toContain("search_threads");
+  await field(page, "Мозг").selectOption("hybrid-fly");
+  await expect(threads).toBeVisible();
+  await expect(threads).toHaveValue("4");
+  // A change by hand takes the preset's mark back; the preset sets 3 again.
+  await field(page, "Мозг").selectOption("hybrid");
+  await card(page).locator(".lc-preset-btn").click();
+  await expect(threads).toHaveValue("3");
+  await expect(card(page).locator(".lc-preset-btn")).toHaveClass(/current/);
+  await threads.selectOption("2");
+  await expect(card(page).locator(".lc-preset-btn")).not.toHaveClass(/current/);
+  // Phone width: the longest hint does not scroll the page sideways.
+  await page.setViewportSize({ width: 360, height: 740 });
+  await noHorizontalScroll(page);
+  await page.screenshot({ path: path.join(SHOTS, "5.17-card-phone.png"), fullPage: true });
 });
 
 /** A STATUS of a live bot, as the site serves it, with the host's load and the bot's search window of the case under test. */
