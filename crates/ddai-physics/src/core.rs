@@ -158,7 +158,9 @@ pub fn angle_from_target(target_x: i32, target_y: i32) -> i32 {
 
 /// [`angle_from_target`] without the memo.
 fn angle_from_target_exact(target_x: i32, target_y: i32) -> i32 {
-    let tmp_angle_f64 = (target_y as f64).atan2(target_x as f64);
+    // `std::atan2(int, int)` promotes both to `double` and calls glibc's double-precision `atan2` (D-127:
+    // `ddai-libm`'s port of it, the same bits on every platform).
+    let tmp_angle_f64 = ddai_libm::atan2(f64::from(target_y), f64::from(target_x));
     let tmp_angle = tmp_angle_f64 as f32;
     let pi = std::f32::consts::PI;
     // `atan2` of two finite `f64`s is always finite and in `[-pi, pi]`, so this narrowing

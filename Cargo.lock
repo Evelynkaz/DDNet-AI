@@ -1159,6 +1159,13 @@ dependencies = [
 [[package]]
 name = "ddai-jsmath"
 version = "0.1.0"
+dependencies = [
+ "ddai-libm",
+]
+
+[[package]]
+name = "ddai-libm"
+version = "0.1.0"
 
 [[package]]
 name = "ddai-map"
@@ -1224,6 +1231,7 @@ version = "0.1.0"
 dependencies = [
  "allocation-counter",
  "criterion 0.8.2",
+ "ddai-libm",
  "ddai-trace",
  "serde_json",
 ]

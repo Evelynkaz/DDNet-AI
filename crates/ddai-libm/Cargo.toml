@@ -1,0 +1,22 @@
+[package]
+name = "ddai-libm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Portable, bit-exact ports of the glibc 2.39 (x86-64 FMA variant) math functions DDNet-AI's physics depends on: sinf, cosf, atanf, atan2f, powf (f32) and log, atan2, pow (f64). Same numbers on Linux and Windows. Leaf crate, no runtime dependencies."
+
+[lib]
+name = "ddai_libm"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Intentionally empty: no runtime dependencies (not even `libm`, whose results differ from glibc, D-004).
+
+[dev-dependencies]
+# Intentionally empty: the probe harness uses its own splitmix64 generator.

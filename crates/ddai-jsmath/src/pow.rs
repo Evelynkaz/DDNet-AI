@@ -33,10 +33,8 @@
 //! literal-constant-argument shapes in `tests/pow_literal_args.rs`), not on a "same symbol"
 //! argument — see the crate README "Почему `pow` — не fdlibm" for the full correction.
 //!
-//! **A second, unrelated risk this function *does* need to guard against:** `f64::powf` compiles
-//! to the `llvm.pow.f64` intrinsic, which LLVM can rewrite for constant operands even without
-//! `-ffast-math` (`pow(2^n, y) -> exp2(n*y)`, `pow(x, -1.0) -> 1.0/x`), diverging from a genuine
-//! runtime glibc call — see the `black_box` calls below and their doc comment.
+//! **Portability (D-127):** the raw `pow` is [`ddai_libm::pow`], a port of glibc 2.39's `pow` that gives the same
+//! bits on every platform, instead of `f64::powf` (the host C library: glibc on Linux, UCRT on Windows).
 
 /// `Math.pow(x, y)`.
 pub fn pow(x: f64, y: f64) -> f64 {
@@ -68,23 +66,15 @@ pub fn pow(x: f64, y: f64) -> f64 {
         // The `+ 0` gives `+0` for `(-0) ** 0.5` rather than `-0` (sqrt(-0) == -0 otherwise).
         return (x + 0.0).sqrt();
     }
-    // `black_box` on both operands is load-bearing, not defensive styling: `f64::powf` compiles
-    // to the `llvm.pow.f64` intrinsic, and LLVM's `TargetLibraryInfo`/instcombine recognize it (by
-    // *name*, the same way it would recognize a hand-written `extern "C" fn pow`, not something
-    // special to Rust) and rewrite it for certain constant operands — `pow(2^n, y)` becomes
-    // `exp2(n*y)`, `pow(x, -1.0)` becomes `1.0/x`, `pow(x, 2.0)` becomes `x*x` — *without* any
-    // `-ffast-math`/fast-math flag, because these rewrites are (mostly) value-preserving in exact
-    // arithmetic, just not bit-identical to a real runtime call into glibc's `pow`. `x`/`y` here
-    // are function parameters with no literal of their own, but if a caller writes something like
-    // `jsmath::pow(2.0, p)` and this function gets inlined into it (plausible: it is small, and
-    // the workspace release profile enables thin LTO across crates), the compiler can see `x ==
-    // 2.0` post-inlining just as well as if the literal were written right here, and apply the
-    // same rewrite — independently confirmed against real V8: unprotected, `pow(2.0, y)` disagreed
-    // with `Math.pow(2, y)` on 216/200,000 random `y`; wrapping both operands in `black_box`
-    // (which is specifically designed to defeat exactly this kind of interprocedural constant
-    // propagation into an intrinsic) brought that to 0/200,000. See
-    // `tests/pow_literal_args.rs` for the regression test and the crate README for the numbers.
-    core::hint::black_box(x).powf(core::hint::black_box(y))
+    // glibc's `pow` as a portable port (D-127): bit-identical to the `std::pow` a Linux Node calls, on every
+    // platform. This used to be `f64::powf`, i.e. whatever C library the host has (glibc on Linux, UCRT on
+    // Windows: not the same bits), guarded by `black_box` against LLVM rewriting the `llvm.pow.f64`
+    // intrinsic for constant operands (`pow(2^n, y) -> exp2(n*y)`, `pow(x, -1.0) -> 1.0/x`, which
+    // disagreed with real V8 on 216/200,000 random `y` for `pow(2.0, y)`). `ddai_libm::pow` is plain Rust
+    // arithmetic, which LLVM can inline and fold but cannot rewrite into a different value, so the guard
+    // is gone; `tests/pow_literal_args.rs` and `literal_argument_regression_survives_dev_profile` below,
+    // with values recorded from real V8, still pin the behaviour.
+    ddai_libm::pow(x, y)
 }
 
 #[cfg(test)]

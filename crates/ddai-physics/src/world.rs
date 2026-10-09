@@ -2650,7 +2650,8 @@ fn apply_speedup<R: Real>(
 /// (this port's old, `f32`-throughout-past-the-`log`-call computation, `MaxSpeed` `1149`)).
 fn max_ramp_speed<R: Real>(velramp_range: R, velramp_curvature: R) -> R {
     let clamped_curvature = velramp_curvature.max(R::from_f64(1.01));
-    let denom = 50.0 * clamped_curvature.to_f64().ln();
+    // The bare C `log` is glibc's double-precision one (D-127: `ddai-libm`'s port, the same bits everywhere).
+    let denom = 50.0 * ddai_libm::log(clamped_curvature.to_f64());
     R::from_f64(velramp_range.to_f64() / denom)
 }
 

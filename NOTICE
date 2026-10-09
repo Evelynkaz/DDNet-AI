@@ -151,8 +151,9 @@ No glibc source is vendored: Node's build of V8 does not compile V8's
 optional glibc-derived trig implementation in (`v8_use_libm_trig_functions`
 is unset — see the crate README for how this was established), so `sin`/
 `cos` are the fdlibm ones above, not glibc's; `Math.pow` calls the
-platform's own `pow` at runtime (same as Rust's `f64::powf`), which is
-linking against the system's libm, not copying its source.
+glibc's `pow`, which since 2026-10 is `ddai_libm::pow` (a Rust port of
+glibc's algorithm, see the next section) instead of the platform's own
+`pow` at runtime.
 
 ------------------------------------------------------------------------
 crates/ddai-tsworld
@@ -187,6 +188,69 @@ the exact same decisions the TS planner did (decision D-035), and, on
 decision-making (decision D-041). Licensed GPL-3.0-only like the rest of
 this repository, with credit to the original TS project (Wranked1/DDNet-AI)
 in its own README.
+
+------------------------------------------------------------------------
+crates/ddai-libm: glibc 2.39 math functions
+------------------------------------------------------------------------
+
+`crates/ddai-libm` re-implements, in Rust, the math functions of the GNU C
+Library 2.39 (Ubuntu 24.04, x86-64 FMA variant) that DDNet 20.1's physics
+calls on Linux, so that Linux and Windows compute identical bits (decisions
+D-047, D-127). The source of each file is stated in its header; the tables in
+`crates/ddai-libm/src/tables.rs` are generated from the glibc sources by
+`tools/libm-tables/gen_tables.py`. No file was copied from a non-GPL-compatible
+source. The parts and their licences:
+
+* `sincosf.rs` (`sinf`, `cosf`), `powf.rs`, `log.rs`, `pow.rs`: the algorithms
+  of ARM Limited's optimized-routines (https://github.com/ARM-software/
+  optimized-routines, `math/sincosf.c`, `powf.c`, `log.c`, `pow.c` and their
+  data files, the revision of 2018 that glibc 2.28 imported), licensed MIT
+  (the upstream project is today "MIT OR Apache-2.0 WITH LLVM-exception"; the
+  MIT alternative is used). Each of the four files carries the MIT text:
+
+    Copyright (c) 2017-2018, Arm Limited.
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions: The above copyright notice and this permission
+    notice shall be included in all copies or substantial portions of the
+    Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+    NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+    USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+* `atanf.rs`, `atan2f.rs`: Sun Microsystems' fdlibm (`s_atanf.c`,
+  `e_atan2f.c` as shipped in glibc):
+
+    Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+    Developed at SunPro, a Sun Microsystems, Inc. business.
+    Permission to use, copy, modify, and distribute this software is freely
+    granted, provided that this notice is preserved.
+
+* `atan2.rs` (double-precision `atan2`, with the table of `uatan.tbl`):
+  IBM Accurate Mathematical Library, Copyright (C) 2001-2024 Free Software
+  Foundation, Inc., licensed LGPL-2.1-or-later; `hypot.rs` (`hypotf`,
+  `hypot`): Copyright (C) 2018-2024 Free Software Foundation, Inc., licensed
+  LGPL-2.1-or-later. Compatibility with GPL-3.0: both are "version 2.1 or (at
+  your option) any later version" of the LGPL, and section 3 of the LGPL 2.1
+  explicitly permits a licensee to apply the terms of the ordinary GNU General
+  Public License (version 2 or, through the "or later" of this code and the
+  clause in section 3 on newer versions, version 3) instead of the LGPL to a
+  copy of the library, the only condition being that the notices that refer
+  to the LGPL are altered to refer to the GPL. These two files are therefore
+  used here under the GNU GPL version 3, the licence of this repository, with
+  the FSF/IBM copyright and permission notices preserved in their headers
+  and the changes marked ("Altered"). Nothing in `crates/ddai-libm` is
+  linked against glibc or distributed in binary form from it.
+
+The probe harness reads results of the system's own libm through Rust's
+`std` at test time only (Linux); no libm code is copied into the tests.
 
 ------------------------------------------------------------------------
 Modified version

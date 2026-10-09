@@ -18,6 +18,8 @@ workspace = true
 phase_profile = []
 
 [dependencies]
+# glibc-exact `sinf`/`cosf`/`atanf`/`atan2f`/`powf` and `log`/`atan2` for `f64`, the same code on every platform (D-127).
+ddai-libm = { path = "../ddai-libm" }
 
 [dev-dependencies]
 # Only for tests/benches: the golden fixtures, bulk trace corpus, scenario generator and

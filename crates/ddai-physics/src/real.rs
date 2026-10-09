@@ -3,39 +3,38 @@
 // `f32` (bit-exact parity with DDNet 20.1's C++, see `docs/DECISIONS.md` D-002/D-003) or `f64`
 // (a compiling, running, but not-yet-parity-checked instantiation for later TS-compat work).
 
-//! The [`Real`] trait: the minimal set of scalar operations `ddai-physics` needs, implemented
-//! for `f32` and `f64` as thin wrappers over `std` (which on `linux-gnu` calls into glibc for
-//! `powf`/`sin`/`cos`/`atan` — see `docs/DECISIONS.md` D-004 for why that specific detail is
-//! part of the bit-exactness argument, and why the `libm` crate is never used here instead).
+//! The [`Real`] trait: the minimal set of scalar operations `ddai-physics` needs, implemented for
+//! `f32` and `f64`. The `f32` transcendental functions (`powf`/`sin`/`cos`/`atan`/`atan2`) are
+//! [`ddai_libm`]'s ports of glibc 2.39's algorithms, **the same code on every platform**: DDNet 20.1's
+//! C++ on Linux calls glibc's `powf`/`sinf`/`cosf`/`atanf`/`atan2f`, and the Oracle A/B traces this crate
+//! must reproduce bit for bit were recorded against those (D-002/D-004). Before D-127 these methods
+//! called `std`, which reaches glibc on `linux-gnu` only; on Windows (UCRT) the last bits differ, so the
+//! physics would have silently diverged from the server. `ddai-libm` is probed against glibc (10^7+ random
+//! inputs per function, all 2^32 `f32` inputs for `sinf`/`cosf`/`atanf`) and its results are pinned by a
+//! golden-hash test that runs on every platform (see its crate docs); the `libm` crate is never used
+//! (D-004: its `powf` differs from glibc's in 9.7% of probes).
+//!
+//! The `f64` instantiation makes no parity claim (D-002/D-003: it exists for later TS-compat work and is
+//! only instantiated by tests) and keeps calling `std`: its `sin`/`cos`/`atan`/`atan2`/`powf` are
+//! whatever the platform's C library gives.
 //!
 //! **Do not add `mul_add`, fast-math, or any other operation that could fuse/reorder floating
-//! point arithmetic.** DDNet 20.1's C++ never contracts float operations (no `-ffast-math`, no
-//! FMA in the reference x86-64 Linux build — see `docs/research/ddnet-physics.md` §4), so this
-//! port must not either: every arithmetic expression elsewhere in this crate is written to
-//! mirror the C++ source's exact operation order and relies on the plain (non-fused) `+`/`*`
-//! this trait's operators provide.
+//! point arithmetic** to this trait or to the arithmetic in this crate. DDNet 20.1's C++ never contracts
+//! float operations (no `-ffast-math`, no FMA in the reference x86-64 Linux build — see
+//! `docs/research/ddnet-physics.md` §4), so this port must not either: every arithmetic expression
+//! elsewhere in this crate is written to mirror the C++ source's exact operation order and relies on the
+//! plain (non-fused) `+`/`*` this trait's operators provide. (The fused operations inside `ddai-libm` are
+//! the ones glibc's own FMA-variant `libm` code contains; they are part of the glibc port, not of this
+//! crate's arithmetic.)
 //!
 //! **Constant folding of libm calls (task 1.6, lesson from the 3.1a review).** LLVM rewrites
 //! `powf`/`pow` calls whose exponent (or, for some patterns, base) is a compile-time constant
 //! *even without fast-math*: `pow(x, -1)` becomes `1/x`, `pow(2^n, y)` becomes `exp2(n*y)`, and
 //! `pow(x, 2)` may become `x*x` — all algebraically equal to the libm call in exact arithmetic,
-//! but not bit-for-bit equal to what glibc's `pow`/`powf` actually returns at run time (glibc's
-//! implementation does not special-case these exponents the same way). This crate's own callers
-//! never write a literal exponent directly (`powf`'s only ported call site,
-//! [`crate::core::velocity_ramp`], passes a *runtime* value — the DDRace old-type speedup
-//! port's own literal-`2`-exponent `std::pow` call does *not* go through this method at all, see
-//! [`Real::powf`]'s own doc comment for why), but after inlining across a generic `R: Real` boundary the optimizer can
-//! still see a literal at the final, monomorphized call site (e.g. a caller that happens to
-//! compute the same runtime value as some constant one). Every `impl Real::powf`/`sin`/`cos`/
-//! `atan`/`atan2` below passes its argument(s) through [`std::hint::black_box`] specifically to
-//! block that: `black_box` is defined to force the value through an (unoptimized-away) memory
-//! round trip, which erases any "this happens to be a compile-time constant" fact the optimizer
-//! might otherwise have propagated into the call, at effectively zero run-time cost (it is not a
-//! real memory barrier on any target this crate builds for — see `real_math_black_box_bench` in
-//! `benches/physics.rs` for a measurement). `ddai-physics`'s own core/collision/tuning code (task
-//! 1.3) was checked and has no call site that passes a literal argument to `Real::powf`/etc., so
-//! this hardening is defense-in-depth for this crate and every future caller, not a fix for an
-//! observed mismatch.
+//! but not bit-for-bit equal to what glibc's `pow`/`powf` actually returns at run time. That hazard is
+//! gone for the `f32` methods: they call ordinary Rust functions made of IEEE operations, which LLVM may
+//! inline and constant-fold but cannot rewrite into anything with a different value. The `f64` methods
+//! still pass their operands through [`std::hint::black_box`] to keep `std`'s calls opaque to LLVM.
 
 use std::fmt::Debug;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
@@ -123,9 +122,8 @@ pub trait Real:
     /// — see `crate::world::apply_speedup`'s own `to_f64()`/`powi`/`sqrt` for why that call
     /// site does not use this method (an earlier revision of this crate did, and this doc
     /// comment used to claim that was correct — found empirically: the `f32` path differed from
-    /// a `double`-throughout one on 16% of 1M random inputs). See the module doc comment's
-    /// "constant folding" note and each `impl Real`'s `powf` for why the exponent (and base) are
-    /// passed through [`std::hint::black_box`] here.
+    /// a `double`-throughout one on 16% of 1M random inputs). See the module doc comment for
+    /// where the `f32` implementation comes from (`ddai_libm::powf`, glibc's `powf` ported).
     fn powf(self, exp: Self) -> Self;
     // Deliberately **no** `ln`/`log` method here: this crate's one ported `log(...)` call
     // (`crate::world::max_ramp_speed`, `character.cpp:1580`) is the *bare*, unqualified C
@@ -221,23 +219,22 @@ impl Real for f32 {
     fn sqrt(self) -> Self {
         f32::sqrt(self)
     }
+    // The transcendental functions are `ddai-libm`'s ports of glibc 2.39's (D-127), the same code on every
+    // platform; no `black_box` is needed (see the module doc comment's "constant folding" note).
     fn powf(self, exp: Self) -> Self {
-        // See the module doc comment's "constant folding" note: `black_box` on both operands
-        // blocks LLVM from rewriting a literal-exponent `pow` (e.g. `pow(x, 2)` -> `x*x`) into
-        // something that is no longer bit-for-bit what glibc's `powf` returns at run time.
-        f32::powf(std::hint::black_box(self), std::hint::black_box(exp))
+        ddai_libm::powf(self, exp)
     }
     fn sin(self) -> Self {
-        f32::sin(std::hint::black_box(self))
+        ddai_libm::sinf(self)
     }
     fn cos(self) -> Self {
-        f32::cos(std::hint::black_box(self))
+        ddai_libm::cosf(self)
     }
     fn atan(self) -> Self {
-        f32::atan(std::hint::black_box(self))
+        ddai_libm::atanf(self)
     }
     fn atan2(self, x: Self) -> Self {
-        f32::atan2(std::hint::black_box(self), std::hint::black_box(x))
+        ddai_libm::atan2f(self, x)
     }
     fn abs(self) -> Self {
         f32::abs(self)
