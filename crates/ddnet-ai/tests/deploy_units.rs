@@ -1,7 +1,8 @@
 //! Task 5.12 (D-099): the deploy files hold the safety rules of the server browser. The web unit gains **no network right** (it stays
 //! loopback-only with `IPAddressDeny=any`), no new writable path and no capability; the one unit that fetches the master list is the
 //! small sandboxed one; the proxy check is unprivileged; no production unit enables the test-only loopback favourites; and the installer
-//! installs exactly the new units.
+//! installs exactly the new units. Task 5.19 (D-130): the installer's apt steps are skipped on a redeploy, wait for the apt lock and keep the
+//! signing-key pin.
 
 use std::fs;
 use std::path::PathBuf;
@@ -598,4 +599,124 @@ fn the_launcher_installer_refuses_a_binary_without_the_duel_fixes_flag() {
         let first_use = script.rfind(later).unwrap();
         assert!(check < first_use, "the binary check must come before `{later}`");
     }
+}
+
+#[test]
+fn the_installer_skips_apt_on_a_redeploy_waits_for_the_apt_lock_and_keeps_the_keyring_pin() {
+    // Task 5.19 (D-130): a down third-party repository (Caddy's answered 402) or a held apt lock must not abort a redeploy of a host that
+    // already has Caddy; only a first install needs apt, and there the signing-key fingerprint is still enforced before anything is installed.
+    let script = fs::read_to_string(deploy().join("install.sh")).unwrap();
+
+    // The explicit flag exists and is documented in the script's usage line.
+    assert!(script.contains("--skip-apt) DO_APT=0 ;;"));
+    assert!(script.contains("# Usage: deploy/install.sh [--no-ufw] [--skip-build] [--skip-apt]"));
+
+    // Every apt-get call goes through `apt_run`, which waits for the lock; no other line runs apt.
+    assert!(script.contains("APT_LOCK_TIMEOUT=600"));
+    let apt_lines: Vec<&str> = script
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#') && l.contains("apt-get "))
+        .collect();
+    let lock_wait = r#"sudo apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT" "$@""#;
+    let direct: Vec<&&str> = apt_lines
+        .iter()
+        .filter(|l| l.contains("sudo apt-get") && !l.contains(lock_wait))
+        .collect();
+    assert!(direct.is_empty(), "apt-get without the lock timeout: {direct:?}");
+    assert!(script.contains(lock_wait));
+    assert!(
+        script.contains("sudo apt-get -o")
+            && !script.contains("sudo apt-get update")
+            && !script.contains("sudo apt-get install")
+    );
+
+    // A repository failure names the repository and points at --skip-apt.
+    let f = script.find("apt_run() {").expect("apt_run");
+    let apt_run = &script[f..f + script[f..].find("\n}\n").unwrap()];
+    assert!(
+        apt_run.contains("$CADDY_REPO_URL") && apt_run.contains("--skip-apt"),
+        "{apt_run}"
+    );
+    assert!(
+        apt_run.contains("grep -E '^(Err:|E:|W:)'"),
+        "names the repositories from apt's error lines: {apt_run}"
+    );
+    assert!(script.contains("CADDY_REPO_URL=\"https://dl.cloudsmith.io/public/caddy/stable/deb/debian\""));
+
+    // The three branches of the Caddy section.
+    let start = script.find("if [[ \"$DO_APT\" -eq 0 ]]; then").expect("apt section");
+    let skip = start + script[start..].find("\nelif ").expect("skip branch");
+    let first = skip + script[skip..].find("\nelse\n").expect("first-install branch");
+    let end = first + script[first..].find("\nfi\ncaddy version").expect("end of the section");
+    let (flag_branch, skip_branch, first_branch) = (&script[start..skip], &script[skip..first], &script[first..end]);
+
+    // --skip-apt: no apt, no key, no source; Caddy must already be there.
+    assert!(!flag_branch.contains("apt_run") && !flag_branch.contains("curl") && !flag_branch.contains("tee"));
+    assert!(flag_branch.contains("command -v caddy"));
+
+    // Redeploy: needs the installed package (dpkg status), the keyring and the sources list; runs no apt; still checks the keyring.
+    assert!(script.contains("dpkg-query -W -f='${Status}' caddy"));
+    assert!(script.contains("*\"install ok installed\"*"));
+    let cond = skip_branch.trim_start().lines().next().unwrap();
+    assert!(
+        cond.contains("caddy_package_installed")
+            && cond.contains("-f \"$CADDY_KEYRING\"")
+            && cond.contains("-f \"$CADDY_SOURCES_LIST\""),
+        "{cond}"
+    );
+    assert!(!skip_branch.contains("apt_run") && !skip_branch.contains("apt-get ") && !skip_branch.contains("curl"));
+    assert!(skip_branch.contains("verify_caddy_keyring \"$CADDY_KEYRING\""));
+
+    // First install: apt with the lock wait, the key is downloaded, fingerprint-checked and only then installed where apt reads it.
+    assert!(first_branch.contains("apt_run update -qq") && first_branch.contains("apt_run install -y caddy"));
+    let fetch = first_branch.find("curl -fsSL").expect("key download");
+    let verify = first_branch
+        .find("verify_caddy_keyring \"$KEY_TMPDIR/keyring.gpg\"")
+        .expect("verification of the download");
+    let install = first_branch
+        .find("sudo install -o root -g root -m 0644 \"$KEY_TMPDIR/keyring.gpg\" \"$CADDY_KEYRING\"")
+        .expect("key install");
+    let sources = first_branch.find("tee \"$CADDY_SOURCES_LIST\"").expect("sources list");
+    assert!(fetch < verify && verify < install && install < sources);
+    // The only place that installs a key into the keyring path is that one, after its check.
+    assert_eq!(
+        script
+            .matches("sudo install -o root -g root -m 0644 \"$KEY_TMPDIR/keyring.gpg\"")
+            .count(),
+        1
+    );
+
+    // The check itself is unchanged: exactly one key, pinned fingerprint, a mismatch is fatal; defined before first use.
+    assert!(script.contains("CADDY_KEY_FINGERPRINT=\"6576 0C51 EDEA 2017 CEA2 CA15 155B 6D79 CA56 EA34\""));
+    let def = script.find("verify_caddy_keyring() {").expect("definition");
+    assert!(def < start, "verify_caddy_keyring is defined before the apt section");
+    let body = &script[def..def + script[def..].find("\n}\n").unwrap()];
+    assert!(
+        body.contains("pub_count\" == \"1\"") && body.contains("exactly 1 public key"),
+        "{body}"
+    );
+    assert!(
+        body.contains("fingerprint mismatch") && body.contains("|| die"),
+        "{body}"
+    );
+
+    // Nothing else moved: the later steps are still unconditional.
+    assert!(
+        script.find("sudo ufw allow 443/tcp").expect("ufw rule") < start,
+        "ufw comes first, as before"
+    );
+    for must in [
+        "sudo -u caddy caddy validate --config \"$CADDYFILE_CANDIDATE\" --adapter caddyfile",
+        "sudo install -m 0644 \"$UNATTENDED_UPGRADES_SRC\" \"$UNATTENDED_UPGRADES_DST\"",
+        "sudo install -m 0644 \"$UNIT_SRC\" \"$UNIT_DST\"",
+    ] {
+        let at = script.find(must).unwrap_or_else(|| panic!("missing: {must}"));
+        assert!(at > end, "{must} must stay after, and outside, the apt section");
+    }
+
+    // The troubleshooting note and the decision exist.
+    let readme = fs::read_to_string(deploy().join("README.md")).unwrap();
+    assert!(readme.contains("--skip-apt") && readme.contains("402") && readme.contains("Lock::Timeout"));
+    let decisions = fs::read_to_string(deploy().join("../docs/DECISIONS.md")).unwrap();
+    assert!(decisions.contains("**D-130 "));
 }

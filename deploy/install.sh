@@ -14,10 +14,14 @@
 #     "regenerate the password") operation the operator runs by hand.
 #   - Does not print or touch any secret.
 #
-# Usage: deploy/install.sh [--no-ufw] [--skip-build]
+# Usage: deploy/install.sh [--no-ufw] [--skip-build] [--skip-apt]
 #   --no-ufw      Don't touch ufw at all (e.g. it's already configured exactly as needed).
 #   --skip-build  Reuse whatever is already at $BIN_PATH instead of rebuilding it (faster
 #                 redeploy of just the Caddy/systemd-unit side after a config-only change).
+#   --skip-apt    Don't run apt at all (task 5.19, D-130): Caddy must already be installed. A redeploy
+#                 does this by itself when Caddy is installed and its keyring (fingerprint verified)
+#                 and sources list are in place; the flag is for forcing it, e.g. when an apt
+#                 repository is down or apt is locked and the automatic check still wants apt.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +37,10 @@ UNIT_SRC="$SCRIPT_DIR/systemd/ddnet-ai-web.service"
 UNIT_DST="/etc/systemd/system/ddnet-ai-web.service"
 CADDY_KEYRING="/etc/apt/keyrings/caddy-stable-archive-keyring.gpg"
 CADDY_SOURCES_LIST="/etc/apt/sources.list.d/caddy-stable.list"
+CADDY_REPO_URL="https://dl.cloudsmith.io/public/caddy/stable/deb/debian"
+# How long apt waits for the dpkg/apt lock (seconds) before giving up: unattended-upgrades can
+# hold it for minutes (task 5.19); without a timeout apt fails at once with "Could not get lock".
+APT_LOCK_TIMEOUT=600
 UNATTENDED_UPGRADES_SRC="$SCRIPT_DIR/apt/51unattended-upgrades-caddy.conf"
 UNATTENDED_UPGRADES_DST="/etc/apt/apt.conf.d/51unattended-upgrades-caddy"
 # The Caddy signing key's well-known fingerprint (Caddy Web Server <contact@caddyserver.com>,
@@ -50,10 +58,12 @@ normalize_fpr() { tr -d ' ' <<<"$1" | tr '[:lower:]' '[:upper:]'; }
 
 DO_UFW=1
 DO_BUILD=1
+DO_APT=1
 for arg in "$@"; do
   case "$arg" in
     --no-ufw) DO_UFW=0 ;;
     --skip-build) DO_BUILD=0 ;;
+    --skip-apt) DO_APT=0 ;;
     *) echo "install.sh: unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -85,10 +95,6 @@ fi
 # 2. Caddy: official apt repository (Cloudsmith), not the old Ubuntu universe package (2.6.2,
 #    missing ~2 years of security fixes vs the 2.11.x this pulls — see docs/SETUP.md).
 # ---------------------------------------------------------------------------------------------
-log "installing Caddy's apt prerequisites (debian-keyring, debian-archive-keyring, apt-transport-https)"
-sudo apt-get update -qq
-sudo apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https >/dev/null
-
 # Review finding F1: verifies a keyring file holds EXACTLY ONE public key, and that its
 # fingerprint matches the pin — not just "the first key's fingerprint matches" (apt trusts EVERY
 # `pub` entry a keyring file contains, so a file holding the real key plus a second,
@@ -109,41 +115,83 @@ verify_caddy_keyring() {
   log "Caddy signing key fingerprint verified: $fpr (exactly 1 public key in the file)"
 }
 
-if [[ -f "$CADDY_KEYRING" ]]; then
-  log "Caddy signing key already present at $CADDY_KEYRING, checking its fingerprint"
+# Runs `sudo apt-get` and waits up to $APT_LOCK_TIMEOUT s for a held lock (task 5.19). Output is
+# shown only on failure (-qq quiet otherwise). On failure it dies with a message that names the
+# repository apt complained about (a down third-party repo, e.g. Caddy's answering 402, must be
+# recognisable at a glance) and says how to proceed when Caddy is already installed.
+apt_run() {
+  local out rc=0 errlines repos
+  out="$(sudo apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT" "$@" 2>&1)" || rc=$?
+  [[ "$rc" -eq 0 ]] && return 0
+  [[ -z "$out" ]] || printf '%s\n' "$out" >&2
+  if grep -q 'Could not get lock\|Unable to acquire the dpkg frontend lock' <<<"$out"; then
+    die "apt-get $1 failed: the apt/dpkg lock is still held after waiting ${APT_LOCK_TIMEOUT}s (unattended-upgrades or another apt running?). Retry later, or pass --skip-apt if Caddy is already installed"
+  fi
+  # Only apt's own error lines (Err:/E:/W:) say which repository failed.
+  errlines="$(grep -E '^(Err:|E:|W:)' <<<"$out" || true)"
+  repos="$(grep -oE 'https?://[^ ]+' <<<"$errlines" | sort -u | tr '\n' ' ' || true)"
+  if grep -q 'dl.cloudsmith.io/public/caddy' <<<"$errlines"; then
+    die "apt-get $1 failed: the Caddy apt repository ($CADDY_REPO_URL) is failing (see the apt output above; e.g. 402 Payment Required / no longer signed). If Caddy is already installed, re-run with --skip-apt"
+  fi
+  die "apt-get $1 failed (exit $rc); repository named in the apt errors: ${repos:-none, see the apt output above}. If Caddy is already installed, re-run with --skip-apt"
+}
+
+caddy_package_installed() {
+  [[ "$(dpkg-query -W -f='${Status}' caddy 2>/dev/null || true)" == *"install ok installed"* ]]
+}
+
+if [[ "$DO_APT" -eq 0 ]]; then
+  # Explicit opt-out: no apt, no key download, no sources list. Caddy itself must be there, since
+  # everything below needs it (`caddy validate`, `caddy adapt`, the service).
+  log "--skip-apt given, not touching apt"
+  command -v caddy >/dev/null 2>&1 || die "--skip-apt given but caddy is not installed: run deploy/install.sh without --skip-apt for the first install"
+elif caddy_package_installed && [[ -f "$CADDY_KEYRING" && -f "$CADDY_SOURCES_LIST" ]]; then
+  # A redeploy of a working host needs no apt (task 5.19): an unreachable Caddy repo or a held
+  # apt lock must not block it. The keyring is still checked (exactly one key, pinned fingerprint).
+  log "Caddy package, keyring and apt source are already in place: skipping apt (no update, no install)"
   verify_caddy_keyring "$CADDY_KEYRING"
 else
-  log "fetching Caddy's signing key"
-  # A fresh `mktemp -d` every run (review finding F1): fixed /tmp filenames meant a leftover file
-  # from an interrupted previous run broke `gpg --dearmor`'s refusal to overwrite an existing
-  # output file. Verified BEFORE `sudo install` ever copies anything into /etc/apt/keyrings — a
-  # failing check here must leave nothing behind for apt to pick up.
-  KEY_TMPDIR="$(mktemp -d)"
-  trap 'rm -rf "$KEY_TMPDIR"' EXIT
-  curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' -o "$KEY_TMPDIR/gpg.key"
-  gpg --batch --yes --dearmor -o "$KEY_TMPDIR/keyring.gpg" "$KEY_TMPDIR/gpg.key"
-  verify_caddy_keyring "$KEY_TMPDIR/keyring.gpg"
-  sudo install -o root -g root -m 0644 "$KEY_TMPDIR/keyring.gpg" "$CADDY_KEYRING"
-  rm -rf "$KEY_TMPDIR"
-  trap - EXIT
-fi
+  log "first Caddy install (or its keyring/apt source is missing): using apt"
+  log "installing Caddy's apt prerequisites (debian-keyring, debian-archive-keyring, apt-transport-https)"
+  apt_run update -qq
+  apt_run install -y -qq debian-keyring debian-archive-keyring apt-transport-https
 
-if [[ -f "$CADDY_SOURCES_LIST" ]]; then
-  log "Caddy apt source already present at $CADDY_SOURCES_LIST"
-else
-  log "adding Caddy apt source at $CADDY_SOURCES_LIST (signed-by $CADDY_KEYRING, per /etc/apt/keyrings convention)"
-  cat <<EOF | sudo tee "$CADDY_SOURCES_LIST" >/dev/null
+  if [[ -f "$CADDY_KEYRING" ]]; then
+    log "Caddy signing key already present at $CADDY_KEYRING, checking its fingerprint"
+    verify_caddy_keyring "$CADDY_KEYRING"
+  else
+    log "fetching Caddy's signing key"
+    # A fresh `mktemp -d` every run (review finding F1): fixed /tmp filenames meant a leftover file
+    # from an interrupted previous run broke `gpg --dearmor`'s refusal to overwrite an existing
+    # output file. Verified BEFORE `sudo install` ever copies anything into /etc/apt/keyrings — a
+    # failing check here must leave nothing behind for apt to pick up.
+    KEY_TMPDIR="$(mktemp -d)"
+    trap 'rm -rf "$KEY_TMPDIR"' EXIT
+    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' -o "$KEY_TMPDIR/gpg.key"
+    gpg --batch --yes --dearmor -o "$KEY_TMPDIR/keyring.gpg" "$KEY_TMPDIR/gpg.key"
+    verify_caddy_keyring "$KEY_TMPDIR/keyring.gpg"
+    sudo install -o root -g root -m 0644 "$KEY_TMPDIR/keyring.gpg" "$CADDY_KEYRING"
+    rm -rf "$KEY_TMPDIR"
+    trap - EXIT
+  fi
+
+  if [[ -f "$CADDY_SOURCES_LIST" ]]; then
+    log "Caddy apt source already present at $CADDY_SOURCES_LIST"
+  else
+    log "adding Caddy apt source at $CADDY_SOURCES_LIST (signed-by $CADDY_KEYRING, per /etc/apt/keyrings convention)"
+    cat <<EOF | sudo tee "$CADDY_SOURCES_LIST" >/dev/null
 # Source: Caddy (official, task 5.3)
 # Site: https://github.com/caddyserver/caddy
 # Repository: Caddy / stable (Cloudsmith)
 # Key fingerprint: $CADDY_KEY_FINGERPRINT (Caddy Web Server <contact@caddyserver.com>)
-deb [signed-by=$CADDY_KEYRING] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main
+deb [signed-by=$CADDY_KEYRING] $CADDY_REPO_URL any-version main
 EOF
-fi
+  fi
 
-log "apt-get update + install caddy"
-sudo apt-get update -qq
-sudo apt-get install -y caddy
+  log "apt-get update + install caddy"
+  apt_run update -qq
+  apt_run install -y caddy
+fi
 caddy version
 
 # Review finding F5: Ubuntu's own 50unattended-upgrades doesn't cover this repo's origin, so an
