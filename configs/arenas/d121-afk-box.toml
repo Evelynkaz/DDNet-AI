@@ -1,0 +1,16 @@
+# Task 3.23 (D-121): the 1vs1 box of `pm1007-clb-duel` (Copy Love Box f9793b34) with spawns drawn from the whole floor (row 180, tiles 79..91, the standing
+# tiles over the no-hook floor and the solid tile at x 91), 1..8 tiles apart. The AFK scenarios of the 2026-10-08 post-mortem used two fixed positions
+# (about six distinct games per 40); with a drawn start an idle opponent stands where an idle human would, anywhere on the floor of the box.
+name = "d121-afk-box"
+tag = "holdout"
+description = "Copy Love Box (f9793b34) 1vs1 box, spawns drawn from the floor of row 180 (tiles 79..91), 1 to 8 tiles apart."
+
+[map]
+kind = "file"
+file = "cache/Copy Love Box_f9793b3416f04eafc1c05c1ca43f6107dff34bf9eb3d5c9ba26ad9ef6317abcb.map"
+sha256 = "f9793b3416f04eafc1c05c1ca43f6107dff34bf9eb3d5c9ba26ad9ef6317abcb"
+
+[spawn]
+min_tiles = 1.0
+max_tiles = 8.0
+rows = [{ y = 180, x0 = 79, x1 = 91 }]

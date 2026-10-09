@@ -34,7 +34,7 @@ use crate::http::bot::{authorize_get, authorize_post, json_error};
 use crate::http::servers::{closing_block, favourite_choices};
 use crate::launch::{
     Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_SPARRING,
-    MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, WbSmart,
+    MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, SearchThreads, WbSmart,
     bundle_run_name, read_regular_nofollow, unix_now, write_atomic,
 };
 use crate::state::SharedState;
@@ -187,6 +187,7 @@ struct LaunchForm {
     no_selfkill: Option<bool>,
     window_model: Option<bool>,
     preinput: Option<bool>,
+    search_threads: Option<SearchThreads>,
 }
 
 fn new_id() -> String {
@@ -216,6 +217,7 @@ fn build_request(
                 || form.no_selfkill.is_some()
                 || form.window_model.is_some()
                 || form.preinput.is_some()
+                || form.search_threads.is_some()
             {
                 return Err("bad_request");
             }
@@ -234,6 +236,7 @@ fn build_request(
                 no_selfkill: None,
                 window_model: None,
                 preinput: None,
+                search_threads: None,
             })
         }
         Action::Start => {
@@ -272,6 +275,10 @@ fn build_request(
             if form.preinput == Some(true) && brain == Brain::Fly {
                 return Err("preinput_hybrid_only");
             }
+            // Task 5.17 (D-125): the pure fly does not search, so more than one search thread means nothing to it (same code as the helper).
+            if brain == Brain::Fly && form.search_threads.is_some_and(SearchThreads::is_more_than_one) {
+                return Err("search_threads_hybrid_only");
+            }
             Ok(LaunchRequest {
                 v: PROTOCOL_VERSION,
                 id,
@@ -288,6 +295,7 @@ fn build_request(
                 no_selfkill: form.no_selfkill,
                 window_model: form.window_model,
                 preinput: form.preinput,
+                search_threads: form.search_threads,
             })
         }
     }
@@ -688,6 +696,56 @@ mod tests {
         }
         // A stop carries nothing.
         let stop = serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","preinput":false})).unwrap();
+        assert_eq!(build_request(stop, &ready, true, true).unwrap_err(), "bad_request");
+    }
+
+    #[test]
+    fn the_search_threads_choice_is_a_closed_list_and_the_pure_fly_takes_one_only() {
+        // Task 5.17 (D-125). No file to check: the choice names nothing but itself.
+        let ready: Vec<String> = Vec::new();
+        let start = |brain: &str, val: serde_json::Value| {
+            let mut v = serde_json::json!({"action":"start","brain":brain,"server":"local","duration":"15m"});
+            if !val.is_null() {
+                v["search_threads"] = val;
+            }
+            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true, false))
+        };
+        for brain in ["hybrid", "hybrid-fly"] {
+            for n in 1..=4u8 {
+                let req = start(brain, serde_json::json!(n)).unwrap().unwrap();
+                assert_eq!(req.search_threads.map(SearchThreads::get), Some(n), "{brain} {n}");
+            }
+            let bare = start(brain, serde_json::Value::Null).unwrap().unwrap();
+            assert_eq!(bare.search_threads, None, "absent stays absent");
+        }
+        // The pure fly does not search: one thread is the same as absent and passes, more is refused with its own code.
+        assert_eq!(
+            start("fly", serde_json::json!(1)).unwrap().unwrap().search_threads,
+            Some(SearchThreads::ONE)
+        );
+        for n in 2..=4u8 {
+            assert_eq!(
+                start("fly", serde_json::json!(n)).unwrap().unwrap_err(),
+                "search_threads_hybrid_only",
+                "{n}"
+            );
+        }
+        // Nothing but the whole numbers 1 to 4 ever gets as far as `build_request`.
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(5),
+            serde_json::json!(-1),
+            serde_json::json!(2.5),
+            serde_json::json!("2"),
+            serde_json::json!("auto"),
+            serde_json::json!(true),
+            serde_json::json!(""),
+        ] {
+            assert!(start("hybrid", bad.clone()).is_err(), "{bad}");
+        }
+        // A stop carries nothing.
+        let stop =
+            serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","search_threads":1})).unwrap();
         assert_eq!(build_request(stop, &ready, true, true).unwrap_err(), "bad_request");
     }
 }

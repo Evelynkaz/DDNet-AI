@@ -810,6 +810,8 @@ fn log_event(e: &BotEvent) {
             jump_presses,
             hits_by_us,
             hits_on_us,
+            decisions,
+            still_inputs,
         } => tracing::info!(
             tick,
             ticks,
@@ -817,7 +819,9 @@ fn log_event(e: &BotEvent) {
             jump_presses,
             hits_by_us,
             hits_on_us,
-            "duel window: hammer presses {hammer_presses}, jump presses {jump_presses}, hammer hits by us {hits_by_us} / on us {hits_on_us} in {ticks} ticks"
+            decisions,
+            still_inputs,
+            "duel window: hammer presses {hammer_presses}, jump presses {jump_presses}, hammer hits by us {hits_by_us} / on us {hits_on_us}, inputs that pressed nothing {still_inputs} of {decisions} decisions in {ticks} ticks"
         ),
         BotEvent::Block { tick, victim } => tracing::info!(tick, victim, "block"),
         BotEvent::BlockedBy { tick, by } => tracing::info!(tick, by, "blocked by"),
@@ -926,6 +930,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
             .unwrap_or(ddai_planner::hybrid::DEFAULT_BUDGET_MS as u32),
         prediction_margin_ms: (!cfg.client.adaptive_margin).then_some(cfg.client.prediction_margin_ms),
         search_window: SearchWindowStatus::from_window(&bot.latency().recent.stats(tick)),
+        search_threads: cfg.brain.search_threads.and_then(|n| u32::try_from(n).ok()),
     }
 }
 

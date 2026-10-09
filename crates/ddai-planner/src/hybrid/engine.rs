@@ -104,6 +104,8 @@ pub struct Ctx {
     /// Task 3.10b: steps of the plans of this decision (`0` = the worker planner's configured length). The longer horizon of a frozen victim
     /// (`HybridConfig::frozen_steps`) makes a worker's step-tick table follow it.
     pub steps: i32,
+    /// Task 3.23: the reacting victim of the rollouts plays the counter ([`crate::config::PlannerConfig::counter_release`]).
+    pub counter: bool,
 }
 
 /// One rollout to run: plan `plan` of the batch under model combination `combo` (bit 0: the
@@ -265,6 +267,7 @@ impl Worker {
         self.planner.cfg_mut().self_freeze_bias = self.base_bias * ctx.self_freeze_bias;
         self.planner
             .set_plan_steps(if ctx.steps > 0 { ctx.steps } else { self.base_steps });
+        self.planner.cfg_mut().counter_release = ctx.counter;
         self.self_id = ctx.self_id;
         self.victim_id = ctx.victim_id;
         self.prev = ctx.prev;
@@ -1084,6 +1087,7 @@ mod pool_tests {
             }),
             self_freeze_bias: 1.0,
             steps: 0,
+            counter: false,
         })
     }
 

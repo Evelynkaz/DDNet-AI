@@ -187,6 +187,8 @@ pub struct BotConfig {
     /// Task 3.18 (`--finish wb`, opt-in; implies `finish`): the target selection also keeps the frozen current target the wayblock guard would skip
     /// while it is falling ([`crate::target::TargetPicker::set_finish_wb`]).
     pub finish_wb: bool,
+    /// Task 3.23 (D-121, `--duel-fixes static`): in a detected duel the target selection never drops the duel opponent as "AFK" ([`PickCtx::duel_opponent`]).
+    pub duel_afk: bool,
     /// `--no-selfkill` (D-102): the bot never kills itself ([`Bot::set_no_selfkill`]); the owner's `!kill` stays. The runner also
     /// re-reads [`BotConfig::selfkill_marker`] once a second ([`crate::selfkill`]).
     pub no_selfkill: bool,
@@ -254,6 +256,7 @@ impl Default for BotConfig {
             strong: false,
             console_names: false,
             finish: false,
+            duel_afk: false,
             finish_wb: false,
             no_selfkill: false,
             selfkill_marker: None,
@@ -332,6 +335,9 @@ pub enum BotEvent {
         jump_presses: u64,
         hits_by_us: u64,
         hits_on_us: u64,
+        /// Task 3.23: decisions of the window, and those whose input pressed nothing (no direction, jump, hook or fire): the stand-still of the AFK hole.
+        decisions: u64,
+        still_inputs: u64,
     },
     Block {
         tick: i32,
@@ -430,6 +436,8 @@ pub struct BotStats {
     pub hammer_fires: u64,
     /// Task 3.19: jump key presses sent (a rising edge of the key).
     pub jump_presses: u64,
+    /// Task 3.23: inputs sent that pressed nothing at all (no direction, jump, hook or fire).
+    pub still_inputs: u64,
     pub self_kills: u64,
     pub vetoed_hooks: u64,
     /// Fire presses withheld because the hammer would have hit a spared tee.
@@ -484,11 +492,13 @@ struct DuelWindow {
     jump_presses: u64,
     hits_by_us: u64,
     hits_on_us: u64,
+    decisions: u64,
+    still_inputs: u64,
 }
 
 impl DuelWindow {
     /// One decision at `tick`: `now` are the running counters. Starts a window, or closes one that has run `DUEL_WINDOW_TICKS` and returns it.
-    fn step(&mut self, tick: i32, now: [u64; 4]) -> Option<BotEvent> {
+    fn step(&mut self, tick: i32, now: [u64; 6]) -> Option<BotEvent> {
         let Some(start) = self.start else {
             *self = DuelWindow {
                 start: Some(tick),
@@ -496,6 +506,8 @@ impl DuelWindow {
                 jump_presses: now[1],
                 hits_by_us: now[2],
                 hits_on_us: now[3],
+                decisions: now[4],
+                still_inputs: now[5],
             };
             return None;
         };
@@ -514,6 +526,8 @@ impl DuelWindow {
             jump_presses: now[1].saturating_sub(self.jump_presses),
             hits_by_us: now[2].saturating_sub(self.hits_by_us),
             hits_on_us: now[3].saturating_sub(self.hits_on_us),
+            decisions: now[4].saturating_sub(self.decisions),
+            still_inputs: now[5].saturating_sub(self.still_inputs),
         };
         *self = DuelWindow {
             start: Some(tick),
@@ -521,6 +535,8 @@ impl DuelWindow {
             jump_presses: now[1],
             hits_by_us: now[2],
             hits_on_us: now[3],
+            decisions: now[4],
+            still_inputs: now[5],
         };
         Some(ev)
     }
@@ -1463,7 +1479,14 @@ impl Bot {
         // Task 3.19: the duel journal, a line per 30 s of a detected duel.
         if self.duel.active().is_some() {
             let (by, on) = self.clipper.hammer_hits();
-            let now = [self.stats.hammer_fires, self.stats.jump_presses, by, on];
+            let now = [
+                self.stats.hammer_fires,
+                self.stats.jump_presses,
+                by,
+                on,
+                self.stats.decisions,
+                self.stats.still_inputs,
+            ];
             if let Some(ev) = self.duel_window.step(snap.tick, now) {
                 push_event(&mut self.events, ev);
             }
@@ -1873,6 +1896,7 @@ impl Bot {
                     base: live.base_world(),
                     lag_ticks,
                     mode: *mode,
+                    duel_opponent: if cfg.duel_afk { duel.opponent() } else { None },
                 },
                 hooks,
                 plan,
@@ -2114,6 +2138,9 @@ impl Bot {
         }
         if info.jump_rising {
             stats.jump_presses += 1;
+        }
+        if action.direction == 0 && !action.jump && !action.hook && !action.fire {
+            stats.still_inputs += 1;
         }
         *last_aim = (input.target_x, input.target_y);
         *last_sent = player_input_from_net(input);
@@ -2536,18 +2563,20 @@ mod tests {
         use super::{BotEvent, DUEL_WINDOW_TICKS, DuelWindow};
         let mut w = DuelWindow::default();
         assert!(
-            w.step(1000, [5, 7, 1, 2]).is_none(),
+            w.step(1000, [5, 7, 1, 2, 10, 4]).is_none(),
             "the first decision opens the window"
         );
-        assert!(w.step(1000 + DUEL_WINDOW_TICKS - 2, [9, 9, 3, 4]).is_none());
+        assert!(w.step(1000 + DUEL_WINDOW_TICKS - 2, [9, 9, 3, 4, 700, 300]).is_none());
         let Some(BotEvent::DuelWindow {
             ticks,
             hammer_presses,
             jump_presses,
             hits_by_us,
             hits_on_us,
+            decisions,
+            still_inputs,
             ..
-        }) = w.step(1000 + DUEL_WINDOW_TICKS, [15, 19, 6, 5])
+        }) = w.step(1000 + DUEL_WINDOW_TICKS, [15, 19, 6, 5, 760, 340])
         else {
             panic!("the window closes");
         };
@@ -2555,11 +2584,15 @@ mod tests {
             (ticks, hammer_presses, jump_presses, hits_by_us, hits_on_us),
             (DUEL_WINDOW_TICKS, 10, 12, 5, 3)
         );
+        assert_eq!((decisions, still_inputs), (750, 336));
         // The next window starts from the closing counters.
-        assert!(w.step(1000 + DUEL_WINDOW_TICKS + 10, [16, 20, 6, 5]).is_none());
+        assert!(
+            w.step(1000 + DUEL_WINDOW_TICKS + 10, [16, 20, 6, 5, 761, 341])
+                .is_none()
+        );
         // A tick reset (time went back) drops the window; the next decision opens a new one.
-        assert!(w.step(5, [20, 20, 6, 5]).is_none());
-        assert!(w.step(10, [21, 21, 6, 5]).is_none());
+        assert!(w.step(5, [20, 20, 6, 5, 0, 0]).is_none());
+        assert!(w.step(10, [21, 21, 6, 5, 1, 1]).is_none());
     }
 
     use super::*;

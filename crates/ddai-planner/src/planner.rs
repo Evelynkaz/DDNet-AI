@@ -3512,6 +3512,14 @@ impl<W: PlanWorld> Planner<W> {
 
             if self.react_this_pass || self.cfg.opponent_model == OpponentModel::React {
                 opp_input = scripted_action(world, enemy_id, self_id, &opp_input, &mut opp_rng);
+                // Task 3.23: the counter -- the reacting victim lets go of us once it is below us and we are rising.
+                if self.cfg.counter_release
+                    && opp_input.hook != 0
+                    && let (Some(m), Some(e)) = (world.get_tee(self_id), world.get_tee(enemy_id))
+                    && crate::hybrid::duelfix::counter_releases(&m, &e)
+                {
+                    opp_input.hook = 0;
+                }
             } else if !self.predicted.is_empty() {
                 opp_input = self.predicted[s.min(self.predicted.len() - 1)];
             }

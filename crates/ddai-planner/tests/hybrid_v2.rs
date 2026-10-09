@@ -597,6 +597,7 @@ fn the_rope_ceiling_cost_reaches_the_workers_rollouts() {
             threats: None,
             self_freeze_bias: 1.0,
             steps: 0,
+            counter: false,
         });
         let mut engine = Engine::new(&cfg, &pw, ctx, Arc::new(ddai_planner::clock::WallClock::new()));
         let mut batch = Batch::default();

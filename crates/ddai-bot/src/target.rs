@@ -52,6 +52,10 @@ pub struct PickCtx<'a> {
     pub base: &'a World<f32>,
     pub lag_ticks: i32,
     pub mode: Mode,
+    /// Task 3.23 (D-121, `--duel-fixes static`): the opponent of a detected duel. The AFK filter never drops him: a human who steps away from the keyboard
+    /// in a `/1vs1` is still the only tee to fight (the round is not lost while both stand still), and an idle target farther than the "next to us" radius
+    /// was dropped, the bot wandered off.
+    pub duel_opponent: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -247,6 +251,7 @@ impl TargetPicker {
             // plays is skipped.
             // Task 3.12 (`--wb-smart`): not when the idle tee is in the way (the hall we hold, next to us, on the route).
             if !at_war
+                && ctx.duel_opponent != Some(tee.id)
                 && ctx.clock.away_in_game(tee.id, tick, ctx.players)
                 && !hooks.wayblock.afk_in_the_way(&hook_ctx, tee, tee.id == self.target)
             {
@@ -541,6 +546,7 @@ mod tests {
         hooks: Hooks,
         rel: Relations,
         tick: i32,
+        duel_opponent: Option<i32>,
     }
 
     fn tee(id: i32, x: f32) -> Tee {
@@ -569,6 +575,7 @@ mod tests {
                 hooks: Hooks::default(),
                 rel: Relations::new(),
                 tick: 1000,
+                duel_opponent: None,
             }
         }
 
@@ -603,6 +610,7 @@ mod tests {
                     base: &self.world,
                     lag_ticks: 0,
                     mode: Mode::Fight,
+                    duel_opponent: self.duel_opponent,
                 },
                 &mut self.hooks,
                 &mut self.plan,
@@ -1375,6 +1383,33 @@ mod tests {
         k.rel.add(ListKind::Friend, "foe");
         k.set_players(&[(0, "me"), (1, "foe")]);
         k.hooks.wayblock = Box::new(InTheWay(vec![1]));
+        idle_for_a_while(&mut k);
+        assert_eq!(k.pick(), -1, "a friend is never a target");
+    }
+
+    /// Task 3.23 (D-121): the opponent of a detected duel is never dropped as AFK, whatever his distance; another idle tee still is.
+    #[test]
+    fn the_duel_opponent_is_never_dropped_by_the_afk_filter() {
+        let mut f = single();
+        idle_for_a_while(&mut f);
+        assert_eq!(f.pick(), -1, "without the duel an idle tee is skipped");
+        let mut g = single();
+        g.duel_opponent = Some(1);
+        idle_for_a_while(&mut g);
+        assert_eq!(g.pick(), 1, "the duel opponent is a target like anybody else");
+        let mut h = single();
+        h.duel_opponent = Some(2);
+        idle_for_a_while(&mut h);
+        assert_eq!(
+            h.pick(),
+            -1,
+            "a duel against somebody else changes nothing for this tee"
+        );
+        // An idle opponent who is also a friend: the relation flags still rule (`never_target`).
+        let mut k = single();
+        k.rel.add(ListKind::Friend, "foe");
+        k.set_players(&[(0, "me"), (1, "foe")]);
+        k.duel_opponent = Some(1);
         idle_for_a_while(&mut k);
         assert_eq!(k.pick(), -1, "a friend is never a target");
     }

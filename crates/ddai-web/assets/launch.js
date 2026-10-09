@@ -56,10 +56,34 @@
     on: "Эксперимент: в предсказании соперник ходит так, как сервер заранее прислал его настоящий ввод. Помогает, только если сервер присылает эти ходы заранее (раньше снапшота): при запасе предсказания соперника по умолчанию (10 мс) решение почти ничего не узнаёт заранее. Вживую ход был известен хотя бы на тик вперёд у 7,6% пар «снапшот, соперник» (joniTee, 08.10), 8,0% (GER, 07.10) и ≈ 0,2% (дуэль с человеком: его клиент шлёт с запасом по умолчанию, снапшоты обгоняют сообщения); сколько это даёт в силе, вживую не измерено. Сколько раз это было на самом деле, видно в карточке «Бот» (доля снапшотов, где ход известен хотя бы на тик вперёд). Бот только принимает, серверу ничего не отправляет. Выключить на ходу: файл data/bot/preinput.off.",
   };
 
+  // Task 5.17 (D-125): the hybrid's search threads (docs/research/perf-4.13.md, D-123). The numbers are the live bench on a QUIET machine (candidates scored per
+  // decision, median, with `--finish full`); strength per thread was not measured, and under load the helpers compete with the builds and the agents (D-080, D-124).
+  var SEARCH_THREADS_CANDIDATES = { "1": "24–25", "2": "29", "3": "38", "4": "44" };
+  var SEARCH_THREADS_TAIL =
+    " Числа с тихой машины (живой стенд, задача 4.13; медиана, один прогон на значение): кандидатов на решение 24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках; p99 времени решения не хуже; каждый помощник занимает около 5% ядра; пул конечен (≈ 55–62 кандидата). Только на тихой машине: под нагрузкой больше потоков отнимает процессор у сборок и может не помочь. Тихая — это нагрузка < 2 и не меньше 4 свободных ядер (perf-4.13.md, раздел 6). Больше кандидатов не значит больше побед: силу от числа потоков вживую и в арене не измеряли.";
+  // Shown (and the hint turns into a warning) while the host's load is above the quietness threshold and more than one thread is chosen.
+  var SEARCH_THREADS_LOADED =
+    " Машина загружена: потоки поиска сверх 1 отнимают процессор у сборок и могут не помочь — выберите 1.";
+  function searchThreadsHint(v) {
+    var c = SEARCH_THREADS_CANDIDATES[v];
+    if (!c) {
+      return "";
+    }
+    var head =
+      v === "1"
+        ? "Один поток (умолчание бота): около " + c + " кандидатов на решение на тихой машине; помощников нет, процессор не делится."
+        : v === "3"
+          ? "Три потока: около " + c + " кандидатов на решение на тихой машине. Это ставит «Дуэль» (рекомендация сборщика 4.13 для дуэли на тихой машине)."
+          : v === "2"
+            ? "Два потока: около " + c + " кандидатов на решение на тихой машине."
+            : "Четыре потока: около " + c + " кандидатов на решение на тихой машине.";
+    return head + SEARCH_THREADS_TAIL;
+  }
+
   // Task 5.16 (D-120): the «Дуэль» preset. It only fills the form (the owner still presses «Запустить»); every value below says why, with the numbers
   // and the caveats of docs/research/duel-3.19.md (D-116, E-034), preinput.md (D-112) and lag-shave.md (D-115).
   var PRESET_NOTE =
-    "Заполняет форму для дуэли 1 на 1 (F-DDrace): мозг, дожим, самоубийства, ходы сервера (выкл), предсказатель и умный ВБ. Сервер, длительность и спарринг остаются вашими. Запускает только кнопка «Запустить».";
+    "Заполняет форму для дуэли 1 на 1 (F-DDrace): мозг, дожим, самоубийства, ходы сервера (выкл), предсказатель, умный ВБ и потоки поиска (3). Сервер, длительность и спарринг остаются вашими. Запускает только кнопка «Запустить».";
   var PRESET_ITEMS = [
     ["Мозг: Гибрид", "у чистой мухи нет ни дожима, ни ходов сервера."],
     [
@@ -83,6 +107,10 @@
       "нужен для толпы на Copy Love Box; в распознанной дуэли бот ВБ не держит и сам.",
     ],
     [
+      "Потоки поиска: 3",
+      "на тихой машине кандидатов на решение вживую 24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках (4.13; медиана, один прогон на значение); три — рекомендация сборщика для дуэли. Помощник занимает около 5% ядра. Тихая машина — нагрузка < 2 и не меньше 4 свободных ядер (perf-4.13.md, раздел 6). Под нагрузкой потоки отнимают процессор у сборок и могут не помочь: выберите 1. Силу от числа потоков не измеряли.",
+    ],
+    [
       "Тихая машина",
       "под нагрузкой бот оценивает вдвое меньше вариантов: вживую 14,2 кандидата на решение при нагрузке 18–30 против ≈ 27 в арене при часах тихой машины (вживую на тихой машине ещё не измерено) (3.19, 3.16). Нагрузка должна быть не выше 6 (карточка «Состояние», строки про нагрузку и поиск).",
     ],
@@ -94,6 +122,14 @@
   var LOAD_WARN = 6;
   var CANDIDATES_WARN = 20;
   var MIN_DECISIONS = 25;
+  // Task 5.17 (D-125): the 20 was calibrated with ONE search thread. With N threads the quiet baseline is higher (4.13, live bench, median of one run per N:
+  // 24–25 / 29 / 38 / 44 for N = 1 / 2 / 3 / 4), so the threshold is 20 scaled by that ratio and rounded: 20 / 24 / 31 / 36. Unverified live for N > 1.
+  // A thread count that is not 1 to 4 (a hand-started bot) or not reported (an older bot) keeps 20.
+  var CANDIDATES_WARN_BY_THREADS = { "1": 20, "2": 24, "3": 31, "4": 36 };
+
+  function candidatesWarn(threads) {
+    return isNum(threads) && Object.prototype.hasOwnProperty.call(CANDIDATES_WARN_BY_THREADS, String(threads)) ? CANDIDATES_WARN_BY_THREADS[String(threads)] : CANDIDATES_WARN;
+  }
 
   function num1(x) {
     return x.toFixed(1).replace(".", ",");
@@ -113,7 +149,9 @@
   }
 
   // `brain` is the bot's brain name (STATUS `brain`): the candidate threshold was calibrated on the hybrid, so another brain's count is shown and not judged.
-  function quietness(host, sw, brain) {
+  // `threads` is the bot's STATUS `search_threads` (the threshold follows it; none or unknown: 20).
+  function quietness(host, sw, brain, threads) {
+    var warnAt = candidatesWarn(threads);
     var out = { load: "—", search: "—", loadHigh: false, searchLow: false, warn: false, reasons: [] };
     if (host && isNum(host.load1)) {
       out.load = numLoad(host.load1) + " / " + (isNum(host.load5) ? num1(host.load5) : "—") + " / " + (isNum(host.load15) ? num1(host.load15) : "—") + " (1 / 5 / 15 мин)";
@@ -134,13 +172,17 @@
           out.search += " · p90 решения " + fmtMs(sw.brain_p90_us);
         }
         out.search += " · решений: " + sw.decisions + " за " + (isNum(sw.window_s) ? sw.window_s : 30) + " с";
+        // The thread count next to the candidates: the same number means something else with another count (known only for a hybrid; the fly has no search).
+        if (isNum(threads) && threads >= 1 && typeof brain === "string" && brain.indexOf("hybrid") === 0) {
+          out.search += " · потоков поиска: " + threads;
+        }
         if (typeof brain !== "string" || brain.indexOf("hybrid") !== 0) {
-          out.search += " (не гибрид: порог 20 к этому мозгу не применяется)";
+          out.search += " (не гибрид: порог кандидатов к этому мозгу не применяется)";
         } else if (sw.decisions < MIN_DECISIONS) {
           out.search += " (мало, не оцениваем)";
-        } else if (sw.candidates_mean < CANDIDATES_WARN) {
+        } else if (sw.candidates_mean < warnAt) {
           out.searchLow = true;
-          out.reasons.push("кандидатов на решение " + num1(sw.candidates_mean) + " меньше " + CANDIDATES_WARN);
+          out.reasons.push("кандидатов на решение " + num1(sw.candidates_mean) + " меньше " + warnAt);
         }
       }
     }
@@ -178,6 +220,7 @@
     window_model_hybrid_only: "Предсказатель соперника бывает только у гибридных мозгов: для «Мухи» его нет.",
     window_model_bad_path: "Путь к файлу предсказателя недопустим.",
     preinput_hybrid_only: "Настоящие ходы соперника от сервера бывают только у гибридных мозгов: для «Мухи» их нет.",
+    search_threads_hybrid_only: "Потоки поиска бывают только у гибридных мозгов: «Муха» не ищет, для неё остаётся один.",
     bundle_bad_path: "Путь к bundle в конфиге недопустим.",
     config_bad: "Конфиг запуска не читается.",
     config_untrusted: "Конфиг запуска доступен на запись не только root: отказ.",
@@ -216,6 +259,7 @@
     window_model_hybrid_only: "Предсказатель соперника бывает только у гибридных мозгов: для «Мухи» его нет.",
     window_model_bad_path: "Путь к файлу предсказателя недопустим.",
     preinput_hybrid_only: "Настоящие ходы соперника от сервера бывают только у гибридных мозгов: для «Мухи» их нет.",
+    search_threads_hybrid_only: "Потоки поиска бывают только у гибридных мозгов: «Муха» не ищет, для неё остаётся один.",
     rate_limited: "Слишком часто: подождите несколько секунд (не больше 6 запросов в минуту).",
     pending: "Предыдущий запрос ещё не обработан.",
     launcher_unavailable: "Запуск с сайта не установлен на сервере (нет каталога data/launch).",
@@ -377,6 +421,13 @@
         { value: "off", text: "выкл" },
         { value: "on", text: "вкл (эксперимент)" },
       ]);
+      // Task 5.17: the hybrid's search threads, 1 to 4; 1 is the bot's default and is not sent (the absence of the field); the pure fly does not search (hidden).
+      ui.searchThreads = select([
+        { value: "1", text: "1 (по умолчанию)" },
+        { value: "2", text: "2" },
+        { value: "3", text: "3" },
+        { value: "4", text: "4" },
+      ]);
       var form = el("div", "lc-form");
       form.appendChild(field("Сервер", ui.server));
       form.appendChild(field("Мозг", ui.brain));
@@ -391,6 +442,8 @@
       form.appendChild(ui.windowModelField);
       ui.preinputField = field("Настоящие ходы соперника от сервера (эксперимент)", ui.preinput);
       form.appendChild(ui.preinputField);
+      ui.searchThreadsField = field("Потоки поиска", ui.searchThreads);
+      form.appendChild(ui.searchThreadsField);
       form.appendChild(field("Длительность", ui.duration));
       ui.sparringField = field("Спарринг (только локальный сервер)", ui.sparring);
       form.appendChild(ui.sparringField);
@@ -405,6 +458,8 @@
       card.appendChild(ui.modelHint);
       ui.preinputHint = el("p", "hint lc-opt-hint lc-preinput-hint");
       card.appendChild(ui.preinputHint);
+      ui.searchThreadsHint = el("p", "hint lc-opt-hint lc-search-threads-hint");
+      card.appendChild(ui.searchThreadsHint);
       ui.bundle = el("p", "hint lc-bundle");
       card.appendChild(ui.bundle);
 
@@ -442,8 +497,9 @@
       ui.noSelfkill.addEventListener("change", syncOptions);
       ui.windowModel.addEventListener("change", syncMirror);
       ui.preinput.addEventListener("change", syncMirror);
+      ui.searchThreads.addEventListener("change", syncMirror);
       // A change by hand takes back "the form is filled for the duel"; the preset button is lit only while the form IS the preset.
-      [ui.brain, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput].forEach(function (c) {
+      [ui.brain, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput, ui.searchThreads].forEach(function (c) {
         c.addEventListener("change", function () {
           ui.presetDone.textContent = "";
           syncPreset();
@@ -484,6 +540,18 @@
       ui.preinputField.hidden = fly;
       ui.preinputHint.hidden = fly;
       ui.preinputHint.textContent = PREINPUT_HINT[ui.preinput.value] || "";
+      // The search threads belong to the hybrid's search: the pure fly does not search, so the choice is not offered to it.
+      ui.searchThreadsField.hidden = fly;
+      ui.searchThreadsHint.hidden = fly;
+      syncThreadsHint();
+    }
+
+    // The hint of the chosen thread count; while the host's load is above the threshold and more than one thread is chosen it adds the warning (the choice is
+    // never blocked: the owner may know better, and «Дуэль» still sets 3).
+    function syncThreadsHint() {
+      var loaded = !!(bridge && bridge.host && quietness(bridge.host, null, null).loadHigh) && ui.searchThreads.value !== "1";
+      ui.searchThreadsHint.textContent = searchThreadsHint(ui.searchThreads.value) + (loaded ? SEARCH_THREADS_LOADED : "");
+      ui.searchThreadsHint.classList.toggle("warn", loaded);
     }
 
     // «полный» is the duel's choice: with the duel switch off the hint says it does not look like a duel (and turns into a warning).
@@ -502,6 +570,7 @@
       ["preinput", "off"],
       ["windowModel", "off"],
       ["wbSmart", "off"],
+      ["searchThreads", "3"],
     ];
 
     function presetIsSet() {
@@ -531,7 +600,12 @@
     function renderQuiet() {
       var host = bridge ? bridge.host : null;
       var live = !!(bridge && bridge.live && bridge.source === "live");
-      var q = quietness(host, live && bridge.status ? bridge.status.search_window : null, live && bridge.status ? bridge.status.brain : null);
+      var q = quietness(
+        host,
+        live && bridge.status ? bridge.status.search_window : null,
+        live && bridge.status ? bridge.status.brain : null,
+        live && bridge.status ? bridge.status.search_threads : null,
+      );
       var text;
       if (!host || q.load === "—") {
         text = "Нагрузку машины сайт сейчас прочитать не может.";
@@ -544,6 +618,7 @@
       }
       ui.quiet.textContent = text;
       ui.quiet.classList.toggle("warn", q.warn);
+      syncThreadsHint();
     }
 
     // The hints of the two switches that every brain has; the duel switch turns its hint into a warning while it is on.
@@ -645,6 +720,9 @@
       if (status.preinput === true) {
         parts.push("ходы соперника от сервера");
       }
+      if (typeof status.search_threads === "number" && status.search_threads > 1) {
+        parts.push("потоки поиска: " + status.search_threads);
+      }
       if (status.bundle && status.brain && status.brain !== "hybrid") {
         parts.push("муха " + status.bundle);
       }
@@ -718,7 +796,7 @@
       ui.start.classList.toggle("is-loading", busy && ui.start === pressed);
       ui.stop.classList.toggle("is-loading", busy && ui.stop === pressed);
       ui.watch.hidden = !live;
-      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput].forEach(function (c) {
+      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput, ui.searchThreads].forEach(function (c) {
         c.disabled = busy || !enabled;
       });
       ui.preset.disabled = busy || !enabled;
@@ -815,6 +893,12 @@
       // Task 3.20b: the same for the server's pre-inputs: sent only when on, never for the pure fly (the helper refuses that anyway).
       if (ui.preinput.value === "on" && ui.brain.value !== "fly") {
         body.preinput = true;
+      }
+      // Task 5.17: the search threads are sent only above the default (1 is the absence of the field, so an older helper still takes every default start) and never for
+      // the pure fly (the helper refuses that anyway). The value is a JSON integer, 2 to 4, from the select's own closed list.
+      var threads = parseInt(ui.searchThreads.value, 10);
+      if (ui.brain.value !== "fly" && threads >= 2 && threads <= 4) {
+        body.search_threads = threads;
       }
       if (body.server !== "local") {
         var ok = window.confirm(

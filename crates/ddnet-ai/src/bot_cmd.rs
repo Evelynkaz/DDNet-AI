@@ -70,6 +70,12 @@ pub struct BotOpts {
     /// `duel_hammer = "<mode>"` in `settings.toml` does the same (the flag wins). Off until the arena numbers (docs/research/duel-3.19.md) and a live session say otherwise.
     #[arg(long, default_value = "off", value_parser = parse_duel_hammer)]
     pub duel_hammer: String,
+    /// The hybrid's fixes for the weaknesses of the 2026-10-08 duel against a human (task 3.23, D-121): `off` (the default), `all`, or a comma list of `static` (a
+    /// standing or AFK opponent: never dropped by the AFK filter, answered by a plan that acts), `counter` (the opponent's "hook from above, pass under, release")
+    /// and `finish` (a frozen victim lying off the freeze is dragged into it; no swing at a frozen tee). They act only in a detected F-DDrace duel. Off until the arena
+    /// numbers (docs/research/duel-fixes-3.23.md) and a live session say otherwise.
+    #[arg(long, default_value = "off", value_parser = parse_duel_fixes)]
+    pub duel_fixes: String,
     /// Finish blocks (task 3.10, E-021, D-097): `off` (the default), `target` keeps a frozen current target until it is held (the bot's target
     /// logic only: the part with consistent evidence, the live A/B candidate), `full` adds the hybrid's drag-back shaping for a frozen victim
     /// (a duel gain that did not hold up in review: not recommended), `wb` (task 3.18, D-114) is `target` plus the wayblock hold: in the held
@@ -340,6 +346,15 @@ fn parse_duel_hammer(s: &str) -> Result<String, String> {
     }
 }
 
+fn parse_duel_fixes(s: &str) -> Result<String, String> {
+    match ddai_bot::brains::duel_fixes(s) {
+        Some(_) => Ok(s.to_ascii_lowercase()),
+        None => Err(format!(
+            "expected `off`, `all` or a list of `static`, `counter`, `finish`, got {s:?}"
+        )),
+    }
+}
+
 fn parse_finish(s: &str) -> Result<FinishMode, String> {
     match s.to_ascii_lowercase().as_str() {
         "off" => Ok(FinishMode::Off),
@@ -601,6 +616,14 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
             }
         );
     }
+    let (duel_fixes, duel_afk) = ddai_bot::brains::duel_fixes(&o.duel_fixes).unwrap_or_default();
+    brain.duel_fixes = duel_fixes;
+    if o.duel_fixes != "off" {
+        eprintln!(
+            "duel fixes: {} (--duel-fixes; D-121): the hybrid's answers to a standing opponent, to his hook from above and to a frozen victim off the freeze, only in a detected duel",
+            o.duel_fixes
+        );
+    }
     if o.finish.target_logic() {
         // One line at start (the journal of a launch from the site shows that `--finish` reached the bot; STATUS carries it too).
         eprintln!("finish blocks: {} (--finish; D-097)", o.finish.name());
@@ -628,6 +651,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         fixed_target: o.target.clone(),
         finish: o.finish.target_logic(),
         finish_wb: o.finish.hybrid_wb_hold(),
+        duel_afk,
         seed: args.seed,
         clips: ddai_bot::clipper::ClipConfig {
             dir: Some(
@@ -1293,6 +1317,20 @@ mod search_threads_tests {
         assert_eq!(get(&["--duel-hammer", "BOTH"]).unwrap(), "both");
         assert!(get(&["--duel-hammer", "sometimes"]).is_err());
         assert!(get(&["--duel-hammer"]).is_err(), "a value is required");
+    }
+
+    #[test]
+    fn duel_fixes_are_off_by_default_and_take_a_list() {
+        let get = |extra: &[&str]| {
+            let mut v = vec!["x"];
+            v.extend_from_slice(extra);
+            Cli::try_parse_from(v).map(|c| c.bot.duel_fixes)
+        };
+        assert_eq!(get(&[]).unwrap(), "off");
+        assert_eq!(get(&["--duel-fixes", "static,Counter"]).unwrap(), "static,counter");
+        assert_eq!(get(&["--duel-fixes", "ALL"]).unwrap(), "all");
+        assert!(get(&["--duel-fixes", "static,sometimes"]).is_err());
+        assert!(get(&["--duel-fixes"]).is_err(), "a value is required");
     }
 
     #[test]

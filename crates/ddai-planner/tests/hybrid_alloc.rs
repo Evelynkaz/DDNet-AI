@@ -129,6 +129,19 @@ fn finishing_terms_keep_worker_scoring_allocation_free() {
     scoring_is_allocation_free(cfg, true);
 }
 
+/// Task 3.23: the counter (the reacting victim lets go of our rope once below us) adds no allocation to a rollout.
+#[test]
+fn the_counter_keeps_worker_scoring_allocation_free() {
+    let cfg = {
+        let mut c = HybridConfig::fixed();
+        c.workers = 1;
+        c.duel_fixes.counter_release = true;
+        c.duel_fixes.duel_only = false;
+        c
+    };
+    scoring_is_allocation_free(cfg, false);
+}
+
 /// Task 3.10b: the longer horizon of a frozen victim (`frozen_steps` 16, 48 ticks a rollout) and the approach family add no allocation to a rollout
 /// either, once the worker has been through a long decision (its step-tick table grew with the config, at construction).
 #[test]
@@ -208,6 +221,7 @@ fn base_ctx(pw: &PhysicsWorld) -> Ctx {
         }),
         self_freeze_bias: 1.0,
         steps: 0,
+        counter: false,
     }
 }
 
@@ -226,6 +240,7 @@ fn scoring_is_allocation_free_n(cfg: HybridConfig, frozen_victim: bool, steps: u
     }
     let mut ctx = Box::new(base_ctx(&pw));
     ctx.steps = steps as i32;
+    ctx.counter = cfg.duel_fixes.counter_release;
     let mut engine = Engine::new(&cfg, &pw, ctx, Arc::new(WallClock::new()));
     let mut batch = Batch::default();
     let mut out = Vec::new();

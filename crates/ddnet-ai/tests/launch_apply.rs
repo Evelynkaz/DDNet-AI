@@ -827,9 +827,10 @@ fn the_preinput_switch_is_written_always_as_on_or_off_for_the_hybrids_and_surviv
 }
 
 #[test]
-fn the_duel_presets_request_starts_the_bot_with_the_duel_words_and_nothing_new() {
-    // Task 5.16 (D-120): the site's «Дуэль» preset only fills the form; what the page then sends is made of the fields that already exist. The helper,
-    // which re-checks every value, writes the duel's words and echoes them in its status (so the «Запуск» card shows what really started).
+fn the_duel_presets_request_starts_the_bot_with_the_duel_words_and_three_search_threads() {
+    // Task 5.16 (D-120): the site's «Дуэль» preset only fills the form; what the page then sends is made of the request's own fields (task 5.17, D-125:
+    // `search_threads: 3` among them). The helper, which re-checks every value, writes the duel's words and echoes them in its status (so the «Запуск»
+    // card shows what really started).
     let rig = Rig::new();
     let mut body = start("local");
     body["brain"] = json!("hybrid");
@@ -837,12 +838,14 @@ fn the_duel_presets_request_starts_the_bot_with_the_duel_words_and_nothing_new()
     body["mirror"] = json!("on");
     body["finish"] = json!("full");
     body["no_selfkill"] = json!(true);
+    body["search_threads"] = json!(3);
     assert!(rig.send(&body).status.success());
     let st = rig.status();
     assert_eq!(st["state"], "started", "{st}");
     let env = rig.env_file();
     for line in [
         "BOT_BRAIN=\"hybrid\"\n",
+        "BOT_SEARCH_THREADS=\"3\"\n",
         "BOT_FINISH=\"full\"\n",
         "BOT_NO_SELFKILL=\"true\"\n",
         "BOT_PREINPUT=\"off\"\n",
@@ -857,9 +860,10 @@ fn the_duel_presets_request_starts_the_bot_with_the_duel_words_and_nothing_new()
             st["no_selfkill"].as_bool(),
             st["preinput"].as_bool(),
             st["wb_smart"].as_str(),
-            st["window_model"].as_bool()
+            st["window_model"].as_bool(),
+            st["search_threads"].as_u64()
         ),
-        (Some("full"), Some(true), Some(false), Some("off"), Some(false)),
+        (Some("full"), Some(true), Some(false), Some("off"), Some(false), Some(3)),
         "{st}"
     );
     // The preset names nothing else: a request with a `preset` (or any invented) field is refused whole, nothing started.
@@ -917,6 +921,122 @@ fn the_preinput_switch_is_refused_for_the_pure_fly_and_for_any_value_but_a_boole
     }
     let rig = Rig::new();
     let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop","preinput":false}));
+    assert!(out.status.success());
+    assert_eq!(reason(&rig.status()), "bad_request");
+}
+
+#[test]
+fn the_search_threads_are_written_always_as_a_digit_for_the_hybrids_and_survive_to_the_exit_status() {
+    // Task 5.17 (D-125). No field (an old request) and `1`: the line is there and says 1, so no value left in a unit's environment leaks in.
+    for body in [start("local"), {
+        let mut b = start("local");
+        b["search_threads"] = json!(1);
+        b
+    }] {
+        let rig = Rig::new();
+        assert!(rig.send(&body).status.success());
+        assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+        assert!(
+            rig.env_file().contains("BOT_SEARCH_THREADS=\"1\"\n"),
+            "{}",
+            rig.env_file()
+        );
+        assert_eq!(rig.status()["search_threads"].as_u64(), Some(1));
+    }
+    // 2 to 4: both hybrid brains, with the other lines independent; the helper's own digit, nothing formatted from the request.
+    for brain in ["hybrid", "hybrid-fly"] {
+        for n in 2..=4u64 {
+            let rig = Rig::new();
+            let mut body = start("local");
+            body["brain"] = json!(brain);
+            body["search_threads"] = json!(n);
+            body["finish"] = json!("full");
+            assert!(rig.send(&body).status.success());
+            let st = rig.status();
+            assert_eq!(st["state"], "started", "{brain} {n}: {st}");
+            assert_eq!(
+                (st["search_threads"].as_u64(), st["finish"].as_str()),
+                (Some(n), Some("full")),
+                "{st}"
+            );
+            let env = rig.env_file();
+            assert!(
+                env.contains(&format!("BOT_SEARCH_THREADS=\"{n}\"\n"))
+                    && env.contains("BOT_FINISH=\"full\"\n")
+                    && env.contains("BOT_PREINPUT=\"off\"\n"),
+                "{brain} {n}: {env}"
+            );
+            assert_eq!(rig.actions().last().unwrap(), "start ddnet-ai-bot.service");
+            for line in env.lines().filter(|l| !l.starts_with('#')) {
+                assert!(line.contains("=\""), "{line}");
+            }
+            // It survives to the status the exit hook writes (read from the helper's memory, not from the request).
+            assert!(rig.exited("exited", "0").status.success());
+            let st = rig.status();
+            assert_eq!(st["search_threads"].as_u64(), Some(n), "{st}");
+        }
+    }
+}
+
+#[test]
+fn the_search_threads_are_refused_for_the_pure_fly_beyond_one_and_for_any_value_outside_one_to_four() {
+    // The pure fly does not search: more than one thread is refused with its own code, nothing started; one (the same as absent) is fine.
+    for n in 2..=4 {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["brain"] = json!("fly");
+        body["search_threads"] = json!(n);
+        assert!(rig.send(&body).status.success());
+        assert_eq!(
+            reason(&rig.status()),
+            "search_threads_hybrid_only",
+            "{n}: {}",
+            rig.status()
+        );
+        assert!(rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists(), "{n}");
+    }
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["brain"] = json!("fly");
+    body["search_threads"] = json!(1);
+    assert!(rig.send(&body).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    assert!(
+        rig.env_file().contains("BOT_SEARCH_THREADS=\"1\"\n"),
+        "{}",
+        rig.env_file()
+    );
+    // Nothing but the whole numbers 1 to 4, and a stop carries none: no zero, no five, no `auto`, no float, no word, no injection.
+    for bad in [
+        json!(0),
+        json!(5),
+        json!(16),
+        json!(255),
+        json!(256),
+        json!(-1),
+        json!(2.0),
+        json!(2.5),
+        json!("2"),
+        json!("auto"),
+        json!("2\nBOT_SERVER=\"203.0.113.5:8308\""),
+        json!("$(id)"),
+        json!(true),
+        json!(""),
+        json!([2]),
+        json!({"n": 2}),
+    ] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["search_threads"] = bad.clone();
+        assert!(rig.send(&body).status.success());
+        assert_eq!(reason(&rig.status()), "bad_request", "{bad}: {}", rig.status());
+        assert!(
+            rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists(),
+            "{bad}"
+        );
+    }
+    let rig = Rig::new();
+    let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop","search_threads":1}));
     assert!(out.status.success());
     assert_eq!(reason(&rig.status()), "bad_request");
 }

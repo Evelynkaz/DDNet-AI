@@ -201,7 +201,7 @@ fn rise(vy: f64) -> f64 {
 }
 
 /// The distance (px) up from `from` to the first freeze/death tile of the columns the tee covers, if no solid tile comes first within `limit`.
-fn hazard_above<C: PlanCollision>(col: &C, from: Vec2, limit: f64) -> Option<f64> {
+pub(crate) fn hazard_above<C: PlanCollision>(col: &C, from: Vec2, limit: f64) -> Option<f64> {
     let mut best: Option<f64> = None;
     for dx in [-10.0, 0.0, 10.0] {
         let mut d = 8.0;

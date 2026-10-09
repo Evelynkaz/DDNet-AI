@@ -1,0 +1,33 @@
+# work-clock: default-rate
+# Task 3.23 (E-038): the two fixed AFK positions of the 2026-10-08 post-mortem (configs/arena/pm1008-afk.toml) with and without the static fix, 4 us.
+name = "d121 afk positions"
+base_seed = 33001
+games = 40
+
+[[condition]]
+name = "afk 4us base"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.004, lag = 2, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "idle" }]
+
+[[condition]]
+name = "afk 4us afk"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.004, lag = 2, hybrid = { frozen_drag_weight = 20.0, duel_fixes = { static_push = true } } }, { brain = "idle" }]
+
+[[condition]]
+name = "r1 4us base"
+arena = "pm1008-afk-r1"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.004, lag = 2, hybrid = { frozen_drag_weight = 20.0 } }, { brain = "idle" }]
+
+[[condition]]
+name = "r1 4us afk"
+arena = "pm1008-afk-r1"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.004, lag = 2, hybrid = { frozen_drag_weight = 20.0, duel_fixes = { static_push = true } } }, { brain = "idle" }]

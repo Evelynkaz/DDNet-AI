@@ -447,6 +447,7 @@ fn fixed_mode_reads_no_clock_and_the_shield_still_runs() {
             lag_ticks: 0,
             roll_ticks: 0,
             deadline_ms: None,
+            duel: false,
         },
     );
     assert!((-1..=1).contains(&out.direction));

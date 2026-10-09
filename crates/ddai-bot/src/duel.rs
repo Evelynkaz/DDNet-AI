@@ -240,6 +240,12 @@ impl DuelDetector {
         self.active
     }
 
+    /// Task 3.23 (D-121): the client id of the one other player of the duel team, while a duel is on and the team named him (a duel that only the chat
+    /// armed has none yet).
+    pub fn opponent(&self) -> Option<i32> {
+        self.active.and(self.opponent).and_then(|o| i32::try_from(o).ok())
+    }
+
     fn evidence(&self, tick: i32) -> bool {
         self.evidence_until.is_some_and(|until| tick < until)
     }
