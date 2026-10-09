@@ -840,7 +840,7 @@ test("the «Бот» card: the machine's quietness rows and the warning (load ab
   const planner = liveStatusAnswer(host(1), sw(600, 5.0, 4000));
   planner.status.brain = "planner-normal-5ms";
   answer = planner;
-  await expect(search).toContainText("(не гибрид: порог 20 к этому мозгу не применяется)", { timeout: 15_000 });
+  await expect(search).toContainText("(не гибрид: порог кандидатов к этому мозгу не применяется)", { timeout: 15_000 });
   await expect(warn).toBeHidden();
   answer = liveStatusAnswer(null, sw(100, 25, 4000));
   await expect(load).toHaveText("—", { timeout: 15_000 });
@@ -879,4 +879,95 @@ test("the «Бот» card: the machine's quietness rows and the warning (load ab
   await page.setViewportSize({ width: 360, height: 740 });
   await noHorizontalScroll(page);
   await page.screenshot({ path: path.join(SHOTS, "5.16-quiet-phone.png"), fullPage: true });
+});
+
+test("the «Бот» card and the «Запуск» card follow the search threads: the candidate threshold scales with them, the count stands beside the candidates, the fly shows «—», and the thread hint warns under load", async ({ page }) => {
+  test.setTimeout(120_000);
+  await login(page);
+  // Task 5.17 (D-125), review round 1 (F1, F2, F4). The status answers are scripted (the real load is not ours to set).
+  let answer: any = null;
+  await page.route("**/api/bot/status", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(answer) });
+  });
+  const sw = (decisions: number, mean: number | null) => ({ window_s: 30, decisions, candidates_mean: mean, brain_p90_us: 4000 });
+  const host = (l1: number) => ({ load1: l1, load5: 1.8, load15: 1.5, cpus: 8 });
+  const withThreads = (h: any, w: any, threads: any, brain = "hybrid") => {
+    const a = liveStatusAnswer(h, w);
+    a.status.search_threads = threads;
+    a.status.brain = brain;
+    return a;
+  };
+  const search = page.locator("#bs-search");
+  const warn = page.locator("#bs-quiet-warn");
+  const rowThreads = page.locator("#bs-searchthreads");
+  answer = withThreads(host(1), sw(600, 28), 1);
+  await openBotTab(page);
+
+  // 1. F2: 28 candidates is fine for one thread (threshold 20) and low for three (31): the same number, another verdict; the count stands beside it.
+  await expect(search).toHaveText("28,0 кандидата на решение · p90 решения 4,00 мс · решений: 600 за 30 с · потоков поиска: 1", { timeout: 15_000 });
+  await expect(warn).toBeHidden();
+  await expect(rowThreads).toHaveText("1");
+  answer = withThreads(host(1), sw(600, 28), 3);
+  await expect(warn).toBeVisible({ timeout: 15_000 });
+  await expect(warn).toContainText("кандидатов на решение 28,0 меньше 31");
+  await expect(search).toContainText("потоков поиска: 3");
+  await expect(rowThreads).toHaveText("3");
+  // The thresholds of 2 and 4 threads, and the edges (the rule is strictly below).
+  for (const [n, edge] of [[2, 24], [3, 31], [4, 36]] as const) {
+    answer = withThreads(host(1), sw(600, edge), n);
+    await expect(search).toContainText("потоков поиска: " + n, { timeout: 15_000 });
+    await expect(warn).toBeHidden();
+    answer = withThreads(host(1), sw(600, edge - 0.1), n);
+    await expect(warn).toContainText("меньше " + edge, { timeout: 15_000 });
+  }
+  // A bot that does not report the count (older build) or a hand-started 8 keeps the threshold of 20 (and no count is claimed for the unreported one).
+  answer = liveStatusAnswer(host(1), sw(600, 22));
+  await expect(search).toHaveText("22,0 кандидата на решение · p90 решения 4,00 мс · решений: 600 за 30 с", { timeout: 15_000 });
+  await expect(warn).toBeHidden();
+  await expect(rowThreads).toHaveText("—");
+  answer = withThreads(host(1), sw(600, 22), 8);
+  await expect(search).toContainText("потоков поиска: 8", { timeout: 15_000 });
+  await expect(warn).toBeHidden();
+
+  // 2. F4: the pure fly does not search: «—» in the row, no thread count beside the candidates.
+  answer = withThreads(host(1), sw(600, 22), 1, "fly");
+  await expect(rowThreads).toHaveText("—", { timeout: 15_000 });
+  await expect(search).not.toContainText("потоков поиска");
+  answer = withThreads(host(1), sw(600, 22), 1, "hybrid");
+  await expect(rowThreads).toHaveText("1", { timeout: 15_000 });
+
+  // 3. F1: the thread hint of the «Запуск» card. Quiet machine: the research's condition, no load sentence. Loaded machine and more than one thread: the
+  // sentence and the warning look; one thread: no sentence. Nothing is blocked either way.
+  const hint = card(page).locator(".lc-search-threads-hint");
+  const threads = field(page, "Потоки поиска");
+  answer = withThreads(host(0.5), sw(600, 40), 3);
+  await expect(card(page).locator(".lc-quiet")).toContainText("нагрузка 0,5", { timeout: 15_000 });
+  await field(page, "Мозг").selectOption("hybrid");
+  await threads.selectOption("3");
+  await expect(hint).toContainText("Тихая — это нагрузка < 2 и не меньше 4 свободных ядер");
+  await expect(hint).toContainText("медиана, один прогон на значение");
+  await expect(hint).not.toContainText("в среднем");
+  await expect(hint).not.toContainText("Машина загружена");
+  await expect(hint).not.toHaveClass(/warn/);
+  answer = withThreads(host(14.1), sw(600, 40), 3);
+  await expect(hint).toContainText("Машина загружена: потоки поиска сверх 1 отнимают процессор у сборок и могут не помочь — выберите 1", { timeout: 15_000 });
+  await expect(hint).toHaveClass(/warn/);
+  await page.screenshot({ path: path.join(SHOTS, "5.17-card-loaded.png"), fullPage: true });
+  await threads.selectOption("1");
+  await expect(hint).not.toContainText("Машина загружена");
+  await expect(hint).not.toHaveClass(/warn/);
+  await threads.selectOption("2");
+  await expect(hint).toContainText("Машина загружена");
+  // The preset still sets 3 under load (nothing is blocked), and the sentence follows.
+  await card(page).locator(".lc-preset-btn").click();
+  await expect(threads).toHaveValue("3");
+  await expect(hint).toContainText("Машина загружена");
+  await card(page).locator(".lc-preset-info summary").click();
+  await expect(card(page).locator(".lc-preset-list")).toContainText("Тихая машина — нагрузка < 2 и не меньше 4 свободных ядер");
+  await expect(card(page).locator(".lc-preset-list")).toContainText("медиана, один прогон на значение");
+  // Back to quiet: the sentence goes.
+  answer = withThreads(host(0.5), sw(600, 40), 3);
+  await expect(hint).not.toContainText("Машина загружена", { timeout: 15_000 });
+  await page.setViewportSize({ width: 360, height: 740 });
+  await noHorizontalScroll(page);
 });

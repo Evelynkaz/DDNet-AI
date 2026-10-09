@@ -60,7 +60,10 @@
   // decision, median, with `--finish full`); strength per thread was not measured, and under load the helpers compete with the builds and the agents (D-080, D-124).
   var SEARCH_THREADS_CANDIDATES = { "1": "24–25", "2": "29", "3": "38", "4": "44" };
   var SEARCH_THREADS_TAIL =
-    " Числа с тихой машины (живой стенд, задача 4.13): кандидатов на решение в среднем 24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках; p99 времени решения не хуже; каждый помощник занимает около 5% ядра; пул конечен (≈ 55–62 кандидата). Только на тихой машине: под нагрузкой больше потоков отнимает процессор у сборок и может не помочь. Больше кандидатов не значит больше побед: силу от числа потоков вживую и в арене не измеряли.";
+    " Числа с тихой машины (живой стенд, задача 4.13; медиана, один прогон на значение): кандидатов на решение 24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках; p99 времени решения не хуже; каждый помощник занимает около 5% ядра; пул конечен (≈ 55–62 кандидата). Только на тихой машине: под нагрузкой больше потоков отнимает процессор у сборок и может не помочь. Тихая — это нагрузка < 2 и не меньше 4 свободных ядер (perf-4.13.md, раздел 6). Больше кандидатов не значит больше побед: силу от числа потоков вживую и в арене не измеряли.";
+  // Shown (and the hint turns into a warning) while the host's load is above the quietness threshold and more than one thread is chosen.
+  var SEARCH_THREADS_LOADED =
+    " Машина загружена: потоки поиска сверх 1 отнимают процессор у сборок и могут не помочь — выберите 1.";
   function searchThreadsHint(v) {
     var c = SEARCH_THREADS_CANDIDATES[v];
     if (!c) {
@@ -105,7 +108,7 @@
     ],
     [
       "Потоки поиска: 3",
-      "на тихой машине кандидатов на решение вживую 24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках (4.13); три — рекомендация сборщика для дуэли. Помощник занимает около 5% ядра. Под нагрузкой потоки отнимают процессор у сборок и могут не помочь: выберите 1. Силу от числа потоков не измеряли.",
+      "на тихой машине кандидатов на решение вживую 24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках (4.13; медиана, один прогон на значение); три — рекомендация сборщика для дуэли. Помощник занимает около 5% ядра. Тихая машина — нагрузка < 2 и не меньше 4 свободных ядер (perf-4.13.md, раздел 6). Под нагрузкой потоки отнимают процессор у сборок и могут не помочь: выберите 1. Силу от числа потоков не измеряли.",
     ],
     [
       "Тихая машина",
@@ -119,6 +122,14 @@
   var LOAD_WARN = 6;
   var CANDIDATES_WARN = 20;
   var MIN_DECISIONS = 25;
+  // Task 5.17 (D-125): the 20 was calibrated with ONE search thread. With N threads the quiet baseline is higher (4.13, live bench, median of one run per N:
+  // 24–25 / 29 / 38 / 44 for N = 1 / 2 / 3 / 4), so the threshold is 20 scaled by that ratio and rounded: 20 / 24 / 31 / 36. Unverified live for N > 1.
+  // A thread count that is not 1 to 4 (a hand-started bot) or not reported (an older bot) keeps 20.
+  var CANDIDATES_WARN_BY_THREADS = { "1": 20, "2": 24, "3": 31, "4": 36 };
+
+  function candidatesWarn(threads) {
+    return isNum(threads) && Object.prototype.hasOwnProperty.call(CANDIDATES_WARN_BY_THREADS, String(threads)) ? CANDIDATES_WARN_BY_THREADS[String(threads)] : CANDIDATES_WARN;
+  }
 
   function num1(x) {
     return x.toFixed(1).replace(".", ",");
@@ -138,7 +149,9 @@
   }
 
   // `brain` is the bot's brain name (STATUS `brain`): the candidate threshold was calibrated on the hybrid, so another brain's count is shown and not judged.
-  function quietness(host, sw, brain) {
+  // `threads` is the bot's STATUS `search_threads` (the threshold follows it; none or unknown: 20).
+  function quietness(host, sw, brain, threads) {
+    var warnAt = candidatesWarn(threads);
     var out = { load: "—", search: "—", loadHigh: false, searchLow: false, warn: false, reasons: [] };
     if (host && isNum(host.load1)) {
       out.load = numLoad(host.load1) + " / " + (isNum(host.load5) ? num1(host.load5) : "—") + " / " + (isNum(host.load15) ? num1(host.load15) : "—") + " (1 / 5 / 15 мин)";
@@ -159,13 +172,17 @@
           out.search += " · p90 решения " + fmtMs(sw.brain_p90_us);
         }
         out.search += " · решений: " + sw.decisions + " за " + (isNum(sw.window_s) ? sw.window_s : 30) + " с";
+        // The thread count next to the candidates: the same number means something else with another count (known only for a hybrid; the fly has no search).
+        if (isNum(threads) && threads >= 1 && typeof brain === "string" && brain.indexOf("hybrid") === 0) {
+          out.search += " · потоков поиска: " + threads;
+        }
         if (typeof brain !== "string" || brain.indexOf("hybrid") !== 0) {
-          out.search += " (не гибрид: порог 20 к этому мозгу не применяется)";
+          out.search += " (не гибрид: порог кандидатов к этому мозгу не применяется)";
         } else if (sw.decisions < MIN_DECISIONS) {
           out.search += " (мало, не оцениваем)";
-        } else if (sw.candidates_mean < CANDIDATES_WARN) {
+        } else if (sw.candidates_mean < warnAt) {
           out.searchLow = true;
-          out.reasons.push("кандидатов на решение " + num1(sw.candidates_mean) + " меньше " + CANDIDATES_WARN);
+          out.reasons.push("кандидатов на решение " + num1(sw.candidates_mean) + " меньше " + warnAt);
         }
       }
     }
@@ -526,7 +543,15 @@
       // The search threads belong to the hybrid's search: the pure fly does not search, so the choice is not offered to it.
       ui.searchThreadsField.hidden = fly;
       ui.searchThreadsHint.hidden = fly;
-      ui.searchThreadsHint.textContent = searchThreadsHint(ui.searchThreads.value);
+      syncThreadsHint();
+    }
+
+    // The hint of the chosen thread count; while the host's load is above the threshold and more than one thread is chosen it adds the warning (the choice is
+    // never blocked: the owner may know better, and «Дуэль» still sets 3).
+    function syncThreadsHint() {
+      var loaded = !!(bridge && bridge.host && quietness(bridge.host, null, null).loadHigh) && ui.searchThreads.value !== "1";
+      ui.searchThreadsHint.textContent = searchThreadsHint(ui.searchThreads.value) + (loaded ? SEARCH_THREADS_LOADED : "");
+      ui.searchThreadsHint.classList.toggle("warn", loaded);
     }
 
     // «полный» is the duel's choice: with the duel switch off the hint says it does not look like a duel (and turns into a warning).
@@ -575,7 +600,12 @@
     function renderQuiet() {
       var host = bridge ? bridge.host : null;
       var live = !!(bridge && bridge.live && bridge.source === "live");
-      var q = quietness(host, live && bridge.status ? bridge.status.search_window : null, live && bridge.status ? bridge.status.brain : null);
+      var q = quietness(
+        host,
+        live && bridge.status ? bridge.status.search_window : null,
+        live && bridge.status ? bridge.status.brain : null,
+        live && bridge.status ? bridge.status.search_threads : null,
+      );
       var text;
       if (!host || q.load === "—") {
         text = "Нагрузку машины сайт сейчас прочитать не может.";
@@ -588,6 +618,7 @@
       }
       ui.quiet.textContent = text;
       ui.quiet.classList.toggle("warn", q.warn);
+      syncThreadsHint();
     }
 
     // The hints of the two switches that every brain has; the duel switch turns its hint into a warning while it is on.

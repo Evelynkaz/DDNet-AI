@@ -1145,6 +1145,13 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         "каждый помощник занимает около 5% ядра",
         "Только на тихой машине: под нагрузкой больше потоков отнимает процессор у сборок и может не помочь",
         "Больше кандидатов не значит больше побед",
+        // Review round 1: the research's quiet condition, medians (one run per value), the load sentence, the thread-scaled candidate threshold.
+        "Тихая — это нагрузка < 2 и не меньше 4 свободных ядер",
+        "медиана, один прогон на значение",
+        "Машина загружена: потоки поиска сверх 1 отнимают процессор у сборок и могут не помочь — выберите 1",
+        "Тихая машина — нагрузка < 2 и не меньше 4 свободных ядер",
+        "CANDIDATES_WARN_BY_THREADS",
+        "потоков поиска: ",
         "Потоки поиска: 3",
         "рекомендация сборщика 4.13 для дуэли на тихой машине",
         "search_threads_hybrid_only",
@@ -1178,6 +1185,7 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
     assert!(html.contains(r#"id="bs-windowmodel""#));
     assert!(html.contains(r#"id="bs-preinput""#));
     assert!(html.contains(r#"id="bs-searchthreads""#));
+    assert!(html.contains("при 2 / 3 / 4 потоках порог 24 / 31 / 36"));
     // Task 5.16: the machine's quietness rows and warning of the «Бот» card.
     for id in ["bs-load", "bs-search", "bs-quiet-warn", "bs-quiet-note"] {
         assert!(html.contains(&format!(r#"id="{id}""#)), "{id}");

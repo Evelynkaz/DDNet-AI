@@ -667,8 +667,8 @@
     var lastInfo = null;
 
     // Task 5.16 (D-120): the «Машина» rows and the warning. The judgement is `LaunchCard.quietness` (launch.js), the one the «Запуск» card uses too.
-    function renderQuiet(host, searchWindow, brain) {
-      var q = LaunchCard.quietness(host, searchWindow, brain);
+    function renderQuiet(host, searchWindow, brain, threads) {
+      var q = LaunchCard.quietness(host, searchWindow, brain, threads);
       setText("bs-load", q.load);
       setText("bs-search", q.search);
       el("bs-load").classList.toggle("kv-warn", q.loadHigh);
@@ -729,9 +729,10 @@
       setText("bs-windowmodel", wm);
       setText("bs-preinput", preinputText(s));
       // Task 5.17 (D-125): the threads that score the hybrid's candidates (1 = the default); a bot of an older build sends none, and a null (left to «auto») is not a number: «—».
+      // The pure fly does not search: «—» there (a bot started with the default would otherwise read «1»).
       setText(
         "bs-searchthreads",
-        typeof s.search_threads === "number" && s.search_threads >= 1 && s.search_threads <= 16 && Math.floor(s.search_threads) === s.search_threads
+        typeof s.search_threads === "number" && s.search_threads >= 1 && s.search_threads <= 16 && Math.floor(s.search_threads) === s.search_threads && typeof s.brain === "string" && s.brain.indexOf("hybrid") === 0
           ? String(s.search_threads)
           : "—"
       );
@@ -743,7 +744,7 @@
       setText("bs-clips", String(s.clips_saved | 0));
       setText("bs-latency", fmtUs(s.decide_p50_us) + " / " + fmtUs(s.decide_p99_us));
       setText("bs-latency2", fmtUs(s.brain_p99_us) + " / " + fmtUs(s.overhead_p99_us));
-      renderQuiet(info.host, s.search_window, s.brain);
+      renderQuiet(info.host, s.search_window, s.brain, s.search_threads);
       setText("bs-identity", [s.name, s.clan, s.skin].filter(Boolean).join(" · ") || "—");
       setText("bs-tick", String(s.tick | 0));
       var cd = s.kill_cooldown_ticks | 0;
