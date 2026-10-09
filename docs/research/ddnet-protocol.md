@@ -229,10 +229,10 @@ NETMSG_INPUT (sys, НЕ vital, flush):
 ### 2.4 Живые проверки
 
 * fork B: минимальный клиент на libtw2 (`proto-scratch/netprobe`) прошёл с неофициальным DDNet 20.0 весь путь: TKEN → CAPABILITIES/MAP_DETAILS → MAP_CHANGE → CON_READY → StartInfo/EnterGame → 60 декодированных снапшотов, сервер отвечал INPUTTIMING на наши INPUT.
-* Мной (тот же пробник, 2026‑09‑27, ≤20 с на сервер, ник `research-probe`):
-  * **GameUp Block (5.188.138.176:8311, DDNet 19.7‑мод, «Copy Love Box Mega»)** — полный вход, 60 снапшотов, ~51 игрок (Character 32/снап, ClientInfo 51/снап — 128‑id работает), `Sv_TuneParams`, `Sv_CommandInfo*`, **2× `NETMSG_CHECKSUM_REQUEST`** (моды реально шлют — ответа от нас нет, последствий за 20 с не было; что делает сервер с неответившими — не проверено). Сервер пустил в игру, **не проверяя, что карта скачана** (READY сразу).
-  * **TeeFusion (46.174.48.103:51010)** — сразу после рукопожатия `NETMSG_REDIRECT port=51000` → на 51000 карта **`Captcha_CAP`, size=10 000 000, crc=f2159e6e** — анти‑бот капча‑лобби; пробник на libtw2 упал на `assert_online` при отправке после редиректа (ошибка обёртки, но показательно: API паникует вместо Result).
-  * **TeeUnion (212.22.85.148:8500, самый людный)** — после MAP_CHANGE: «You have been banned for 10 minutes (bad ip)». fork B на официальном DDNet: «banned (VPN detected)». ⇒ **IP этой (дата‑центровой) машины отвергается популярными серверами; боту нужен «жилой» IP.**
+* Мной (тот же пробник, 2026‑09‑27, ≤20 с на сервер, ник `research-probe`) (адреса ниже заменены на документационные, RFC 5737):
+  * **GameUp Block (192.0.2.176:8311, DDNet 19.7‑мод, «Copy Love Box Mega»)** — полный вход, 60 снапшотов, ~51 игрок (Character 32/снап, ClientInfo 51/снап — 128‑id работает), `Sv_TuneParams`, `Sv_CommandInfo*`, **2× `NETMSG_CHECKSUM_REQUEST`** (моды реально шлют — ответа от нас нет, последствий за 20 с не было; что делает сервер с неответившими — не проверено). Сервер пустил в игру, **не проверяя, что карта скачана** (READY сразу).
+  * **TeeFusion (192.0.2.103:51010)** — сразу после рукопожатия `NETMSG_REDIRECT port=51000` → на 51000 карта **`Captcha_CAP`, size=10 000 000, crc=f2159e6e** — анти‑бот капча‑лобби; пробник на libtw2 упал на `assert_online` при отправке после редиректа (ошибка обёртки, но показательно: API паникует вместо Result).
+  * **TeeUnion (192.0.2.148:8500, самый людный)** — после MAP_CHANGE: «You have been banned for 10 minutes (bad ip)». fork B на официальном DDNet: «banned (VPN detected)». ⇒ **IP этой (дата‑центровой) машины отвергается популярными серверами; боту нужен «жилой» IP.**
 * На официальном сервере fork B видел REDIRECT/RECONNECT на тот же порт сразу после INFO; в открытом коде DDNet `ReconnectClient`/`RedirectClient` (`server.cpp:544-596`) никем не вызываются — вероятно, закрытый antibot‑модуль (не проверено).
 
 ### 2.5 Качество кода

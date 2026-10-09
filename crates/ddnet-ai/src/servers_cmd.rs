@@ -135,7 +135,7 @@ mod tests {
         let text = render(&rows, &list, "Muha", true, 100);
         let line = text.lines().find(|l| l.contains("93.184.216.35:8308")).unwrap();
         assert!(line.starts_with("READY"), "{line}");
-        let other = text.lines().find(|l| l.contains("46.174.54.240:8302")).unwrap();
+        let other = text.lines().find(|l| l.contains("93.184.216.240:8302")).unwrap();
         assert!(other.starts_with("      "), "a public server is never marked: {other}");
         assert!(text.lines().next().unwrap().contains("block servers on the list"));
         assert!(!text.contains("CTF server"), "--block hides the others");

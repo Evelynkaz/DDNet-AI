@@ -447,7 +447,7 @@ mod tests {
             "a 0.7-only server falls back: {addrs:?}"
         );
         assert_eq!(
-            addrs.iter().filter(|a| a.as_str() == "46.174.54.240:8302").count(),
+            addrs.iter().filter(|a| a.as_str() == "93.184.216.240:8302").count(),
             1,
             "the duplicate address is dropped"
         );
@@ -583,7 +583,7 @@ mod tests {
             &LiveServers::default()
         ));
         assert!(!is_auto_candidate(
-            "46.174.54.240:8302".parse().unwrap(),
+            "93.184.216.240:8302".parse().unwrap(),
             "Muha",
             &list(true)
         ));
