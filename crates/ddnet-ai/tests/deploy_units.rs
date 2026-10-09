@@ -612,12 +612,13 @@ fn the_installer_skips_apt_on_a_redeploy_waits_for_the_apt_lock_and_keeps_the_ke
     assert!(script.contains("# Usage: deploy/install.sh [--no-ufw] [--skip-build] [--skip-apt]"));
 
     // Every apt-get call goes through `apt_run`, which waits for the lock; no other line runs apt.
-    assert!(script.contains("APT_LOCK_TIMEOUT=600"));
+    assert!(script.contains("APT_LOCK_TIMEOUT=\"${DDAI_APT_LOCK_TIMEOUT:-600}\""));
     let apt_lines: Vec<&str> = script
         .lines()
         .filter(|l| !l.trim_start().starts_with('#') && l.contains("apt-get "))
         .collect();
-    let lock_wait = r#"sudo apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT" "$@""#;
+    let lock_wait =
+        r#"sudo apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT" -o "Dpkg::Options::=--force-confold" "$@""#;
     let direct: Vec<&&str> = apt_lines
         .iter()
         .filter(|l| l.contains("sudo apt-get") && !l.contains(lock_wait))
@@ -653,10 +654,15 @@ fn the_installer_skips_apt_on_a_redeploy_waits_for_the_apt_lock_and_keeps_the_ke
     // --skip-apt: no apt, no key, no source; Caddy must already be there.
     assert!(!flag_branch.contains("apt_run") && !flag_branch.contains("curl") && !flag_branch.contains("tee"));
     assert!(flag_branch.contains("command -v caddy"));
+    // ... but a keyring that is there is still fingerprint-checked (the unattended-upgrades drop-in trusts the origin).
+    assert!(flag_branch.contains("verify_caddy_keyring \"$CADDY_KEYRING\""));
 
     // Redeploy: needs the installed package (dpkg status), the keyring and the sources list; runs no apt; still checks the keyring.
     assert!(script.contains("dpkg-query -W -f='${Status}' caddy"));
-    assert!(script.contains("*\"install ok installed\"*"));
+    assert!(
+        script.contains("== *\" ok installed\""),
+        "a held package counts as installed"
+    );
     let cond = skip_branch.trim_start().lines().next().unwrap();
     assert!(
         cond.contains("caddy_package_installed")
@@ -719,4 +725,218 @@ fn the_installer_skips_apt_on_a_redeploy_waits_for_the_apt_lock_and_keeps_the_ke
     assert!(readme.contains("--skip-apt") && readme.contains("402") && readme.contains("Lock::Timeout"));
     let decisions = fs::read_to_string(deploy().join("../docs/DECISIONS.md")).unwrap();
     assert!(decisions.contains("**D-130 "));
+}
+
+/// Runs the apt section of `install.sh` (the functions it uses and the branch itself, cut out of the real file) against fake `sudo`,
+/// `apt-get`, `dpkg-query`, `gpg` and `caddy` in a temporary directory. Nothing real is touched. Returns (exit ok, stderr, apt-get calls).
+struct Harness {
+    dir: tempfile::TempDir,
+}
+
+const GOOD_KEY: &str =
+    "pub:-:4096:1:155B6D79CA56EA34:1:::-:::scESC:::::::\nfpr:::::::::65760C51EDEA2017CEA2CA15155B6D79CA56EA34:\n";
+const BAD_KEY: &str =
+    "pub:-:4096:1:AAAAAAAAAAAAAAAA:1:::-:::scESC:::::::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n";
+
+impl Harness {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let fakes: [(&str, &str); 5] = [
+            ("sudo", "exec \"$@\"\n"),
+            ("caddy", "echo v2.fake\n"),
+            ("gpg", "cat \"${@: -1}\"\n"),
+            (
+                "dpkg-query",
+                "[ -f \"$H/dpkg-status\" ] || exit 1\ncat \"$H/dpkg-status\"\n",
+            ),
+            (
+                "apt-get",
+                "echo \"$*\" >> \"$H/calls\"\nn=$(wc -l < \"$H/calls\")\nexec bash \"$H/apt-script\" \"$n\" \"$@\"\n",
+            ),
+        ];
+        for (name, body) in fakes {
+            let f = bin.join(name);
+            fs::write(&f, format!("#!/bin/bash\n{body}")).unwrap();
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(dir.path().join("apt-script"), "exit 0\n").unwrap();
+        Harness { dir }
+    }
+    fn path(&self, name: &str) -> PathBuf {
+        self.dir.path().join(name)
+    }
+    fn set(&self, name: &str, text: &str) {
+        fs::write(self.path(name), text).unwrap();
+    }
+    /// `status`: dpkg status of caddy (None = not installed); `key`: keyring file content (None = absent); `sources`: sources list present.
+    fn setup(&self, status: Option<&str>, key: Option<&str>, sources: bool, apt_script: &str) {
+        if let Some(st) = status {
+            self.set("dpkg-status", st);
+        }
+        if let Some(k) = key {
+            self.set("keyring.gpg", k);
+        }
+        if sources {
+            self.set("caddy.list", "deb x\n");
+        }
+        self.set("apt-script", apt_script);
+    }
+    fn run(&self, flags: &str) -> (bool, String, Vec<String>) {
+        let install = fs::read_to_string(deploy().join("install.sh")).unwrap();
+        let cut = |from: &str, to: &str| -> String {
+            let a = install.find(from).unwrap_or_else(|| panic!("{from}"));
+            let b = a + install[a..].find(to).unwrap_or_else(|| panic!("{to}"));
+            install[a..b].to_string()
+        };
+        let consts: Vec<&str> = install
+            .lines()
+            .filter(|l| {
+                [
+                    "CADDY_REPO_URL=",
+                    "APT_LOCK_TIMEOUT=",
+                    "APT_LOCK_POLL=",
+                    "CADDY_KEY_FINGERPRINT=",
+                    "normalize_fpr()",
+                ]
+                .iter()
+                .any(|p| l.starts_with(p))
+            })
+            .collect();
+        assert_eq!(consts.len(), 5, "{consts:?}");
+        let h = self.dir.path().display();
+        let script = format!(
+            "set -euo pipefail\nH='{h}'\nCADDY_KEYRING=\"$H/keyring.gpg\"\nCADDY_SOURCES_LIST=\"$H/caddy.list\"\n{}\nDO_APT=1\nfor a in {flags}; do [ \"$a\" = --skip-apt ] && DO_APT=0; done\n\
+             log() {{ printf '[log] %s\\n' \"$*\" >&2; }}\ndie() {{ printf '[die] %s\\n' \"$*\" >&2; exit 1; }}\n{}\n{}\n{}\n{}\nfi\necho SECTION-DONE\n",
+            consts.join("\n"),
+            cut("verify_caddy_keyring() {", "\n# Runs `sudo apt-get`"),
+            cut("apt_run() {", "\ncaddy_package_installed() {"),
+            cut("caddy_package_installed() {", "\nif [[ \"$DO_APT\" -eq 0 ]]"),
+            cut("if [[ \"$DO_APT\" -eq 0 ]]; then", "\nfi\ncaddy version"),
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env(
+                "PATH",
+                format!("{}:{}", self.path("bin").display(), std::env::var("PATH").unwrap()),
+            )
+            .env("H", self.dir.path())
+            .env("DDAI_APT_LOCK_TIMEOUT", "2")
+            .env("DDAI_APT_LOCK_POLL", "1")
+            .output()
+            .unwrap();
+        let calls = fs::read_to_string(self.path("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout),
+            calls,
+        )
+    }
+}
+
+const INSTALLED: &str = "install ok installed";
+
+#[test]
+fn the_installer_apt_section_behaves_on_a_redeploy_a_first_install_and_a_broken_repository() {
+    // Redeploy of a working host: no apt at all, keyring still verified; a held package counts as installed.
+    for status in [INSTALLED, "hold ok installed"] {
+        let h = Harness::new();
+        h.setup(Some(status), Some(GOOD_KEY), true, "exit 100\n");
+        let (ok, log, calls) = h.run("");
+        assert!(
+            ok && calls.is_empty() && log.contains("skipping apt") && log.contains("fingerprint verified"),
+            "{status}: {log}"
+        );
+    }
+    // ... and a wrong key in the keyring is still fatal there, with no apt call.
+    let h = Harness::new();
+    h.setup(Some(INSTALLED), Some(BAD_KEY), true, "exit 0\n");
+    let (ok, log, calls) = h.run("");
+    assert!(!ok && calls.is_empty() && log.contains("fingerprint mismatch"), "{log}");
+
+    // --skip-apt: no apt; a present keyring is still verified; caddy must exist (the fake `caddy` is always on PATH, so only the keyring is tested).
+    let h = Harness::new();
+    h.setup(None, Some(BAD_KEY), false, "exit 0\n");
+    let (ok, log, calls) = h.run("--skip-apt");
+    assert!(!ok && calls.is_empty() && log.contains("fingerprint mismatch"), "{log}");
+    let h = Harness::new();
+    h.setup(None, Some(GOOD_KEY), false, "exit 0\n");
+    let (ok, log, calls) = h.run("--skip-apt");
+    assert!(ok && calls.is_empty() && log.contains("--skip-apt given"), "{log}");
+
+    // Missing piece (no sources list) -> apt is used, the list is written, every call waits for the lock and keeps old conffiles.
+    let h = Harness::new();
+    h.setup(Some(INSTALLED), Some(GOOD_KEY), false, "exit 0\n");
+    let (ok, log, calls) = h.run("");
+    assert!(ok && h.path("caddy.list").is_file() && !calls.is_empty(), "{log}");
+    for c in &calls {
+        assert!(
+            c.contains("DPkg::Lock::Timeout=2") && c.contains("Dpkg::Options::=--force-confold"),
+            "{c}"
+        );
+    }
+
+    // First install where the lists lock is held twice and then released: `update` is retried, the run completes.
+    let h = Harness::new();
+    h.setup(
+        None,
+        Some(GOOD_KEY),
+        true,
+        "if [[ \" $* \" == *\" update \"* ]] && [ \"$1\" -le 2 ]; then\n  echo 'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 7 (apt-get)'; exit 100\nfi\nexit 0\n",
+    );
+    let (ok, log, calls) = h.run("");
+    assert!(ok && log.contains("SECTION-DONE") && log.contains("retrying"), "{log}");
+    assert!(calls.len() >= 5, "{calls:?}");
+
+    // The lock never frees: dies with the lock message after the deadline (not the repository message).
+    let h = Harness::new();
+    h.setup(
+        None,
+        Some(GOOD_KEY),
+        true,
+        "echo 'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 7'; exit 100\n",
+    );
+    let (ok, log, _) = h.run("");
+    assert!(
+        !ok && log.contains("lock is still held after waiting") && log.contains("--skip-apt"),
+        "{log}"
+    );
+    assert!(!log.contains("repository named"), "{log}");
+
+    // A successful wait leaves "Waiting for cache lock" lines in the output; a later unrelated failure is not reported as a lock.
+    let h = Harness::new();
+    h.setup(
+        None,
+        Some(GOOD_KEY),
+        true,
+        "echo 'Waiting for cache lock: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 9'\necho 'Err:1 https://example.org/deb stable InRelease'\necho 'E: Failed to fetch https://example.org/deb/dists/stable/InRelease  503'\nexit 100\n",
+    );
+    let (ok, log, _) = h.run("");
+    assert!(
+        !ok && log.contains("repository named in the apt errors") && log.contains("https://example.org/deb"),
+        "{log}"
+    );
+    assert!(!log.contains("still held"), "{log}");
+
+    // The Caddy repository answering 402 is named as such.
+    let h = Harness::new();
+    h.setup(
+        None,
+        Some(GOOD_KEY),
+        true,
+        "echo 'Err:3 https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version InRelease'\necho '  402  Payment Required'\necho \"E: The repository 'https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version InRelease' is no longer signed.\"\nexit 100\n",
+    );
+    let (ok, log, _) = h.run("");
+    assert!(
+        !ok && log
+            .contains("the Caddy apt repository (https://dl.cloudsmith.io/public/caddy/stable/deb/debian) is failing"),
+        "{log}"
+    );
 }

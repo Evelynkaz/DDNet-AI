@@ -38,11 +38,13 @@ UNIT_DST="/etc/systemd/system/ddnet-ai-web.service"
 CADDY_KEYRING="/etc/apt/keyrings/caddy-stable-archive-keyring.gpg"
 CADDY_SOURCES_LIST="/etc/apt/sources.list.d/caddy-stable.list"
 CADDY_REPO_URL="https://dl.cloudsmith.io/public/caddy/stable/deb/debian"
-# How long apt waits for the dpkg/apt lock (seconds) before giving up: unattended-upgrades can
-# hold it for minutes (task 5.19); without a timeout apt fails at once with "Could not get lock".
-APT_LOCK_TIMEOUT=600
-UNATTENDED_UPGRADES_SRC="$SCRIPT_DIR/apt/51unattended-upgrades-caddy.conf"
-UNATTENDED_UPGRADES_DST="/etc/apt/apt.conf.d/51unattended-upgrades-caddy"
+# How long (seconds) a first install waits for the apt/dpkg lock before giving up: unattended-upgrades
+# can hold it for minutes (task 5.19). `DPkg::Lock::Timeout` covers the dpkg frontend lock only; the
+# lists lock of `apt-get update` is not covered (apt 2.8.3 fails at once), so `apt_run` also retries
+# on lock errors every $APT_LOCK_POLL seconds until the same deadline. The DDAI_* variables exist so
+# the harness test (crates/ddnet-ai/tests/deploy_units.rs) can run with a short deadline.
+APT_LOCK_TIMEOUT="${DDAI_APT_LOCK_TIMEOUT:-600}"
+APT_LOCK_POLL="${DDAI_APT_LOCK_POLL:-10}"
 # The Caddy signing key's well-known fingerprint (Caddy Web Server <contact@caddyserver.com>,
 # rsa4096/155B6D79CA56EA34) — checked (review finding F1: strictly, before the file is ever
 # installed anywhere apt would read it from) so a compromised/wrong download is a hard failure
@@ -115,20 +117,41 @@ verify_caddy_keyring() {
   log "Caddy signing key fingerprint verified: $fpr (exactly 1 public key in the file)"
 }
 
-# Runs `sudo apt-get` and waits up to $APT_LOCK_TIMEOUT s for a held lock (task 5.19). Output is
-# shown only on failure (-qq quiet otherwise). On failure it dies with a message that names the
-# repository apt complained about (a down third-party repo, e.g. Caddy's answering 402, must be
-# recognisable at a glance) and says how to proceed when Caddy is already installed.
+# Runs `sudo apt-get`, waiting up to $APT_LOCK_TIMEOUT s for a held lock (task 5.19): the dpkg lock is
+# waited for by apt itself (`DPkg::Lock::Timeout`), the lists lock of `update` by the retry loop here.
+# apt's output is streamed and also kept; `--force-confold` answers dpkg's conffile questions (a
+# prompt would look like a hang under the captured output). On failure it dies with a message that
+# names the repository apt complained about (a down third-party repo, e.g. Caddy's answering 402,
+# must be recognisable at a glance) and says how to proceed when Caddy is already installed.
 apt_run() {
-  local out rc=0 errlines repos
-  out="$(sudo apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT" "$@" 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] && return 0
-  [[ -z "$out" ]] || printf '%s\n' "$out" >&2
-  if grep -q 'Could not get lock\|Unable to acquire the dpkg frontend lock' <<<"$out"; then
-    die "apt-get $1 failed: the apt/dpkg lock is still held after waiting ${APT_LOCK_TIMEOUT}s (unattended-upgrades or another apt running?). Retry later, or pass --skip-apt if Caddy is already installed"
-  fi
-  # Only apt's own error lines (Err:/E:/W:) say which repository failed.
-  errlines="$(grep -E '^(Err:|E:|W:)' <<<"$out" || true)"
+  local out_file rc errlines repos start="$SECONDS"
+  out_file="$(mktemp)"
+  log "apt-get $1: may wait up to ${APT_LOCK_TIMEOUT}s for the apt/dpkg lock"
+  while :; do
+    if sudo apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT" -o "Dpkg::Options::=--force-confold" "$@" 2>&1 | tee "$out_file" >&2; then
+      rc=0
+    else
+      rc="${PIPESTATUS[0]}"
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+      rm -f "$out_file"
+      return 0
+    fi
+    # Only apt's own error lines (Err:/E:/W:) say what failed: progress lines such as "Waiting for
+    # cache lock: Could not get lock ..." (printed during a wait that then succeeded) must not count.
+    errlines="$(grep -E '^(Err:|E:|W:)' "$out_file" || true)"
+    if grep -qE '^E: (Could not get lock|Unable to lock directory|Unable to acquire the dpkg frontend lock)' <<<"$errlines"; then
+      if (( SECONDS - start < APT_LOCK_TIMEOUT )); then
+        log "apt-get $1: the apt/dpkg lock is held, retrying in ${APT_LOCK_POLL}s"
+        sleep "$APT_LOCK_POLL"
+        continue
+      fi
+      rm -f "$out_file"
+      die "apt-get $1 failed: the apt/dpkg lock is still held after waiting $((SECONDS - start))s (unattended-upgrades or another apt running?). Retry later, or pass --skip-apt if Caddy is already installed"
+    fi
+    break
+  done
+  rm -f "$out_file"
   repos="$(grep -oE 'https?://[^ ]+' <<<"$errlines" | sort -u | tr '\n' ' ' || true)"
   if grep -q 'dl.cloudsmith.io/public/caddy' <<<"$errlines"; then
     die "apt-get $1 failed: the Caddy apt repository ($CADDY_REPO_URL) is failing (see the apt output above; e.g. 402 Payment Required / no longer signed). If Caddy is already installed, re-run with --skip-apt"
@@ -137,7 +160,8 @@ apt_run() {
 }
 
 caddy_package_installed() {
-  [[ "$(dpkg-query -W -f='${Status}' caddy 2>/dev/null || true)" == *"install ok installed"* ]]
+  # Status is "<want> <flag> <state>": any want (install, hold, ...) counts as long as it is installed.
+  [[ "$(dpkg-query -W -f='${Status}' caddy 2>/dev/null || true)" == *" ok installed" ]]
 }
 
 if [[ "$DO_APT" -eq 0 ]]; then
@@ -145,13 +169,18 @@ if [[ "$DO_APT" -eq 0 ]]; then
   # everything below needs it (`caddy validate`, `caddy adapt`, the service).
   log "--skip-apt given, not touching apt"
   command -v caddy >/dev/null 2>&1 || die "--skip-apt given but caddy is not installed: run deploy/install.sh without --skip-apt for the first install"
+  # The unattended-upgrades drop-in below trusts this repo's origin, so a keyring that is there is
+  # still checked, as on every run before 5.19.
+  if [[ -f "$CADDY_KEYRING" ]]; then
+    verify_caddy_keyring "$CADDY_KEYRING"
+  fi
 elif caddy_package_installed && [[ -f "$CADDY_KEYRING" && -f "$CADDY_SOURCES_LIST" ]]; then
   # A redeploy of a working host needs no apt (task 5.19): an unreachable Caddy repo or a held
   # apt lock must not block it. The keyring is still checked (exactly one key, pinned fingerprint).
   log "Caddy package, keyring and apt source are already in place: skipping apt (no update, no install)"
   verify_caddy_keyring "$CADDY_KEYRING"
 else
-  log "first Caddy install (or its keyring/apt source is missing): using apt"
+  log "using apt: caddy installed=$(caddy_package_installed && echo yes || echo no), keyring present=$([[ -f "$CADDY_KEYRING" ]] && echo yes || echo no), apt source present=$([[ -f "$CADDY_SOURCES_LIST" ]] && echo yes || echo no) (first install, or one of them is missing)"
   log "installing Caddy's apt prerequisites (debian-keyring, debian-archive-keyring, apt-transport-https)"
   apt_run update -qq
   apt_run install -y -qq debian-keyring debian-archive-keyring apt-transport-https
