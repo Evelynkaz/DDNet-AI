@@ -1,7 +1,7 @@
 //! Task 3.21 (E-036): offline evaluation of a v2 model per arena file (one file = one lag cell) and on clips, optionally with `n` known ticks (pre-inputs).
 //!
 //! ```text
-//! cargo run --release -p ddai-oppnet --example opp_eval2 -- --model m2.oppnet --arena DIR [--clips FILE...] [--human FILE...] [--known N] [--decode "press=-1"]
+//! cargo run --release -p ddai-oppnet --example opp_eval2 -- --model m2.oppnet --arena DIR [--clips FILE...] [--human FILE... [--pool-human]] [--known N] [--decode "press=-1"]
 //! ```
 
 use std::path::PathBuf;
@@ -17,6 +17,7 @@ use ddai_oppnet::v2::train::evaluate;
 fn main() -> Result<(), String> {
     let (mut model, mut arena, mut clips, mut humans) = (PathBuf::new(), Vec::new(), Vec::new(), Vec::<PathBuf>::new());
     let (mut known, mut decode, mut swing) = (0usize, String::new(), false);
+    let mut pool_human = false;
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut v = || it.next().ok_or_else(|| format!("{k} needs a value"));
@@ -25,6 +26,7 @@ fn main() -> Result<(), String> {
             "--arena" => arena.push(PathBuf::from(v()?)),
             "--clips" => clips.push(PathBuf::from(v()?)),
             "--human" => humans.push(PathBuf::from(v()?)),
+            "--pool-human" => pool_human = true,
             "--known" => known = v()?.parse().map_err(|e| format!("--known: {e}"))?,
             "--decode" => decode = v()?,
             "--swing-label" => swing = true,
@@ -76,13 +78,23 @@ fn main() -> Result<(), String> {
             evaluate(&b.net, &c, &s, &dec).table()
         );
     }
-    for f in humans {
-        let g: Vec<HumanGame> = read_blob(&f)?;
+    // `--pool-human`: all `--human` files are one test set (one table, one sign test); otherwise one table per file
+    let groups: Vec<Vec<PathBuf>> = if pool_human {
+        vec![humans]
+    } else {
+        humans.into_iter().map(|f| vec![f]).collect()
+    };
+    for files in groups.into_iter().filter(|g| !g.is_empty()) {
+        let mut g: Vec<HumanGame> = Vec::new();
+        for f in &files {
+            g.extend(read_blob::<Vec<HumanGame>>(f)?);
+        }
         let c = Corpus::new(vec![], vec![], cfg.clone()).with_humans(g);
         let s = c.samples();
+        let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
         println!(
             "\n## humans {} (known ticks {known})\n\n{}",
-            f.display(),
+            names.join(" + "),
             evaluate(&b.net, &c, &s, &dec).table()
         );
     }
