@@ -931,6 +931,7 @@ fn status_message(bot: &Bot, tick: i32, cfg: &RunnerConfig) -> StatusMessage {
         prediction_margin_ms: (!cfg.client.adaptive_margin).then_some(cfg.client.prediction_margin_ms),
         search_window: SearchWindowStatus::from_window(&bot.latency().recent.stats(tick)),
         search_threads: cfg.brain.search_threads.and_then(|n| u32::try_from(n).ok()),
+        duel_fixes: crate::brains::duel_fixes_name(&cfg.brain.duel_fixes),
     }
 }
 

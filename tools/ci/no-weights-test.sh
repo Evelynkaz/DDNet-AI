@@ -61,7 +61,7 @@ expect_fail "upper-case extension" "model.PT"
 git rm -q -f --cached model.PT
 
 # Every other banned name (all small): each must be refused on its own, by name.
-for f in weights.bin model.pkl m.gguf m.tflite t.feather t.parquet m1.oppnet joni_3_0.opp joni_2_0.opp2 s0.clipgames policy.json opponent.json value2.json run.checkpoint.json \
+for f in weights.bin model.pkl m.gguf m.tflite t.feather t.parquet m1.oppnet joni_3_0.opp joni_2_0.opp2 s0.clipgames h3.humangames b3.bcsamples prior.bc policy.json opponent.json value2.json run.checkpoint.json \
   sub/state.bin; do
   mkdir -p "$(dirname "$f")"
   echo w >"$f"

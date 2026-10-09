@@ -134,6 +134,37 @@ fn write_big_chunk(out: &mut Vec<u8>, huffman: &Huffman, ty: u8, ints: &[i32]) {
 /// With `embed` the map is embedded; without it the header still carries the map's size and crc
 /// but no map bytes (like the 30 demos of the real archive that rely on the server's map).
 pub fn demo_bytes(map: &[u8], embed: bool, snapshots: &[(i32, Vec<SynthChar>)]) -> Vec<u8> {
+    demo_bytes_with_pre_inputs(map, embed, snapshots, &[])
+}
+
+/// The ints of an `Sv_PreInput` message chunk (the packed message bytes as little-endian words, the
+/// way `CDemoRecorder::Write` stores any message).
+fn pre_input_ints(m: &ddai_net::generated::messages::SvPreInput) -> Vec<i32> {
+    use ddai_net::packer::Packer;
+    use ddai_net::uuid::{MsgId, calculate_uuid, pack_msg_id};
+    let mut buf = [0u8; 256];
+    let mut packer = Packer::new(&mut buf);
+    let uuid = calculate_uuid("preinput@netmsg.ddnet.org");
+    pack_msg_id(&mut packer, MsgId::Ex { uuid, resolved: None }, false);
+    ddai_net::generated::messages::encode_sv_pre_input(m, &mut packer);
+    let mut bytes = packer.data().to_vec();
+    bytes.resize(bytes.len().div_ceil(4) * 4, 0);
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| i32::from_le_bytes(*c))
+        .collect()
+}
+
+/// [`demo_bytes`] plus `Sv_PreInput` messages: each `(tick, message)` is recorded in the chunk
+/// stream of the snapshot with that tick (messages of other ticks are dropped).
+pub fn demo_bytes_with_pre_inputs(
+    map: &[u8],
+    embed: bool,
+    snapshots: &[(i32, Vec<SynthChar>)],
+    pre_inputs: &[(i32, ddai_net::generated::messages::SvPreInput)],
+) -> Vec<u8> {
     let loaded = ddai_map::load_map(map).expect("synthetic map is valid");
     let embedded = if embed { map.len() } else { 0 };
     let mut out = build_prelude_bytes(5, embedded as u32);
@@ -147,6 +178,9 @@ pub fn demo_bytes(map: &[u8], embed: bool, snapshots: &[(i32, Vec<SynthChar>)]) 
     let huffman = Huffman::new();
     for (tick, chars) in snapshots {
         write_tick_marker(&mut out, *tick, true);
+        for (_, m) in pre_inputs.iter().filter(|(t, _)| t == tick) {
+            write_big_chunk(&mut out, &huffman, 2, &pre_input_ints(m));
+        }
         write_big_chunk(&mut out, &huffman, 1, &snapshot_ints(chars));
     }
     out

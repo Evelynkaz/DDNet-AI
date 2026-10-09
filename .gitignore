@@ -56,6 +56,10 @@ site/dist-preview/
 *.opp2
 # Task 3.21: live-clip data sets of the predictor (derived from clips, which never go to git).
 *.clipgames
+# Task 3.24: games of real humans from demos, behaviour-cloning samples and heads (E-039); derived from demos, which never go to git.
+*.humangames
+*.bcsamples
+*.bc
 *.safetensors
 *.npz
 *.pt

@@ -16,6 +16,7 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+ddai-brain = { path = "../ddai-brain" }
 ddai-jsmath = { path = "../ddai-jsmath" }
 # Task 5.5a (D-127): owner-only files on Unix and Windows.
 ddai-os = { path = "../ddai-os" }
@@ -32,4 +33,11 @@ serde_json = "1"
 allocation-counter = "0.8.1"
 ddai-clip = { path = "../ddai-clip" }
 ddai-map = { path = "../ddai-map" }
+# `examples/human_games.rs` (task 3.24): demos -> games of real humans.
+ddai-dataset = { path = "../ddai-dataset" }
+ddai-demo = { path = "../ddai-demo" }
+ddai-recorder = { path = "../ddai-recorder" }
+ddai-world = { path = "../ddai-world" }
+# `examples/human_arena.rs` (task 3.24): the arena with the behaviour-cloning proposer.
+ddai-env = { path = "../ddai-env" }
 tempfile = "3.14"

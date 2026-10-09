@@ -360,3 +360,7 @@ STATUS несёт аддитивный объект `search_window`: сколь�
 ## Потоки поиска в STATUS: `search_threads` (задача 5.17, D-125; `docs/formats.md` §57)
 
 STATUS несёт аддитивное целое `search_threads`: сколько потоков оценивают кандидатов гибрида, включая решающий (`--search-threads`, как процесс запущен; `RunnerConfig::brain.search_threads`); `null`, если число оставлено на `auto` до сборки мозга (`ddnet-ai play` решает его сам, поэтому `null` бывает только у вызывающего библиотеку). Сайт показывает его строкой «Потоки поиска» в карточке «Бот». Тест — `bridge::tests` (поле в сообщении).
+
+## Исправления дуэли в STATUS: `duel_fixes` (задача 5.18, D-129; `docs/formats.md` §59)
+
+STATUS несёт аддитивную строку `duel_fixes`: `off` или включённые исправления 3.23 через запятую в порядке `static,counter,finish` (`brains::duel_fixes_name` по `RunnerConfig::brain.duel_fixes`; при `--duel-fixes all` — `static,counter,finish`). Сайт показывает её строкой «Исправления дуэли» в карточке «Бот». Тесты — `bridge::tests` (поле в сообщении) и `brains::tests::the_duel_fixes_name_lists_the_fixes_that_are_on` (имя разбирается обратно в ту же настройку).

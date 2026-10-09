@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use ddai_demo::Demo;
+use ddai_net::generated::messages::ExGameMsg;
 use ddai_net::message::Msg;
 use ddai_net::snapshot::Snapshot;
 use ddai_net::tuning::{DEFAULT_TUNE_PARAMS, TuneParams};
@@ -32,6 +33,27 @@ pub struct KillEvent {
     pub killer: i32,
     pub victim: i32,
     pub weapon: i32,
+}
+
+/// One `Sv_PreInput` message (task 3.24): a *real* input change of another player, forwarded by the
+/// server before its tick and recorded by the client into the demo (`client.cpp:2415`). Only the
+/// owner's client id is known here (the label comes from the frames, see
+/// [`crate::humaninput::true_table`]); no name is involved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreInputMsg {
+    /// Demo tick of the chunk the message was recorded in.
+    pub arrived: i32,
+    /// Client id of the player whose input this is.
+    pub owner: i32,
+    pub intended_tick: i32,
+    pub direction: i32,
+    pub jump: i32,
+    pub hook: i32,
+    pub fire: i32,
+    pub target: [i32; 2],
+    pub wanted_weapon: i32,
+    pub next_weapon: i32,
+    pub prev_weapon: i32,
 }
 
 /// The anonymised content of one demo.
@@ -158,6 +180,18 @@ pub struct FrameSource<'d> {
     pub tune_nondefault_frames: usize,
     /// Frames yielded whose tuning differed in a movement-relevant field ([`tune_moves_differently`]).
     pub tune_movement_frames: usize,
+    /// `Sv_PreInput` messages seen so far and not yet taken ([`FrameSource::take_pre_inputs`]);
+    /// only filled when collection was switched on with [`FrameSource::collect_pre_inputs`].
+    pre_inputs: Vec<PreInputMsg>,
+    collect_pre_inputs: bool,
+    /// `Sv_PreInput` messages seen in total (counted whether or not they are collected).
+    pub pre_input_messages: u64,
+    /// Fresh snapshots closer than this many ticks to the last one yielded are not yielded (they are
+    /// still anonymised, so labels do not depend on it); 0 = yield all.
+    min_spacing: i32,
+    last_yielded: Option<i32>,
+    /// Fresh snapshots left out because of `min_spacing`.
+    pub decimated_snapshots: usize,
 }
 
 impl<'d> FrameSource<'d> {
@@ -173,7 +207,34 @@ impl<'d> FrameSource<'d> {
             decode_error: None,
             tune_nondefault_frames: 0,
             tune_movement_frames: 0,
+            pre_inputs: Vec::new(),
+            collect_pre_inputs: false,
+            pre_input_messages: 0,
+            min_spacing: 0,
+            last_yielded: None,
+            decimated_snapshots: 0,
         }
+    }
+
+    /// Skips fresh snapshots less than `ticks` after the last one yielded. Servers that send a
+    /// snapshot every tick (50 Hz; several of the owner's duel demos) then look like the usual
+    /// 25 Hz stream the pipeline's two-tick steps are made for; the players' real inputs are per
+    /// tick anyway ([`crate::humaninput`]).
+    pub fn min_spacing(mut self, ticks: i32) -> Self {
+        self.min_spacing = ticks;
+        self
+    }
+
+    /// Switches the collection of `Sv_PreInput` messages on (off by default: nothing else needs
+    /// them and they would pile up).
+    pub fn collect_pre_inputs(mut self) -> Self {
+        self.collect_pre_inputs = true;
+        self
+    }
+
+    /// The pre-input messages recorded since the previous call, in file order.
+    pub fn take_pre_inputs(&mut self) -> Vec<PreInputMsg> {
+        std::mem::take(&mut self.pre_inputs)
     }
 }
 
@@ -208,6 +269,24 @@ impl Iterator for FrameSource<'_> {
                             weapon: k.weapon,
                         });
                     }
+                    Msg::ExGame(ExGameMsg::SvPreInput(p)) => {
+                        self.pre_input_messages += 1;
+                        if self.collect_pre_inputs {
+                            self.pre_inputs.push(PreInputMsg {
+                                arrived: tick.tick,
+                                owner: p.owner,
+                                intended_tick: p.intended_tick,
+                                direction: p.direction,
+                                jump: p.jump,
+                                hook: p.hook,
+                                fire: p.fire,
+                                target: [p.target_x, p.target_y],
+                                wanted_weapon: p.wanted_weapon,
+                                next_weapon: p.next_weapon,
+                                prev_weapon: p.prev_weapon,
+                            });
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -220,6 +299,11 @@ impl Iterator for FrameSource<'_> {
             }
             let mut frame = snapshot_to_frame(tick.tick, snap);
             self.anon.anonymize_frame(&mut frame);
+            if self.min_spacing > 0 && self.last_yielded.is_some_and(|l| tick.tick - l < self.min_spacing) {
+                self.decimated_snapshots += 1;
+                continue;
+            }
+            self.last_yielded = Some(tick.tick);
             if !tune_is_default(&self.tune) {
                 self.tune_nondefault_frames += 1;
             }
@@ -280,6 +364,11 @@ pub struct LabelTracker {
 impl LabelTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The label number the client id carries right now (`None` before it was ever seen).
+    pub fn label_of(&self, id: i32) -> Option<u16> {
+        self.carried.get(&id).copied()
     }
 
     /// `(client id, label number)` of every character of `frame`, in the frame's order (empty for
@@ -445,5 +534,56 @@ mod tests {
         assert_eq!(ing.repeated_snapshots, 0);
         assert_eq!(ing.tunes.len(), 2);
         assert_eq!(ing.kills.len(), 0);
+    }
+
+    #[test]
+    fn min_spacing_thins_a_50_hz_stream_to_two_ticks_and_keeps_the_labels() {
+        use crate::synth::{self, SynthChar};
+        let map = synth::map_bytes(30, 12, (10, 20));
+        let ch = |id: i32, tick: i32| SynthChar {
+            id,
+            name: format!("ZzName{id}"),
+            clan: "c".into(),
+            wire: wire_character(tick, 100 + 40 * id, 338),
+        };
+        // a snapshot every tick, then a 3-tick gap
+        let ticks = [100, 101, 102, 103, 104, 105, 108, 109, 110];
+        let snaps: Vec<(i32, Vec<SynthChar>)> = ticks.iter().map(|&t| (t, vec![ch(0, t), ch(1, t)])).collect();
+        let bytes = synth::demo_bytes(&map, true, &snaps);
+        let demo = Demo::parse(&bytes).unwrap();
+        let all: Vec<i32> = FrameSource::new(&demo).map(|(f, _)| frame_tick(&f)).collect();
+        assert_eq!(all, ticks);
+        let mut thin = FrameSource::new(&demo).min_spacing(2);
+        let kept: Vec<(i32, Vec<String>)> = (&mut thin).map(|(f, _)| (frame_tick(&f), names(&f))).collect();
+        assert_eq!(
+            kept.iter().map(|k| k.0).collect::<Vec<_>>(),
+            vec![100, 102, 104, 108, 110]
+        );
+        assert_eq!(thin.decimated_snapshots, 4);
+        // the labels of the thinned stream are the labels of the full one
+        let full: Vec<(i32, Vec<String>)> = FrameSource::new(&demo)
+            .map(|(f, _)| (frame_tick(&f), names(&f)))
+            .collect();
+        for (t, n) in &kept {
+            assert_eq!(full.iter().find(|f| f.0 == *t).map(|f| &f.1), Some(n));
+        }
+        assert_eq!(kept[0].1, vec!["player_0", "player_1"]);
+    }
+
+    fn frame_tick(f: &Frame) -> i32 {
+        match f {
+            Frame::Snapshot { tick, .. } => *tick,
+            _ => unreachable!(),
+        }
+    }
+
+    fn names(f: &Frame) -> Vec<String> {
+        match f {
+            Frame::Snapshot { players, .. } => players
+                .iter()
+                .map(|p| p.client_info.as_ref().map(|c| c.name.clone()).unwrap_or_default())
+                .collect(),
+            _ => unreachable!(),
+        }
     }
 }

@@ -248,10 +248,9 @@ License. Section 3 of the GNU LGPL 2.1 says that a licensee "may opt to apply
 the terms of the ordinary GNU General Public License instead of this License
 to a given copy of the Library. To do this, you must alter all the notices
 that refer to this License, so that they refer to the ordinary GNU General
-Public License, version 2, instead of to this License (version 2.1 of the
-Lesser General Public License). (If a newer version than version 2 of the
-ordinary GNU General Public License has appeared, then you can specify that
-version instead if you wish.) Do not make any other change in these
+Public License, version 2, instead of to this License. (If a newer version
+than version 2 of the ordinary GNU General Public License has appeared, then
+you can specify that version instead if you wish.) Do not make any other change in these
 notices." This has been done in the header of each such file: the FSF and IBM
 copyright lines are kept, the paragraphs that granted the LGPL are replaced
 by the GPL's (version 3 or, at the licensee's option, any later version), a

@@ -726,6 +726,109 @@ async fn the_page_gets_the_search_threads_of_the_helpers_status_and_an_old_statu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_duel_fixes_choice_reaches_the_request_as_one_of_three_words() {
+    // Task 5.18 (D-129): a closed list of three words; `counter` and `all` are not on it.
+    let with = |brain: &str, val: serde_json::Value| {
+        let mut body = start_body();
+        body["brain"] = serde_json::json!(brain);
+        body["duel_fixes"] = val;
+        body
+    };
+    // Both hybrid brains carry each word into the request, and the helper's own parser reads it back.
+    for brain in ["hybrid", "hybrid-fly"] {
+        for word in ["off", "finish", "static,finish"] {
+            // (a fresh site each time: it takes at most six requests a minute)
+            let server = deployed().await;
+            let l = login(&server);
+            let r = post(&server, &l, &with(brain, serde_json::json!(word)));
+            assert_eq!(r.status, 202, "{brain} {word}: {r:?}");
+            let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
+            let req = parse_request(text.as_bytes()).expect("the helper's own parser accepts it");
+            assert_eq!(req.duel_fixes.map(|f| f.flag_value()), Some(word), "{brain}");
+            assert!(text.contains(&format!(r#""duel_fixes":"{word}""#)), "{text}");
+        }
+    }
+    // An absent field stays absent: the request is byte-identical to one from before the field existed.
+    let server = deployed().await;
+    let l = login(&server);
+    let r = post(&server, &l, &start_body());
+    assert_eq!(r.status, 202, "{r:?}");
+    let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
+    assert!(!text.contains("duel_fixes"), "{text}");
+    fs::remove_file(request_file(&server)).unwrap();
+    // The pure fly has no duel fixes: `off` is the same as absent and goes through, anything else is refused with its own code.
+    let r = post(&server, &l, &with("fly", serde_json::json!("off")));
+    assert_eq!(r.status, 202, "{r:?}");
+    fs::remove_file(request_file(&server)).unwrap();
+    for word in ["finish", "static,finish"] {
+        let r = post(&server, &l, &with("fly", serde_json::json!(word)));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("duel_fixes_hybrid_only")),
+            "{word}: {r:?}"
+        );
+    }
+    // Nothing but the three words; a stop carries none. Refused, nothing written.
+    for bad in [
+        serde_json::json!("counter"),
+        serde_json::json!("all"),
+        serde_json::json!("static"),
+        serde_json::json!("finish,static"),
+        serde_json::json!("Finish"),
+        serde_json::json!("finish\nBOT_NAME=\"evil\""),
+        serde_json::json!("$(id)"),
+        serde_json::json!(true),
+        serde_json::json!(1),
+        serde_json::json!(""),
+        serde_json::json!(["finish"]),
+    ] {
+        let r = post(&server, &l, &with("hybrid", bad.clone()));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{bad}"
+        );
+    }
+    let r = post(&server, &l, &serde_json::json!({"action":"stop","duel_fixes":"off"}));
+    assert_eq!((r.status, r.json()["error"].as_str()), (400, Some("bad_request")));
+    assert!(
+        files_in(&launch_dir(&server)).is_empty(),
+        "a refused call writes nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_page_gets_the_duel_fixes_of_the_helpers_status_and_an_old_status_has_none() {
+    let server = deployed().await;
+    let l = login(&server);
+    let status = server.config.status_dir.join("status.json");
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"request_id":"0123456789abcdef","brain":"hybrid","server":"local","duration":"15m","sparring":0,"duel_fixes":"static,finish"}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["duel_fixes"].as_str(), Some("static,finish"));
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"brain":"hybrid","server":"local","duration":"15m","sparring":0}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["state"], "started");
+    assert!(j["status"].get("duel_fixes").is_none(), "{j}");
+    // A value outside the list makes the whole status unreadable, never a word of its own.
+    for bad in ["\"all\"", "\"counter\"", "\"static\"", "3", "true", "\"\""] {
+        fs::write(
+            &status,
+            format!(r#"{{"v":1,"state":"started","at":5,"duel_fixes":{bad}}}"#),
+        )
+        .unwrap();
+        assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null, "{bad}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_opponent_model_switch_reaches_the_request_and_only_as_on_or_off() {
     // Task 3.7b F9 (D-090).
     let server = deployed().await;
@@ -1039,6 +1142,8 @@ async fn the_duel_presets_request_is_made_of_the_requests_own_fields_only() {
         !text.contains("wb_smart") && !text.contains("window_model") && !text.contains("preinput"),
         "{text}"
     );
+    // Task 5.18 (D-129): the preset leaves the duel fixes off (no field) until a live A/B has been played.
+    assert!(!text.contains("duel_fixes") && req.duel_fixes.is_none(), "{text}");
     // The only field the preset adds is `search_threads`; there is no preset field and no other new one: a request that names one is refused whole, nothing written.
     fs::remove_file(request_file(&server)).unwrap();
     for (name, value) in [("preset", serde_json::json!("duel")), ("duel", serde_json::json!(true))] {
@@ -1077,6 +1182,7 @@ async fn the_duel_presets_request_is_made_of_the_requests_own_fields_only() {
         "window_model",
         "preinput",
         "search_threads",
+        "duel_fixes",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -1093,6 +1199,7 @@ async fn the_duel_presets_request_is_made_of_the_requests_own_fields_only() {
             && fields.contains("no_selfkill")
             && fields.contains("preinput")
             && fields.contains("search_threads")
+            && fields.contains("duel_fixes")
     );
 }
 
@@ -1159,6 +1266,18 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         "рекомендация сборщика 4.13 для дуэли на тихой машине",
         "search_threads_hybrid_only",
         "body.search_threads",
+        // Task 5.18: the duel-fixes select (three words, no `counter`/`all`), its honest hint and its refusal; the preset leaves it off.
+        "Исправления дуэли",
+        "выкл (по умолчанию)",
+        "стоячая цель и добивание",
+        "удержание 57,7% → 90,4%",
+        "(+1,7 ± 2,0 п.п. побед, p 0,13; таймауты те же)",
+        "планку по букве не взяла",
+        "Работает только в распознанной дуэли; вживую не проверено",
+        "Пресет «Дуэль» ставит «выкл»",
+        "Исправления дуэли: выкл",
+        "duel_fixes_hybrid_only",
+        "body.duel_fixes",
         "ВБ (эксперимент)",
         "заранее объявленной планки (+4,0 п.п.) это не берёт",
         "Эксперимент для игры на ВБ, не для дуэли",
@@ -1188,6 +1307,7 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
     assert!(html.contains(r#"id="bs-windowmodel""#));
     assert!(html.contains(r#"id="bs-preinput""#));
     assert!(html.contains(r#"id="bs-searchthreads""#));
+    assert!(html.contains(r#"id="bs-duelfixes""#));
     assert!(html.contains("при 2 / 3 / 4 потоках порог 24 / 31 / 36"));
     // Task 5.16: the machine's quietness rows and warning of the «Бот» card.
     for id in ["bs-load", "bs-search", "bs-quiet-warn", "bs-quiet-note"] {

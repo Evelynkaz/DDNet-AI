@@ -1,0 +1,27 @@
+# work-clock: default-rate
+# Task 3.24 (E-039), PRE-REGISTERED confirmation of the imitation pilot, seed set 310001..310200 per cell, arm "base". Criteria: docs/EXPERIMENTS.md E-039 (committed before this config was run).
+#   human_arena --config configs/arena/e039-base.toml --threads 3 --jsonl ~/aiddnet/data/runs/E-039/arena-base.jsonl
+name = "e039-base"
+base_seed = 310001
+games = 200
+
+[[condition]]
+name = "base lag 2/0"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.0021, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 0 }]
+
+[[condition]]
+name = "base lag 2/1"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.0021, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 1 }]
+
+[[condition]]
+name = "base lag 2/2"
+arena = "pm1007-clb-duel"
+duel = { live_view = [0] }
+rules = { max_ticks = 3000 }
+players = [{ brain = "hybrid", mode = "deadline", clock = "work", budget_ms = 4.0, step_ms = 0.0021, lag = 2 }, { brain = "planner", mode = "fixed", preset = "live-v2", lag = 2 }]

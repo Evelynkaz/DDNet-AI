@@ -33,9 +33,9 @@ use serde::Deserialize;
 use crate::http::bot::{authorize_get, authorize_post, json_error};
 use crate::http::servers::{closing_block, favourite_choices};
 use crate::launch::{
-    Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_SPARRING,
-    MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE, SearchThreads, WbSmart,
-    bundle_run_name, read_regular_nofollow, unix_now, write_atomic,
+    Action, Brain, DuelFixes, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus,
+    MAX_SPARRING, MAX_STATUS_BYTES, Mirror, PROTOCOL_VERSION, REQUEST_FILE, REQUEST_STALE_SECS, STATUS_FILE,
+    SearchThreads, WbSmart, bundle_run_name, read_regular_nofollow, unix_now, write_atomic,
 };
 use crate::state::SharedState;
 
@@ -188,6 +188,7 @@ struct LaunchForm {
     window_model: Option<bool>,
     preinput: Option<bool>,
     search_threads: Option<SearchThreads>,
+    duel_fixes: Option<DuelFixes>,
 }
 
 fn new_id() -> String {
@@ -218,6 +219,7 @@ fn build_request(
                 || form.window_model.is_some()
                 || form.preinput.is_some()
                 || form.search_threads.is_some()
+                || form.duel_fixes.is_some()
             {
                 return Err("bad_request");
             }
@@ -237,6 +239,7 @@ fn build_request(
                 window_model: None,
                 preinput: None,
                 search_threads: None,
+                duel_fixes: None,
             })
         }
         Action::Start => {
@@ -279,6 +282,10 @@ fn build_request(
             if brain == Brain::Fly && form.search_threads.is_some_and(SearchThreads::is_more_than_one) {
                 return Err("search_threads_hybrid_only");
             }
+            // Task 5.18 (D-129): the pure fly has no duel fixes (they are the hybrid's); `off` is the same as absent (same code as the helper).
+            if brain == Brain::Fly && form.duel_fixes.is_some_and(DuelFixes::is_on) {
+                return Err("duel_fixes_hybrid_only");
+            }
             Ok(LaunchRequest {
                 v: PROTOCOL_VERSION,
                 id,
@@ -296,6 +303,7 @@ fn build_request(
                 window_model: form.window_model,
                 preinput: form.preinput,
                 search_threads: form.search_threads,
+                duel_fixes: form.duel_fixes,
             })
         }
     }
@@ -746,6 +754,61 @@ mod tests {
         // A stop carries nothing.
         let stop =
             serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","search_threads":1})).unwrap();
+        assert_eq!(build_request(stop, &ready, true, true).unwrap_err(), "bad_request");
+    }
+
+    #[test]
+    fn the_duel_fixes_choice_is_a_closed_list_and_the_pure_fly_takes_off_only() {
+        // Task 5.18 (D-129). No file to check: the choice names nothing but itself.
+        let ready: Vec<String> = Vec::new();
+        let start = |brain: &str, val: serde_json::Value| {
+            let mut v = serde_json::json!({"action":"start","brain":brain,"server":"local","duration":"15m"});
+            if !val.is_null() {
+                v["duel_fixes"] = val;
+            }
+            serde_json::from_value::<LaunchForm>(v).map(|f| build_request(f, &ready, true, false))
+        };
+        for brain in ["hybrid", "hybrid-fly"] {
+            for (word, want) in [
+                ("off", DuelFixes::Off),
+                ("finish", DuelFixes::Finish),
+                ("static,finish", DuelFixes::StaticFinish),
+            ] {
+                let req = start(brain, serde_json::json!(word)).unwrap().unwrap();
+                assert_eq!(req.duel_fixes, Some(want), "{brain} {word}");
+            }
+            let bare = start(brain, serde_json::Value::Null).unwrap().unwrap();
+            assert_eq!(bare.duel_fixes, None, "absent stays absent");
+        }
+        // The pure fly has no duel fixes: `off` is the same as absent and passes, anything else is refused with its own code.
+        assert_eq!(
+            start("fly", serde_json::json!("off")).unwrap().unwrap().duel_fixes,
+            Some(DuelFixes::Off)
+        );
+        for word in ["finish", "static,finish"] {
+            assert_eq!(
+                start("fly", serde_json::json!(word)).unwrap().unwrap_err(),
+                "duel_fixes_hybrid_only",
+                "{word}"
+            );
+        }
+        // Nothing but the three words ever gets as far as `build_request`.
+        for bad in [
+            serde_json::json!("counter"),
+            serde_json::json!("all"),
+            serde_json::json!("static"),
+            serde_json::json!("finish,static"),
+            serde_json::json!("Finish"),
+            serde_json::json!("finish --report /etc/passwd"),
+            serde_json::json!(""),
+            serde_json::json!(1),
+            serde_json::json!(true),
+        ] {
+            assert!(start("hybrid", bad.clone()).is_err(), "{bad}");
+        }
+        // A stop carries nothing.
+        let stop =
+            serde_json::from_value::<LaunchForm>(serde_json::json!({"action":"stop","duel_fixes":"off"})).unwrap();
         assert_eq!(build_request(stop, &ready, true, true).unwrap_err(), "bad_request");
     }
 }

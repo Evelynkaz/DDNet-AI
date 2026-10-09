@@ -7,15 +7,19 @@
 //! * [`data`], [`blob`]: the dataset format and its file container (shared with the model bundle, [`bundle`]).
 //! * [`train`]: samples, loss, the trainer and the offline metrics against "hold the last input".
 //! * [`predictor`]: the network behind `ddai_planner::hybrid::window::WindowModel`.
+//! * [`bc`] (task 3.24): the imitation pilot -- a behaviour-cloning head trained on humans after a block, and its proposer for the hybrid brain.
+//! * [`humandata`] (task 3.24): games of real humans from demos, with their real inputs as labels.
 //! * [`live`] (task 3.17): the predictor in the live bot -- history from every snapshot, the online guard against hold, the compact log and its analysis.
 
 pub mod any;
+pub mod bc;
 pub mod blob;
 pub mod bundle;
 pub mod clipdata;
 pub mod data;
 pub mod feature;
 pub mod frame;
+pub mod humandata;
 pub mod live;
 pub mod net;
 pub mod predictor;

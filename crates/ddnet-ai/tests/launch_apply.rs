@@ -1042,6 +1042,124 @@ fn the_search_threads_are_refused_for_the_pure_fly_beyond_one_and_for_any_value_
 }
 
 #[test]
+fn the_duel_fixes_are_written_always_as_one_of_three_words_for_the_hybrids_and_survive_to_the_exit_status() {
+    // Task 5.18 (D-129). No field (an old request) and `off`: the line is there and says off, so no value left in a unit's environment leaks in.
+    for body in [start("local"), {
+        let mut b = start("local");
+        b["duel_fixes"] = json!("off");
+        b
+    }] {
+        let rig = Rig::new();
+        assert!(rig.send(&body).status.success());
+        assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+        assert!(
+            rig.env_file().contains("BOT_DUEL_FIXES=\"off\"\n"),
+            "{}",
+            rig.env_file()
+        );
+        assert_eq!(rig.status()["duel_fixes"].as_str(), Some("off"));
+    }
+    // The two arms: both hybrid brains, with the other lines independent; the helper's own word, nothing formatted from the request.
+    for brain in ["hybrid", "hybrid-fly"] {
+        for word in ["finish", "static,finish"] {
+            let rig = Rig::new();
+            let mut body = start("local");
+            body["brain"] = json!(brain);
+            body["duel_fixes"] = json!(word);
+            body["search_threads"] = json!(3);
+            assert!(rig.send(&body).status.success());
+            let st = rig.status();
+            assert_eq!(st["state"], "started", "{brain} {word}: {st}");
+            assert_eq!(
+                (st["duel_fixes"].as_str(), st["search_threads"].as_u64()),
+                (Some(word), Some(3)),
+                "{st}"
+            );
+            let env = rig.env_file();
+            assert!(
+                env.contains(&format!("BOT_DUEL_FIXES=\"{word}\"\n"))
+                    && env.contains("BOT_SEARCH_THREADS=\"3\"\n")
+                    && env.contains("BOT_PREINPUT=\"off\"\n"),
+                "{brain} {word}: {env}"
+            );
+            assert_eq!(rig.actions().last().unwrap(), "start ddnet-ai-bot.service");
+            for line in env.lines().filter(|l| !l.starts_with('#')) {
+                assert!(line.contains("=\""), "{line}");
+            }
+            // It survives to the status the exit hook writes (read from the helper's memory, not from the request).
+            assert!(rig.exited("exited", "0").status.success());
+            let st = rig.status();
+            assert_eq!(st["duel_fixes"].as_str(), Some(word), "{st}");
+        }
+    }
+}
+
+#[test]
+fn the_duel_fixes_are_refused_for_the_pure_fly_and_for_any_value_outside_the_three_words() {
+    // The pure fly has no duel fixes: anything but off is refused with its own code, nothing started; `off` (the same as absent) is fine.
+    for word in ["finish", "static,finish"] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["brain"] = json!("fly");
+        body["duel_fixes"] = json!(word);
+        assert!(rig.send(&body).status.success());
+        assert_eq!(
+            reason(&rig.status()),
+            "duel_fixes_hybrid_only",
+            "{word}: {}",
+            rig.status()
+        );
+        assert!(
+            rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists(),
+            "{word}"
+        );
+    }
+    let rig = Rig::new();
+    let mut body = start("local");
+    body["brain"] = json!("fly");
+    body["duel_fixes"] = json!("off");
+    assert!(rig.send(&body).status.success());
+    assert_eq!(rig.status()["state"], "started", "{}", rig.status());
+    assert!(
+        rig.env_file().contains("BOT_DUEL_FIXES=\"off\"\n"),
+        "{}",
+        rig.env_file()
+    );
+    // Nothing but the three words, and a stop carries none: `counter` and `all` are not offered; no other order, case, list or injection.
+    for bad in [
+        json!("counter"),
+        json!("all"),
+        json!("static"),
+        json!("finish,static"),
+        json!("static,counter,finish"),
+        json!("static, finish"),
+        json!("Finish"),
+        json!("finish\nBOT_SERVER=\"203.0.113.5:8308\""),
+        json!("finish --report /etc/passwd"),
+        json!("$(id)"),
+        json!(""),
+        json!(1),
+        json!(true),
+        json!(["finish"]),
+        json!({"fix": "finish"}),
+    ] {
+        let rig = Rig::new();
+        let mut body = start("local");
+        body["duel_fixes"] = bad.clone();
+        assert!(rig.send(&body).status.success());
+        assert_eq!(reason(&rig.status()), "bad_request", "{bad}: {}", rig.status());
+        assert!(
+            rig.actions().is_empty() && !rig.p("etc/bot-launch.env").exists(),
+            "{bad}"
+        );
+    }
+    let rig = Rig::new();
+    let out = rig.send(&json!({"v":1,"id":"fedcba9876543210","ts":now(),"action":"stop","duel_fixes":"off"}));
+    assert!(out.status.success());
+    assert_eq!(reason(&rig.status()), "bad_request");
+}
+
+#[test]
 fn stop_stops_the_bot_and_all_sparring_units() {
     let rig = Rig::new();
     assert!(rig.send(&start("local")).status.success());

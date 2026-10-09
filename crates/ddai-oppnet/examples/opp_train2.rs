@@ -5,12 +5,15 @@
 //!     --val-arena DIR --val-clips s0.clipgames --out m2.oppnet [--init m.oppnet] [--epochs 14] [--threads 3]
 //! ```
 //!
-//! Model selection and threshold tuning use the validation sets only; the tables printed at the end are on them, split by source (arena / clips).
+//! Task 3.24 adds games of real humans from demos (`--train-human FILE.humangames`, `--val-human`, `--test-human`, `--human-weight`): their labels are the
+//! true inputs. Model selection and threshold tuning use the validation sets only (the human ones when there are any, else the clips, else the arena); the
+//! tables printed at the end are on them, split by source (arena / clips / humans).
 
 use std::path::PathBuf;
 
 use ddai_oppnet::blob::read_blob;
 use ddai_oppnet::clipdata::ClipGame;
+use ddai_oppnet::humandata::HumanGame;
 use ddai_oppnet::net::Mlp;
 use ddai_oppnet::v2::corpus::{Corpus, CorpusCfg, SampleRef};
 use ddai_oppnet::v2::data::GameRec;
@@ -25,6 +28,10 @@ struct Args {
     val_clips: Vec<PathBuf>,
     /// Clips held out of everything: evaluated at the end only (a final test).
     test_clips: Vec<PathBuf>,
+    /// Games of real humans (task 3.24).
+    train_human: Vec<PathBuf>,
+    val_human: Vec<PathBuf>,
+    test_human: Vec<PathBuf>,
     out: PathBuf,
     init: Option<PathBuf>,
     cfg: TrainCfg,
@@ -48,6 +55,9 @@ fn parse() -> Result<Args, String> {
         val_arena: vec![],
         val_clips: vec![],
         test_clips: vec![],
+        train_human: vec![],
+        val_human: vec![],
+        test_human: vec![],
         out: PathBuf::new(),
         init: None,
         cfg: TrainCfg::default(),
@@ -71,6 +81,10 @@ fn parse() -> Result<Args, String> {
             "--val-arena" => a.val_arena.push(PathBuf::from(v()?)),
             "--val-clips" => a.val_clips.push(PathBuf::from(v()?)),
             "--test-clips" => a.test_clips.push(PathBuf::from(v()?)),
+            "--train-human" => a.train_human.push(PathBuf::from(v()?)),
+            "--val-human" => a.val_human.push(PathBuf::from(v()?)),
+            "--test-human" => a.test_human.push(PathBuf::from(v()?)),
+            "--human-weight" => a.cfg.loss.human_weight = f(v()?)?,
             "--out" => a.out = PathBuf::from(v()?),
             "--init" => a.init = Some(PathBuf::from(v()?)),
             "--epochs" => a.cfg.epochs = u(v()?)?,
@@ -120,7 +134,9 @@ fn parse() -> Result<Args, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if a.out.as_os_str().is_empty() || (a.train_arena.is_empty() && a.train_clips.is_empty()) {
+    if a.out.as_os_str().is_empty()
+        || (a.train_arena.is_empty() && a.train_clips.is_empty() && a.train_human.is_empty())
+    {
         return Err("usage: opp_train2 --train-arena DIR|FILE... --train-clips FILE... --val-arena ... --val-clips ... --out FILE [options]".into());
     }
     Ok(a)
@@ -144,6 +160,14 @@ fn load_arena(paths: &[PathBuf]) -> Result<Vec<GameRec>, String> {
         for f in files {
             out.extend(read_blob::<Vec<GameRec>>(&f)?);
         }
+    }
+    Ok(out)
+}
+
+fn load_humans(paths: &[PathBuf]) -> Result<Vec<HumanGame>, String> {
+    let mut out = Vec::new();
+    for p in paths {
+        out.extend(read_blob::<Vec<HumanGame>>(p)?);
     }
     Ok(out)
 }
@@ -241,6 +265,9 @@ fn main() -> Result<(), String> {
     let va_arena = load_arena(&a.val_arena)?;
     let mut va_clips = load_clips(&a.val_clips)?;
     let te_clips = load_clips(&a.test_clips)?;
+    let tr_human = load_humans(&a.train_human)?;
+    let va_human = load_humans(&a.val_human)?;
+    let te_human = load_humans(&a.test_human)?;
     if let Some((fold, n)) = a.fold {
         // Whole runs of a clip: the games of one source never split between the sets.
         let mut sources: Vec<String> = tr_clips
@@ -269,12 +296,15 @@ fn main() -> Result<(), String> {
         va_clips.extend(out);
     }
     println!(
-        "train: {} arena games, {} clip runs; val: {} arena games, {} clip runs; test: {} clip runs",
+        "train: {} arena games, {} clip runs, {} human games; val: {} arena games, {} clip runs, {} human games; test: {} clip runs, {} human games",
         tr_arena.len(),
         tr_clips.len(),
+        tr_human.len(),
         va_arena.len(),
         va_clips.len(),
-        te_clips.len()
+        va_human.len(),
+        te_clips.len(),
+        te_human.len()
     );
     let cfg_train = CorpusCfg {
         clip_lag: a.clip_lag,
@@ -288,8 +318,8 @@ fn main() -> Result<(), String> {
         hist_keep: a.hist_keep,
         swing_label: a.swing_label,
     };
-    let c_train = Corpus::new(tr_arena, tr_clips, cfg_train);
-    let c_val = Corpus::new(va_arena, va_clips, cfg_val.clone());
+    let c_train = Corpus::new(tr_arena, tr_clips, cfg_train).with_humans(tr_human);
+    let c_val = Corpus::new(va_arena, va_clips, cfg_val.clone()).with_humans(va_human);
     let init = match &a.init {
         Some(p) => Some(Bundle::load(p)?.net),
         None => None,
@@ -309,17 +339,16 @@ fn main() -> Result<(), String> {
     let (net, val) = train(&c_train, &c_val, &a.cfg, init.as_ref(), &mut |l| println!("{l}"))?;
     let samples = c_val.samples();
     // The thresholds are tuned for the real opponent when there are clips to tune on, else on the arena.
-    let clip_samples: Vec<SampleRef> = samples.iter().copied().filter(|r| r.src == 1).collect();
-    let tune_on = if clip_samples.is_empty() {
-        &samples
+    let of_src = |src: u8| -> Vec<SampleRef> { samples.iter().copied().filter(|r| r.src == src).collect() };
+    let (human_samples, clip_samples) = (of_src(2), of_src(1));
+    let (tune_on, tune_name) = if !human_samples.is_empty() {
+        (&human_samples, "human")
+    } else if !clip_samples.is_empty() {
+        (&clip_samples, "clip")
     } else {
-        &clip_samples
+        (&samples, "arena")
     };
-    println!(
-        "tuning the decoding on {} {} samples",
-        tune_on.len(),
-        if clip_samples.is_empty() { "arena" } else { "clip" }
-    );
+    println!("tuning the decoding on {} {tune_name} samples", tune_on.len());
     let mut decode = tune(&net, &c_val, tune_on, a.press_thr);
     ddai_oppnet::v2::predictor::apply_decode_overrides(&mut decode, &a.decode)?;
     println!("decoding used: {decode:?}");
@@ -337,7 +366,7 @@ fn main() -> Result<(), String> {
         a.out.display(),
         net.params.len()
     );
-    for (name, src) in [("arena", 0u8), ("clips", 1u8)] {
+    for (name, src) in [("arena", 0u8), ("clips", 1u8), ("humans", 2u8)] {
         let s: Vec<SampleRef> = samples.iter().copied().filter(|r| r.src == src).collect();
         if s.is_empty() {
             continue;
@@ -345,6 +374,15 @@ fn main() -> Result<(), String> {
         println!(
             "\n## validation, {name}\n\n{}",
             evaluate(&net, &c_val, &s, &decode).table()
+        );
+    }
+    if !te_human.is_empty() {
+        let c_test = Corpus::new(vec![], vec![], cfg_val.clone()).with_humans(te_human);
+        let s = c_test.samples();
+        println!(
+            "\n## test humans ({} samples)\n\n{}",
+            s.len(),
+            evaluate(&net, &c_test, &s, &decode).table()
         );
     }
     if !te_clips.is_empty() {

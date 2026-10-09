@@ -80,10 +80,25 @@
     return head + SEARCH_THREADS_TAIL;
   }
 
+  // Task 5.18 (D-129): the 3.23 duel fixes (docs/research/duel-fixes-3.23.md, D-121, E-038), hybrid brains only. A closed list of the three arms of the live protocol
+  // (section 7): off, finish, static+finish. `counter` (no-go: it raises timeouts) and `all` are not offered. The numbers are the arena's and the scenarios', not live ones.
+  var DUEL_FIXES_LABEL = { off: "выкл", finish: "добивание", "static,finish": "стоячая цель и добивание" };
+  var DUEL_FIXES_TAIL =
+    " Работает только в распознанной дуэли; вживую не проверено. Силу вживую на сотнях раундов не измерить: сравнивайте плечи по журналу (протокол 3.23, раздел 7). Пресет «Дуэль» ставит «выкл» и остаётся таким, пока вживую не сыграют сравнение плеч.";
+  var DUEL_FIXES_HINT = {
+    off: "Выключено (умолчание): бот ведёт себя, как до задачи 3.23.",
+    finish:
+      "Добивание: замороженный соперник лежит вне фриза, а бот не стоит, а действует (подходит, подтягивает; молотом замороженного не бьёт). Заранее объявленные планки взяты: в сценариях добивания удержание 57,7% → 90,4% (+32,7 п.п.), нулевой ввод 34% → 15%; в арене дуэли против «live-v2» не хуже базы (+1,7 ± 2,0 п.п. побед, p 0,13; таймауты те же), силу это не доказывает." +
+      DUEL_FIXES_TAIL,
+    "static,finish":
+      "Добивание плюс стоячая цель: соперник дуэли не отбрасывается как АФК, а против стоящего бот выбирает план, который действует. Стоячая цель — большой эффект в сценарии (ввод «ничего не нажато» 100% → 6,8%; блок 59% → 87% при 6 мкс на ти-тик), но планку по букве не взяла (87% при 6 мкс вместо 90%; в ячейке 2/2 арены −4,5 п.п., в шуме); в арене сочетание вместе −0,7 ± 3,3 п.п. (p 0,77; задним числом, не заранее объявленное плечо). Против активного человека пользы не доказано, нужна при настоящем АФК-партнёре." +
+      DUEL_FIXES_TAIL,
+  };
+
   // Task 5.16 (D-120): the «Дуэль» preset. It only fills the form (the owner still presses «Запустить»); every value below says why, with the numbers
   // and the caveats of docs/research/duel-3.19.md (D-116, E-034), preinput.md (D-112) and lag-shave.md (D-115).
   var PRESET_NOTE =
-    "Заполняет форму для дуэли 1 на 1 (F-DDrace): мозг, дожим, самоубийства, ходы сервера (выкл), предсказатель, умный ВБ и потоки поиска (3). Сервер, длительность и спарринг остаются вашими. Запускает только кнопка «Запустить».";
+    "Заполняет форму для дуэли 1 на 1 (F-DDrace): мозг, дожим, самоубийства, ходы сервера (выкл), предсказатель, умный ВБ, исправления дуэли (выкл) и потоки поиска (3). Сервер, длительность и спарринг остаются вашими. Запускает только кнопка «Запустить».";
   var PRESET_ITEMS = [
     ["Мозг: Гибрид", "у чистой мухи нет ни дожима, ни ходов сервера."],
     [
@@ -105,6 +120,10 @@
     [
       "Умный ВБ: выкл",
       "нужен для толпы на Copy Love Box; в распознанной дуэли бот ВБ не держит и сам.",
+    ],
+    [
+      "Исправления дуэли: выкл",
+      "умолчание не меняем, пока вживую не сыграно сравнение плеч «выкл» / «добивание» / «стоячая цель и добивание» (3.23, раздел 7): сценарии и арена показывают, что добивание не вредит, но вживую его не проверяли. Включается отдельным выбором.",
     ],
     [
       "Потоки поиска: 3",
@@ -221,6 +240,7 @@
     window_model_bad_path: "Путь к файлу предсказателя недопустим.",
     preinput_hybrid_only: "Настоящие ходы соперника от сервера бывают только у гибридных мозгов: для «Мухи» их нет.",
     search_threads_hybrid_only: "Потоки поиска бывают только у гибридных мозгов: «Муха» не ищет, для неё остаётся один.",
+    duel_fixes_hybrid_only: "Исправления дуэли бывают только у гибридных мозгов: для «Мухи» их нет.",
     bundle_bad_path: "Путь к bundle в конфиге недопустим.",
     config_bad: "Конфиг запуска не читается.",
     config_untrusted: "Конфиг запуска доступен на запись не только root: отказ.",
@@ -260,6 +280,7 @@
     window_model_bad_path: "Путь к файлу предсказателя недопустим.",
     preinput_hybrid_only: "Настоящие ходы соперника от сервера бывают только у гибридных мозгов: для «Мухи» их нет.",
     search_threads_hybrid_only: "Потоки поиска бывают только у гибридных мозгов: «Муха» не ищет, для неё остаётся один.",
+    duel_fixes_hybrid_only: "Исправления дуэли бывают только у гибридных мозгов: для «Мухи» их нет.",
     rate_limited: "Слишком часто: подождите несколько секунд (не больше 6 запросов в минуту).",
     pending: "Предыдущий запрос ещё не обработан.",
     launcher_unavailable: "Запуск с сайта не установлен на сервере (нет каталога data/launch).",
@@ -428,6 +449,12 @@
         { value: "3", text: "3" },
         { value: "4", text: "4" },
       ]);
+      // Task 5.18: the 3.23 duel fixes, off by default and sent only when not off; a closed list of three; the hybrid brains only (hidden for the fly).
+      ui.duelFixes = select([
+        { value: "off", text: "выкл (по умолчанию)" },
+        { value: "finish", text: "добивание" },
+        { value: "static,finish", text: "стоячая цель и добивание" },
+      ]);
       var form = el("div", "lc-form");
       form.appendChild(field("Сервер", ui.server));
       form.appendChild(field("Мозг", ui.brain));
@@ -444,6 +471,8 @@
       form.appendChild(ui.preinputField);
       ui.searchThreadsField = field("Потоки поиска", ui.searchThreads);
       form.appendChild(ui.searchThreadsField);
+      ui.duelFixesField = field("Исправления дуэли", ui.duelFixes);
+      form.appendChild(ui.duelFixesField);
       form.appendChild(field("Длительность", ui.duration));
       ui.sparringField = field("Спарринг (только локальный сервер)", ui.sparring);
       form.appendChild(ui.sparringField);
@@ -460,6 +489,8 @@
       card.appendChild(ui.preinputHint);
       ui.searchThreadsHint = el("p", "hint lc-opt-hint lc-search-threads-hint");
       card.appendChild(ui.searchThreadsHint);
+      ui.duelFixesHint = el("p", "hint lc-opt-hint lc-duel-fixes-hint");
+      card.appendChild(ui.duelFixesHint);
       ui.bundle = el("p", "hint lc-bundle");
       card.appendChild(ui.bundle);
 
@@ -498,8 +529,9 @@
       ui.windowModel.addEventListener("change", syncMirror);
       ui.preinput.addEventListener("change", syncMirror);
       ui.searchThreads.addEventListener("change", syncMirror);
+      ui.duelFixes.addEventListener("change", syncMirror);
       // A change by hand takes back "the form is filled for the duel"; the preset button is lit only while the form IS the preset.
-      [ui.brain, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput, ui.searchThreads].forEach(function (c) {
+      [ui.brain, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput, ui.searchThreads, ui.duelFixes].forEach(function (c) {
         c.addEventListener("change", function () {
           ui.presetDone.textContent = "";
           syncPreset();
@@ -544,6 +576,10 @@
       ui.searchThreadsField.hidden = fly;
       ui.searchThreadsHint.hidden = fly;
       syncThreadsHint();
+      // The duel fixes are the hybrid's too: the pure fly has none, so the choice is not offered to it.
+      ui.duelFixesField.hidden = fly;
+      ui.duelFixesHint.hidden = fly;
+      ui.duelFixesHint.textContent = Object.prototype.hasOwnProperty.call(DUEL_FIXES_HINT, ui.duelFixes.value) ? DUEL_FIXES_HINT[ui.duelFixes.value] : "";
     }
 
     // The hint of the chosen thread count; while the host's load is above the threshold and more than one thread is chosen it adds the warning (the choice is
@@ -571,6 +607,7 @@
       ["windowModel", "off"],
       ["wbSmart", "off"],
       ["searchThreads", "3"],
+      ["duelFixes", "off"],
     ];
 
     function presetIsSet() {
@@ -723,6 +760,9 @@
       if (typeof status.search_threads === "number" && status.search_threads > 1) {
         parts.push("потоки поиска: " + status.search_threads);
       }
+      if (typeof status.duel_fixes === "string" && Object.prototype.hasOwnProperty.call(DUEL_FIXES_LABEL, status.duel_fixes) && status.duel_fixes !== "off") {
+        parts.push("исправления дуэли: " + DUEL_FIXES_LABEL[status.duel_fixes]);
+      }
       if (status.bundle && status.brain && status.brain !== "hybrid") {
         parts.push("муха " + status.bundle);
       }
@@ -796,7 +836,7 @@
       ui.start.classList.toggle("is-loading", busy && ui.start === pressed);
       ui.stop.classList.toggle("is-loading", busy && ui.stop === pressed);
       ui.watch.hidden = !live;
-      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput, ui.searchThreads].forEach(function (c) {
+      [ui.server, ui.brain, ui.duration, ui.mirror, ui.finish, ui.wbSmart, ui.noSelfkill, ui.windowModel, ui.preinput, ui.searchThreads, ui.duelFixes].forEach(function (c) {
         c.disabled = busy || !enabled;
       });
       ui.preset.disabled = busy || !enabled;
@@ -899,6 +939,11 @@
       var threads = parseInt(ui.searchThreads.value, 10);
       if (ui.brain.value !== "fly" && threads >= 2 && threads <= 4) {
         body.search_threads = threads;
+      }
+      // Task 5.18: the duel fixes are sent only when not off (the absence of the field is off, so an older helper still takes every default start), never for the pure fly,
+      // and only one of the select's own two words.
+      if (ui.brain.value !== "fly" && (ui.duelFixes.value === "finish" || ui.duelFixes.value === "static,finish")) {
+        body.duel_fixes = ui.duelFixes.value;
       }
       if (body.server !== "local") {
         var ok = window.confirm(

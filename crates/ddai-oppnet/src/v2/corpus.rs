@@ -1,8 +1,9 @@
 //! Samples from arena games and live clips, their input vectors and their labels.
 //!
-//! A **sample** is a decision tick `T`: the arena's `T % decide_every == 0` (with the game's own lag as the window), or a clip's duel frame (window
-//! [`CorpusCfg::clip_lag`]). Its input is built by [`assemble`], the same function the live predictor uses. The label says what the opponent did at `T ..`: the
-//! arena knows every applied input, a clip only what the next snapshots show (see [`crate::clipdata`]), so labels carry a mask per head.
+//! A **sample** is a decision tick `T`: the arena's `T % decide_every == 0` (with the game's own lag as the window), a clip's duel frame (window
+//! [`CorpusCfg::clip_lag`]) or a human game's duel frame (task 3.24, the same window). Its input is built by [`assemble`], the same function the live predictor
+//! uses. The label says what the opponent did at `T ..`: the arena and the human games know every applied input (a human game's are the real ones from the
+//! demo's pre-inputs), a clip only what the next snapshots show (see [`crate::clipdata`]), so labels carry a mask per head.
 
 use rayon::prelude::*;
 
@@ -13,6 +14,7 @@ use super::feature::{
 };
 use crate::clipdata::{ClipGame, labels_at};
 use crate::frame::{InputRec, TeeFrame};
+use crate::humandata::HumanGame;
 
 #[derive(Debug, Clone)]
 pub struct CorpusCfg {
@@ -38,7 +40,7 @@ impl Default for CorpusCfg {
     }
 }
 
-/// A sample's place: source (0 arena, 1 clip), game and tick index.
+/// A sample's place: source (0 arena, 1 clip, 2 human game), game and tick index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SampleRef {
     pub src: u8,
@@ -49,9 +51,33 @@ pub struct SampleRef {
 pub struct Corpus {
     pub arena: Vec<GameRec>,
     pub clips: Vec<ClipGame>,
+    /// Games of real humans from demos (source 2); see [`Corpus::with_humans`].
+    pub humans: Vec<HumanGame>,
     af: Vec<Vec<[f32; FD]>>,
     cf: Vec<Vec<[f32; FD]>>,
+    hf: Vec<Vec<[f32; FD]>>,
     pub cfg: CorpusCfg,
+}
+
+/// Our input applied in the step into world tick `tick`, for the human-game sample at frame `i`: the real one when the demo has it, else what the frame that
+/// ends the step shows of our own tee (direction, jump key as the jump bit, hook key as a hook above idle, aim as its angle; no fire).
+fn human_us_input(g: &HumanGame, i: usize, tick: i32) -> InputRec {
+    if let Some(r) = g.input_at(0, tick) {
+        return r;
+    }
+    let m = (i..g.ticks.len())
+        .find(|&m| g.ticks[m].tick >= tick)
+        .unwrap_or(g.ticks.len() - 1);
+    let f = &g.ticks[m].frames[0];
+    let a = f64::from(f.angle);
+    InputRec {
+        direction: f.direction,
+        jump: f.jumped & 1 != 0,
+        hook: f.hook_state > 0,
+        fire: 0,
+        target_x: (ddai_jsmath::cos(a) * 1000.0) as i16,
+        target_y: (ddai_jsmath::sin(a) * 1000.0) as i16,
+    }
 }
 
 fn mix(a: u64, b: u64, c: u64) -> u64 {
@@ -94,10 +120,31 @@ impl Corpus {
         Corpus {
             arena,
             clips,
+            humans: Vec::new(),
             af,
             cf,
+            hf: Vec::new(),
             cfg,
         }
+    }
+
+    /// Adds games of real humans (source 2) to the corpus.
+    pub fn with_humans(mut self, humans: Vec<HumanGame>) -> Corpus {
+        self.hf = humans
+            .par_iter()
+            .map(|g| {
+                g.ticks
+                    .iter()
+                    .map(|t| {
+                        let mut f = [0.0; FD];
+                        frame_features(&t.frames[0], &t.frames[1], &mut f);
+                        f
+                    })
+                    .collect()
+            })
+            .collect();
+        self.humans = humans;
+        self
     }
 
     /// Every usable decision tick.
@@ -131,7 +178,37 @@ impl Corpus {
                 }
             }
         }
+        for (gi, g) in self.humans.iter().enumerate() {
+            for i in 0..g.ticks.len() {
+                if self.human_sample_ok(g, i) {
+                    out.push(SampleRef {
+                        src: 2,
+                        game: gi as u32,
+                        idx: i as u32,
+                    });
+                }
+            }
+        }
         out
+    }
+
+    /// A human-game frame is a sample when it is a duel frame, both tees are alive and free, the next frame follows and the opponent's real input just before
+    /// it is known. Our own inputs for the window need not be: the player who recorded a demo has none in it (the server forwards the others' only), so
+    /// they are then read off the frames ([`human_us_input`]).
+    fn human_sample_ok(&self, g: &HumanGame, i: usize) -> bool {
+        let t = &g.ticks[i];
+        if !t.duel
+            || !t.frames[0].alive
+            || !t.frames[1].alive
+            || t.frames[0].freeze_left > 0
+            || t.frames[1].freeze_left > 0
+        {
+            return false;
+        }
+        if !g.consecutive(i, 0, 1) || !g.ticks[i + 1].frames[1].alive {
+            return false;
+        }
+        g.input_at(1, t.tick).is_some()
     }
 
     /// A clip frame is a sample when it is a duel frame, both tees are alive and free, the next frame follows, and our inputs for the window are known.
@@ -153,7 +230,7 @@ impl Corpus {
 
     /// How many ticks of the window are known (pre-inputs) in this sample at this epoch: always 0 for a clip.
     pub fn known_n(&self, r: SampleRef, salt: u64) -> usize {
-        if r.src != 0 {
+        if r.src == 1 {
             return 0;
         }
         let u = (mix(u64::from(r.game), u64::from(r.idx), salt) >> 40) as f32 / (1u64 << 24) as f32;
@@ -207,6 +284,31 @@ impl Corpus {
             );
             label = self.label(r);
             label.mask_known(n);
+        } else if r.src == 2 {
+            let g = &self.humans[r.game as usize];
+            let feats = &self.hf[r.game as usize];
+            let t = &g.ticks[i];
+            for (k, f) in inflight.iter_mut().enumerate().take(n_if) {
+                let rec = human_us_input(g, i, t.tick + 1 + k as i32);
+                inflight_features(&rec, f);
+            }
+            let n = self.known_n(r, salt);
+            for (k, slot) in known.iter_mut().enumerate().take(n) {
+                *slot = g
+                    .input_at(1, t.tick + 1 + k as i32)
+                    .map(|rec| KnownTick::from_rec(&rec));
+            }
+            assemble(
+                x,
+                |j| &feats[i.saturating_sub(j.min(self.cfg.hist_keep.max(1) - 1))],
+                &t.rays[1],
+                &t.rays[0],
+                &inflight[..n_if],
+                lag,
+                &known,
+            );
+            label = self.label(r);
+            label.mask_known(n);
         } else {
             let g = &self.clips[r.game as usize];
             let feats = &self.cf[r.game as usize];
@@ -254,6 +356,8 @@ impl Corpus {
                 }
                 prev = cur;
             }
+        } else if r.src == 2 {
+            return self.human_label(&self.humans[r.game as usize], i);
         } else {
             let g = &self.clips[r.game as usize];
             let l = labels_at(g, i, HORIZON);
@@ -271,11 +375,52 @@ impl Corpus {
         label
     }
 
-    /// The opponent's frame at the sample tick, and (arena only) the input it applied just before it.
+    /// The label of the human-game frame `i`: window tick `k` is the real input applied in the step into tick `T + 1 + k` (`prev` the one before it),
+    /// valid where the opponent is alive and free in the frame that ends the step and both inputs are known; the fire label is a real **swing** (the
+    /// weapon went off: the frames show its `attack_tick`), as for clips and the `swing_label` arena.
+    fn human_label(&self, g: &HumanGame, i: usize) -> Label {
+        let mut label = Label::default();
+        let t0 = g.ticks[i].tick;
+        let base = f64::from(g.ticks[i].frames[1].angle);
+        for k in 0..HORIZON {
+            // the frame that ends the step into T + 1 + k: the first one at or after it
+            let j = i + (k + 2) / 2;
+            if j >= g.ticks.len() || !g.consecutive(i, 0, j - i) {
+                break;
+            }
+            let f = &g.ticks[j].frames[1];
+            if !f.alive || f.freeze_left > 0 || !g.ticks[j].duel {
+                break;
+            }
+            let (Some(prev), Some(cur)) = (g.input_at(1, t0 + k as i32), g.input_at(1, t0 + 1 + k as i32)) else {
+                continue;
+            };
+            label_tick(&mut label, k, &prev, &cur, base);
+            // The aim is repeated between messages (it never causes one): only a tick that carries a message has a fresh aim to learn.
+            if !g.is_msg(1, t0 + 1 + k as i32) {
+                label.v_aim &= !(1 << k);
+                label.aim_delta[k] = 0.0;
+            }
+            // a swing in the step T + k -> T + k + 1 leaves `attack_tick == T + k` in the frames that follow
+            let swung = (i + 1..=j).any(|m| {
+                let f = &g.ticks[m].frames[1];
+                f.attack_age < 120 && g.ticks[m].tick - i32::from(f.attack_age) == t0 + k as i32
+            });
+            label.press &= !(1 << k);
+            label.press |= u8::from(swung) << k;
+        }
+        label
+    }
+
+    /// The opponent's frame at the sample tick, and (arena and human games) the input it applied just before it.
     pub fn snapshot_of(&self, r: SampleRef) -> (Option<InputRec>, TeeFrame) {
         if r.src == 0 {
             let t = &self.arena[r.game as usize].ticks[r.idx as usize];
             (Some(t.applied[1]), t.frames[1])
+        } else if r.src == 2 {
+            let g = &self.humans[r.game as usize];
+            let t = &g.ticks[r.idx as usize];
+            (g.input_at(1, t.tick), t.frames[1])
         } else {
             (None, self.clips[r.game as usize].ticks[r.idx as usize].frames[1])
         }
@@ -528,5 +673,173 @@ mod tests {
         assert_eq!(made, l, "a clip sample has no known ticks");
         let lag_slot = INPUT_DIM - HORIZON * super::super::feature::KNOWN_DIM - super::super::feature::LAG_SLOTS;
         assert_eq!(x[lag_slot + 2], 1.0, "the live window");
+    }
+
+    /// Frames every 2 ticks from tick 100; the opponent (slot 1) walks right (+1) from tick 100 on, jumps at 105, hooks at 106-107 and swings its
+    /// weapon at tick 106 (the frames from 108 on show `attack_tick` 106); we walk left throughout.
+    fn human_game() -> HumanGame {
+        let n = 6usize;
+        let ticks = (0..n)
+            .map(|j| {
+                let tick = 100 + 2 * j as i32;
+                let mut opp = tee(1, 0.5);
+                opp.attack_age = if tick >= 108 { (tick - 106) as i16 } else { 120 };
+                ClipTick {
+                    tick,
+                    frames: [tee(-1, 0.0), opp],
+                    rays: [[1.0; N_RAYS]; 2],
+                    sent: [None, None],
+                    opp_attack_tick: 0,
+                    opp_weapon: 0,
+                    duel: true,
+                }
+            })
+            .collect();
+        let inputs = (99..99 + 14)
+            .map(|t| {
+                let me = InputRec {
+                    direction: -1,
+                    ..InputRec::default()
+                };
+                let opp = InputRec {
+                    direction: if t >= 100 { 1 } else { 0 },
+                    jump: t == 105,
+                    hook: t == 106 || t == 107,
+                    fire: if t == 106 {
+                        1
+                    } else if t >= 107 {
+                        2
+                    } else {
+                        0
+                    },
+                    ..InputRec::default()
+                };
+                [Some(me), Some(opp)]
+            })
+            .collect();
+        // messages of the opponent at the ticks its input changes (its direction at 100, jump at 105, hook at 106, fire at 106 and 107, jump off at 106)
+        let msg = (99..99 + 14)
+            .map(|t| [false, matches!(t, 100 | 105 | 106 | 107 | 108)])
+            .collect();
+        HumanGame {
+            source: "h0-1-2p1".into(),
+            session: 0,
+            ticks,
+            first: 99,
+            inputs,
+            msg,
+        }
+    }
+
+    #[test]
+    fn human_labels_are_the_real_inputs_with_a_swing_from_the_frames() {
+        let c = Corpus::new(vec![], vec![], CorpusCfg::default()).with_humans(vec![human_game()]);
+        let s = c.samples();
+        let idx: Vec<u32> = s.iter().map(|r| r.idx).collect();
+        assert_eq!(
+            idx,
+            vec![0, 1, 2, 3, 4],
+            "every frame with a successor and the inputs it needs"
+        );
+        // sample 3 is the frame at tick 106: window ticks 0..3 are the inputs applied in the steps into 107..110
+        let r = SampleRef {
+            src: 2,
+            game: 0,
+            idx: 3,
+        };
+        assert_eq!(
+            c.snapshot_of(r).0.map(|i| i.hook),
+            Some(true),
+            "the true previous input is the one of tick 106"
+        );
+        // sample 2 is the frame at tick 104: k = 0 is the step into 105 (the jump), k = 1 the step into 106 (hook on, press), k = 2 into 107
+        let r = SampleRef {
+            src: 2,
+            game: 0,
+            idx: 2,
+        };
+        let l = c.label(r);
+        assert_eq!(l.v_dir & 0b0011, 0b0011);
+        assert_eq!(l.jump & 0b0001, 0b0001, "jump key down at tick 105");
+        assert_eq!(l.hook & 0b0011, 0b0010, "hook at 106, not at 105");
+        assert_eq!(l.dir[0], 2, "direction +1 -> class 2");
+        // the weapon went off in the step 106 -> 107? No: a press at world tick 106 is applied in the step into tick 106, i.e. `attack_tick`
+        // 105... the frames say 106, so the swing is the step T + k -> T + k + 1 = 106 -> 107 for T = 104: k = 2
+        assert_eq!(l.press, 0b0100, "swing in window tick 2 (attack tick 106 = T + 2)");
+        // the aim is fresh only at ticks with a message: for T = 104 the window ticks 0..3 are the ticks 105..108, all flagged but 109 (k = 4 does not exist)
+        assert_eq!(l.v_aim & 0b1111, 0b1111);
+        let r1 = SampleRef {
+            src: 2,
+            game: 0,
+            idx: 0,
+        };
+        // T = 100: window ticks are 101..104, none carries a message: no aim label at all, the other heads stay
+        let l1 = c.label(r1);
+        assert_eq!(l1.v_aim, 0, "no message in 101..=104");
+        assert_eq!(l1.v_dir & 0b1111, 0b1111);
+        // our in-flight inputs are the real ones, and known ticks come from the opponent's real inputs
+        let mut x = Box::new([0.0f32; INPUT_DIM]);
+        let l2 = c.make(r, 0, &mut x);
+        assert_eq!(l2, l, "no known ticks by default");
+        let cfg = CorpusCfg {
+            known_p: [0.0, 0.0, 1.0, 0.0, 0.0],
+            ..CorpusCfg::default()
+        };
+        let c = Corpus::new(vec![], vec![], cfg).with_humans(vec![human_game()]);
+        let l3 = c.make(r, 0, &mut x);
+        assert_eq!(l3.v_dir, l.v_dir & 0b1100, "two known ticks are not learned");
+        let k0 = INPUT_DIM - HORIZON * super::super::feature::KNOWN_DIM;
+        assert_eq!(x[k0], 1.0);
+        assert_eq!(x[k0 + 2 * super::super::feature::KNOWN_DIM], 0.0);
+    }
+
+    #[test]
+    fn a_human_sample_needs_the_inputs_and_a_free_alive_pair() {
+        let mut g = human_game();
+        // our own inputs are not in the demo (the recording player's): the samples stay and read them off the frames
+        for i in &mut g.inputs {
+            i[0] = None;
+        }
+        g.ticks[1].frames[0].direction = 1;
+        g.ticks[1].frames[0].jumped = 1;
+        let c = Corpus::new(vec![], vec![], CorpusCfg::default()).with_humans(vec![g.clone()]);
+        let idx: Vec<u32> = c.samples().iter().map(|r| r.idx).collect();
+        assert_eq!(idx, vec![0, 1, 2, 3, 4]);
+        let rec = human_us_input(&g, 0, 101);
+        assert_eq!(
+            (rec.direction, rec.jump),
+            (1, true),
+            "the frame that ends the step into tick 101 is the one at tick 102"
+        );
+        let mut x = Box::new([0.0f32; INPUT_DIM]);
+        let r = SampleRef {
+            src: 2,
+            game: 0,
+            idx: 0,
+        };
+        c.make(r, 0, &mut x);
+        let if0 = INPUT_DIM
+            - HORIZON * super::super::feature::KNOWN_DIM
+            - super::super::feature::LAG_SLOTS
+            - IF_SLOTS * IF_DIM;
+        assert_eq!(x[if0], 1.0, "the in-flight direction comes from the frame");
+        // the opponent's previous input unknown: no sample
+        let mut g = human_game();
+        g.inputs[1][1] = None; // tick 100
+        let c = Corpus::new(vec![], vec![], CorpusCfg::default()).with_humans(vec![g]);
+        let idx: Vec<u32> = c.samples().iter().map(|r| r.idx).collect();
+        assert!(!idx.contains(&0), "{idx:?}");
+        let mut g = human_game();
+        g.ticks[2].frames[1].freeze_left = 30;
+        let c = Corpus::new(vec![], vec![], CorpusCfg::default()).with_humans(vec![g]);
+        let idx: Vec<u32> = c.samples().iter().map(|r| r.idx).collect();
+        assert!(!idx.contains(&2), "a frozen opponent is not a sample");
+        // and the label stops at the frame where it froze
+        let l = c.label(SampleRef {
+            src: 2,
+            game: 0,
+            idx: 0,
+        });
+        assert_eq!(l.v_dir, 0b0011, "frame 2 is frozen: window ticks 2, 3 end in it");
     }
 }
