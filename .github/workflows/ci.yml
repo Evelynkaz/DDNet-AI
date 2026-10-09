@@ -105,6 +105,20 @@ jobs:
       - name: ddai-libm, which fma this runner uses
         run: cargo test --locked -p ddai-libm --test fma_check -- --nocapture
 
+      # The Windows binary for the release page is built here, on the same runner and toolchain the tests above passed on, and kept as a
+      # workflow artifact; the lead attaches it to the GitHub release by hand (no publishing from CI).
+      - name: Release build of the bot
+        run: cargo build --release --locked -p ddnet-ai
+      - name: Smoke-run the release binary
+        run: target/release/ddnet-ai.exe --help
+      - name: Keep ddnet-ai.exe as an artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ddnet-ai-windows-x86_64
+          path: target/release/ddnet-ai.exe
+          if-no-files-found: error
+          retention-days: 30
+
   # Second layer behind .gitignore: no trained weights, demos, maps or files over 2 MB in git (tools/ci/no-weights.sh).
   no-weights:
     name: no weights / big files in git
