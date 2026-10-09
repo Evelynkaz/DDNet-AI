@@ -313,6 +313,10 @@ pub struct StatusMessage {
     /// decides it, so only a library caller can leave it open). Set also when the brain is not the hybrid. A bot of an older build sends no such
     /// field; the site's «Бот» card shows «—» for it.
     pub search_threads: Option<u32>,
+    /// Additive since task 5.18 (D-129): the 3.23 duel fixes the hybrid was built with (`--duel-fixes`): `off`, or the fixes that are on as a comma list
+    /// in the order `static,counter,finish` (the site offers `off`, `finish` and `static,finish`; a hand-started bot may run others). Set also when the
+    /// brain is not the hybrid. A bot of an older build sends no such field; the site's «Бот» card shows «—» for it.
+    pub duel_fixes: String,
 }
 
 /// STATUS `search_window` (task 5.16, D-120): what the hybrid's searching decisions of the last `window_s` seconds of game time looked like.
@@ -883,6 +887,7 @@ mod tests {
             preinput: "on".into(),
             preinput_stats: serde_json::json!({"received": 7}),
             search_threads: Some(3),
+            duel_fixes: "static,finish".into(),
             hybrid_budget_ms: 3,
             prediction_margin_ms: None,
             search_window: SearchWindowStatus {
@@ -897,6 +902,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&p).unwrap();
         assert_eq!(v["hybrid_budget_ms"], 3);
         assert_eq!(v["search_threads"], 3);
+        assert_eq!(v["duel_fixes"], "static,finish");
         assert!(v["prediction_margin_ms"].is_null(), "adaptive margin: null");
         assert_eq!(v["target"], 3);
         assert_eq!(v["telemetry"]["x"], 1);

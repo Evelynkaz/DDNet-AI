@@ -521,6 +521,28 @@
     // Task 3.20b (D-112): the server's pre-inputs (`preinput` of the status); «off» still counts them, only the prediction does not use them.
     var PREINPUT_LABELS = { off: "выкл (только счёт)", on: "вкл", killed: "выкл (флажок)" };
     var FINISH_LABELS = { off: "выкл", target: "цель", wb: "цель + удержание ВБ", full: "полный (дуэль 1 на 1)" };
+    // Task 5.18 (D-129): «Исправления дуэли» from STATUS `duel_fixes`: `off`, or a comma list of the fixes that are on, in the order static, counter, finish. The site
+    // offers off / finish / static+finish; a hand-started bot may run others (counter is a no-go, shown plainly). Anything else, or a brain that is not a hybrid
+    // (the pure fly has none), or an older bot without the field: «—».
+    var DUEL_FIX_NAMES = { static: "стоячая цель", counter: "хук сверху (не рекомендуется)", finish: "добивание" };
+    function duelFixesText(s) {
+      if (typeof s.duel_fixes !== "string" || typeof s.brain !== "string" || s.brain.indexOf("hybrid") !== 0) {
+        return "—";
+      }
+      if (s.duel_fixes === "off") {
+        return "выкл";
+      }
+      var names = s.duel_fixes.split(",");
+      var out = [];
+      for (var i = 0; i < names.length; i++) {
+        if (!Object.prototype.hasOwnProperty.call(DUEL_FIX_NAMES, names[i])) {
+          return "—";
+        }
+        out.push(DUEL_FIX_NAMES[names[i]]);
+      }
+      return out.join(" + ");
+    }
+
     // «Ходы от сервера»: the mode, how many arrived, the share of (snapshot, opponent) pairs whose newest message reaches at least one tick past the snapshot
     // (`known_ahead` bins above 0; the bin of tick 0 is at index -lead_from; it pools ALL opponents present), and, with the mode on, the share of decisions
     // the pre-inputs reached (`decisions_real` of `decisions`; TARGET only).
@@ -697,7 +719,7 @@
                 ? "бот не запущен: сейчас на сайте показ (муха на арене), настоящей игры нет"
                 : "бот не запущен (нет живого статуса)";
         setText("bot-conn-text", why);
-        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-wbsmart", "bs-windowmodel", "bs-preinput", "bs-searchthreads", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
+        ["bs-server", "bs-map", "bs-mode", "bs-brain", "bs-finish", "bs-target", "bs-wb", "bs-wbsmart", "bs-windowmodel", "bs-preinput", "bs-searchthreads", "bs-duelfixes", "bs-selfkill", "bs-blocks", "bs-deaths", "bs-clips", "bs-latency", "bs-latency2", "bs-identity", "bs-tick"].forEach(function (id) {
           setText(id, "—");
         });
         el("bs-selfkill").classList.remove("kv-warn");
@@ -736,6 +758,7 @@
           ? String(s.search_threads)
           : "—"
       );
+      setText("bs-duelfixes", duelFixesText(s));
       // A status without the field (an older bot) shows «—», never «вкл».
       setText("bs-selfkill", Object.prototype.hasOwnProperty.call(SELFKILL_LABELS, s.selfkill) ? SELFKILL_LABELS[s.selfkill] : "—");
       el("bs-selfkill").classList.toggle("kv-warn", s.selfkill === "off");

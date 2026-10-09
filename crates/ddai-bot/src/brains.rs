@@ -251,6 +251,20 @@ pub fn duel_fixes(list: &str) -> Option<(ddai_planner::hybrid::DuelFixConfig, bo
     Some((c, afk))
 }
 
+/// The `--duel-fixes` word of a configuration (task 5.18, D-129; STATUS `duel_fixes`): `off`, or the fixes that are on as a comma list in the order
+/// `static,counter,finish`. The inverse of [`duel_fixes`] for the three fixes (`all` reads as the full list).
+pub fn duel_fixes_name(c: &ddai_planner::hybrid::DuelFixConfig) -> String {
+    let on: Vec<&str> = [
+        (c.static_push, "static"),
+        (c.counter_release, "counter"),
+        (c.finish_push, "finish"),
+    ]
+    .into_iter()
+    .filter_map(|(is_on, name)| is_on.then_some(name))
+    .collect();
+    if on.is_empty() { "off".to_string() } else { on.join(",") }
+}
+
 /// The belief that the opponent reacts while his hook holds us, with `--duel-fixes counter` (E-038).
 pub const COUNTER_HOOKED_BELIEF: f64 = 0.8;
 /// Approach plans (technique T30) per decision against a frozen victim lying off the freeze, with `--duel-fixes finish` (E-038).
@@ -422,6 +436,26 @@ mod tests {
             ..BrainOptions::default()
         };
         assert_eq!(hybrid_config(&opts).duel_fixes, all, "the live hybrid carries them");
+    }
+
+    /// Task 5.18 (D-129): STATUS names the fixes the hybrid runs with, and the name parses back to the same configuration.
+    #[test]
+    fn the_duel_fixes_name_lists_the_fixes_that_are_on() {
+        use ddai_planner::hybrid::DuelFixConfig;
+        assert_eq!(duel_fixes_name(&DuelFixConfig::default()), "off");
+        for (list, name) in [
+            ("off", "off"),
+            ("finish", "finish"),
+            ("static", "static"),
+            ("counter", "counter"),
+            ("finish,static", "static,finish"),
+            ("static,finish", "static,finish"),
+            ("all", "static,counter,finish"),
+        ] {
+            let (c, _) = duel_fixes(list).unwrap();
+            assert_eq!(duel_fixes_name(&c), name, "{list}");
+            assert_eq!(duel_fixes(name).unwrap().0, c, "{name} parses back");
+        }
     }
 
     #[test]

@@ -548,3 +548,54 @@ fn the_launcher_installer_refuses_a_binary_without_the_search_threads_flag() {
         assert!(check < first_use, "the binary check must come before `{later}`");
     }
 }
+
+#[test]
+fn the_bot_unit_passes_the_duel_fixes_as_two_words_and_they_are_off_by_default() {
+    // Task 5.18 (D-129): `--duel-fixes ${BOT_DUEL_FIXES}` (`off`, `finish` or `static,finish`), the form of `--preinput`; the helper always writes the line.
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    let env = values(&s, "Environment");
+    assert!(env.contains(&"BOT_DUEL_FIXES=off"), "{env:?}");
+    let exec = values(&s, "ExecStart");
+    assert_eq!(exec.len(), 1);
+    assert!(exec[0].contains(" --duel-fixes ${BOT_DUEL_FIXES} "), "{}", exec[0]);
+    // Once; never split by `$VAR`, never the equals form, never hard-coded (the list holds no `counter` and no `all`).
+    assert_eq!(exec[0].matches("--duel-fixes").count(), 1, "{}", exec[0]);
+    assert!(
+        !exec[0].contains("$BOT_DUEL_FIXES")
+            && !exec[0].contains("--duel-fixes=")
+            && !exec[0].contains("--duel-fixes off")
+            && !exec[0].contains("--duel-fixes finish")
+            && !exec[0].contains("--duel-fixes static")
+            && !exec[0].contains("--duel-fixes all")
+            && !exec[0].contains("counter"),
+        "{}",
+        exec[0]
+    );
+    // The earlier switches are untouched.
+    assert!(
+        exec[0].contains(" --search-threads ${BOT_SEARCH_THREADS} "),
+        "{}",
+        exec[0]
+    );
+    assert!(exec[0].contains(" --preinput ${BOT_PREINPUT} "), "{}", exec[0]);
+    assert!(exec[0].contains(" --finish ${BOT_FINISH} "), "{}", exec[0]);
+}
+
+#[test]
+fn the_launcher_installer_refuses_a_binary_without_the_duel_fixes_flag() {
+    let script = fs::read_to_string(deploy().join("install-launcher.sh")).unwrap();
+    let check = script
+        .find("grep -q -- '--duel-fixes' <<<\"$play_help\"")
+        .expect("install-launcher.sh checks the binary for --duel-fixes");
+    assert!(
+        script[check..]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("run deploy/install.sh first")
+    );
+    for later in ["daemon-reload", "install -o root -g root -m 0644"] {
+        let first_use = script.rfind(later).unwrap();
+        assert!(check < first_use, "the binary check must come before `{later}`");
+    }
+}

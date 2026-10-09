@@ -232,6 +232,39 @@ impl From<SearchThreads> for u8 {
     }
 }
 
+/// The 3.23 duel fixes (task 5.18, D-129; `ddnet-ai play --duel-fixes`): a closed list of the three arms of the live protocol (docs/research/duel-fixes-3.23.md,
+/// section 7). `counter` (no-go: it raises timeouts) and `all` are NOT on the list, so the helper writes only one of three static words to the
+/// unit's environment. `Off` is the default and what a request without the field means. The fixes act only in a detected duel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DuelFixes {
+    /// No fixes (the bot as before 3.23).
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    /// Fix 3 alone: a frozen victim lying off the freeze is answered by a plan that acts (the pre-registered bars passed: scenarios 57.7 to 90.4%).
+    #[serde(rename = "finish")]
+    Finish,
+    /// Fixes 1 and 3: the duel opponent is never dropped as AFK and a standing opponent is answered by a plan that acts, plus `finish`.
+    #[serde(rename = "static,finish")]
+    StaticFinish,
+}
+
+impl DuelFixes {
+    /// The value of `ddnet-ai play --duel-fixes`: one of three fixed words.
+    pub fn flag_value(self) -> &'static str {
+        match self {
+            DuelFixes::Off => "off",
+            DuelFixes::Finish => "finish",
+            DuelFixes::StaticFinish => "static,finish",
+        }
+    }
+
+    /// Whether this is not `off` (the pure fly brain, which has no duel fixes, refuses such a request).
+    pub fn is_on(self) -> bool {
+        self != DuelFixes::Off
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurationChoice {
     #[serde(rename = "15m")]
@@ -300,6 +333,11 @@ pub struct LaunchRequest {
     /// It names no file and no word: the helper writes one of four static digits to the unit's environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_threads: Option<SearchThreads>,
+    /// The 3.23 duel fixes (task 5.18, D-129; `ddnet-ai play --duel-fixes`): `off`, `finish` or `static,finish`, `off` when absent. The pure fly has
+    /// none, so the helper refuses `duel_fixes_hybrid_only` for the fly with anything but `off`. It names no file: the helper writes one of three
+    /// static words to the unit's environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duel_fixes: Option<DuelFixes>,
 }
 
 /// Whether a request made at `ts` (and written to a file last modified at `mtime`), seen at `now`, is fresh: neither older than
@@ -354,7 +392,8 @@ pub fn parse_request(bytes: &[u8]) -> Result<LaunchRequest, ParseError> {
         && req.no_selfkill.is_none()
         && req.window_model.is_none()
         && req.preinput.is_none()
-        && req.search_threads.is_none();
+        && req.search_threads.is_none()
+        && req.duel_fixes.is_none();
     match req.action {
         Action::Start if !complete => Err(ParseError::Invalid),
         Action::Stop if !empty => Err(ParseError::Invalid),
@@ -420,6 +459,9 @@ pub struct LaunchStatus {
     /// The hybrid's search threads of the launch (task 5.17); none in the status of a launch made before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_threads: Option<SearchThreads>,
+    /// The 3.23 duel fixes of the launch (task 5.18); none in the status of a launch made before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duel_fixes: Option<DuelFixes>,
 }
 
 impl LaunchStatus {
@@ -442,6 +484,7 @@ impl LaunchStatus {
             window_model: None,
             preinput: None,
             search_threads: None,
+            duel_fixes: None,
         }
     }
 }
@@ -865,6 +908,66 @@ mod tests {
         // A stop carries nothing.
         let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
         stop["search_threads"] = serde_json::json!(1);
+        assert_eq!(parse(&stop), Err(ParseError::Invalid));
+    }
+
+    #[test]
+    fn the_duel_fixes_field_is_an_additive_closed_list_of_three_and_absent_means_off() {
+        // Task 5.18 (D-129). An old request parses and means off; an absent field is not written (byte-identical).
+        let old = parse(&start_json()).unwrap();
+        assert_eq!(old.duel_fixes, None);
+        assert_eq!(old.duel_fixes.unwrap_or_default(), DuelFixes::Off);
+        let text = String::from_utf8(serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(!text.contains("duel_fixes"), "{text}");
+        for (word, want) in [
+            ("off", DuelFixes::Off),
+            ("finish", DuelFixes::Finish),
+            ("static,finish", DuelFixes::StaticFinish),
+        ] {
+            let mut v = start_json();
+            v["duel_fixes"] = serde_json::json!(word);
+            let r = parse(&v).unwrap();
+            assert_eq!(r.duel_fixes, Some(want), "{word}");
+            assert_eq!(want.flag_value(), word, "the unit's word is the request's word");
+            assert_eq!(want.is_on(), word != "off");
+            let bytes = serde_json::to_vec(&r).unwrap();
+            assert!(
+                String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .contains(&format!(r#""duel_fixes":"{word}""#))
+            );
+            assert_eq!(parse_request(&bytes).unwrap(), r, "round trip");
+        }
+        // Closed list: `counter` (no-go, E-038) and `all` are not offered, nor are other orders, cases, spaces, lists or injections.
+        for bad in [
+            serde_json::json!("counter"),
+            serde_json::json!("all"),
+            serde_json::json!("static"),
+            serde_json::json!("finish,static"),
+            serde_json::json!("static, finish"),
+            serde_json::json!("static,finish,counter"),
+            serde_json::json!("static,counter,finish"),
+            serde_json::json!("Finish"),
+            serde_json::json!("STATIC,FINISH"),
+            serde_json::json!(" finish"),
+            serde_json::json!("finish\n"),
+            serde_json::json!("finish --report /etc/passwd"),
+            serde_json::json!("finish\"\nBOT_SERVER=\"1.2.3.4:5\""),
+            serde_json::json!("$(id)"),
+            serde_json::json!(""),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!(["finish"]),
+            serde_json::json!({"fix": "finish"}),
+        ] {
+            let mut v = start_json();
+            v["duel_fixes"] = bad.clone();
+            assert_eq!(parse(&v), Err(ParseError::Invalid), "duel_fixes={bad}");
+        }
+        // A stop carries nothing.
+        let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
+        stop["duel_fixes"] = serde_json::json!("off");
         assert_eq!(parse(&stop), Err(ParseError::Invalid));
     }
 

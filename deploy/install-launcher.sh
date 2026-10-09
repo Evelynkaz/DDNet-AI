@@ -128,6 +128,8 @@ grep -q -- '--window-model' <<<"$play_help" || die "$BIN_SRC is an older build (
 grep -q -- '--preinput' <<<"$play_help" || die "$BIN_SRC is an older build (no '--preinput', task 3.20): run deploy/install.sh first, so the binary is newer than the unit"
 # Task 5.17: the unit also passes `--search-threads ${BOT_SEARCH_THREADS}` (1 to 4); a binary without the flag rejects it and every bot start would fail.
 grep -q -- '--search-threads' <<<"$play_help" || die "$BIN_SRC is an older build (no '--search-threads', task 3.7a): run deploy/install.sh first, so the binary is newer than the unit"
+# Task 5.18: the unit also passes `--duel-fixes ${BOT_DUEL_FIXES}` (off|finish|static,finish); a binary from before 3.23 rejects the flag and every bot start would fail.
+grep -q -- '--duel-fixes' <<<"$play_help" || die "$BIN_SRC is an older build (no '--duel-fixes', task 3.23): run deploy/install.sh first, so the binary is newer than the unit"
 if bot_is_active; then
   die "ddnet-ai-bot.service or a sparring unit is active: not touching a running bot. Let it finish (or stop it) and run this again."
 fi

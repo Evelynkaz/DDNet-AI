@@ -38,10 +38,10 @@ use ddai_client::favourites::{self, Favourite, Favourites, Rules};
 use ddai_client::live_servers::{LiveServers, is_loopback};
 use ddai_client::socks5::{ProxyCheck, RelayHost, Socks5Error, Timeouts};
 use ddai_web::launch::{
-    Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_REQUEST_BYTES,
-    MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, SearchThreads, State as RunState,
-    WbSmart, bundle_run_name, no_selfkill_flag_value, parse_request, preinput_flag_value, read_regular_nofollow,
-    read_regular_nofollow_with_mtime, request_is_fresh, unix_now, write_atomic,
+    Action, Brain, DuelFixes, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus,
+    MAX_REQUEST_BYTES, MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, SearchThreads,
+    State as RunState, WbSmart, bundle_run_name, no_selfkill_flag_value, parse_request, preinput_flag_value,
+    read_regular_nofollow, read_regular_nofollow_with_mtime, request_is_fresh, unix_now, write_atomic,
 };
 use ddai_web::serverbrowser::{
     BLOCKED_FILE, BlockedEntry, BlockedFile, MAX_PROXY_CHECK_BYTES, PROXY_CHECK_REQUEST_FILE, PROXY_CHECK_RESULT_FILE,
@@ -193,6 +193,9 @@ struct LaunchInfo {
     /// The hybrid's search threads of the launch (task 5.17); older state files have none, which is one thread.
     #[serde(default)]
     search_threads: SearchThreads,
+    /// The 3.23 duel fixes of the launch (task 5.18); older state files have none, which is `off`.
+    #[serde(default)]
+    duel_fixes: DuelFixes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +338,8 @@ struct Plan {
     preinput: bool,
     /// The hybrid's search threads (task 5.17, D-125): one unless the request says otherwise; the pure fly takes one only.
     search_threads: SearchThreads,
+    /// The 3.23 duel fixes (task 5.18, D-129): `off` unless the request says otherwise; the pure fly has none.
+    duel_fixes: DuelFixes,
 }
 
 fn valid_nick(nick: &str) -> bool {
@@ -520,6 +525,11 @@ fn decide(
     if brain == Brain::Fly && search_threads.is_more_than_one() {
         return Err(Refuse("search_threads_hybrid_only"));
     }
+    // Task 5.18 (D-129): the duel fixes are the hybrid's; the pure fly has none. The field itself is a closed list of three words already at the parse.
+    let duel_fixes = req.duel_fixes.unwrap_or_default();
+    if brain == Brain::Fly && duel_fixes.is_on() {
+        return Err(Refuse("duel_fixes_hybrid_only"));
+    }
     let target = resolve_server(selector, cat.live, cat.favs, cat.rules)?;
     if sparring > 0 && target.public {
         return Err(Refuse("sparring_local_only"));
@@ -562,6 +572,7 @@ fn decide(
         window_model,
         preinput,
         search_threads,
+        duel_fixes,
     })
 }
 
@@ -575,6 +586,15 @@ fn env_line(key: &str, value: &str) -> Result<String, Refuse> {
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b':' | b' ' | b'[' | b']'));
     if !plain || value.len() > 512 {
+        return Err(Refuse("internal"));
+    }
+    Ok(format!("{key}=\"{value}\"\n"))
+}
+
+/// One `KEY="a,b"` line for a comma list of lower-case words (task 5.18: `static,finish`). `env_line`'s set has no comma on purpose (nothing else may carry
+/// one), so this one takes lower-case letters and commas only.
+fn env_list_line(key: &str, value: &str) -> Result<String, Refuse> {
+    if value.is_empty() || value.len() > 64 || !value.bytes().all(|b| b.is_ascii_lowercase() || b == b',') {
         return Err(Refuse("internal"));
     }
     Ok(format!("{key}=\"{value}\"\n"))
@@ -611,6 +631,8 @@ fn render_env(id: &str, plan: &Plan) -> Result<String, Refuse> {
     out += &env_line("BOT_PREINPUT", preinput_flag_value(plan.preinput))?;
     // Always written (`1` to `4`, a static word): the unit passes `--search-threads ${BOT_SEARCH_THREADS}`, so a stale value can never leak into a run.
     out += &env_line("BOT_SEARCH_THREADS", plan.search_threads.flag_value())?;
+    // Always written (`off`, `finish` or `static,finish`, a static word): the unit passes `--duel-fixes ${BOT_DUEL_FIXES}`, so a stale value can never leak into a run.
+    out += &env_list_line("BOT_DUEL_FIXES", plan.duel_fixes.flag_value())?;
     Ok(out)
 }
 
@@ -854,6 +876,7 @@ fn status_of(info: &LaunchInfo, state: RunState, now: u64) -> LaunchStatus {
     status.window_model = Some(info.window_model);
     status.preinput = Some(info.preinput);
     status.search_threads = Some(info.search_threads);
+    status.duel_fixes = Some(info.duel_fixes);
     status
 }
 
@@ -1072,6 +1095,7 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         window_model: plan.window_model.is_some(),
         preinput: plan.preinput,
         search_threads: plan.search_threads,
+        duel_fixes: plan.duel_fixes,
     };
     let fail = |code: &str| {
         let mut status = status_of(&info, RunState::Error, now);
@@ -1136,7 +1160,7 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         }
     }
     eprintln!(
-        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {}, window-model {}, preinput {}, search-threads {})",
+        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {}, window-model {}, preinput {}, search-threads {}, duel-fixes {})",
         plan.brain,
         !plan.target.public,
         plan.sparring,
@@ -1145,7 +1169,8 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         no_selfkill_flag_value(plan.no_selfkill),
         plan.window_model.is_some(),
         plan.preinput,
-        plan.search_threads.flag_value()
+        plan.search_threads.flag_value(),
+        plan.duel_fixes.flag_value()
     );
     ExitCode::SUCCESS
 }
@@ -1430,6 +1455,7 @@ mod tests {
             window_model: None,
             preinput: None,
             search_threads: None,
+            duel_fixes: None,
         }
     }
 
@@ -1714,6 +1740,16 @@ mod tests {
             assert_eq!(env_line("K", bad), Err(Refuse("internal")), "{bad:?}");
         }
         assert_eq!(env_line("K", &"a".repeat(513)), Err(Refuse("internal")));
+        // A comma is in no value of `env_line` (task 5.18 keeps its comma list on its own line type).
+        assert_eq!(env_line("K", "a,b"), Err(Refuse("internal")));
+        assert_eq!(
+            env_list_line("K", "static,finish").as_deref(),
+            Ok("K=\"static,finish\"\n")
+        );
+        for bad in ["", "A", "a b", "a\"b", "a\nb", "a$b", "a;b", "a1", "é"] {
+            assert_eq!(env_list_line("K", bad), Err(Refuse("internal")), "{bad:?}");
+        }
+        assert_eq!(env_list_line("K", &"a".repeat(65)), Err(Refuse("internal")));
     }
 
     #[test]
@@ -1780,6 +1816,7 @@ mod tests {
             window_model: false,
             preinput: false,
             search_threads: SearchThreads::ONE,
+            duel_fixes: DuelFixes::Off,
         };
         assert_eq!(status_of(&info, RunState::Started, 5).finish, Some(Finish::Target));
         let mut old = serde_json::to_value(&info).unwrap();
@@ -1839,6 +1876,7 @@ mod tests {
             window_model: false,
             preinput: false,
             search_threads: SearchThreads::ONE,
+            duel_fixes: DuelFixes::Off,
         };
         let status = status_of(&info, RunState::Started, 5);
         assert_eq!((status.wb_smart, status.no_selfkill), (Some(WbSmart::On), Some(true)));
@@ -1920,6 +1958,7 @@ mod tests {
             window_model: true,
             preinput: false,
             search_threads: SearchThreads::ONE,
+            duel_fixes: DuelFixes::Off,
         };
         assert_eq!(status_of(&info, RunState::Started, 5).window_model, Some(true));
         let mut old = serde_json::to_value(&info).unwrap();
@@ -1979,6 +2018,7 @@ mod tests {
             window_model: false,
             preinput: true,
             search_threads: SearchThreads::ONE,
+            duel_fixes: DuelFixes::Off,
         };
         let status = status_of(&info, RunState::Started, 5);
         assert_eq!((status.preinput, status.finish), (Some(true), Some(Finish::Wb)));
@@ -2044,6 +2084,7 @@ mod tests {
             window_model: false,
             preinput: false,
             search_threads: SearchThreads::new(3).unwrap(),
+            duel_fixes: DuelFixes::Off,
         };
         assert_eq!(
             status_of(&info, RunState::Started, 5)
@@ -2055,6 +2096,78 @@ mod tests {
         old.as_object_mut().unwrap().remove("search_threads");
         let old: LaunchInfo = serde_json::from_value(old).unwrap();
         assert_eq!(old.search_threads, SearchThreads::ONE);
+    }
+
+    #[test]
+    fn the_duel_fixes_are_off_unless_asked_are_written_always_and_the_pure_fly_takes_off_only() {
+        // Task 5.18 (D-129).
+        let plan_for = |brain: Brain, fixes: Option<DuelFixes>| {
+            let mut r = req("local");
+            r.brain = Some(brain);
+            r.duel_fixes = fixes;
+            decide_with(&r, &LiveServers::default(), Some(&State::default()), 0, 1000)
+        };
+        let env_of = |plan: &Plan| render_env("0123456789abcdef", plan).unwrap();
+        // No field (an old request) and `off`: the line is written explicitly as `off`, so a stale value in the environment never leaks in.
+        for fixes in [None, Some(DuelFixes::Off)] {
+            let plan = plan_for(Brain::Hybrid, fixes).unwrap();
+            assert_eq!(plan.duel_fixes, DuelFixes::Off);
+            let env = env_of(&plan);
+            assert!(env.contains("BOT_DUEL_FIXES=\"off\"\n"), "{env}");
+        }
+        // The two arms: both hybrids; the other lines are unchanged.
+        for brain in [Brain::Hybrid, Brain::HybridFly] {
+            for (fixes, word) in [
+                (DuelFixes::Finish, "finish"),
+                (DuelFixes::StaticFinish, "static,finish"),
+            ] {
+                let plan = plan_for(brain, Some(fixes)).unwrap();
+                assert_eq!(plan.duel_fixes, fixes);
+                let env = env_of(&plan);
+                assert!(
+                    env.contains(&format!("BOT_DUEL_FIXES=\"{word}\"\n"))
+                        && env.contains("BOT_PREINPUT=\"off\"\n")
+                        && env.contains("BOT_SEARCH_THREADS=\"1\"\n")
+                        && env.contains("BOT_FINISH=\"off\"\n"),
+                    "{env}"
+                );
+            }
+        }
+        // The pure fly has no duel fixes: `off` (the same as absent) is fine, anything else is refused.
+        assert!(plan_for(Brain::Fly, None).is_ok() && plan_for(Brain::Fly, Some(DuelFixes::Off)).is_ok());
+        for fixes in [DuelFixes::Finish, DuelFixes::StaticFinish] {
+            assert_eq!(
+                plan_for(Brain::Fly, Some(fixes)).unwrap_err(),
+                Refuse("duel_fixes_hybrid_only"),
+                "{fixes:?}"
+            );
+        }
+        // The status the site reads names it; a launch remembered before the field existed reads as off.
+        let info = LaunchInfo {
+            id: "0123456789abcdef".to_string(),
+            brain: Brain::Hybrid,
+            server: "local".to_string(),
+            duration: DurationChoice::M15,
+            sparring: 0,
+            public: false,
+            favourite: false,
+            bundle: None,
+            finish: Finish::Full,
+            wb_smart: WbSmart::Off,
+            no_selfkill: true,
+            window_model: false,
+            preinput: false,
+            search_threads: SearchThreads::ONE,
+            duel_fixes: DuelFixes::StaticFinish,
+        };
+        assert_eq!(
+            status_of(&info, RunState::Started, 5).duel_fixes,
+            Some(DuelFixes::StaticFinish)
+        );
+        let mut old = serde_json::to_value(&info).unwrap();
+        old.as_object_mut().unwrap().remove("duel_fixes");
+        let old: LaunchInfo = serde_json::from_value(old).unwrap();
+        assert_eq!(old.duel_fixes, DuelFixes::Off);
     }
 
     #[test]

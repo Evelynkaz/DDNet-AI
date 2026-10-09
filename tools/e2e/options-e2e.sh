@@ -19,6 +19,7 @@
 # Since tasks 3.17 and 3.20b the same stack also drives the toggles «Предсказатель соперника», «Настоящие ходы соперника от сервера» and the
 # «ВБ (эксперимент)» value of «Дожим»; the unit's words `--window-model=`, `--preinput` and `--finish` are run-bot.sh's.
 # Since task 5.17 (D-125) it also drives «Потоки поиска» (1–4) and the preset's 3; the unit's `--search-threads ${BOT_SEARCH_THREADS}` is run-bot.sh's too.
+# Since task 5.18 (D-129) it also drives «Исправления дуэли» (off / finish / static,finish); the unit's `--duel-fixes ${BOT_DUEL_FIXES}` is run-bot.sh's too.
 #
 # Usage: tools/e2e/options-e2e.sh            (builds target/debug/ddnet-ai with the feature, runs Playwright, stops everything)
 #        DDAI_BIN=/path/ddnet-ai tools/e2e/options-e2e.sh       (use an existing build; it MUST have the loopback-favourites feature)
