@@ -30,6 +30,10 @@ pub struct HumanGame {
     /// `inputs[j]` = the real inputs `[us, opponent]` applied in the step into tick `first + j` (`None` = not known: no real input was in
     /// force for that player).
     pub inputs: Vec<[Option<InputRec>; 2]>,
+    /// `msg[j][who]`: a message (an input change the server forwarded) of that player has `intended_tick == first + j`. The aim rides along with
+    /// a message and never causes one (`server.cpp:1954` ignores it when it decides to send), so between messages `inputs` repeats the old aim:
+    /// the aim is a fresh observation only at the ticks flagged here.
+    pub msg: Vec<[bool; 2]>,
 }
 
 impl HumanGame {
@@ -37,6 +41,14 @@ impl HumanGame {
     pub fn input_at(&self, who: usize, tick: i32) -> Option<InputRec> {
         let j = usize::try_from(tick.checked_sub(self.first)?).ok()?;
         self.inputs.get(j)?.get(who).copied().flatten()
+    }
+
+    /// Whether a message of `who` carries the input of world tick `tick` (so its aim is fresh, not repeated).
+    pub fn is_msg(&self, who: usize, tick: i32) -> bool {
+        let Some(j) = tick.checked_sub(self.first).and_then(|j| usize::try_from(j).ok()) else {
+            return false;
+        };
+        self.msg.get(j).is_some_and(|m| m[who.min(1)])
     }
 
     /// Whether the frames `i - back ..= i + fwd` exist and are consecutive (2 ticks apart).
@@ -81,6 +93,7 @@ mod tests {
                     Some(InputRec::default()),
                 ],
             ],
+            msg: vec![[false, false], [true, false]],
         }
     }
 
@@ -92,6 +105,11 @@ mod tests {
         assert_eq!(g.input_at(0, 100).map(|i| i.direction), Some(1));
         assert_eq!(g.input_at(0, 98), None, "before the first tick");
         assert_eq!(g.input_at(0, 101), None, "past the last");
+        assert!(
+            g.is_msg(0, 100) && !g.is_msg(0, 99) && !g.is_msg(1, 100),
+            "only flagged ticks carry a fresh aim"
+        );
+        assert!(!g.is_msg(0, 50) && !g.is_msg(0, 500), "outside the game: no message");
     }
 
     #[test]

@@ -87,6 +87,8 @@ pub struct TrueStats {
     pub labelled: u64,
     /// Messages that arrived out of the order of their intended ticks.
     pub out_of_order: u64,
+    /// Events dropped because an earlier arrival already holds their intended tick (the server applies only the first).
+    pub same_tick_dropped: u64,
     /// `intended - arrived`, clamped to `-8..=8` (index `lead + 8`).
     pub lead: [u64; 17],
 }
@@ -238,6 +240,11 @@ pub fn true_table_raw(demo: &Demo<'_>) -> TrueTable {
         let before = events.windows(2).filter(|w| w[1].intended < w[0].intended).count() as u64;
         table.stats.out_of_order += before;
         events.sort_by_key(|e| e.intended); // stable: ties stay in arrival order
+        // Two inputs for one tick (the server moves a late input to `Tick() + 1`): `server.cpp:3557-3584` applies the first one it finds
+        // for the tick, the earliest to have arrived, and never the others. Keep that one.
+        let n = events.len();
+        events.dedup_by(|later, earlier| later.intended == earlier.intended);
+        table.stats.same_tick_dropped += (n - events.len()) as u64;
         let restarts = restarts.remove(&label).unwrap_or_default();
         table.tracks.insert(
             label,
@@ -277,7 +284,7 @@ mod tests {
         assert_eq!(t.at(9), None);
         assert_eq!(t.at(10).map(|e| e.direction), Some(1));
         assert_eq!(t.at(19).map(|e| e.direction), Some(1));
-        // two events of the same intended tick: the later arrival wins
+        // `Track::at` takes the last event of a tick; a table never holds two (see `two_inputs_for_one_tick_...`)
         assert_eq!(t.at(20).map(|e| e.fire), Some(2));
         assert_eq!(t.at(29).map(|e| e.fire), Some(2));
         assert_eq!(t.at(1000).map(|e| e.fire), Some(3));
@@ -472,5 +479,37 @@ mod tests {
         );
         assert!(t.track(1).unwrap().desyncs.is_empty());
         assert_eq!(t.track(1).unwrap().at(105).map(|e| e.direction), Some(0));
+    }
+
+    #[test]
+    fn two_inputs_for_one_tick_keep_the_earliest_arrival_like_the_server() {
+        let map = synth::map_bytes(30, 12, (10, 20));
+        let ch = |id: i32, tick: i32| SynthChar {
+            id,
+            name: format!("ZzSecret{id}"),
+            clan: "c".into(),
+            wire: wire_character(tick, 100 + 40 * id, 338),
+        };
+        let snaps: Vec<(i32, Vec<SynthChar>)> = (0..4)
+            .map(|i| (100 + 2 * i, vec![ch(0, 100 + 2 * i), ch(1, 100 + 2 * i)]))
+            .collect();
+        // a late input is moved to the next tick by the server, so two messages can carry the same intended tick (103): the one that arrived
+        // first (chunk tick 100, direction -1) is the one the server applies, the second (chunk tick 102, direction +1) never is
+        let msgs = [
+            (100, pre(0, 103, -1, 0, 0, 0, (0, -1))),
+            (102, pre(0, 103, 1, 0, 0, 0, (0, -1))),
+            (102, pre(0, 104, 0, 0, 0, 0, (0, -1))),
+        ];
+        let bytes = synth::demo_bytes_with_pre_inputs(&map, true, &snaps, &msgs);
+        let demo = Demo::parse(&bytes).unwrap();
+        let t = true_table_raw(&demo);
+        assert_eq!(t.stats.same_tick_dropped, 1);
+        let tr = t.track(0).unwrap();
+        assert_eq!(tr.events.iter().map(|e| e.intended).collect::<Vec<_>>(), vec![103, 104]);
+        assert_eq!(
+            tr.at(103).map(|e| e.direction),
+            Some(-1),
+            "the earliest arrival holds tick 103"
+        );
     }
 }

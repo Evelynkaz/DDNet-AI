@@ -85,6 +85,9 @@ pub struct AfterBlock {
     pub holds: Vec<(i16, i16)>,
     /// How many of those holds grabbed the victim at some frame.
     pub holds_on_victim: u16,
+    /// Runs of snapshots in which the actor's hook stayed **attached** to the victim in the window: `(start offset, length)` in ticks
+    /// (a run may begin before the freeze; frames at most 4 ticks apart are one run). Needs no real input.
+    pub attached: Vec<(i16, i16)>,
     /// Hammer swings of the actor (offsets in ticks) and how many were at a frozen victim within reach.
     pub swings: Vec<i16>,
     pub swings_at_frozen: u16,
@@ -151,9 +154,20 @@ pub struct Fight {
     pub hook_on_other: u64,
     /// Real-input hook holds that grabbed the other player: lengths in ticks, in a histogram
     /// `[<=4, <=10, <=25, <=50, <=100, more]`, and the sum / count for the mean.
+    ///
+    /// This is how long the hook **key** was down (from the press, so the flight of the hook is in it, to the release), not how long
+    /// the hook stayed attached: see the `att_*` fields for that.
     pub hold_hist: [u64; 6],
     pub hold_ticks: u64,
     pub holds: u64,
+    /// Hook episodes in which the hook stayed **attached** to the other player (`analysis::hook_episodes`, from the snapshots; no real
+    /// input needed, so every player counts, the recording one too): both players free at the start, in a frame with 2 (`fight2`) or
+    /// 2-4 (`fight4`) characters. Lengths in ticks, in the histogram `[<=4, <=10, <=25, <=50, <=100, more]`. This is what the arena's
+    /// `duel_stats` counts as a hold, so these are the numbers to put next to the bot's.
+    pub att_hist: [u64; 6],
+    pub att_ticks: u64,
+    pub att_episodes: u64,
+    pub att_lengths: Vec<i16>,
     /// Real jump presses (rising edge of the jump key).
     pub jumps: u64,
     /// Player-frames in which the other player is above by more than [`ABOVE_PX`].
@@ -182,6 +196,12 @@ impl Fight {
         }
         self.hold_ticks += o.hold_ticks;
         self.holds += o.holds;
+        for i in 0..6 {
+            self.att_hist[i] += o.att_hist[i];
+        }
+        self.att_ticks += o.att_ticks;
+        self.att_episodes += o.att_episodes;
+        self.att_lengths.extend_from_slice(&o.att_lengths);
         self.jumps += o.jumps;
         self.other_above += o.other_above;
         self.near += o.near;
@@ -238,6 +258,22 @@ fn freeze_dist(tiles: &Tiles<'_>, c: &CharRec) -> f32 {
         .nearest_freeze(c.pos[0], c.pos[1], 160.0)
         .map_or(f32::NAN, |(dx, dy)| dx.abs().max(dy.abs()))
 }
+
+/// Joins the (ascending) ticks of snapshots in which something held into runs `(start, length)` in ticks; snapshots at most
+/// [`RUN_GAP`] ticks apart are one run, and a run of `n` frames `step` ticks apart is `(n - 1) * step + step` long.
+fn tick_runs(ticks: &[i32], step: i32) -> Vec<(i32, i32)> {
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    for &t in ticks {
+        match out.last_mut() {
+            Some((s, l)) if t - (*s + *l - step) <= RUN_GAP => *l = t - *s + step,
+            _ => out.push((t, step)),
+        }
+    }
+    out
+}
+
+/// Snapshots at most this many ticks apart belong to one attached-hook run.
+const RUN_GAP: i32 = 4;
 
 /// Real hook holds of `label` in `[from, to)`: `(start, length)` in ticks, a hold that is still on at
 /// `to` is cut there. Unknown input ends a hold.
@@ -369,7 +405,27 @@ pub fn study_demo(
         let mut dists = [f32::NAN; 4];
         let mut vdx = [f32::NAN; 3];
         let mut vdy = [f32::NAN; 3];
-        let mut grabbed_ticks: Vec<i32> = Vec::new();
+        // an attached run that began before the freeze keeps its true start: walk back while the hook was on the victim
+        let mut grabbed_ticks: Vec<i32> = {
+            let mut back: Vec<i32> = Vec::new();
+            let mut j = e.k;
+            while j > 0 && tl.contiguous(j - 1) {
+                let attached = frames[j - 1].by_label(actor).is_some_and(|c| {
+                    c.hook_state == HOOK_GRABBED
+                        && frames[j - 1]
+                            .chars
+                            .iter()
+                            .any(|o| o.player == victim && i16::from(o.id) == c.hooked_player)
+                });
+                if !attached {
+                    break;
+                }
+                back.push(tl.tick(j - 1));
+                j -= 1;
+            }
+            back.reverse();
+            back
+        };
         let mut k = e.k;
         while k < n {
             let tk = tl.tick(k);
@@ -417,6 +473,10 @@ pub fn study_demo(
             .into_iter()
             .filter(|&(s, l)| s + l > t0)
             .map(|(s, l)| ((s - t0) as i16, l.min(i32::from(i16::MAX)) as i16))
+            .collect();
+        let attached: Vec<(i16, i16)> = tick_runs(&grabbed_ticks, tl.cfg.decision_ticks)
+            .into_iter()
+            .map(|(st, l)| ((st - t0) as i16, l.min(i32::from(i16::MAX)) as i16))
             .collect();
         let holds_on_victim = holds
             .iter()
@@ -482,6 +542,7 @@ pub fn study_demo(
             first_hook,
             holds,
             holds_on_victim,
+            attached,
             swings: sw.iter().map(|&t| (t - t0) as i16).collect(),
             swings_at_frozen,
             hits: hits_n,
@@ -675,6 +736,33 @@ pub fn study_demo(
             }
         }
     }
+    // hook episodes that stayed attached to the other player, both players free at the start
+    let step = tl.cfg.decision_ticks;
+    for h in hooks {
+        let f = &frames[h.start_k];
+        let nc = f.chars.len();
+        if !(2..=4).contains(&nc) {
+            continue;
+        }
+        let (Some(a), Some(v)) = (f.by_label(h.actor), f.by_label(h.victim)) else {
+            continue;
+        };
+        if a.frozen() || v.frozen() {
+            continue;
+        }
+        let len = (tl.tick(h.end_k) - tl.tick(h.start_k) + step).clamp(1, i32::from(i16::MAX));
+        for (which, fight) in [&mut out.fight2, &mut out.fight4].into_iter().enumerate() {
+            if which == 0 && nc != 2 {
+                continue;
+            }
+            fight.att_episodes += 1;
+            fight.att_ticks += len as u64;
+            fight.att_hist[hold_bucket(len)] += 1;
+            if fight.att_lengths.len() < 200_000 {
+                fight.att_lengths.push(len as i16);
+            }
+        }
+    }
     out
 }
 
@@ -732,6 +820,11 @@ pub struct AfterSummary {
     pub hold_median: f32,
     pub hold_tap_pct: f32,
     pub holds_per_block: f32,
+    /// Attached hook runs on the victim in the window (snapshots, every record): median length in ticks, share of runs of at most
+    /// [`TAP_TICKS`], runs per record.
+    pub att_median: f32,
+    pub att_tap_pct: f32,
+    pub att_per_block: f32,
     /// Hammer: share of records with at least one swing, mean swings per record, share with a swing at
     /// the frozen victim, mean hits per record.
     pub swung_pct: f32,
@@ -786,6 +879,13 @@ pub fn summarize_after(recs: &[&AfterBlock]) -> AfterSummary {
         .collect();
     s.hold_median = median(&holds);
     s.hold_tap_pct = pct(holds.iter().filter(|&&l| l <= TAP_TICKS as f32).count(), holds.len());
+    let att: Vec<f32> = recs
+        .iter()
+        .flat_map(|r| r.attached.iter().map(|&(_, l)| l as f32))
+        .collect();
+    s.att_median = median(&att);
+    s.att_tap_pct = pct(att.iter().filter(|&&l| l <= TAP_TICKS as f32).count(), att.len());
+    s.att_per_block = att.len() as f32 / n as f32;
     let known: Vec<&&AfterBlock> = recs.iter().filter(|r| r.known_input > 0.5).collect();
     s.holds_per_block = known.iter().map(|r| r.holds.len() as f32).sum::<f32>() / known.len().max(1) as f32;
     s.swung_pct = pct(known.iter().filter(|r| !r.swings.is_empty()).count(), known.len());
@@ -828,6 +928,12 @@ pub fn after_rows(label: &str, s: &AfterSummary) -> String {
         fmt(s.frozen_median, 0),
         format!("{} / {}", fmt(s.hooked_pct, 0), fmt(s.first_hook_median, 0)),
         fmt(s.hook_share_median * 100.0, 0),
+        format!(
+            "{} / {} / {}",
+            fmt(s.att_median, 0),
+            fmt(s.att_tap_pct, 0),
+            fmt(s.att_per_block, 1)
+        ),
         format!(
             "{} / {} / {}",
             fmt(s.hold_median, 0),
@@ -897,8 +1003,9 @@ pub fn fight_row(label: &str, f: &Fight) -> String {
     let secs = f.ticks as f64 / 50.0;
     let per30 = |x: u64| if secs > 0.0 { x as f64 * 30.0 / secs } else { f64::NAN };
     let holds: Vec<f32> = f.hold_lengths.iter().map(|&l| l as f32).collect();
+    let att: Vec<f32> = f.att_lengths.iter().map(|&l| l as f32).collect();
     format!(
-        "| {label} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {} ({}/{}) | {:.0} | {} / {} / {} / {} | {:.0} | {:.1} | {:.0} |",
+        "| {label} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {} ({}/{}) | {:.0} | {} / {} / {} / {} | {:.0} ({}) | {} / {} / {} / {} | {:.0} | {:.1} | {:.0} |",
         secs / 30.0,
         per30(f.hits),
         per30(f.swings),
@@ -908,6 +1015,12 @@ pub fn fight_row(label: &str, f: &Fight) -> String {
         f.ready_close_swung,
         f.ready_close,
         100.0 * f.hook_on_other as f64 / f.player_frames.max(1) as f64,
+        fmt(quantile(&att, 0.25), 0),
+        fmt(median(&att), 0),
+        fmt(quantile(&att, 0.75), 0),
+        fmt(quantile(&att, 0.9), 0),
+        pct(f.att_hist[0] as usize, f.att_episodes as usize),
+        f.att_episodes,
         fmt(quantile(&holds, 0.25), 0),
         fmt(median(&holds), 0),
         fmt(quantile(&holds, 0.75), 0),
@@ -1018,7 +1131,28 @@ mod tests {
         assert_eq!(s.n, 1);
         assert!(after_rows("x", &s).starts_with("| x | 1 |"));
         assert_eq!(st.chars_hist[2], 90);
+        // the hook stayed attached for the frames 4..=12 (18 ticks), both players free at its start: one attached episode of 18 ticks (the key was
+        // down for 16: the other definition)
+        assert_eq!((st.fight2.att_episodes, st.fight2.att_lengths.clone()), (1, vec![18]));
+        assert_eq!(st.fight2.att_hist[3], 0);
+        assert_eq!(st.fight2.att_hist[2], 1, "11..=25 ticks");
+        assert_eq!(a.attached.len(), 1, "{:?}", a.attached);
+        assert_eq!(
+            a.attached[0],
+            (-2, 18),
+            "the run began one frame (2 ticks) before the freeze and keeps its true length"
+        );
+
         assert!(st.fight2.player_frames > 0);
+    }
+
+    #[test]
+    fn attached_frames_join_into_runs_of_ticks() {
+        // frames 2 ticks apart: 10, 12, 14 is one run of 6 ticks; 20, 22 another of 4 (a 6-tick hole splits)
+        assert_eq!(tick_runs(&[10, 12, 14, 20, 22], 2), vec![(10, 6), (20, 4)]);
+        // a one-frame hole (16 missing) of 4 ticks between kept frames still joins
+        assert_eq!(tick_runs(&[10, 12, 14, 18, 20], 2), vec![(10, 12)]);
+        assert!(tick_runs(&[], 2).is_empty());
     }
 
     #[test]

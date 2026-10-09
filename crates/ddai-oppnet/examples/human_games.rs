@@ -42,6 +42,13 @@ fn input_of(table: &TrueTable, label: u16, tick: i32) -> Option<InputRec> {
     table.track(label).and_then(|t: &Track| t.at(tick)).map(rec_of)
 }
 
+/// A message of `label` is applied at tick `t` (its input changed there; the aim is fresh only then).
+fn is_msg(table: &TrueTable, label: u16, t: i32) -> bool {
+    table
+        .track(label)
+        .is_some_and(|tr| tr.events.binary_search_by_key(&t, |e| e.intended).is_ok())
+}
+
 #[derive(Default)]
 struct Run {
     ticks: Vec<ClipTick>,
@@ -74,6 +81,9 @@ fn finish(d: &Demo<'_>, run: Run, key: (u16, u16), part: usize, out: &mut Vec<Hu
     let inputs: Vec<[Option<InputRec>; 2]> = (first..=t_last + 6)
         .map(|t| [input_of(table, key.0, t), input_of(table, key.1, t)])
         .collect();
+    let msg: Vec<[bool; 2]> = (first..=t_last + 6)
+        .map(|t| [is_msg(table, key.0, t), is_msg(table, key.1, t)])
+        .collect();
     st.known_both += inputs.iter().filter(|i| i[0].is_some() && i[1].is_some()).count() as u64;
     let mut ticks = run.ticks;
     for t in &mut ticks {
@@ -87,6 +97,7 @@ fn finish(d: &Demo<'_>, run: Run, key: (u16, u16), part: usize, out: &mut Vec<Hu
         ticks,
         first,
         inputs,
+        msg,
     });
 }
 

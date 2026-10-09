@@ -396,6 +396,11 @@ impl Corpus {
                 continue;
             };
             label_tick(&mut label, k, &prev, &cur, base);
+            // The aim is repeated between messages (it never causes one): only a tick that carries a message has a fresh aim to learn.
+            if !g.is_msg(1, t0 + 1 + k as i32) {
+                label.v_aim &= !(1 << k);
+                label.aim_delta[k] = 0.0;
+            }
             // a swing in the step T + k -> T + k + 1 leaves `attack_tick == T + k` in the frames that follow
             let swung = (i + 1..=j).any(|m| {
                 let f = &g.ticks[m].frames[1];
@@ -712,12 +717,17 @@ mod tests {
                 [Some(me), Some(opp)]
             })
             .collect();
+        // messages of the opponent at the ticks its input changes (its direction at 100, jump at 105, hook at 106, fire at 106 and 107, jump off at 106)
+        let msg = (99..99 + 14)
+            .map(|t| [false, matches!(t, 100 | 105 | 106 | 107 | 108)])
+            .collect();
         HumanGame {
             source: "h0-1-2p1".into(),
             session: 0,
             ticks,
             first: 99,
             inputs,
+            msg,
         }
     }
 
@@ -756,6 +766,17 @@ mod tests {
         // the weapon went off in the step 106 -> 107? No: a press at world tick 106 is applied in the step into tick 106, i.e. `attack_tick`
         // 105... the frames say 106, so the swing is the step T + k -> T + k + 1 = 106 -> 107 for T = 104: k = 2
         assert_eq!(l.press, 0b0100, "swing in window tick 2 (attack tick 106 = T + 2)");
+        // the aim is fresh only at ticks with a message: for T = 104 the window ticks 0..3 are the ticks 105..108, all flagged but 109 (k = 4 does not exist)
+        assert_eq!(l.v_aim & 0b1111, 0b1111);
+        let r1 = SampleRef {
+            src: 2,
+            game: 0,
+            idx: 0,
+        };
+        // T = 100: window ticks are 101..104, none carries a message: no aim label at all, the other heads stay
+        let l1 = c.label(r1);
+        assert_eq!(l1.v_aim, 0, "no message in 101..=104");
+        assert_eq!(l1.v_dir & 0b1111, 0b1111);
         // our in-flight inputs are the real ones, and known ticks come from the opponent's real inputs
         let mut x = Box::new([0.0f32; INPUT_DIM]);
         let l2 = c.make(r, 0, &mut x);

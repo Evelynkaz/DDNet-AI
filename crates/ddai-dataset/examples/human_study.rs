@@ -173,7 +173,7 @@ fn report(dir: &Path) -> String {
         )
         .unwrap();
     }
-    let head = "| group | credited freezes | blocks | victim killed / thawed / still frozen % | frozen median ticks | hooked the victim % / first hook tick | hook-on-victim share median % | hold median / taps % / holds per freeze | swung % / swings / swung at frozen % / hits | idle % / neutral input % | victim \\|dx\\| / dy at +150 | nearer freeze % | freeze dist start / end px |\n|---|---:|---:|---|---:|---|---:|---|---|---|---|---:|---|";
+    let head = "| group | credited freezes | blocks | victim killed / thawed / still frozen % | frozen median ticks | hooked the victim % / first hook tick | hook-on-victim share median % | attached-hook runs on the victim: median ticks / taps % / runs per freeze | key-hold (incl. flight) median / taps % / holds per freeze | swung % / swings / swung at frozen % / hits | idle % / neutral input % | victim \\|dx\\| / dy at +150 | nearer freeze % | freeze dist start / end px |\n|---|---:|---:|---|---:|---|---:|---|---|---|---|---|---:|---|";
     writeln!(md, "\n## After the block (3 s after a credited freeze)\n").unwrap();
     writeln!(md, "{head}").unwrap();
     for (gname, pred) in &groups {
@@ -309,7 +309,7 @@ fn report(dir: &Path) -> String {
         "\n## Fights (two free players within 400 px), rates per 30 s per player\n"
     )
     .unwrap();
-    writeln!(md, "| group | 30 s units of fight per player | hits | swings | fire presses | jumps | eagerness % (swung / ready and close) | hook on the other % of frames | hold p25 / p50 / p75 / p90 ticks | taps % | holds | other above % |\n|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|").unwrap();
+    writeln!(md, "| group | 30 s units of fight per player | hits | swings | fire presses | jumps | eagerness % (swung / ready and close) | hook on the other % of frames | ATTACHED hook episodes (both free, any distance): p25 / p50 / p75 / p90 ticks | attached taps % (n) | KEY-hold on the other player (incl. flight): p25 / p50 / p75 / p90 ticks | key taps % | key holds per 30 s | other above % |\n|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|").unwrap();
     for (gname, pred) in &groups {
         for (which, tag) in [(0, "2 chars"), (1, "<= 4 chars")] {
             let mut f = Fight::default();

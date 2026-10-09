@@ -248,10 +248,14 @@ fn derive(rec: Option<Recon<'_>>, prev_tick: i32, tick: i32) -> Derived {
 /// The interval `[prev_tick, tick)` from a player's real inputs: step `s` (world tick
 /// `prev + s` to `prev + s + 1`) applies the input of tick `prev + s + 1`. `None` when the track
 /// has nothing in force yet at the first step (the caller falls back to the reconstruction).
+/// The fire counter at the start is the one in force at `prev` (see the comment below for when it is not known).
 fn derive_real(track: &Track, shift: i32, prev_tick: i32, tick: i32) -> Option<Derived> {
     let n = (tick - prev_tick).max(0) as usize;
-    track.at(prev_tick + 1 - shift)?;
-    let fire_base = track.at(prev_tick - shift).map_or(0, |e| e.fire);
+    let first = track.at(prev_tick + 1 - shift)?;
+    // The press counter in force before the interval. When nothing is known at `prev_tick` (a track's first event, a re-appearance, a
+    // distrusted stretch) the first known event's own counter is the base: no press is known to have happened. Counters are large
+    // (one count per press and per release), so a base of 0 would read the whole counter as a burst of presses.
+    let fire_base = track.at(prev_tick - shift).map_or(first.fire, |e| e.fire);
     let mut steps = Vec::with_capacity(n);
     let mut fire_at = Vec::with_capacity(n);
     let mut last_fire = fire_base;
@@ -1462,6 +1466,52 @@ mod tests {
                 .flatten()
                 .all(|s| s.replay == ReplayClass::Exact)
         );
+    }
+
+    #[test]
+    fn a_track_that_starts_with_a_large_fire_counter_does_not_start_with_a_press() {
+        // Real counters are large: the press counter of the input has been counting up for the whole session. The track of player 0
+        // starts at frame 6 (nothing is known before), with the counter at 40 (even: not held) and no press afterwards.
+        let script: Vec<[PlayerInput; 2]> = move_jump_hook_script()
+            .into_iter()
+            .map(|[a, b]| [PlayerInput { fire: 40, ..a }, b])
+            .collect();
+        let frames = scripted_run(&script);
+        let mut table = real_table(&frames, &script);
+        let track = table.tracks.get_mut(&0).unwrap();
+        track.events.drain(..6);
+        let built = build_real(&ingested(frames), &table);
+        for (k, st) in built.steps.iter().enumerate() {
+            let Some(st) = st.first().copied().flatten() else {
+                continue;
+            };
+            if k < 6 {
+                assert!(!st.real, "frame {k}: nothing is known yet");
+                continue;
+            }
+            assert!(st.real, "frame {k}");
+            assert!(
+                !st.action.fire,
+                "frame {k}: no hammer was pressed, the counter only started high"
+            );
+            assert_eq!(st.replay, ReplayClass::Exact, "frame {k}: {st:?}");
+        }
+        // the neighbour (player 1) is not hit by a phantom swing either
+        assert!(
+            built
+                .steps
+                .iter()
+                .flat_map(|s| s.get(1).copied().flatten())
+                .all(|st| st.replay == ReplayClass::Exact)
+        );
+        // (frame 0 is reconstructed, not real: the recorder reads the zero `attack_tick` of a fresh character as a use; that is old behaviour)
+        let real_fires = built
+            .steps
+            .iter()
+            .flat_map(|s| s.first().copied().flatten())
+            .filter(|st| st.real && st.action.fire)
+            .count();
+        assert_eq!(real_fires, 0);
     }
 
     #[test]
