@@ -35,7 +35,14 @@ pub struct Tail {
 /// is already canonical (`paths::RunsRoot`), so its last component is never legitimately a symlink. A directory component
 /// swapped for a symlink between the check and the open is not caught by this; see `docs/formats.md` §29.2.
 fn open_regular(path: &Path) -> Result<(File, u64), ReadError> {
-    let file = ddai_os::nofollow::open_read_nofollow(path).map_err(|_| ReadError::Io)?;
+    let file = ddai_os::nofollow::open_read_nofollow(path).map_err(|_| {
+        // Windows cannot open a directory like a file: say what it is, not "I/O error".
+        if ddai_os::nofollow::is_existing_non_file(path) {
+            ReadError::NotFile
+        } else {
+            ReadError::Io
+        }
+    })?;
     let meta = file.metadata().map_err(|_| ReadError::Io)?;
     if !meta.is_file() {
         return Err(ReadError::NotFile);

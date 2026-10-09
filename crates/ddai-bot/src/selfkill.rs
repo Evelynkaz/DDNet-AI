@@ -43,13 +43,11 @@ impl SelfKillOff {
     }
 }
 
-/// Whether the marker counts as present. It fails safe: only "not found" means absent; any other error (EACCES, ENOTDIR, ...) leaves the
-/// state of the marker unknown, and an unknown marker keeps the bot from killing itself.
+/// Whether the marker counts as present. It fails safe on every platform: only a plain "not found" means absent; any other state (EACCES,
+/// a path below a regular file, ...) leaves the marker unknown, and an unknown marker keeps the bot from killing itself
+/// (`ddai_os::marker`).
 fn marker_present(path: &std::path::Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => true,
-        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
-    }
+    ddai_os::marker::is_present(path)
 }
 
 /// The switch's state: the flag, the marker path and the time of the last look.
@@ -130,7 +128,8 @@ mod tests {
 
     #[test]
     fn a_marker_that_cannot_be_looked_at_counts_as_present() {
-        // A file where the directory should be: `symlink_metadata` fails with ENOTDIR, not "not found".
+        // A file where the directory should be: `symlink_metadata` fails with ENOTDIR on Linux and with a plain "not found" on Windows; both
+        // must count as present (`ddai_os::marker`).
         let d = tmp("unreadable");
         let file = d.join("bot");
         std::fs::write(&file, b"").unwrap();

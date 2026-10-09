@@ -92,17 +92,33 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # --no-fail-fast: the first run on Windows has to show every failing crate, not stop at the first.
       - name: cargo test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
-      # ddai-libm picks its fused multiply-add at run time (the instruction, the C library's fma after a self-check, or its own integer
-      # one: crates/ddai-libm/src/softfma.rs). The runner has FMA hardware, so the integer one would never run here by itself: force it,
-      # and run the golden hashes recorded from glibc, the fma tests and the self-test through it. The second step prints which fma the
-      # normal build chose on this runner.
+      # ddai-libm picks its fused multiply-add once per process (crates/ddai-libm/src/softfma.rs). The MSVC runtime's fma is not trusted (its
+      # software path for CPUs without FMA3 is unchecked, and this runner cannot show it), so on Windows the crate uses its own integer
+      # fma by choice; the debug test run above covers that. This step
+      # repeats the golden hashes, the fma tests and the self-test with the integer fma forced, in a release build. The second step
+      # prints which fma the normal build chose on this runner.
       - name: ddai-libm with the software fma forced
         run: cargo test --locked -p ddai-libm --features force-soft-fma --release
       - name: ddai-libm, which fma this runner uses
         run: cargo test --locked -p ddai-libm --test fma_check -- --nocapture
+
+      # The Windows binary for the release page is built here, on the same runner and toolchain the tests above passed on, and kept as a
+      # workflow artifact; the lead attaches it to the GitHub release by hand (no publishing from CI).
+      - name: Release build of the bot
+        run: cargo build --release --locked -p ddnet-ai
+      - name: Smoke-run the release binary
+        run: target/release/ddnet-ai.exe --help
+      - name: Keep ddnet-ai.exe as an artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ddnet-ai-windows-x86_64
+          path: target/release/ddnet-ai.exe
+          if-no-files-found: error
+          retention-days: 30
 
   # Second layer behind .gitignore: no trained weights, demos, maps or files over 2 MB in git (tools/ci/no-weights.sh).
   no-weights:

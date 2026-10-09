@@ -117,6 +117,23 @@ fn brain(rate_us: f64, fixes: DuelFixConfig, duel: bool) -> HybridBrain {
 
 /// `n` decisions in a row on the same (still) world, as a live bot decides every snapshot against a victim who does not move: the chosen first-three-step
 /// plans, and the telemetry of the last decision.
+/// Runs `f` on a thread with the stack the bot's decision thread has (64 MiB, `bot_cmd.rs` / `engine.rs`): a whole hybrid decision in a debug build
+/// needs more than the default 2 MiB test thread has (it overflowed on Windows, STATUS_STACK_OVERFLOW). A panic in `f` is re-raised here, so the test
+/// still fails with its own message.
+fn with_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name("duelfix-test".into())
+            .stack_size(64 << 20)
+            .spawn_scoped(scope, f)
+            .expect("spawn the test thread");
+        match handle.join() {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
+}
+
 fn decisions(b: &mut HybridBrain, pw: &PhysicsWorld, n: usize) -> (Vec<bool>, DecisionTelemetry) {
     let map = hall();
     let world = pw.inner().clone();
@@ -153,128 +170,136 @@ fn all_on() -> DuelFixConfig {
 /// other half: with every fix **on** but no duel detected (`duel_only`), the decisions are those of the default brain.
 #[test]
 fn with_every_fix_on_but_no_duel_the_decisions_are_the_default_ones() {
-    // A standing victim and a frozen one lying off the freeze: both situations of the fixes. Same seed, same world, the work clock: a pure function.
-    let scenes = [scene(5.5, 8.5, 0), scene(5.5, 13.5, 150)];
-    let plan = |t: &DecisionTelemetry| {
-        t.chosen_plan
-            .iter()
-            .map(|s| (s.dir, s.jump, s.hook, s.fire))
-            .collect::<Vec<_>>()
-    };
-    let mut differs = false;
-    for pw in &scenes {
-        let (base_idle, base) = decisions(&mut brain(8.0, DuelFixConfig::default(), true), pw, 40);
-        let (idle_nd, nd) = decisions(&mut brain(8.0, all_on(), false), pw, 40);
-        assert_eq!(idle_nd, base_idle, "outside a duel nothing changes");
-        assert_eq!(plan(&nd), plan(&base));
-        assert_eq!(nd.best_score.to_bits(), base.best_score.to_bits());
-        assert!(!nd.static_push && !nd.finish_push);
-        // In a duel the same fixes do change the decision (so the comparison above can fail).
-        let (idle_duel, duel) = decisions(&mut brain(8.0, all_on(), true), pw, 40);
-        assert!(duel.static_push || duel.finish_push, "the fixes act in a duel");
-        differs |= idle_duel != base_idle || plan(&duel) != plan(&base);
-    }
-    assert!(differs, "in a duel the fixes change at least one of the two decisions");
+    with_big_stack(|| {
+        // A standing victim and a frozen one lying off the freeze: both situations of the fixes. Same seed, same world, the work clock: a pure function.
+        let scenes = [scene(5.5, 8.5, 0), scene(5.5, 13.5, 150)];
+        let plan = |t: &DecisionTelemetry| {
+            t.chosen_plan
+                .iter()
+                .map(|s| (s.dir, s.jump, s.hook, s.fire))
+                .collect::<Vec<_>>()
+        };
+        let mut differs = false;
+        for pw in &scenes {
+            let (base_idle, base) = decisions(&mut brain(8.0, DuelFixConfig::default(), true), pw, 40);
+            let (idle_nd, nd) = decisions(&mut brain(8.0, all_on(), false), pw, 40);
+            assert_eq!(idle_nd, base_idle, "outside a duel nothing changes");
+            assert_eq!(plan(&nd), plan(&base));
+            assert_eq!(nd.best_score.to_bits(), base.best_score.to_bits());
+            assert!(!nd.static_push && !nd.finish_push);
+            // In a duel the same fixes do change the decision (so the comparison above can fail).
+            let (idle_duel, duel) = decisions(&mut brain(8.0, all_on(), true), pw, 40);
+            assert!(duel.static_push || duel.finish_push, "the fixes act in a duel");
+            differs |= idle_duel != base_idle || plan(&duel) != plan(&base);
+        }
+        assert!(differs, "in a duel the fixes change at least one of the two decisions");
+    });
 }
 
 #[test]
 fn a_standing_victim_is_not_answered_by_standing_still_with_the_fix() {
-    let pw = scene(5.5, 8.5, 0);
-    let on = DuelFixConfig {
-        static_push: true,
-        ..DuelFixConfig::default()
-    };
-    // The starved default stands still against him (the fixed point), or the test would prove nothing.
-    let (base_idle, _) = decisions(&mut brain(8.0, DuelFixConfig::default(), true), &pw, 80);
-    let stood = base_idle[30..].iter().filter(|&&i| i).count();
-    assert!(stood >= 10, "the default idled {stood} of 50 decisions: {base_idle:?}");
-    // Before the victim has been passive for `static_after` decisions the fix waits.
-    let (idle, early) = decisions(&mut brain(8.0, on, true), &pw, 10);
-    assert!(!early.static_push && idle.len() == 10);
-    // After it, a decision is made among the plans that act: no idle choice once it is on (while a safe active plan exists).
-    let (idle, last) = decisions(&mut brain(8.0, on, true), &pw, 80);
-    assert!(last.static_push, "the victim has stood for 80 decisions");
-    assert!(
-        idle[30..].iter().all(|&i| !i),
-        "no idle plan once the push is on: {idle:?}"
-    );
+    with_big_stack(|| {
+        let pw = scene(5.5, 8.5, 0);
+        let on = DuelFixConfig {
+            static_push: true,
+            ..DuelFixConfig::default()
+        };
+        // The starved default stands still against him (the fixed point), or the test would prove nothing.
+        let (base_idle, _) = decisions(&mut brain(8.0, DuelFixConfig::default(), true), &pw, 80);
+        let stood = base_idle[30..].iter().filter(|&&i| i).count();
+        assert!(stood >= 10, "the default idled {stood} of 50 decisions: {base_idle:?}");
+        // Before the victim has been passive for `static_after` decisions the fix waits.
+        let (idle, early) = decisions(&mut brain(8.0, on, true), &pw, 10);
+        assert!(!early.static_push && idle.len() == 10);
+        // After it, a decision is made among the plans that act: no idle choice once it is on (while a safe active plan exists).
+        let (idle, last) = decisions(&mut brain(8.0, on, true), &pw, 80);
+        assert!(last.static_push, "the victim has stood for 80 decisions");
+        assert!(
+            idle[30..].iter().all(|&i| !i),
+            "no idle plan once the push is on: {idle:?}"
+        );
+    });
 }
 
 #[test]
 fn a_frozen_victim_off_the_freeze_is_finished_with_the_fix_and_one_in_the_freeze_is_left_alone() {
-    let on = DuelFixConfig {
-        finish_push: true,
-        finish_approach: 6,
-        no_hammer_frozen: true,
-        ..DuelFixConfig::default()
-    };
-    // Frozen on the floor 3 tiles away, 150 ticks left, off the pit: the push is on at the first decision.
-    let (idle, t) = decisions(&mut brain(8.0, on, true), &scene(5.5, 8.5, 150), 1);
-    assert!(t.finish_push && !t.static_push && !idle[0], "{:?}", t.chosen_plan);
-    // In the pit (x 20..25): it stays frozen by itself, nothing is pushed.
-    let mut pit = PhysicsWorld::new(hall(), 1);
-    pit.add_tee(
-        0,
-        Vec2 {
-            x: 14.5 * 32.0,
-            y: 9.5 * 32.0,
-        },
-    );
-    pit.add_tee(
-        1,
-        Vec2 {
-            x: 22.5 * 32.0,
-            y: 10.5 * 32.0,
-        },
-    );
-    pit.inner_mut().characters[1].as_mut().expect("victim").freeze_time = 150;
-    let (_, t) = decisions(&mut brain(8.0, on, true), &pit, 1);
-    assert!(!t.finish_push, "a victim lying in the freeze is left alone");
-    // About to thaw: nothing we walk to arrives in time.
-    let (_, t) = decisions(&mut brain(8.0, on, true), &scene(5.5, 8.5, 20), 1);
-    assert!(!t.finish_push);
+    with_big_stack(|| {
+        let on = DuelFixConfig {
+            finish_push: true,
+            finish_approach: 6,
+            no_hammer_frozen: true,
+            ..DuelFixConfig::default()
+        };
+        // Frozen on the floor 3 tiles away, 150 ticks left, off the pit: the push is on at the first decision.
+        let (idle, t) = decisions(&mut brain(8.0, on, true), &scene(5.5, 8.5, 150), 1);
+        assert!(t.finish_push && !t.static_push && !idle[0], "{:?}", t.chosen_plan);
+        // In the pit (x 20..25): it stays frozen by itself, nothing is pushed.
+        let mut pit = PhysicsWorld::new(hall(), 1);
+        pit.add_tee(
+            0,
+            Vec2 {
+                x: 14.5 * 32.0,
+                y: 9.5 * 32.0,
+            },
+        );
+        pit.add_tee(
+            1,
+            Vec2 {
+                x: 22.5 * 32.0,
+                y: 10.5 * 32.0,
+            },
+        );
+        pit.inner_mut().characters[1].as_mut().expect("victim").freeze_time = 150;
+        let (_, t) = decisions(&mut brain(8.0, on, true), &pit, 1);
+        assert!(!t.finish_push, "a victim lying in the freeze is left alone");
+        // About to thaw: nothing we walk to arrives in time.
+        let (_, t) = decisions(&mut brain(8.0, on, true), &scene(5.5, 8.5, 20), 1);
+        assert!(!t.finish_push);
+    });
 }
 
 #[test]
 fn the_counter_is_a_switch_of_the_robust_stage_and_changes_nothing_while_he_does_not_hook_us() {
-    // Free victim in reach, no hook anywhere: the counter's floor and protection need his hook on us; the release model needs him below us while we rise.
-    let pw = scene(5.5, 8.5, 0);
-    let on = DuelFixConfig {
-        counter_release: true,
-        hooked_belief: 0.8,
-        protect_defence: true,
-        ..DuelFixConfig::default()
-    };
-    let (_, base) = decisions(&mut brain(1.25, DuelFixConfig::default(), true), &pw, 3);
-    let (_, fixed) = decisions(&mut brain(1.25, on, true), &pw, 3);
-    let plan = |t: &DecisionTelemetry| {
-        t.chosen_plan
-            .iter()
-            .map(|s| (s.dir, s.jump, s.hook, s.fire))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(plan(&base), plan(&fixed));
-    assert_eq!(base.best_score.to_bits(), fixed.best_score.to_bits());
-    // His hook on us: the robust stage believes he reacts (the floor of the belief) -- visible in the telemetry.
-    let mut pw = scene(5.5, 8.5, 0);
-    for _ in 0..12 {
-        // He hooks us: aim at us, hook held (we are 96 px to his left).
-        let mut him = ddai_planner::types::empty_input();
-        him.hook = 1;
-        him.target_x = -300.0;
-        him.target_y = 0.0;
-        pw.set_input(1, him);
-        pw.set_input(0, ddai_planner::types::empty_input());
-        pw.step();
-    }
-    let t1 = pw.get_tee(1).expect("his tee");
-    assert_eq!(t1.hooked_player, 0, "his hook has grabbed us: {t1:?}");
-    let (_, base) = decisions(&mut brain(1.25, DuelFixConfig::default(), true), &pw, 1);
-    let (_, fixed) = decisions(&mut brain(1.25, on, true), &pw, 1);
-    assert!(
-        fixed.react_belief >= 0.8 - 1e-9 && fixed.react_belief > base.react_belief,
-        "belief {} against {}",
-        fixed.react_belief,
-        base.react_belief
-    );
+    with_big_stack(|| {
+        // Free victim in reach, no hook anywhere: the counter's floor and protection need his hook on us; the release model needs him below us while we rise.
+        let pw = scene(5.5, 8.5, 0);
+        let on = DuelFixConfig {
+            counter_release: true,
+            hooked_belief: 0.8,
+            protect_defence: true,
+            ..DuelFixConfig::default()
+        };
+        let (_, base) = decisions(&mut brain(1.25, DuelFixConfig::default(), true), &pw, 3);
+        let (_, fixed) = decisions(&mut brain(1.25, on, true), &pw, 3);
+        let plan = |t: &DecisionTelemetry| {
+            t.chosen_plan
+                .iter()
+                .map(|s| (s.dir, s.jump, s.hook, s.fire))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(plan(&base), plan(&fixed));
+        assert_eq!(base.best_score.to_bits(), fixed.best_score.to_bits());
+        // His hook on us: the robust stage believes he reacts (the floor of the belief) -- visible in the telemetry.
+        let mut pw = scene(5.5, 8.5, 0);
+        for _ in 0..12 {
+            // He hooks us: aim at us, hook held (we are 96 px to his left).
+            let mut him = ddai_planner::types::empty_input();
+            him.hook = 1;
+            him.target_x = -300.0;
+            him.target_y = 0.0;
+            pw.set_input(1, him);
+            pw.set_input(0, ddai_planner::types::empty_input());
+            pw.step();
+        }
+        let t1 = pw.get_tee(1).expect("his tee");
+        assert_eq!(t1.hooked_player, 0, "his hook has grabbed us: {t1:?}");
+        let (_, base) = decisions(&mut brain(1.25, DuelFixConfig::default(), true), &pw, 1);
+        let (_, fixed) = decisions(&mut brain(1.25, on, true), &pw, 1);
+        assert!(
+            fixed.react_belief >= 0.8 - 1e-9 && fixed.react_belief > base.react_belief,
+            "belief {} against {}",
+            fixed.react_belief,
+            base.react_belief
+        );
+    });
 }

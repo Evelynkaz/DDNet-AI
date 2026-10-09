@@ -839,8 +839,7 @@ pub fn run(args: &PlayArgs, data_dir: &Path, server: std::net::SocketAddr) -> Ex
         };
         // Chat is on unless something switches it off, and it fails closed: the flag, `owner_chat = false`, the marker file
         // `bot/owner-chat.off` (survives `launch apply`), an unreadable settings file, or a settings key the bot does not know.
-        let marker =
-            std::fs::symlink_metadata(data_dir.join("bot").join(ddai_bot::settings::OWNER_CHAT_OFF_MARKER)).is_ok();
+        let marker = ddai_os::marker::is_present(&data_dir.join("bot").join(ddai_bot::settings::OWNER_CHAT_OFF_MARKER));
         let chat_off = ddai_bot::settings::owner_chat_off(
             o.no_owner_chat,
             &settings,

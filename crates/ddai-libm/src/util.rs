@@ -15,7 +15,7 @@ pub(crate) trait Fma {
     fn fma(a: f64, b: f64, c: f64) -> f64;
 }
 
-/// The instruction, or the C library's `fma` after it passed the self-check of [`crate::softfma`].
+/// The instruction, or glibc's `fma` after it passed the self-check of [`crate::softfma`].
 pub(crate) struct Fused;
 
 /// The crate's own integer `fma` ([`crate::softfma::soft_fma`]).

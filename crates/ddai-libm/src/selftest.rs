@@ -162,7 +162,10 @@ pub(crate) fn hashes(f: &Fns) -> [(&'static str, u64); 10] {
             run(
                 7,
                 Box::new(move |r, h| {
-                    let x = r.f64_in(-30.0, 30.0).exp2();
+                    // Built from bits: an exponent in [-30, 30) and a random mantissa. (`exp2` would be the platform's libm, and on
+                    // Windows it gives other inputs than glibc: the first version of this test failed there for that reason.)
+                    let exp = r.next() % 60 + (1023 - 30);
+                    let x = f64::from_bits((exp << 52) | (r.next() & 0x000f_ffff_ffff_ffff));
                     b64(h, log_f(x));
                 }),
             ),
@@ -209,7 +212,7 @@ pub(crate) const EXPECTED: [(&str, u64); 10] = [
     ("atan2f", 0x8533d99b1d7f0fd8),
     ("powf", 0x5ff69a1667e6c6d4),
     ("hypotf", 0x61c834ee2a4dc88d),
-    ("log", 0x5e0fa9a68188c14f),
+    ("log", 0x2d690dbb6fd64b59),
     ("atan2", 0x16b1daae94752de3),
     ("pow", 0x2047daeaff8ecff2),
     ("hypot", 0x1041c3763ca281b5),

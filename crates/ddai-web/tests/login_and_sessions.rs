@@ -256,12 +256,15 @@ async fn session_expires_after_the_idle_timeout() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn activity_refreshes_the_idle_timeout() {
     let server = TestServer::start_with(|c| {
-        c.idle_timeout = Duration::from_millis(150);
+        c.idle_timeout = Duration::from_millis(600);
     })
     .await;
     let (cookie, _csrf) = server.login();
+    // Three gaps of 250 ms against an idle timeout of 600 ms: every gap is well inside the timeout (a slow request or a coarse timer, 15 ms
+    // on Windows, cannot push one past it), and the three together (750 ms) are longer than the timeout, so the last check only passes
+    // if the earlier requests refreshed the session.
     for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(70)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
         let response = send(server.addr, Req::new("GET", "/api/me").cookie(&cookie));
         assert_eq!(
             response.json()["authenticated"],

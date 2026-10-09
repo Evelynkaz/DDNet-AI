@@ -38,6 +38,8 @@ pub fn read_regular_nofollow(path: &Path, max: usize) -> Result<SafeRead, SafeRe
     let mut file = nofollow::open_read_nofollow(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => SafeReadError::Missing,
         _ if nofollow::is_symlink_refusal(&e) => SafeReadError::NotRegular,
+        // Windows cannot open a directory like a file: say what it is, not "I/O error".
+        _ if nofollow::is_existing_non_file(path) => SafeReadError::NotRegular,
         _ => SafeReadError::Io,
     })?;
     let meta = file.metadata().map_err(|_| SafeReadError::Io)?;

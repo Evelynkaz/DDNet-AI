@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 
 /// Crates whose non-test code is checked.
 const CRATES: &[&str] = &[
+    // The crate itself: its start-up self-test (`selftest.rs`) runs on the user's machine, and an input it computes with the platform's libm
+    // (`exp2` once) makes the test fail on a platform whose libm differs, although the ports are right.
+    "ddai-libm",
     "ddai-physics",
     "ddai-world",
     "ddai-bot",

@@ -51,7 +51,9 @@ pub enum StoreError {
 /// is the one place names live, and nothing here holds one).
 fn write_failed(op: &'static str, e: &std::io::Error) -> StoreError {
     tracing::warn!(op, kind = ?e.kind(), os_error = ?e.raw_os_error(), "the lists file could not be written");
-    if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem {
+    // Windows reports a write-protected volume as ERROR_WRITE_PROTECT (19), which `std` does not map to `ReadOnlyFilesystem`.
+    let write_protected = cfg!(windows) && e.raw_os_error() == Some(19);
+    if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem || write_protected {
         StoreError::ReadOnly
     } else {
         StoreError::Write
@@ -237,7 +239,9 @@ mod tests {
 
     #[test]
     fn a_read_only_file_system_is_told_apart_from_any_other_write_failure() {
-        let erofs = std::io::Error::from_raw_os_error(30); // EROFS on Linux
+        // The OS's own "read-only" error: EROFS (30) on Linux, ERROR_WRITE_PROTECT (19) on Windows.
+        let erofs = std::io::Error::from_raw_os_error(if cfg!(windows) { 19 } else { 30 });
+        #[cfg(unix)]
         assert_eq!(erofs.kind(), std::io::ErrorKind::ReadOnlyFilesystem);
         assert_eq!(write_failed("save", &erofs), StoreError::ReadOnly);
         for other in [
