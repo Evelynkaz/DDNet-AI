@@ -10,7 +10,7 @@
 // is preserved.
 // ====================================================
 //
-// Altered: rewritten from C to Rust for DDNet-AI (safe bit operations instead of macros on unions),
+// Altered on 2026-10-09: rewritten from C to Rust for DDNet-AI (safe bit operations instead of macros on unions),
 // otherwise line-for-line with the same operation order. glibc builds this file without FMA (it has no
 // `ifunc` variant), so there is no fused operation here, and the Rust `f32` operations round exactly as
 // the C `float` operations do.

@@ -1,21 +1,36 @@
-// Double-precision x^y, ported from the ARM optimized-routines `math/pow.c`, `math/pow_log_data.c` and
-// `math/exp_data.c` (the algorithm glibc 2.28+ ships as `pow`).
+// Double-precision x^y, ported from glibc 2.39: `sysdeps/ieee754/dbl-64/e_pow.c`, `e_pow_log_data.c` and
+// `e_exp_data.c` (function `__pow`).
 //
-// Copyright (c) 2018, Arm Limited.
-// SPDX-License-Identifier: MIT
+// Copyright (C) 2018-2024 Free Software Foundation, Inc.
+// This file is part of the GNU C Library.
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
-// associated documentation files (the "Software"), to deal in the Software without restriction, including
-// without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
-// following conditions: The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-// ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-// LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
-// ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-// Altered: rewritten from C to Rust for DDNet-AI (safe bit operations instead of unions), the build
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program; if not, see <https://www.gnu.org/licenses/>.
+//
+// Licence note (see NOTICE): the C original carries the GNU Lesser General Public License, version 2.1 or
+// (at your option) any later version. Section 3 of that licence lets a recipient apply the terms of the
+// ordinary GNU General Public License (a newer version than 2 may be named) to a copy instead, on the one
+// condition that every notice that refers to the LGPL is altered to refer to the GPL and nothing else in
+// the notices is changed. That is what this file does: the copyright lines above are the original ones, the
+// permission paragraphs are the GPL's, and DDNet-AI as a whole is GPL-3.0.
+//
+// Origin: the algorithm and the tables are those of ARM Limited's optimized-routines (`math/pow.c`, `pow_log_data.c`, `exp_data.c`),
+// which glibc imported (Copyright (c) 2018, Arm Limited). This file was ported from glibc's copy, not
+// from upstream, so it follows glibc's licence (above). Upstream history: Apache-2.0 at first (spring
+// 2018), MIT from 2018-11-12, "MIT OR Apache-2.0 WITH LLVM-exception" since 2022-02-10; all three are
+// compatible with GPL-3.0, and the table values were cross-checked against current upstream in the 5.5a review.
+//
+// Altered on 2026-10-09: rewritten from C to Rust for DDNet-AI (safe bit operations instead of unions), the build
 // configuration of glibc 2.39 on x86-64 fixed (`__FP_FAST_FMA` defined, `WANT_ROUNDING`, `WANT_ERRNO`), and
 // every `a + b * c` that GCC fuses when compiling glibc's `e_pow-fma.c` with `-mfma -mavx2` written as an
 // explicit `fma(b, c, a)`, so the result is bit-identical to glibc 2.39's x86-64 FMA variant.

@@ -196,58 +196,70 @@ crates/ddai-libm: glibc 2.39 math functions
 `crates/ddai-libm` re-implements, in Rust, the math functions of the GNU C
 Library 2.39 (Ubuntu 24.04, x86-64 FMA variant) that DDNet 20.1's physics
 calls on Linux, so that Linux and Windows compute identical bits (decisions
-D-047, D-127). The source of each file is stated in its header; the tables in
-`crates/ddai-libm/src/tables.rs` are generated from the glibc sources by
-`tools/libm-tables/gen_tables.py`. No file was copied from a non-GPL-compatible
-source. The parts and their licences:
+D-047, D-127). The code was ported from glibc's own source files (read from a
+glibc 2.39 source tree; `tools/libm-tables/gen_tables.py` generates
+`crates/ddai-libm/src/tables.rs` from the same tree), not from the upstream
+projects glibc took some of it from. The source of each file is stated in its
+header. No file was copied from a source that is not GPL-3.0-compatible. The
+parts and their licences:
 
-* `sincosf.rs` (`sinf`, `cosf`), `powf.rs`, `log.rs`, `pow.rs`: the algorithms
-  of ARM Limited's optimized-routines (https://github.com/ARM-software/
-  optimized-routines, `math/sincosf.c`, `powf.c`, `log.c`, `pow.c` and their
-  data files, the revision of 2018 that glibc 2.28 imported), licensed MIT
-  (the upstream project is today "MIT OR Apache-2.0 WITH LLVM-exception"; the
-  MIT alternative is used). Each of the four files carries the MIT text:
-
-    Copyright (c) 2017-2018, Arm Limited.
-    Permission is hereby granted, free of charge, to any person obtaining a
-    copy of this software and associated documentation files (the
-    "Software"), to deal in the Software without restriction, including
-    without limitation the rights to use, copy, modify, merge, publish,
-    distribute, sublicense, and/or sell copies of the Software, and to
-    permit persons to whom the Software is furnished to do so, subject to
-    the following conditions: The above copyright notice and this permission
-    notice shall be included in all copies or substantial portions of the
-    Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
-    NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-    USE OR OTHER DEALINGS IN THE SOFTWARE.
+* `sincosf.rs` (`sinf`, `cosf`), `powf.rs`, `log.rs`, `pow.rs` and the tables
+  of `tables.rs` they use: ported from glibc 2.39's
+  `sysdeps/ieee754/flt-32/{s_sincosf.c,s_sincosf.h,s_sincosf_data.c,e_powf.c,
+  e_powf_log2_data.c,e_exp2f_data.c}` and `sysdeps/ieee754/dbl-64/{e_log.c,
+  e_log_data.c,e_pow.c,e_pow_log_data.c,e_exp_data.c}`. These files are
+  Copyright (C) 2017-2024 (powf, exp2f tables) and 2018-2024 (the others) Free
+  Software Foundation, Inc., licensed LGPL-2.1-or-later. Their algorithms and
+  tables are the work of ARM Limited's optimized-routines
+  (https://github.com/ARM-software/optimized-routines, `math/sincosf.c`,
+  `powf.c`, `log.c`, `pow.c` and their data files; Copyright (c) 2017-2018,
+  Arm Limited), which glibc imported in versions 2.27 and 2.28. Upstream was
+  under Apache-2.0 for its first revisions (spring 2018), under MIT from
+  2018-11-12 and under "MIT OR Apache-2.0 WITH LLVM-exception" since
+  2022-02-10; every revision is GPL-3.0-compatible, and the 5.5a review found
+  every numeric table value of glibc 2.39 also in current upstream. Because
+  the ports were made from glibc's copies, they carry glibc's licence (the
+  LGPL, converted to the GPL below), with the Arm origin recorded in each
+  header; the MIT text of the upstream is not what they are distributed under.
 
 * `atanf.rs`, `atan2f.rs`: Sun Microsystems' fdlibm (`s_atanf.c`,
-  `e_atan2f.c` as shipped in glibc):
+  `e_atan2f.c` as shipped in glibc), under the Sun notice, preserved in each
+  header:
 
     Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
     Developed at SunPro, a Sun Microsystems, Inc. business.
     Permission to use, copy, modify, and distribute this software is freely
     granted, provided that this notice is preserved.
 
-* `atan2.rs` (double-precision `atan2`, with the table of `uatan.tbl`):
-  IBM Accurate Mathematical Library, Copyright (C) 2001-2024 Free Software
-  Foundation, Inc., licensed LGPL-2.1-or-later; `hypot.rs` (`hypotf`,
-  `hypot`): Copyright (C) 2018-2024 Free Software Foundation, Inc., licensed
-  LGPL-2.1-or-later. Compatibility with GPL-3.0: both are "version 2.1 or (at
-  your option) any later version" of the LGPL, and section 3 of the LGPL 2.1
-  explicitly permits a licensee to apply the terms of the ordinary GNU General
-  Public License (version 2 or, through the "or later" of this code and the
-  clause in section 3 on newer versions, version 3) instead of the LGPL to a
-  copy of the library, the only condition being that the notices that refer
-  to the LGPL are altered to refer to the GPL. These two files are therefore
-  used here under the GNU GPL version 3, the licence of this repository, with
-  the FSF/IBM copyright and permission notices preserved in their headers
-  and the changes marked ("Altered"). Nothing in `crates/ddai-libm` is
-  linked against glibc or distributed in binary form from it.
+* `atan2.rs` (double-precision `atan2`, with the table of `uatan.tbl` and the
+  constants of `atnat2.h`): IBM Accurate Mathematical Library, Copyright (C)
+  2001-2024 Free Software Foundation, Inc., licensed LGPL-2.1-or-later;
+  `hypot.rs` (`hypotf`, `hypot`): Copyright (C) 2012-2024 (`hypotf`) and
+  2021-2024 (`hypot`) Free Software Foundation, Inc., licensed
+  LGPL-2.1-or-later.
+
+* `softfma.rs` (a correctly rounded `fma` in integer arithmetic) and
+  `selftest.rs`: written for DDNet-AI, derived from no other code (GPL-3.0
+  like the rest of the repository).
+
+The LGPL parts (the four ARM-derived files, `atan2.rs`, `hypot.rs`, and the
+glibc-derived tables in `tables.rs`) are used under the GNU General Public
+License. Section 3 of the GNU LGPL 2.1 says that a licensee "may opt to apply
+the terms of the ordinary GNU General Public License instead of this License
+to a given copy of the Library. To do this, you must alter all the notices
+that refer to this License, so that they refer to the ordinary GNU General
+Public License, version 2, instead of to this License (version 2.1 of the
+Lesser General Public License). (If a newer version than version 2 of the
+ordinary GNU General Public License has appeared, then you can specify that
+version instead if you wish.) Do not make any other change in these
+notices." This has been done in the header of each such file: the FSF and IBM
+copyright lines are kept, the paragraphs that granted the LGPL are replaced
+by the GPL's (version 3 or, at the licensee's option, any later version), a
+note records why, and each file states, with the date 2026-10-09, how it was
+altered (rewritten from C to Rust, operation order and fused operations as
+described there). DDNet-AI as a whole is GPL-3.0. Nothing in
+`crates/ddai-libm` is linked against glibc or distributed in binary form from
+it.
 
 The probe harness reads results of the system's own libm through Rust's
 `std` at test time only (Linux); no libm code is copied into the tests.

@@ -5,26 +5,27 @@
 // Copyright (C) 2012-2024 (hypotf) and 2021-2024 (hypot) Free Software Foundation, Inc.
 // This file is part of the GNU C Library.
 //
-// The GNU C Library is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 2.1 of the License, or (at your option) any later version.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-// The GNU C Library is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
 //
-// You should have received a copy of the GNU Lesser General Public
-// License along with the GNU C Library; if not, see
-// <https://www.gnu.org/licenses/>.
+// You should have received a copy of the GNU General Public License
+// along with this program; if not, see <https://www.gnu.org/licenses/>.
 //
-// LICENSE NOTE (see NOTICE): this file is a derived work of LGPL-2.1-or-later code. Section 3 of the
-// GNU LGPL version 2.1 allows applying the terms of the ordinary GNU General Public License instead of the
-// LGPL to a copy of the library; this copy is used under the terms of the GNU GPL version 3, which is the
-// licence of DDNet-AI as a whole. The copyright and permission notices above are preserved.
+// Licence note (see NOTICE): the C original carries the GNU Lesser General Public License, version 2.1 or
+// (at your option) any later version. Section 3 of that licence lets a recipient apply the terms of the
+// ordinary GNU General Public License (a newer version than 2 may be named) to a copy instead, on the one
+// condition that every notice that refers to the LGPL is altered to refer to the GPL and nothing else in
+// the notices is changed. That is what this file does: the copyright lines above are the original ones, the
+// permission paragraphs are the GPL's, and DDNet-AI as a whole is GPL-3.0.
 //
-// Altered: rewritten from C to Rust for DDNet-AI. x86-64 glibc builds both files without FMA (no `ifunc`
+// Altered on 2026-10-09: rewritten from C to Rust for DDNet-AI. x86-64 glibc builds both files without FMA (no `ifunc`
 // variant exists for them), so the non-`__FP_FAST_FMA` kernel is the one ported, with the same operation
 // order and no fused operation.
 

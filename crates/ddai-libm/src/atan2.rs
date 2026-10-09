@@ -6,26 +6,27 @@
 // written by International Business Machines Corp.
 // Copyright (C) 2001-2024 Free Software Foundation, Inc.
 //
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
-// the Free Software Foundation; either version 2.1 of the License, or
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Lesser General Public License for more details.
+// GNU General Public License for more details.
 //
-// You should have received a copy of the GNU Lesser General Public License
+// You should have received a copy of the GNU General Public License
 // along with this program; if not, see <https://www.gnu.org/licenses/>.
 //
-// LICENSE NOTE (see NOTICE): this file is a derived work of LGPL-2.1-or-later code. Section 3 of the
-// GNU LGPL version 2.1 allows applying the terms of the ordinary GNU General Public License, version 2 or
-// (as that version's "or later" clause and section 3's own text allow) any later version, instead of the
-// LGPL to a copy of the library; this copy is used under the terms of the GNU GPL version 3, which is the
-// licence of DDNet-AI as a whole. The copyright and permission notices above are preserved.
+// Licence note (see NOTICE): the C original carries the GNU Lesser General Public License, version 2.1 or
+// (at your option) any later version. Section 3 of that licence lets a recipient apply the terms of the
+// ordinary GNU General Public License (a newer version than 2 may be named) to a copy instead, on the one
+// condition that every notice that refers to the LGPL is altered to refer to the GPL and nothing else in
+// the notices is changed. That is what this file does: the copyright lines above are the original ones, the
+// permission paragraphs are the GPL's, and DDNet-AI as a whole is GPL-3.0.
 //
-// Altered: rewritten from C to Rust for DDNet-AI (safe bit operations instead of unions), the build
+// Altered on 2026-10-09: rewritten from C to Rust for DDNet-AI (safe bit operations instead of unions), the build
 // configuration of glibc 2.39 on x86-64 fixed (`__FP_FAST_FMA` defined: `EMULV` uses `fma`, no multi-
 // precision fallback exists any more), and every `a + b * c` that GCC fuses when compiling glibc's
 // `e_atan2-fma.c` with `-mfma -mavx2` written as an explicit `fma(b, c, a)`, so the result is

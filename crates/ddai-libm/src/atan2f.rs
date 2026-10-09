@@ -10,7 +10,7 @@
 // is preserved.
 // ====================================================
 //
-// Altered: rewritten from C to Rust for DDNet-AI, otherwise line-for-line with the same operation order.
+// Altered on 2026-10-09: rewritten from C to Rust for DDNet-AI, otherwise line-for-line with the same operation order.
 // glibc builds this file without FMA (no `ifunc` variant), so there is no fused operation here.
 
 //! `atan2f`, bit-identical to glibc 2.39's `__atan2f`.
