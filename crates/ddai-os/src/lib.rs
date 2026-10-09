@@ -9,6 +9,7 @@
 //! * [`host`]: the load average of the machine, where the OS has one.
 //! * [`ipc`]: Unix-domain sockets where they exist; on Windows types nothing can construct (the bot's control channel and live bridge
 //!   are then "not available", see that module).
+//! * [`marker`]: "is this switch-off marker file there?" with one fail-safe rule on every platform (unknown counts as present).
 //! * [`random`]: bytes from the operating system's random generator.
 //!
 //! No `unsafe`; the only dependencies are `getrandom` and (Unix) `libc` for the open flags. The systemd units, the root launcher and
@@ -17,6 +18,7 @@
 pub mod dirs;
 pub mod host;
 pub mod ipc;
+pub mod marker;
 pub mod nofollow;
 pub mod private;
 pub mod random;

@@ -92,8 +92,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # --no-fail-fast: the first run on Windows has to show every failing crate, not stop at the first.
       - name: cargo test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
       # ddai-libm picks its fused multiply-add at run time (the instruction, the C library's fma after a self-check, or its own integer
       # one: crates/ddai-libm/src/softfma.rs). The runner has FMA hardware, so the integer one would never run here by itself: force it,

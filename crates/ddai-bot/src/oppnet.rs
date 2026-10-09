@@ -86,12 +86,9 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Whether the marker counts as present: only "not found" means absent (any other error leaves it unknown, and unknown keeps the model off).
+/// Whether the marker counts as present: unknown counts too, on every platform (`ddai_os::marker`).
 fn marker_present(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => true,
-        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
-    }
+    ddai_os::marker::is_present(path)
 }
 
 /// STATUS's view of the model (`window_model` and `window_guard`).
@@ -403,7 +400,7 @@ mod tests {
             std::os::unix::fs::symlink("/nonexistent", &m).unwrap();
             assert!(marker_present(&m), "a dangling symlink counts too");
         }
-        // A path below a regular file: ENOTDIR is not "not found": present.
+        // A path below a regular file: ENOTDIR on Linux, "not found" on Windows: present on both.
         let f = dir.path().join("file");
         std::fs::write(&f, "x").unwrap();
         assert!(marker_present(&f.join("window-model.off")));
