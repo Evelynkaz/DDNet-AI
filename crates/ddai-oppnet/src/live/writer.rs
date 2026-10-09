@@ -57,10 +57,11 @@ impl RotatingFile {
             .owner_only()
             .open(&self.path)?;
         self.size = f.metadata()?.len();
-        // Windows: the ACL (Unix: the mode was given at creation); best effort, the folder is the user's own.
+        // Windows: the ACL (Unix: the mode was given at creation). A path outside the user's profile folder whose ACL cannot be set
+        // is an error here (`ddai_os::private`), not a silent skip.
         #[cfg(not(unix))]
         if self.size == 0 {
-            let _ = ddai_os::private::restrict_file(&self.path);
+            ddai_os::private::restrict_file(&self.path)?;
         }
         if self.size == 0 || !self.announced {
             f.write_all(self.header.as_bytes())?;

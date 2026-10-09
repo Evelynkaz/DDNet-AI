@@ -225,9 +225,10 @@ pub struct FileAudit {
 
 fn open_audit(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new().create(true).append(true).owner_only().open(path)?;
-    // Windows: the ACL (Unix: the mode was given at creation); best effort, the folder is the user's own.
+    // Windows: the ACL (Unix: the mode was given at creation). A path outside the user's profile folder whose ACL cannot be set is an
+    // error here (`ddai_os::private`), not a silent skip.
     #[cfg(not(unix))]
-    let _ = ddai_os::private::restrict_file(path);
+    ddai_os::private::restrict_file(path)?;
     Ok(file)
 }
 

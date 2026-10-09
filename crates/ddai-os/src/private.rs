@@ -1,12 +1,18 @@
 //! Owner-only files and directories.
 //!
 //! * **Unix**: permission bits, `0600` for files and `0700` for directories.
-//! * **Windows**: an access-control list that grants full control to the current user alone and nothing to anybody else. The ACL is
-//!   set with the system's own `icacls.exe` (`/inheritance:r /grant:r <user>:F`), which needs no `unsafe` and no Win32 binding. If it
-//!   cannot be run or fails, the call still succeeds but reports [`Protection::ParentInherited`] with the reason: the caller must log a
-//!   warning, and the file keeps the permissions its parent directory gave it, which for everything under the user's profile
-//!   (`%USERPROFILE%`) is "this user, the administrators and the system", never "everyone". A file created by [`OwnerOnly::owner_only`]
-//!   on Windows has no extra protection from that call alone: call [`restrict_file`] on it **before** writing secret content.
+//! * **Windows**: an access-control list that grants full control to the current user alone and nothing to anybody else. The user is
+//!   identified by the SID that `whoami /user` prints (not by the `USERNAME` environment variable, which anything can set), the ACL is
+//!   set with the system's own `icacls.exe` (`/inheritance:r /grant:r *<SID>:F`, which needs no `unsafe` and no Win32 binding) and
+//!   read back with `icacls /save` (the SDDL string, which does not depend on the language of the system or on a code page).
+//!
+//! When the ACL cannot be set or read (`icacls` missing or failing, a file system without ACLs such as FAT32), the call does **not**
+//! quietly succeed: it succeeds, reporting [`Protection::ParentInherited`] with the reason, only for a path under the user's profile
+//! folder (`%USERPROFILE%`), where Windows' default ACL is "this user, the administrators and the system" and never "everyone"; for any
+//! other path (a `--data-dir` on `D:\`, `C:\ddnet-ai`, ...) it fails with `PermissionDenied`, unless the environment variable
+//! `DDNET_AI_ALLOW_UNRESTRICTED=1` accepts the risk explicitly. [`is_restricted`] follows the same rule when it cannot read the ACL,
+//! so the load path and the write path agree. A file created by [`OwnerOnly::owner_only`] on Windows has no extra protection from that
+//! call alone: call [`restrict_file`] on it **before** writing secret content.
 
 use std::fs::OpenOptions;
 use std::io;
@@ -109,25 +115,39 @@ mod imp {
     use std::path::Path;
     use std::process::Command;
 
+    fn run_icacls(args: &[std::ffi::OsString]) -> io::Result<std::process::Output> {
+        let out = Command::new(icacls::exe()).args(args).output()?;
+        if out.status.success() {
+            Ok(out)
+        } else {
+            Err(io::Error::other(format!(
+                "icacls exited with {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout).trim()
+            )))
+        }
+    }
+
     pub fn restrict(path: &Path, dir: bool) -> io::Result<Protection> {
-        let result = icacls::current_principal().and_then(|who| {
-            let out = Command::new(icacls::exe())
-                .args(icacls::restrict_args(path, &who, dir))
-                .output()?;
-            if out.status.success() {
-                Ok(())
-            } else {
-                Err(io::Error::other(format!(
-                    "icacls exited with {}: {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stdout).trim()
-                )))
+        let result =
+            icacls::current_sid().and_then(|sid| run_icacls(&icacls::restrict_args(path, &sid, dir)).map(drop));
+        match result {
+            Ok(()) => Ok(Protection::Exact),
+            Err(e) => {
+                if icacls::tolerated(path) {
+                    Ok(Protection::ParentInherited { reason: e.to_string() })
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "could not restrict {} to this user ({e}); it is outside your profile folder, so other local users may be able to read it: move the data directory under your profile, or set {}=1 to accept that",
+                            path.display(),
+                            icacls::ALLOW_ENV
+                        ),
+                    ))
+                }
             }
-        });
-        Ok(match result {
-            Ok(()) => Protection::Exact,
-            Err(e) => Protection::ParentInherited { reason: e.to_string() },
-        })
+        }
     }
 
     pub fn create_dir_all_restricted(path: &Path) -> io::Result<Protection> {
@@ -135,49 +155,97 @@ mod imp {
         restrict(path, true)
     }
 
+    /// The ACL as the SDDL string `icacls /save` writes, compared with the current user's SID.
+    fn query(path: &Path) -> io::Result<bool> {
+        let sid = icacls::current_sid()?;
+        let tmp = std::env::temp_dir().join(format!(
+            "ddnet-ai-acl-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let saved = run_icacls(&icacls::save_args(path, &tmp)).and_then(|_| fs::read(&tmp));
+        let _ = fs::remove_file(&tmp);
+        let text = icacls::decode_save(&saved?);
+        let aces = icacls::sddl_aces(&text)
+            .ok_or_else(|| io::Error::other("icacls /save wrote no DACL that could be read"))?;
+        Ok(icacls::only_sid(&aces, &sid))
+    }
+
     pub fn is_restricted(path: &Path) -> io::Result<bool> {
-        let who = icacls::current_principal()?;
-        let out = Command::new(icacls::exe()).arg(path).output()?;
-        if !out.status.success() {
-            return Err(io::Error::other(format!("icacls exited with {}", out.status)));
+        match query(path) {
+            Ok(answer) => Ok(answer),
+            Err(_) if icacls::tolerated(path) => Ok(true),
+            Err(e) => Err(e),
         }
-        let entries = icacls::entries(&String::from_utf8_lossy(&out.stdout), path);
-        Ok(icacls::only_user(&entries, &who))
     }
 }
 
-/// The command lines and the output of `icacls.exe`, as pure functions (tested on every platform; only run on Windows).
+/// The command lines and the output of `whoami.exe` and `icacls.exe`, as pure functions (tested on every platform; only run on
+/// Windows).
 #[cfg_attr(not(windows), allow(dead_code))]
 mod icacls {
     use std::ffi::OsString;
     use std::io;
     use std::path::{Path, PathBuf};
 
+    /// The environment variable that accepts a secret path whose ACL cannot be set (see the module docs of [`super`]).
+    pub const ALLOW_ENV: &str = "DDNET_AI_ALLOW_UNRESTRICTED";
+
+    fn system32(exe: &str) -> PathBuf {
+        match std::env::var_os("SystemRoot") {
+            Some(root) if !root.is_empty() => PathBuf::from(root).join("System32").join(exe),
+            _ => PathBuf::from(exe),
+        }
+    }
+
     /// `%SystemRoot%\System32\icacls.exe` (not looked up on `PATH`), or plain `icacls`.
     pub fn exe() -> PathBuf {
-        match std::env::var_os("SystemRoot") {
-            Some(root) if !root.is_empty() => PathBuf::from(root).join("System32").join("icacls.exe"),
-            _ => PathBuf::from("icacls"),
-        }
+        system32("icacls.exe")
     }
 
-    /// `DOMAIN\user` (or just `user` without a domain), from the environment of the logon session.
-    pub fn current_principal() -> io::Result<String> {
-        let user = std::env::var("USERNAME").ok().filter(|u| !u.is_empty());
-        let domain = std::env::var("USERDOMAIN").ok().filter(|d| !d.is_empty());
-        match (domain, user) {
-            (Some(d), Some(u)) => Ok(format!("{d}\\{u}")),
-            (None, Some(u)) => Ok(u),
-            _ => Err(io::Error::other("USERNAME is not set")),
-        }
+    /// The SID of the user running this process: the second field of `whoami /user /fo csv /nh`, which reads the process token. Cached.
+    #[cfg(windows)]
+    pub fn current_sid() -> io::Result<String> {
+        use std::sync::OnceLock;
+        static SID: OnceLock<Result<String, String>> = OnceLock::new();
+        SID.get_or_init(|| {
+            let out = std::process::Command::new(system32("whoami.exe"))
+                .args(["/user", "/fo", "csv", "/nh"])
+                .output()
+                .map_err(|e| format!("whoami: {e}"))?;
+            if !out.status.success() {
+                return Err(format!("whoami exited with {}", out.status));
+            }
+            parse_whoami_user(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| "whoami printed no SID".to_string())
+        })
+        .clone()
+        .map_err(io::Error::other)
     }
 
-    /// The arguments that replace the ACL of `path` by "`who` has full control" (for a directory: inherited by what it will contain).
-    pub fn restrict_args(path: &Path, who: &str, dir: bool) -> Vec<OsString> {
+    /// Without Windows there is no `whoami /user`; the functions that call this are never reached.
+    #[cfg(not(windows))]
+    pub fn current_sid() -> io::Result<String> {
+        Err(io::Error::other("no SID on this platform"))
+    }
+
+    /// The SID in the output of `whoami /user /fo csv /nh`: `"DOMAIN\user","S-1-5-21-..."`.
+    pub fn parse_whoami_user(output: &str) -> Option<String> {
+        let line = output.lines().map(str::trim).find(|l| !l.is_empty())?;
+        let field = line.rsplit(',').next()?.trim().trim_matches('"').trim();
+        let well_formed = field.len() > 4
+            && field.starts_with("S-1-")
+            && field.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b'S');
+        well_formed.then(|| field.to_string())
+    }
+
+    /// The arguments that replace the ACL of `path` by "the SID has full control" (for a directory: inherited by what it will contain).
+    pub fn restrict_args(path: &Path, sid: &str, dir: bool) -> Vec<OsString> {
         let grant = if dir {
-            format!("{who}:(OI)(CI)F")
+            format!("*{sid}:(OI)(CI)F")
         } else {
-            format!("{who}:F")
+            format!("*{sid}:F")
         };
         vec![
             path.as_os_str().to_owned(),
@@ -187,88 +255,199 @@ mod icacls {
         ]
     }
 
-    /// The principals of the entries `icacls <path>` printed. The first line carries the path before its first entry; further lines
-    /// are indented. A line is an entry when it holds `:(`.
-    pub fn entries(output: &str, path: &Path) -> Vec<String> {
-        let path = path.display().to_string();
-        output
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                let line = line.strip_prefix(path.as_str()).unwrap_or(line).trim();
-                let (principal, _) = line.split_once(":(")?;
-                Some(principal.trim().to_string())
-            })
-            .filter(|p| !p.is_empty())
-            .collect()
+    /// `icacls <path> /save <out>`: writes the path and its security descriptor in SDDL.
+    pub fn save_args(path: &Path, out: &Path) -> Vec<OsString> {
+        vec![path.as_os_str().to_owned(), "/save".into(), out.as_os_str().to_owned()]
     }
 
-    /// Exactly one entry and it is `who` (case-insensitive; `who` may be `user` alone while icacls prints `HOST\user`). `icacls` prints
-    /// in the console's OEM code page, so a user name with non-ASCII letters (a Cyrillic account name) cannot be compared by text:
-    /// there the single remaining entry (the one `restrict_args` leaves) is taken to be the user's own.
-    pub fn only_user(entries: &[String], who: &str) -> bool {
-        let user = who.rsplit('\\').next().unwrap_or(who);
-        if entries.len() != 1 {
-            return false;
+    /// `icacls /save` writes UTF-16LE with a byte order mark (UTF-8 is accepted too, in case a version does that).
+    pub fn decode_save(bytes: &[u8]) -> String {
+        if let Some(rest) = bytes.strip_prefix(&[0xff, 0xfe]) {
+            let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+            String::from_utf16_lossy(&units)
+        } else if let Some(rest) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+            String::from_utf8_lossy(rest).into_owned()
+        } else {
+            String::from_utf8_lossy(bytes).into_owned()
         }
-        if !user.is_ascii() {
+    }
+
+    /// One access-control entry of an SDDL DACL.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Ace {
+        /// `A` allow, `D` deny, ...
+        pub kind: String,
+        /// The trustee: a SID string, or a two-letter alias for a well-known one.
+        pub trustee: String,
+    }
+
+    /// The entries of the DACL in the text `icacls /save` wrote (a line `D:<flags>(<ace>)(<ace>)...`; the SACL and owner parts are not
+    /// part of it). `None` when there is no DACL line.
+    pub fn sddl_aces(text: &str) -> Option<Vec<Ace>> {
+        let line = text.lines().map(str::trim).find(|l| l.starts_with("D:"))?;
+        let dacl = line[2..].split("S:").next().unwrap_or("");
+        let mut aces = Vec::new();
+        let mut rest = dacl;
+        while let Some(open) = rest.find('(') {
+            let close = open + rest[open..].find(')')?;
+            let fields: Vec<&str> = rest[open + 1..close].split(';').collect();
+            if fields.len() < 6 {
+                return None;
+            }
+            aces.push(Ace {
+                kind: fields[0].to_string(),
+                trustee: fields[5].to_string(),
+            });
+            rest = &rest[close + 1..];
+        }
+        Some(aces)
+    }
+
+    /// Exactly one entry, it allows, and its trustee is `sid` (compared whole, case-insensitively; the built-in Administrator account
+    /// (RID 500) is printed as the alias `LA`).
+    pub fn only_sid(aces: &[Ace], sid: &str) -> bool {
+        match aces {
+            [ace] => {
+                ace.kind == "A"
+                    && (ace.trustee.eq_ignore_ascii_case(sid)
+                        || (ace.trustee.eq_ignore_ascii_case("LA") && sid.ends_with("-500")))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `path` is inside `profile` (the user's profile folder): compared on normalised text (case-insensitive, `\` and `/` the
+    /// same, no `\\?\` prefix, no trailing separator), whole components only (`C:\Users\me2` is not inside `C:\Users\me`).
+    pub fn is_under(path: &str, profile: &str) -> bool {
+        fn norm(s: &str) -> String {
+            let s = s.strip_prefix("\\\\?\\").unwrap_or(s);
+            s.replace('\\', "/").trim_end_matches('/').to_lowercase()
+        }
+        let (path, profile) = (norm(path), norm(profile));
+        !profile.is_empty() && (path == profile || path.starts_with(&format!("{profile}/")))
+    }
+
+    /// May a path whose ACL could not be set or read be used for a secret anyway? Under the user's profile folder (Windows' default ACL
+    /// there is user-only), or when the user accepted the risk with [`ALLOW_ENV`].
+    #[cfg(windows)]
+    pub fn tolerated(path: &Path) -> bool {
+        if std::env::var(ALLOW_ENV).is_ok_and(|v| v == "1") {
             return true;
         }
-        entries[0].to_lowercase().ends_with(&user.to_lowercase())
+        let Some(profile) = std::env::var_os("USERPROFILE") else {
+            return false;
+        };
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        is_under(
+            &canonical(path).to_string_lossy(),
+            &canonical(Path::new(&profile)).to_string_lossy(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
+    const SID: &str = "S-1-5-21-1004336348-1177238915-682003330-1001";
 
     #[test]
-    fn icacls_command_line() {
-        let a = icacls::restrict_args(Path::new("C:\\d\\secret.toml"), "PC\\me", false);
+    fn icacls_command_line_names_the_sid_not_the_user() {
+        let a = icacls::restrict_args(Path::new("C:\\d\\secret.toml"), SID, false);
         let a: Vec<String> = a.iter().map(|s| s.to_string_lossy().into_owned()).collect();
-        assert_eq!(a, ["C:\\d\\secret.toml", "/inheritance:r", "/grant:r", "PC\\me:F"]);
-        let d = icacls::restrict_args(Path::new("C:\\d"), "PC\\me", true);
-        assert_eq!(d.last().unwrap().to_string_lossy(), "PC\\me:(OI)(CI)F");
+        assert_eq!(
+            a,
+            ["C:\\d\\secret.toml", "/inheritance:r", "/grant:r", &format!("*{SID}:F")]
+        );
+        let d = icacls::restrict_args(Path::new("C:\\d"), SID, true);
+        assert_eq!(d.last().unwrap().to_string_lossy(), format!("*{SID}:(OI)(CI)F"));
+        let s = icacls::save_args(Path::new("C:\\d\\f"), Path::new("C:\\t\\o.txt"));
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[1].to_string_lossy(), "/save");
     }
 
     #[test]
-    fn icacls_output_is_read_into_principals() {
-        let path = PathBuf::from("C:\\Users\\me\\ddnet-ai\\data\\secrets\\auth.toml");
-        let one = format!(
-            "{} PC\\me:(F)\n\nSuccessfully processed 1 files; Failed processing 0 files\n",
-            path.display()
-        );
-        let e = icacls::entries(&one, &path);
-        assert_eq!(e, ["PC\\me"]);
-        assert!(icacls::only_user(&e, "PC\\me"));
-        assert!(icacls::only_user(&e, "me"));
-        let many = format!(
-            "{} NT AUTHORITY\\SYSTEM:(I)(F)\n       BUILTIN\\Administrators:(I)(F)\n       PC\\me:(I)(F)\n       BUILTIN\\Users:(I)(RX)\n\nSuccessfully processed 1 files; Failed processing 0 files\n",
-            path.display()
-        );
-        let e = icacls::entries(&many, &path);
+    fn whoami_output_is_read_into_a_sid() {
+        let out = format!("\"PC\\me\",\"{SID}\"\r\n");
+        assert_eq!(icacls::parse_whoami_user(&out).as_deref(), Some(SID));
+        // A domain account whose name has a comma-free but non-ASCII name, and a line break at the start.
+        let out = format!("\n\"\u{418}\u{432}\u{430}\u{43d}\\\u{418}\u{432}\u{430}\u{43d}\",\"{SID}\"\n");
+        assert_eq!(icacls::parse_whoami_user(&out).as_deref(), Some(SID));
+        assert_eq!(icacls::parse_whoami_user(""), None);
+        assert_eq!(icacls::parse_whoami_user("ERROR: Access is denied.\n"), None);
+        assert_eq!(icacls::parse_whoami_user("\"PC\\me\",\"not-a-sid\"\n"), None);
+    }
+
+    #[test]
+    fn the_saved_acl_is_read_from_utf16_and_utf8() {
+        let sddl = format!("C:\\Users\\me\\secrets\nD:PAI(A;OICIID;FA;;;{SID})\n");
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(sddl.encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(icacls::decode_save(&utf16), sddl);
+        assert_eq!(icacls::decode_save(sddl.as_bytes()), sddl);
+        let aces = icacls::sddl_aces(&icacls::decode_save(&utf16)).unwrap();
         assert_eq!(
-            e,
-            [
-                "NT AUTHORITY\\SYSTEM",
-                "BUILTIN\\Administrators",
-                "PC\\me",
-                "BUILTIN\\Users"
-            ]
+            aces,
+            [icacls::Ace {
+                kind: "A".into(),
+                trustee: SID.into()
+            }]
         );
-        assert!(!icacls::only_user(&e, "PC\\me"));
-        assert!(!icacls::only_user(&[], "PC\\me"));
-        assert!(!icacls::only_user(&["PC\\someone-else".to_string()], "PC\\me"));
-        // A non-ASCII account name: icacls prints it in the OEM code page, so only the count can be checked.
-        assert!(icacls::only_user(
-            &["PC\\\u{fffd}\u{fffd}\u{fffd}".to_string()],
-            "PC\\\u{418}\u{432}\u{430}\u{43d}"
+        assert!(icacls::only_sid(&aces, SID));
+        assert!(icacls::only_sid(&aces, &SID.to_lowercase()));
+    }
+
+    #[test]
+    fn only_the_whole_sid_of_a_single_allow_entry_counts() {
+        let parse = |s: &str| icacls::sddl_aces(s).unwrap();
+        // The usual Windows default for a file under the profile: system, administrators, the user.
+        let many = parse(&format!("f\nD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{SID})\n"));
+        assert_eq!(many.len(), 3);
+        assert!(!icacls::only_sid(&many, SID));
+        // Two entries are never "only", even when both are ours.
+        assert!(!icacls::only_sid(
+            &parse(&format!("D:P(A;;FA;;;{SID})(A;;FR;;;{SID})")),
+            SID
         ));
-        assert!(!icacls::only_user(
-            &["A".to_string(), "B".to_string()],
-            "PC\\\u{418}\u{432}\u{430}\u{43d}"
+        // A different user, and a SID that merely ends with ours (the suffix bug the first version had).
+        assert!(!icacls::only_sid(&parse("D:P(A;;FA;;;S-1-5-21-1-2-3-1002)"), SID));
+        assert!(!icacls::only_sid(
+            &parse(&format!("D:P(A;;FA;;;S-1-5-21-1-2-3-9{SID})")),
+            SID
         ));
+        assert!(!icacls::only_sid(&parse(&format!("D:P(A;;FA;;;{SID}0)")), SID));
+        // A deny entry is not an allow for us.
+        assert!(!icacls::only_sid(&parse(&format!("D:P(D;;FA;;;{SID})")), SID));
+        // The built-in Administrator is printed as the alias LA.
+        assert!(icacls::only_sid(&parse("D:P(A;;FA;;;LA)"), "S-1-5-21-1-2-3-500"));
+        assert!(!icacls::only_sid(&parse("D:P(A;;FA;;;LA)"), SID));
+        // Everyone and Authenticated Users never match.
+        assert!(!icacls::only_sid(&parse("D:P(A;;FA;;;WD)"), SID));
+        assert!(!icacls::only_sid(&parse("D:P(A;;0x1200a9;;;AU)"), SID));
+        // No DACL, a broken one, and an empty one (nobody at all).
+        assert!(icacls::sddl_aces("just a path\n").is_none());
+        assert!(icacls::sddl_aces("D:P(A;;FA;;;").is_none());
+        assert!(icacls::sddl_aces("D:P(A;FA)").is_none());
+        assert_eq!(icacls::sddl_aces("D:P").unwrap(), []);
+        assert!(!icacls::only_sid(&[], SID));
+        // The SACL part of the line is not read as entries.
+        let with_sacl = parse(&format!("D:P(A;;FA;;;{SID})S:(AU;SA;FA;;;WD)"));
+        assert_eq!(with_sacl.len(), 1);
+    }
+
+    #[test]
+    fn the_profile_test_compares_whole_components() {
+        let profile = "C:\\Users\\me";
+        assert!(icacls::is_under("C:\\Users\\me\\ddnet-ai\\data", profile));
+        assert!(icacls::is_under("c:\\users\\ME\\x", profile));
+        assert!(icacls::is_under("\\\\?\\C:\\Users\\me\\x", profile));
+        assert!(icacls::is_under("C:/Users/me/", profile));
+        assert!(icacls::is_under("C:\\Users\\me", profile));
+        assert!(!icacls::is_under("C:\\Users\\me2\\x", profile));
+        assert!(!icacls::is_under("D:\\data", profile));
+        assert!(!icacls::is_under("C:\\ddnet-ai", profile));
+        assert!(!icacls::is_under("C:\\Users", profile));
+        assert!(!icacls::is_under("C:\\Users\\me\\x", ""));
     }
 
     #[test]

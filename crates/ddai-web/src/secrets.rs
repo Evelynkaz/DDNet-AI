@@ -2,7 +2,8 @@
 //! owner once, and the session-cookie signing key. All three live outside the git repository (see
 //! `CLAUDE.md` "Никогда не коммитить"), in files created with `0600` permissions inside a `0700`
 //! directory, never logged. (On Windows "owner only" is an ACL granting the current user alone, set with the system's `icacls`; if
-//! that cannot be done a warning says so and the files keep what their folder in the user's profile gives them: see `ddai_os::private`.)
+//! that cannot be done, a path under the user's profile folder keeps what the folder gives it, with a warning, and any other path is
+//! refused unless `DDNET_AI_ALLOW_UNRESTRICTED=1` accepts the risk: see `ddai_os::private`.)
 //!
 //! File formats are the tiny [`crate::toml_kv`] subset, not a full TOML parser (see its module
 //! doc for why).
@@ -131,7 +132,8 @@ pub fn ensure_secrets_dir(paths: &SecretsPaths) -> Result<(), SecretsError> {
     restrict(paths.dir(), true)
 }
 
-/// Makes `path` owner-only; a Windows ACL that could not be set is a warning, not an error (see the module docs).
+/// Makes `path` owner-only; a Windows ACL that could not be set is a warning under the user's profile folder and an error elsewhere (see
+/// the module docs).
 fn restrict(path: &Path, dir: bool) -> Result<(), SecretsError> {
     let protection = if dir {
         private::restrict_dir(path)
