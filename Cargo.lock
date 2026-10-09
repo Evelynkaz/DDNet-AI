@@ -1204,11 +1204,17 @@ name = "ddai-oppnet"
 version = "0.1.0"
 dependencies = [
  "allocation-counter",
+ "ddai-brain",
  "ddai-clip",
+ "ddai-dataset",
+ "ddai-demo",
+ "ddai-env",
  "ddai-jsmath",
  "ddai-map",
  "ddai-physics",
  "ddai-planner",
+ "ddai-recorder",
+ "ddai-world",
  "postcard",
  "rayon",
  "serde",

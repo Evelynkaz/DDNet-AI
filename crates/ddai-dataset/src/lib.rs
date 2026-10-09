@@ -14,6 +14,7 @@ pub mod analysis;
 pub mod config;
 pub mod dataset;
 pub mod demo;
+pub mod humaninput;
 pub mod ingest;
 pub mod pipeline;
 pub mod privacy;
@@ -22,6 +23,7 @@ pub mod report;
 pub mod run;
 pub mod skill;
 pub mod store;
+pub mod study;
 #[cfg(feature = "test-util")]
 pub mod synth;
 pub mod tags;

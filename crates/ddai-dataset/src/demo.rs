@@ -16,6 +16,7 @@ use ddai_physics::map::MapData;
 
 use crate::analysis::{self, Timeline};
 use crate::config::Config;
+use crate::humaninput::TrueTable;
 use crate::ingest::{FrameSource, Ingested, IngestedFrame, KillEvent};
 use crate::pipeline::{self, BuildCounters, FrameOut};
 use crate::replay::ReplayStats;
@@ -151,7 +152,7 @@ pub fn choose_target(frame: &FrameRec, slot: usize, target_range: f32) -> i16 {
 /// bucket of the samples is left at `Unranked`, it is assigned after the global ranking.
 pub fn process(cfg: &Config, map: &Arc<MapData>, ing: &Ingested) -> io::Result<DemoOutput> {
     let frames = || ing.frames_with_tunes();
-    process_frames(cfg, map, frames, None, |_| Tail {
+    process_frames(cfg, map, None, frames, None, |_| Tail {
         kills: ing.kills.clone(),
         tune_nondefault_frames: ing.tune_nondefault_frames as u32,
         tune_movement_frames: ing.tune_movement_frames as u32,
@@ -168,10 +169,24 @@ pub fn process_source(
     demo: &ddai_demo::Demo<'_>,
     spill_dir: Option<&Path>,
 ) -> io::Result<DemoOutput> {
+    process_source_real(cfg, map, demo, spill_dir, None)
+}
+
+/// [`process_source`] with the demo's real inputs (`Sv_PreInput`, task 3.24): where a player's
+/// track has an input in force the sample carries it (flagged [`quality::REAL_INPUT`]); the rest
+/// stays reconstructed. `None` = exactly [`process_source`].
+pub fn process_source_real(
+    cfg: &Config,
+    map: &Arc<MapData>,
+    demo: &ddai_demo::Demo<'_>,
+    spill_dir: Option<&Path>,
+    real: Option<&TrueTable>,
+) -> io::Result<DemoOutput> {
     process_frames(
         cfg,
         map,
-        || FrameSource::new(demo),
+        real,
+        || FrameSource::new(demo).min_spacing(cfg.min_frame_spacing),
         spill_dir,
         |src| Tail {
             kills: src.kills,
@@ -195,6 +210,7 @@ pub struct Tail {
 fn process_frames<I: Iterator<Item = IngestedFrame>>(
     cfg: &Config,
     map: &Arc<MapData>,
+    real: Option<&TrueTable>,
     mut frames: impl FnMut() -> I,
     spill_dir: Option<&Path>,
     tail: impl FnOnce(I) -> Tail,
@@ -209,14 +225,21 @@ fn process_frames<I: Iterator<Item = IngestedFrame>>(
     let mut sample_count = 0usize;
     let mut k = 0u32;
     let mut frames = frames();
-    let summary = pipeline::build_stream(cfg, map, &table, frames.by_ref(), |out: FrameOut| -> io::Result<()> {
-        let samples = samples_of(cfg, k, &out);
-        sample_count += samples.len();
-        frame_w.push(out.frame)?;
-        sample_w.push(samples)?;
-        k += 1;
-        Ok(())
-    })?;
+    let summary = pipeline::build_stream_real(
+        cfg,
+        map,
+        &table,
+        real,
+        frames.by_ref(),
+        |out: FrameOut| -> io::Result<()> {
+            let samples = samples_of(cfg, k, &out);
+            sample_count += samples.len();
+            frame_w.push(out.frame)?;
+            sample_w.push(samples)?;
+            k += 1;
+            Ok(())
+        },
+    )?;
     let tail = tail(frames);
     let store = frame_w.finish()?;
     let sample_store = sample_w.finish()?;
@@ -316,6 +339,9 @@ fn samples_of(cfg: &Config, k: u32, out: &FrameOut) -> Vec<SampleRec> {
         }
         if st.active {
             q |= quality::ACTIVE;
+        }
+        if st.real {
+            q |= quality::REAL_INPUT;
         }
         samples.push(SampleRec {
             frame: k,

@@ -398,12 +398,13 @@ fn process_one(
         .expect("no panics while holding the lock")
         .entry(map_sha.clone())
         .or_insert_with(|| (demo.header.map_name.clone(), map_bytes));
-    let out = demo::process_source(cfg, &Arc::new(map), &demo, opts.spill_dir.as_deref()).map_err(|source| {
-        DatasetError::Io {
+    let real = cfg.real_inputs.then(|| crate::humaninput::true_table(&demo));
+    let out = demo::process_source_real(cfg, &Arc::new(map), &demo, opts.spill_dir.as_deref(), real.as_ref()).map_err(
+        |source| DatasetError::Io {
             path: opts.spill_dir.clone().unwrap_or_else(std::env::temp_dir),
             source,
-        }
-    })?;
+        },
+    )?;
     if out.frame_count == 0 {
         return Ok(skipped(sha.to_string(), size, "no snapshots"));
     }

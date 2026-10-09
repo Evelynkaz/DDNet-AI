@@ -177,6 +177,9 @@ pub mod quality {
     pub const NEXT_FRESH: u8 = 1 << 2;
     /// A non-neutral action, or the character moved (speed >= 1 px/tick), or it was hooking.
     pub const ACTIVE: u8 = 1 << 3;
+    /// The action is the player's real input from the demo's `Sv_PreInput` messages (task 3.24,
+    /// [`crate::humaninput`]) and not one reconstructed from the snapshots.
+    pub const REAL_INPUT: u8 = 1 << 4;
     /// Mask of the two low bits: the [`super::ReplayClass`].
     pub const REPLAY_MASK: u8 = 0b11;
 }
@@ -249,6 +252,10 @@ impl SampleRec {
     }
     pub fn active(&self) -> bool {
         self.q & quality::ACTIVE != 0
+    }
+    /// The action is a real input (`Sv_PreInput`), not a reconstruction.
+    pub fn real_input(&self) -> bool {
+        self.q & quality::REAL_INPUT != 0
     }
     /// A sample gets training weight only when the physics replay reproduced the next state.
     pub fn confident(&self) -> bool {
