@@ -38,7 +38,7 @@
 //! `log`, bit-identical to glibc 2.39's `__log_fma` (the function `f64::ln` calls on x86-64 Linux).
 
 use crate::tables::{LOG_LN2HI, LOG_LN2LO, LOG_POLY, LOG_POLY1, LOG_TAB};
-use crate::util::{divzero_f64, fma, invalid_f64};
+use crate::util::{Fma, dispatch, divzero_f64, invalid_f64};
 
 const LOG_TABLE_BITS: u32 = 7;
 const N: u64 = 1 << LOG_TABLE_BITS;
@@ -53,6 +53,10 @@ const INF_BITS: u64 = 0x7ff0_0000_0000_0000;
 /// `log(x)`, bit-identical to glibc 2.39 (x86-64, FMA variant).
 #[must_use]
 pub fn log(x: f64) -> f64 {
+    dispatch!(log_impl(x))
+}
+
+fn log_impl<F: Fma>(x: f64) -> f64 {
     let b = |i: usize| f64::from_bits(LOG_POLY1[i]);
     let a = |i: usize| f64::from_bits(LOG_POLY[i]);
     let ln2hi = f64::from_bits(LOG_LN2HI);
@@ -71,21 +75,21 @@ pub fn log(x: f64) -> f64 {
         let r2 = r * r;
         let r3 = r * r2;
         // B[1] + r*B[2] + r2*B[3] + r3*(B[4] + r*B[5] + r2*B[6] + r3*(B[7] + r*B[8] + r2*B[9] + r3*B[10]))
-        let t1 = fma(r2, b(3), fma(r, b(2), b(1)));
-        let t2 = fma(r2, b(6), fma(r, b(5), b(4)));
-        let t3 = fma(r3, b(10), fma(r2, b(9), fma(r, b(8), b(7))));
-        let q = fma(fma(t3, r3, t2), r3, t1);
+        let t1 = F::fma(r2, b(3), F::fma(r, b(2), b(1)));
+        let t2 = F::fma(r2, b(6), F::fma(r, b(5), b(4)));
+        let t3 = F::fma(r3, b(10), F::fma(r2, b(9), F::fma(r, b(8), b(7))));
+        let q = F::fma(F::fma(t3, r3, t2), r3, t1);
         // rhi = r + w - w, with both `w` products fused.
-        let rhi = fma(-134_217_728.0, r, fma(r, 134_217_728.0, r));
+        let rhi = F::fma(-134_217_728.0, r, F::fma(r, 134_217_728.0, r));
         let rlo = r - rhi;
         let rr = rhi * rhi;
         // w = rhi * rhi * B[0]  (B[0] == -0.5); hi = r + w; lo = r - hi + w;
-        let hi = fma(rr, b(0), r);
-        let mut lo = fma(rr, b(0), r - hi);
+        let hi = F::fma(rr, b(0), r);
+        let mut lo = F::fma(rr, b(0), r - hi);
         // lo += B[0] * rlo * (rhi + r);
-        lo = fma(b(0) * rlo, r + rhi, lo);
+        lo = F::fma(b(0) * rlo, r + rhi, lo);
         // y = r3 * q; y += lo; y += hi;
-        return fma(r3, q, lo) + hi;
+        return F::fma(r3, q, lo) + hi;
     }
     if top.wrapping_sub(0x0010) >= 0x7ff0 - 0x0010 {
         // x < 0x1p-1022 or inf or nan.
@@ -118,18 +122,18 @@ pub fn log(x: f64) -> f64 {
     // log(x) = log1p(z/c-1) + log(c) + k*Ln2.
     // r ~= z/c - 1, |r| < 1/(2*N).
     // rounding error: 0x1p-55/N.
-    let r = fma(z, invc, -1.0);
+    let r = F::fma(z, invc, -1.0);
     let kd = k as f64;
 
     // hi + lo = r + log(c) + k*Ln2.
-    let w = fma(kd, ln2hi, logc);
+    let w = F::fma(kd, ln2hi, logc);
     let hi = w + r;
-    let lo = fma(kd, ln2lo, (w - hi) + r);
+    let lo = F::fma(kd, ln2lo, (w - hi) + r);
 
     // log(x) = lo + (log1p(r) - r) + hi.
     let r2 = r * r; // rounding error: 0x1p-54/N^2.
     // y = lo + r2*A[0] + r*r2*(A[1] + r*A[2] + r2*(A[3] + r*A[4])) + hi
-    let poly = fma(fma(r, a(4), a(3)), r2, fma(r, a(2), a(1)));
-    let y = fma(r * r2, poly, fma(r2, a(0), lo));
+    let poly = F::fma(F::fma(r, a(4), a(3)), r2, F::fma(r, a(2), a(1)));
+    let y = F::fma(r * r2, poly, F::fma(r2, a(0), lo));
     y + hi
 }

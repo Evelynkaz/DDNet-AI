@@ -42,7 +42,7 @@
 use crate::tables::{
     EXP_INVLN2N, EXP_NEGLN2HIN, EXP_NEGLN2LON, EXP_POLY, EXP_SHIFT, EXP_TAB, POW_LOG_POLY, POW_LOG_TAB,
 };
-use crate::util::{divzero_f64, fma, invalid_f64, nan_sum_f64, oflow_f64, uflow_f64};
+use crate::util::{Fma, dispatch, divzero_f64, invalid_f64, nan_sum_f64, oflow_f64, uflow_f64};
 
 const POW_LOG_TABLE_BITS: u32 = 7;
 const EXP_TABLE_BITS: u32 = 7;
@@ -64,7 +64,7 @@ fn top12(x: f64) -> u32 {
 /// precision. `ix` is the bit representation of x, normalized in the subnormal range using the sign bit
 /// for the exponent.
 #[inline(always)]
-fn log_inline(ix: u64) -> (f64, f64) {
+fn log_inline<F: Fma>(ix: u64) -> (f64, f64) {
     let a = |i: usize| f64::from_bits(POW_LOG_POLY[i]);
     // x = 2^k z; where z is in range [OFF,2*OFF) and exact.
     let tmp = ix.wrapping_sub(OFF);
@@ -81,12 +81,12 @@ fn log_inline(ix: u64) -> (f64, f64) {
 
     // Note: 1/c is j/N or j/N/2 where j is an integer in [N,2N) and |z/c - 1| < 1/N, so r = z/c - 1 is
     // exactly representible.
-    let r = fma(z, invc, -1.0);
+    let r = F::fma(z, invc, -1.0);
 
     // k*Ln2 + log(c) + r.
-    let t1 = fma(kd, LN2HI, logc);
+    let t1 = F::fma(kd, LN2HI, logc);
     let t2 = t1 + r;
-    let lo1 = fma(kd, LN2LO, logctail);
+    let lo1 = F::fma(kd, LN2LO, logctail);
     let lo2 = (t1 - t2) + r;
 
     // Evaluation is optimized assuming superscalar pipelined execution.
@@ -95,14 +95,14 @@ fn log_inline(ix: u64) -> (f64, f64) {
     let ar3 = r * ar2;
     // k*Ln2 + log(c) + r + A[0]*r*r.
     let hi = t2 + ar2;
-    let lo3 = fma(ar, r, -ar2);
+    let lo3 = F::fma(ar, r, -ar2);
     let lo4 = (t2 - hi) + ar2;
     // p = log1p(r) - r - A[0]*r*r.
     // ar3 * (A[1] + r*A[2] + ar2*(A[3] + r*A[4] + ar2*(A[5] + r*A[6])))
-    let inner = fma(ar2, fma(r, a(6), a(5)), fma(r, a(4), a(3)));
-    let poly = fma(ar2, inner, fma(r, a(2), a(1)));
+    let inner = F::fma(ar2, F::fma(r, a(6), a(5)), F::fma(r, a(4), a(3)));
+    let poly = F::fma(ar2, inner, F::fma(r, a(2), a(1)));
     // lo = lo1 + lo2 + lo3 + lo4 + p
-    let lo = fma(ar3, poly, ((lo1 + lo2) + lo3) + lo4);
+    let lo = F::fma(ar3, poly, ((lo1 + lo2) + lo3) + lo4);
     let y = hi + lo;
     let tail = (hi - y) + lo;
     (y, tail)
@@ -111,13 +111,13 @@ fn log_inline(ix: u64) -> (f64, f64) {
 /// Handles cases that may overflow or underflow when computing the result that is `scale*(1+TMP)`
 /// without intermediate rounding.
 #[inline(always)]
-fn specialcase(tmp: f64, sbits: u64, ki: u64) -> f64 {
+fn specialcase<F: Fma>(tmp: f64, sbits: u64, ki: u64) -> f64 {
     if (ki & 0x8000_0000) == 0 {
         // k > 0, the exponent of scale might have overflowed by <= 460.
         let sbits = sbits.wrapping_sub(1009u64 << 52);
         let scale = f64::from_bits(sbits);
         // 0x1p1009 * (scale + scale * tmp)
-        return f64::from_bits((1023 + 1009) << 52) * fma(scale, tmp, scale);
+        return f64::from_bits((1023 + 1009) << 52) * F::fma(scale, tmp, scale);
     }
     // k < 0, need special care in the subnormal range.
     let sbits = sbits.wrapping_add(1022u64 << 52);
@@ -144,7 +144,7 @@ fn specialcase(tmp: f64, sbits: u64, ki: u64) -> f64 {
 
 /// `sign*exp(x+xtail)` where `|xtail| < 2^-8/N` and `|xtail| <= |x|`. `sign_bias` is `SIGN_BIAS` or 0.
 #[inline(always)]
-fn exp_inline(x: f64, xtail: f64, sign_bias: u32) -> f64 {
+fn exp_inline<F: Fma>(x: f64, xtail: f64, sign_bias: u32) -> f64 {
     let c = |i: usize| f64::from_bits(EXP_POLY[i]);
     let shift = f64::from_bits(EXP_SHIFT);
     let mut abstop = top12(x) & 0x7ff;
@@ -171,14 +171,14 @@ fn exp_inline(x: f64, xtail: f64, sign_bias: u32) -> f64 {
     // exp(x) = 2^(k/N) * exp(r), with exp(r) in [2^(-1/2N),2^(1/2N)].
     // x = ln2/N*k + r, with int k and r in [-ln2/2N, ln2/2N].
     // z = InvLn2N * x; kd = z + Shift (fused)
-    let kd = fma(f64::from_bits(EXP_INVLN2N), x, shift);
+    let kd = F::fma(f64::from_bits(EXP_INVLN2N), x, shift);
     let ki = kd.to_bits();
     let kd = kd - shift;
     // r = x + kd*NegLn2hiN + kd*NegLn2loN
-    let r = fma(
+    let r = F::fma(
         kd,
         f64::from_bits(EXP_NEGLN2LON),
-        fma(kd, f64::from_bits(EXP_NEGLN2HIN), x),
+        F::fma(kd, f64::from_bits(EXP_NEGLN2HIN), x),
     );
     // The code assumes 2^-200 < |xtail| < 2^-8/N.
     let r = r + xtail;
@@ -191,14 +191,18 @@ fn exp_inline(x: f64, xtail: f64, sign_bias: u32) -> f64 {
     // exp(x) = 2^(k/N) * exp(r) ~= scale + scale * (tail + exp(r) - 1).
     let r2 = r * r;
     // tail + r + r2 * (C2 + r * C3) + r2 * r2 * (C4 + r * C5)
-    let tmp = fma(r2 * r2, fma(r, c(3), c(2)), fma(r2, fma(r, c(1), c(0)), tail + r));
+    let tmp = F::fma(
+        r2 * r2,
+        F::fma(r, c(3), c(2)),
+        F::fma(r2, F::fma(r, c(1), c(0)), tail + r),
+    );
     if abstop == 0 {
-        return specialcase(tmp, sbits, ki);
+        return specialcase::<F>(tmp, sbits, ki);
     }
     let scale = f64::from_bits(sbits);
     // Note: tmp == 0 or |tmp| > 2^-200 and scale > 2^-739, so there is no spurious underflow here even
     // without fma.
-    fma(scale, tmp, scale)
+    F::fma(scale, tmp, scale)
 }
 
 /// Returns 0 if not int, 1 if odd int, 2 if even int. The argument is the bit representation of a
@@ -236,6 +240,10 @@ fn issignaling(x: f64) -> bool {
 /// `pow(x, y)`, bit-identical to glibc 2.39 (x86-64, FMA variant).
 #[must_use]
 pub fn pow(x: f64, y: f64) -> f64 {
+    dispatch!(pow_impl(x, y))
+}
+
+fn pow_impl<F: Fma>(x: f64, y: f64) -> f64 {
     let mut sign_bias = 0u32;
     let mut ix = x.to_bits();
     let iy = y.to_bits();
@@ -310,9 +318,9 @@ pub fn pow(x: f64, y: f64) -> f64 {
         }
     }
 
-    let (hi, lo) = log_inline(ix);
+    let (hi, lo) = log_inline::<F>(ix);
     let ehi = y * hi;
     // elo = y * lo + fma (y, hi, -ehi)
-    let elo = fma(y, lo, fma(y, hi, -ehi));
-    exp_inline(ehi, elo, sign_bias)
+    let elo = F::fma(y, lo, F::fma(y, hi, -ehi));
+    exp_inline::<F>(ehi, elo, sign_bias)
 }

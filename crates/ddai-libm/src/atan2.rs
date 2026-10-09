@@ -39,7 +39,7 @@ use crate::tables::{
     ATAN2_MHPI, ATAN2_MOPI, ATAN2_MQPI, ATAN2_MTQPI, ATAN2_OPI, ATAN2_OPI1, ATAN2_QPI, ATAN2_TQPI, ATAN2_TWO500,
     ATAN2_TWOM500,
 };
-use crate::util::{fma, nan_sum_f64};
+use crate::util::{Fma, dispatch, nan_sum_f64};
 
 const fn k(bits: u64) -> f64 {
     f64::from_bits(bits)
@@ -85,12 +85,12 @@ fn sign_arctan2(y: f64, z: f64) -> f64 {
 
 /// `d3 + v*(d5 + v*(d7 + v*(d9 + v*(d11 + v*d13))))`, every step fused.
 #[inline(always)]
-fn poly_d(v: f64) -> f64 {
-    let p = fma(v, D13, D11);
-    let p = fma(v, p, D9);
-    let p = fma(v, p, D7);
-    let p = fma(v, p, D5);
-    fma(v, p, D3)
+fn poly_d<F: Fma>(v: f64) -> f64 {
+    let p = F::fma(v, D13, D11);
+    let p = F::fma(v, p, D9);
+    let p = F::fma(v, p, D7);
+    let p = F::fma(v, p, D5);
+    F::fma(v, p, D3)
 }
 
 /// `EADD (x, y, z, zz)`: `z = x + y; zz = |x| > |y| ? ((x - z) + y) : ((y - z) + x)`.
@@ -119,6 +119,10 @@ fn table_index(u: f64) -> usize {
 /// `atan2(y, x)` for doubles, bit-identical to glibc 2.39 (x86-64, FMA variant).
 #[must_use]
 pub fn atan2(y: f64, x: f64) -> f64 {
+    dispatch!(atan2_impl(y, x))
+}
+
+fn atan2_impl<F: Fma>(y: f64, x: f64) -> f64 {
     let xb = x.to_bits();
     let ux = (xb >> 32) as u32;
     let dx = xb as u32;
@@ -218,12 +222,12 @@ pub fn atan2(y: f64, x: f64) -> f64 {
         let u = ay / ax;
         // EMULV (ax, u, v, vv)
         let v = ax * u;
-        let vv = fma(ax, u, -v);
+        let vv = F::fma(ax, u, -v);
         (u, ((ay - v) - vv) / ax)
     } else {
         let u = ax / ay;
         let v = ay * u;
-        let vv = fma(ay, u, -v);
+        let vv = F::fma(ay, u, -v);
         (u, ((ax - v) - vv) / ay)
     };
 
@@ -233,7 +237,7 @@ pub fn atan2(y: f64, x: f64) -> f64 {
             if u < INV16 {
                 let v = u * u;
                 // zz = du + u * v * (d3 + v * (d5 + ...))
-                let zz = fma(u * v, poly_d(v), du);
+                let zz = F::fma(u * v, poly_d::<F>(v), du);
                 let z = u + zz;
                 return sign_arctan2(y, z);
             }
@@ -245,10 +249,10 @@ pub fn atan2(y: f64, x: f64) -> f64 {
             let t1 = cij(i, 1);
             let t2 = cij(i, 2);
             // zz = v*t2 + (dv*t2 + v*v*(c3 + v*(c4 + v*(c5 + v*c6))))
-            let p = fma(v, cij(i, 6), cij(i, 5));
-            let p = fma(v, p, cij(i, 4));
-            let p = fma(v, p, cij(i, 3));
-            let zz = fma(v, t2, fma(dv, t2, (v * v) * p));
+            let p = F::fma(v, cij(i, 6), cij(i, 5));
+            let p = F::fma(v, p, cij(i, 4));
+            let p = F::fma(v, p, cij(i, 3));
+            let zz = F::fma(v, t2, F::fma(dv, t2, (v * v) * p));
             let z = t1 + zz;
             return sign_arctan2(y, z);
         }
@@ -259,7 +263,7 @@ pub fn atan2(y: f64, x: f64) -> f64 {
             // zz = u * v * (d3 + ...). Unlike in case (i) it is NOT fused with the addition that uses it:
             // that addition sits behind the branches of ESUB/EADD, in another basic block, where GCC's
             // multiply-add contraction does not reach.
-            let zz = (u * v) * poly_d(v);
+            let zz = (u * v) * poly_d::<F>(v);
             // ESUB (hpi, u, t2, cor)
             let (t2, cor) = esub(HPI, u);
             let t3 = ((HPI1 + cor) - du) - zz;
@@ -269,12 +273,12 @@ pub fn atan2(y: f64, x: f64) -> f64 {
 
         let i = table_index(u);
         let v = (u - cij(i, 0)) + du;
-        let p = fma(v, cij(i, 6), cij(i, 5));
-        let p = fma(v, p, cij(i, 4));
-        let p = fma(v, p, cij(i, 3));
-        let p = fma(v, p, cij(i, 2));
+        let p = F::fma(v, cij(i, 6), cij(i, 5));
+        let p = F::fma(v, p, cij(i, 4));
+        let p = F::fma(v, p, cij(i, 3));
+        let p = F::fma(v, p, cij(i, 2));
         // zz = hpi1 - v * p
-        let zz = fma(-v, p, HPI1);
+        let zz = F::fma(-v, p, HPI1);
         let t1 = HPI - cij(i, 1);
         let z = t1 + zz;
         return sign_arctan2(y, z);
@@ -284,7 +288,7 @@ pub fn atan2(y: f64, x: f64) -> f64 {
     if ax < ay {
         if u < INV16 {
             let v = u * u;
-            let zz = (u * v) * poly_d(v); // not fused, see case (ii)
+            let zz = (u * v) * poly_d::<F>(v); // not fused, see case (ii)
             // EADD (hpi, u, t2, cor)
             let (t2, cor) = eadd(HPI, u);
             let t3 = ((HPI1 + cor) + du) + zz;
@@ -294,12 +298,12 @@ pub fn atan2(y: f64, x: f64) -> f64 {
 
         let i = table_index(u);
         let v = (u - cij(i, 0)) + du;
-        let p = fma(v, cij(i, 6), cij(i, 5));
-        let p = fma(v, p, cij(i, 4));
-        let p = fma(v, p, cij(i, 3));
-        let p = fma(v, p, cij(i, 2));
+        let p = F::fma(v, cij(i, 6), cij(i, 5));
+        let p = F::fma(v, p, cij(i, 4));
+        let p = F::fma(v, p, cij(i, 3));
+        let p = F::fma(v, p, cij(i, 2));
         // zz = hpi1 + v * p
-        let zz = fma(v, p, HPI1);
+        let zz = F::fma(v, p, HPI1);
         let t1 = HPI + cij(i, 1);
         let z = t1 + zz;
         return sign_arctan2(y, z);
@@ -308,7 +312,7 @@ pub fn atan2(y: f64, x: f64) -> f64 {
     // (iv)  x<0, abs(y)<=abs(x):  pi-atan(ax/ay)
     if u < INV16 {
         let v = u * u;
-        let zz = (u * v) * poly_d(v); // not fused, see case (ii)
+        let zz = (u * v) * poly_d::<F>(v); // not fused, see case (ii)
         // ESUB (opi, u, t2, cor)
         let (t2, cor) = esub(OPI, u);
         let t3 = ((OPI1 + cor) - du) - zz;
@@ -318,12 +322,12 @@ pub fn atan2(y: f64, x: f64) -> f64 {
 
     let i = table_index(u);
     let v = (u - cij(i, 0)) + du;
-    let p = fma(v, cij(i, 6), cij(i, 5));
-    let p = fma(v, p, cij(i, 4));
-    let p = fma(v, p, cij(i, 3));
-    let p = fma(v, p, cij(i, 2));
+    let p = F::fma(v, cij(i, 6), cij(i, 5));
+    let p = F::fma(v, p, cij(i, 4));
+    let p = F::fma(v, p, cij(i, 3));
+    let p = F::fma(v, p, cij(i, 2));
     // zz = opi1 - v * p
-    let zz = fma(-v, p, OPI1);
+    let zz = F::fma(-v, p, OPI1);
     let t1 = OPI - cij(i, 1);
     let z = t1 + zz;
     sign_arctan2(y, z)

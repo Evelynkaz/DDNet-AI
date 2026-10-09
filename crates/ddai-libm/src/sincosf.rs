@@ -38,7 +38,7 @@
 //! `sinf` and `cosf`, bit-identical to glibc 2.39's `__sinf_fma` / `__cosf_fma`.
 
 use crate::tables::{INV_PIO4, SINCOSF_TABLE};
-use crate::util::{fma, invalid_f32};
+use crate::util::{Fma, dispatch, invalid_f32};
 
 /// One `sincos_t` entry of `__sincosf_table` (the sign array is the same in both entries).
 #[derive(Clone, Copy)]
@@ -98,12 +98,12 @@ const TOP_INF: u32 = 0x7f8;
 /// Fast range reduction using a single multiply-subtract: the modulo of `x` as a value between
 /// -PI/4 and PI/4 and the quadrant. Accurate for |x| <= 120.
 #[inline(always)]
-fn reduce_fast(x: f64, p: &Poly) -> (f64, i32) {
+fn reduce_fast<F: Fma>(x: f64, p: &Poly) -> (f64, i32) {
     // hpi_inv is prescaled by 2^24 so the quadrant ends up in bits 24..31.
     let r = x * p.hpi_inv;
     let n = ((r as i32) + 0x80_0000) >> 24;
     // `x - n * hpi`, fused.
-    (fma(-f64::from(n), p.hpi, x), n)
+    (F::fma(-f64::from(n), p.hpi, x), n)
 }
 
 /// Range reduction of `xi` (a reinterpreted float, >= 2.0f, sign ignored) to a multiple of PI/2 using a
@@ -128,33 +128,37 @@ fn reduce_large(xi: u32) -> (f64, i32) {
 
 /// Sine (`n` even) or cosine (`n` odd) polynomial of `x` and `x2 = x * x`.
 #[inline(always)]
-fn sinf_poly(x: f64, x2: f64, p: &Poly, n: i32) -> f32 {
+fn sinf_poly<F: Fma>(x: f64, x2: f64, p: &Poly, n: i32) -> f32 {
     if n & 1 == 0 {
         let x3 = x * x2;
         // `p->s2 + x2 * p->s3`
-        let s1 = fma(x2, p.s3, p.s2);
+        let s1 = F::fma(x2, p.s3, p.s2);
         let x7 = x3 * x2;
         // `x + x3 * p->s1`
-        let s = fma(x3, p.s1, x);
+        let s = F::fma(x3, p.s1, x);
         // `s + x7 * s1`
-        fma(x7, s1, s) as f32
+        F::fma(x7, s1, s) as f32
     } else {
         let x4 = x2 * x2;
         // `p->c3 + x2 * p->c4`
-        let c2 = fma(x2, p.c4, p.c3);
+        let c2 = F::fma(x2, p.c4, p.c3);
         // `p->c0 + x2 * p->c1`
-        let c1 = fma(x2, p.c1, p.c0);
+        let c1 = F::fma(x2, p.c1, p.c0);
         let x6 = x4 * x2;
         // `c1 + x4 * p->c2`
-        let c = fma(x4, p.c2, c1);
+        let c = F::fma(x4, p.c2, c1);
         // `c + x6 * c2`
-        fma(x6, c2, c) as f32
+        F::fma(x6, c2, c) as f32
     }
 }
 
 /// `sinf(y)`, bit-identical to glibc 2.39 (x86-64, FMA variant).
 #[must_use]
 pub fn sinf(y: f32) -> f32 {
+    dispatch!(sinf_impl(y))
+}
+
+fn sinf_impl<F: Fma>(y: f32) -> f32 {
     let top = abstop12(y);
     let x = f64::from(y);
     if top < TOP_PIO4 {
@@ -163,13 +167,13 @@ pub fn sinf(y: f32) -> f32 {
             // Tiny y (and +-0, subnormals): sin(y) == y (glibc also forces the underflow flag here).
             return y;
         }
-        sinf_poly(x, s, &TABLE[0], 0)
+        sinf_poly::<F>(x, s, &TABLE[0], 0)
     } else if top < TOP_120 {
-        let (x, n) = reduce_fast(x, &TABLE[0]);
+        let (x, n) = reduce_fast::<F>(x, &TABLE[0]);
         // Set up the signs for sin and cos.
         let s = SIGN[(n & 3) as usize];
         let p = if n & 2 != 0 { &TABLE[1] } else { &TABLE[0] };
-        sinf_poly(x * s, x * x, p, n)
+        sinf_poly::<F>(x * s, x * x, p, n)
     } else if top < TOP_INF {
         let xi = y.to_bits();
         let sign = (xi >> 31) as i32;
@@ -177,7 +181,7 @@ pub fn sinf(y: f32) -> f32 {
         // Set up signs for sin and cos - include the original sign.
         let s = SIGN[((n + sign) & 3) as usize];
         let p = if (n + sign) & 2 != 0 { &TABLE[1] } else { &TABLE[0] };
-        sinf_poly(x * s, x * x, p, n)
+        sinf_poly::<F>(x * s, x * x, p, n)
     } else {
         invalid_f32(y)
     }
@@ -186,6 +190,10 @@ pub fn sinf(y: f32) -> f32 {
 /// `cosf(y)`, bit-identical to glibc 2.39 (x86-64, FMA variant).
 #[must_use]
 pub fn cosf(y: f32) -> f32 {
+    dispatch!(cosf_impl(y))
+}
+
+fn cosf_impl<F: Fma>(y: f32) -> f32 {
     let top = abstop12(y);
     let x = f64::from(y);
     if top < TOP_PIO4 {
@@ -193,19 +201,19 @@ pub fn cosf(y: f32) -> f32 {
         if top < TOP_2M12 {
             return 1.0;
         }
-        sinf_poly(x, x2, &TABLE[0], 1)
+        sinf_poly::<F>(x, x2, &TABLE[0], 1)
     } else if top < TOP_120 {
-        let (x, n) = reduce_fast(x, &TABLE[0]);
+        let (x, n) = reduce_fast::<F>(x, &TABLE[0]);
         let s = SIGN[(n & 3) as usize];
         let p = if n & 2 != 0 { &TABLE[1] } else { &TABLE[0] };
-        sinf_poly(x * s, x * x, p, n ^ 1)
+        sinf_poly::<F>(x * s, x * x, p, n ^ 1)
     } else if top < TOP_INF {
         let xi = y.to_bits();
         let sign = (xi >> 31) as i32;
         let (x, n) = reduce_large(xi);
         let s = SIGN[((n + sign) & 3) as usize];
         let p = if (n + sign) & 2 != 0 { &TABLE[1] } else { &TABLE[0] };
-        sinf_poly(x * s, x * x, p, n ^ 1)
+        sinf_poly::<F>(x * s, x * x, p, n ^ 1)
     } else {
         invalid_f32(y)
     }

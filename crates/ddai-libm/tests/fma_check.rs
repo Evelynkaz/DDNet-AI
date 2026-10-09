@@ -1,8 +1,11 @@
-//! The crate rests on `f64::mul_add` being correctly rounded on every platform (D-127): on a target without the `fma` feature it is a call
-//! to the C library's `fma`, and the C library of a platform (UCRT, mingw's msvcrt, ...) could in principle emulate it with a plain
-//! multiply and add. This test checks the platform's `mul_add` against an exact reference that needs no fused operation: the rounding
-//! error of a product, computed with Veltkamp's splitting. If a platform fails this, every other number of `ddai-libm` is suspect, and the
-//! failure message says so.
+//! The fused multiply-add the ports use is correctly rounded on this platform (D-127, review F2).
+//!
+//! `ddai_libm::fma` is the instruction, the C library's `fma` (only after it agreed with the crate's own integer
+//! `fma` on a corner-case self-check) or the integer `fma` itself, depending on the target and the CPU; this test
+//! checks whichever it is against an exact reference that needs no fused operation (the rounding error of a
+//! product, computed with Veltkamp/Dekker splitting), and reports what the platform's own `f64::mul_add` does.
+//! A platform whose `mul_add` fails this still gets the right bits from the ports, because the self-check
+//! rejects that `fma`; the report line says so.
 
 fn rng(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -28,8 +31,40 @@ fn two_product(a: f64, b: f64) -> (f64, f64) {
     (p, e)
 }
 
+/// Cases that separate a fused operation from `a * b + c`, and the IEEE special values.
+fn corner_cases(fma: impl Fn(f64, f64, f64) -> f64) {
+    let eps = f64::EPSILON; // 2^-52
+    let a = 1.0 + eps;
+    let b = 1.0 - eps / 2.0;
+    // a * b = 1 + eps/2 - eps^2/2 rounds to 1.0; the fused result keeps what the plain one loses.
+    assert_eq!(a * b - 1.0, 0.0);
+    assert_ne!(fma(a, b, -1.0), 0.0, "not fused");
+    assert!(fma(0.0, f64::INFINITY, 1.0).is_nan());
+    assert_eq!(
+        fma(1.0, 0.0, -0.0).to_bits(),
+        0.0f64.to_bits(),
+        "(+0) + (-0) is +0 in round-to-nearest"
+    );
+    assert_eq!(fma(-1.0, 0.0, -0.0).to_bits(), (-0.0f64).to_bits(), "(-0) + (-0) is -0");
+    assert_eq!(fma(2.0, 3.0, 4.0), 10.0);
+    assert!(fma(f64::NAN, 1.0, 1.0).is_nan());
+    assert_eq!(
+        fma(f64::MAX, 2.0, -f64::MAX),
+        f64::MAX,
+        "the intermediate product does not overflow"
+    );
+    assert_eq!(fma(f64::MAX, 2.0, 0.0), f64::INFINITY);
+    assert_eq!(
+        fma(f64::from_bits(1), 0.5, 0.0).to_bits(),
+        0,
+        "half the smallest subnormal rounds to even"
+    );
+    assert_eq!(fma(f64::from_bits(1), 0.75, 0.0).to_bits(), 1);
+}
+
 #[test]
-fn mul_add_is_a_single_rounding_on_this_platform() {
+fn the_fma_the_ports_use_is_a_single_rounding_on_this_platform() {
+    println!("ddai-libm fma: {}", ddai_libm::fma_mode_description());
     let mut s = 0x00f4_a5c4_d4e5_f001u64;
     for i in 0..2_000_000u64 {
         // Operands of moderate magnitude, so that neither the product nor its error leaves the normal range.
@@ -39,46 +74,43 @@ fn mul_add_is_a_single_rounding_on_this_platform() {
             * if rng(&mut s) & 1 == 0 { 1.0 } else { -1.0 };
         let (p, e) = two_product(a, b);
         // fma(a, b, -p) is exactly the rounding error of the product.
-        let got = a.mul_add(b, -p);
+        let got = ddai_libm::fma(a, b, -p);
         assert_eq!(
             got.to_bits(),
             e.to_bits(),
-            "probe {i}: mul_add({a:e}, {b:e}, {:e}) = {got:e}, exact {e:e}: this platform's fma is not fused, so ddai-libm cannot give glibc's bits here",
+            "probe {i}: fma({a:e}, {b:e}, {:e}) = {got:e}, exact {e:e}: the fma of ddai-libm is not fused",
             -p
         );
     }
 }
 
 #[test]
-fn mul_add_cancellation_cases() {
-    let eps = f64::EPSILON; // 2^-52
-    let a = 1.0 + eps;
-    let b = 1.0 - eps / 2.0;
-    // a * b = 1 - 2^-105 + ... rounds to 1.0; the fused result keeps what the plain one loses.
-    let fused = a.mul_add(b, -1.0);
-    let plain = a * b - 1.0;
-    assert_eq!(plain, 0.0);
-    assert_ne!(
-        fused, 0.0,
-        "not fused: ddai-libm cannot give glibc's bits on this platform"
-    );
-    // Signs of zero and the special values keep IEEE semantics.
-    assert!(0.0f64.mul_add(f64::INFINITY, 1.0).is_nan());
-    assert_eq!(
-        1.0f64.mul_add(0.0, -0.0).to_bits(),
-        0.0f64.to_bits(),
-        "(+0) + (-0) is +0 in round-to-nearest"
-    );
-    assert_eq!(
-        (-1.0f64).mul_add(0.0, -0.0).to_bits(),
-        (-0.0f64).to_bits(),
-        "(-0) + (-0) is -0"
-    );
-    assert_eq!(2.0f64.mul_add(3.0, 4.0), 10.0);
-    assert!(f64::NAN.mul_add(1.0, 1.0).is_nan());
-    assert_eq!(
-        f64::MAX.mul_add(2.0, -f64::MAX),
-        f64::MAX,
-        "the intermediate product does not overflow"
+fn the_fma_the_ports_use_passes_the_corner_cases() {
+    corner_cases(ddai_libm::fma);
+}
+
+#[test]
+fn the_software_fma_passes_the_corner_cases_on_every_platform() {
+    corner_cases(ddai_libm::soft_fma);
+}
+
+/// Not a pass/fail test of the ports: tells, in the test log, whether this platform's own `mul_add` is correct. On
+/// a platform where it is not (mingw's `fma` is known to be wrong in corner cases), `ddai-libm` falls back to its
+/// own `fma` by itself, which the tests above prove; this line is for the people who read the log.
+#[test]
+fn report_the_platform_mul_add() {
+    let agrees = (0..200_000u64).all(|i| {
+        let mut s = i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let (a, b, c) = (
+            f64::from_bits(rng(&mut s)),
+            f64::from_bits(rng(&mut s)),
+            f64::from_bits(rng(&mut s)),
+        );
+        let (x, y) = (a.mul_add(b, c), ddai_libm::soft_fma(a, b, c));
+        x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
+    });
+    println!(
+        "platform f64::mul_add agrees with the software fma on 200000 random-bit triples: {agrees}; ddai-libm uses: {}",
+        ddai_libm::fma_mode_description()
     );
 }

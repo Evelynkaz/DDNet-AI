@@ -156,8 +156,36 @@ fn binary_f64(name: &str, xs: &[(f64, f64)], ours: fn(f64, f64) -> f64, std_: fn
     row(name, tp(ours), tp(std_), lat(ours), lat(std_));
 }
 
+/// ns per call of the three `fma`s: the one the ports use, the C library's, and the crate's integer one.
+fn fma_rows(rng: &mut Rng) {
+    let ops: Vec<(f64, f64, f64)> = (0..N)
+        .map(|_| (rng.unit() * 8.0 - 4.0, rng.unit() * 8.0 - 4.0, rng.unit() * 8.0 - 4.0))
+        .collect();
+    let calls = (N * REPS) as f64;
+    let tp = |f: fn(f64, f64, f64) -> f64| {
+        time(|| {
+            let mut acc = 0f64;
+            for _ in 0..REPS {
+                for &(a, b, c) in &ops {
+                    acc += f(black_box(a), black_box(b), black_box(c));
+                }
+            }
+            acc
+        }) / calls
+            * 1e9
+    };
+    println!(
+        "fma ({}): {:.2} ns/call",
+        ddai_libm::fma_mode_description(),
+        tp(ddai_libm::fma)
+    );
+    println!("fma, C library f64::mul_add: {:.2} ns/call", tp(f64::mul_add));
+    println!("fma, ddai_libm::soft_fma: {:.2} ns/call", tp(ddai_libm::soft_fma));
+}
+
 fn main() {
     let mut rng = Rng(7);
+    fma_rows(&mut rng);
     // sin/cos/atan: angles and tangent-like values in the range the physics and the brain use.
     let angles: Vec<f32> = (0..N).map(|_| ((rng.unit() - 0.5) * 12.0) as f32).collect();
     let ratios: Vec<f32> = (0..N).map(|_| ((rng.unit() - 0.5) * 8.0) as f32).collect();

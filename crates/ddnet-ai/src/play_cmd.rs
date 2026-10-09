@@ -359,6 +359,19 @@ pub fn run(args: PlayArgs) -> ExitCode {
     let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
     let _tracing_guard = init_tracing(&data_dir);
 
+    // The bot's physics, search and prediction rest on `ddai-libm` giving glibc's bits (D-127): check it on this machine
+    // (the `fma` of the platform, then a few thousand probes per function against hashes recorded from glibc) and
+    // refuse to play if it does not. A few milliseconds.
+    match ddai_libm::self_test() {
+        Ok(fma) => tracing::info!("ddai-libm self-test passed; fma: {fma}"),
+        Err(e) => {
+            eprintln!(
+                "{e}\nrefusing to play: the math of this machine does not give the bits the physics needs (D-127)"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+
     // Review round 1, finding F8: refuse a second instance under the same identity against the
     // same server — shared with `ddnet-ai record` (same lock scheme, keyed on (address, name) —
     // see `single_instance`'s own doc comment for why: an address-only lock broke this project's

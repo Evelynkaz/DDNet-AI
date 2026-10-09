@@ -95,6 +95,15 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      # ddai-libm picks its fused multiply-add at run time (the instruction, the C library's fma after a self-check, or its own integer
+      # one: crates/ddai-libm/src/softfma.rs). The runner has FMA hardware, so the integer one would never run here by itself: force it,
+      # and run the golden hashes recorded from glibc, the fma tests and the self-test through it. The second step prints which fma the
+      # normal build chose on this runner.
+      - name: ddai-libm with the software fma forced
+        run: cargo test --locked -p ddai-libm --features force-soft-fma --release
+      - name: ddai-libm, which fma this runner uses
+        run: cargo test --locked -p ddai-libm --test fma_check -- --nocapture
+
   # Second layer behind .gitignore: no trained weights, demos, maps or files over 2 MB in git (tools/ci/no-weights.sh).
   no-weights:
     name: no weights / big files in git

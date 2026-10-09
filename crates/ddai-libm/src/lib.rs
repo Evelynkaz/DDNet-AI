@@ -10,19 +10,21 @@
 //! way out: its `powf` differs from glibc's in 9.7% of probes (D-004). So this crate re-implements the
 //! glibc algorithms in plain Rust and every platform uses it.
 //!
-//! | function | glibc symbol | algorithm | licence of the source |
+//! | function | glibc symbol | algorithm | licence of the source file |
 //! |---|---|---|---|
-//! | [`sinf`], [`cosf`] | `sinf`, `cosf` | ARM optimized-routines `sincosf` (polynomial in double, 2-step reduction) | MIT |
-//! | [`powf`] | `powf` | ARM optimized-routines `powf` (`log2` table + `exp2` table, in double) | MIT |
-//! | [`log`] | `log` | ARM optimized-routines `log` (table, 128 intervals) | MIT |
-//! | [`pow`] | `pow` | ARM optimized-routines `pow` (extended-precision log + exp tables) | MIT |
+//! | [`sinf`], [`cosf`] | `sinf`, `cosf` | ARM optimized-routines `sincosf` as imported by glibc (polynomial in double, 2-step reduction) | FSF copyright, LGPL-2.1+, used under GPL-3 |
+//! | [`powf`] | `powf` | ARM optimized-routines `powf` as imported by glibc (`log2` table + `exp2` table, in double) | same |
+//! | [`log`] | `log` | ARM optimized-routines `log` as imported by glibc (table, 128 intervals) | same |
+//! | [`pow`] | `pow` | ARM optimized-routines `pow` as imported by glibc (extended-precision log + exp tables) | same |
 //! | [`atanf`], [`atan2f`] | `atanf`, `atan2f` | Sun fdlibm | Sun permissive notice |
-//! | [`atan2`] | `atan2` | IBM Accurate Mathematical Library | LGPL-2.1+, used under GPL-3 (see below) |
-//! | [`hypotf`], [`hypot`] | `hypotf`, `hypot` | glibc (Borges' correction for `hypot`) | LGPL-2.1+, used under GPL-3 |
+//! | [`atan2`] | `atan2` | IBM Accurate Mathematical Library | FSF/IBM copyright, LGPL-2.1+, used under GPL-3 |
+//! | [`hypotf`], [`hypot`] | `hypotf`, `hypot` | glibc (Borges' correction for `hypot`) | FSF copyright, LGPL-2.1+, used under GPL-3 |
 //!
 //! Every file carries the notice of its source; the repository `NOTICE` lists them all and gives the
 //! reasoning for the LGPL parts: section 3 of the GNU LGPL 2.1 lets a licensee apply the ordinary GNU GPL
-//! (here: version 3) instead, and DDNet-AI is GPL-3.0-only.
+//! (here: version 3) instead, which the headers of those files do (the permission paragraphs are the GPL's,
+//! the FSF/IBM copyright lines are kept, the changes are dated), and DDNet-AI is GPL-3.0. The ports were made
+//! from glibc's copies of the ARM code, so that is the licence they follow; the Arm origin is in the headers.
 //!
 //! # Which glibc, and why there are `fma` calls
 //!
@@ -32,17 +34,26 @@
 //! `__ieee754_atan2_fma`, `__pow_fma`) GCC contracted `a + b * c` into fused multiply-adds, and the
 //! ARM-derived `log`/`pow` code takes its `__FP_FAST_FMA` paths. Results differ from the plain-SSE2
 //! variant in the last bit for a small fraction of inputs (549 of 10^7 random probes for `log`), so the
-//! ports reproduce the **fused** operations, written as explicit `f64::mul_add` calls at exactly the places
+//! ports reproduce the **fused** operations, written as explicit calls of a correctly rounded `fma` at exactly the places
 //! the machine code of the shipped `libm.so.6` has them (found by reading its disassembly and confirmed by
-//! probing). `f64::mul_add` is correctly rounded on every platform, so Windows gets the same bits.
+//! probing). The `fma` is correctly rounded on every platform (see below), so Windows gets the same bits.
 //!
 //! Consequences:
 //!
 //! * No `unsafe`, no `target_feature` tricks, no dependency (not even `libm`).
-//! * Without the `fma` target feature (the default build, see D-001: no `target-cpu` in committed
-//!   configuration) every `mul_add` is a call to the C library's `fma`, so these functions are slower than
-//!   glibc's own on a baseline x86-64 build (measured in the task report); building with
-//!   `-C target-feature=+fma` makes them as fast as glibc's. The results never depend on it.
+//! * Which `fma` runs is decided once per process by [`fma_mode`]: the instruction when the build has the
+//!   `fma` target feature (`-C target-feature=+fma`; then the functions are as fast as glibc's); else, on a
+//!   CPU without FMA, the crate's own integer [`soft_fma`] (a correctly rounded fused multiply-add in safe
+//!   Rust, written for this crate); else the C library's `fma` after it has agreed with [`soft_fma`] on a
+//!   self-check of a few tens of thousands of corner-case operands (overflow, underflow, subnormals,
+//!   cancellation, ties, signed zeros), falling back to [`soft_fma`] if it does not. The reason: the C
+//!   library's `fma` is glibc's on Linux (correct), but mingw-w64's is known to be wrong in corner cases and
+//!   nobody has checked the UCRT's software path on CPUs without FMA3. The results never depend on which of
+//!   the three runs; [`self_test`] checks that, and the bot refuses to play if it fails.
+//!   Without `+fma` each fused operation is a library call, so the functions are 2 to 5 times slower than glibc's
+//!   on the `fma`-heavy ones (no measurable effect on `World::step`), and on a CPU without FMA, where [`soft_fma`] runs
+//!   (about 54 ns per fused operation), 14 to 39 times slower (0.2 to 1 microsecond per call; measured in D-127).
+//!   The choice is made once per call of `sinf`, `powf`, ... (a generic parameter, not a branch per fused operation).
 //! * [`f32::mul_add`]-style fusion is *not* applied anywhere else in the repository; the physics
 //!   arithmetic stays un-fused exactly like DDNet's C++ (see `ddai-physics`'s `real.rs`).
 //!
@@ -65,7 +76,9 @@ mod hypot;
 mod log;
 mod pow;
 mod powf;
+mod selftest;
 mod sincosf;
+mod softfma;
 mod tables;
 mod util;
 
@@ -76,4 +89,6 @@ pub use hypot::{hypot, hypotf};
 pub use log::log;
 pub use pow::pow;
 pub use powf::powf;
+pub use selftest::self_test;
 pub use sincosf::{cosf, sinf};
+pub use softfma::{FmaMode, fma, mode as fma_mode, mode_description as fma_mode_description, soft_fma};

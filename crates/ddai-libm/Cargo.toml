@@ -15,6 +15,10 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+# Always use the crate's own integer `fma` (tests and probes of the software path on a machine that has the instruction).
+force-soft-fma = []
+
 [dependencies]
 # Intentionally empty: no runtime dependencies (not even `libm`, whose results differ from glibc, D-004).
 

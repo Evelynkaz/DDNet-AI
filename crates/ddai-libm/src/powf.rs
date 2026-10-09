@@ -38,7 +38,7 @@
 //! `powf`, bit-identical to glibc 2.39's `__powf_fma`.
 
 use crate::tables::{EXP2F_POLY, EXP2F_SHIFT_SCALED, EXP2F_TAB, POWF_LOG2_POLY, POWF_LOG2_TAB};
-use crate::util::{divzero_f32, fma, invalid_f32, may_uflow_f32, nan_sum_f32, oflow_f32, uflow_f32};
+use crate::util::{Fma, dispatch, divzero_f32, invalid_f32, may_uflow_f32, nan_sum_f32, oflow_f32, uflow_f32};
 
 const POWF_LOG2_TABLE_BITS: u32 = 4;
 const EXP2F_TABLE_BITS: u32 = 5;
@@ -64,7 +64,7 @@ fn tab(i: usize) -> (f64, f64) {
 
 /// `log2(x)` for the (normalised) bit pattern `ix`, as a double.
 #[inline(always)]
-fn log2_inline(ix: u32) -> f64 {
+fn log2_inline<F: Fma>(ix: u32) -> f64 {
     // x = 2^k z; where z is in range [OFF,2*OFF] and exact.
     let tmp = ix.wrapping_sub(OFF);
     let i = ((tmp >> (23 - POWF_LOG2_TABLE_BITS)) % (1 << POWF_LOG2_TABLE_BITS)) as usize;
@@ -76,22 +76,22 @@ fn log2_inline(ix: u32) -> f64 {
     let a = |j: usize| f64::from_bits(POWF_LOG2_POLY[j]);
 
     // log2(x) = log1p(z/c-1)/ln2 + log2(c) + k
-    let r = fma(z, invc, -1.0);
+    let r = F::fma(z, invc, -1.0);
     let y0 = logc + f64::from(k);
 
     // Pipelined polynomial evaluation to approximate log1p(r)/ln2.
     let r2 = r * r;
-    let y = fma(a(0), r, a(1));
-    let p = fma(a(2), r, a(3));
+    let y = F::fma(a(0), r, a(1));
+    let p = F::fma(a(2), r, a(3));
     let r4 = r2 * r2;
-    let q = fma(a(4), r, y0);
-    let q = fma(p, r2, q);
-    fma(y, r4, q)
+    let q = F::fma(a(4), r, y0);
+    let q = F::fma(p, r2, q);
+    F::fma(y, r4, q)
 }
 
 /// `2^xd` with the sign bit of the result set by `sign_bias`; `xd` must be in [-1021, 1023].
 #[inline(always)]
-fn exp2_inline(xd: f64, sign_bias: u32) -> f64 {
+fn exp2_inline<F: Fma>(xd: f64, sign_bias: u32) -> f64 {
     let shift = f64::from_bits(EXP2F_SHIFT_SCALED);
     let c = |j: usize| f64::from_bits(EXP2F_POLY[j]);
     // x = k/N + r with r in [-1/(2N), 1/(2N)]
@@ -105,10 +105,10 @@ fn exp2_inline(xd: f64, sign_bias: u32) -> f64 {
     let ski = ki.wrapping_add(u64::from(sign_bias));
     t = t.wrapping_add(ski << (52 - EXP2F_TABLE_BITS));
     let s = f64::from_bits(t);
-    let z = fma(c(0), r, c(1));
+    let z = F::fma(c(0), r, c(1));
     let r2 = r * r;
-    let y = fma(c(2), r, 1.0);
-    let y = fma(z, r2, y);
+    let y = F::fma(c(2), r, 1.0);
+    let y = F::fma(z, r2, y);
     y * s
 }
 
@@ -147,6 +147,10 @@ fn issignaling(x: f32) -> bool {
 /// `powf(x, y)`, bit-identical to glibc 2.39 (x86-64, FMA variant).
 #[must_use]
 pub fn powf(x: f32, y: f32) -> f32 {
+    dispatch!(powf_impl(x, y))
+}
+
+fn powf_impl<F: Fma>(x: f32, y: f32) -> f32 {
     let mut sign_bias = 0u32;
     let mut ix = x.to_bits();
     let iy = y.to_bits();
@@ -200,7 +204,7 @@ pub fn powf(x: f32, y: f32) -> f32 {
             ix = ix.wrapping_sub(23 << 23);
         }
     }
-    let logx = log2_inline(ix);
+    let logx = log2_inline::<F>(ix);
     let ylogx = f64::from(y) * logx; // Note: cannot overflow, y is single prec.
     if ((ylogx.to_bits() >> 47) & 0xffff) >= LIM_126_TOP {
         // |y*log(x)| >= 126.
@@ -218,5 +222,5 @@ pub fn powf(x: f32, y: f32) -> f32 {
             return may_uflow_f32(sign_bias != 0);
         }
     }
-    exp2_inline(ylogx, sign_bias) as f32
+    exp2_inline::<F>(ylogx, sign_bias) as f32
 }

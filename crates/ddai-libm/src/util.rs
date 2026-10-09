@@ -2,19 +2,50 @@
 //! glibc's `math_err.c` / `math_errf.c` (errno and the floating-point exception flags are not
 //! reproduced; only the returned values are).
 
-/// `a * b + c` with a single rounding (C `fma`, `__builtin_fma`, and what GCC emits when it
-/// contracts `a * b + c` while compiling for `-mfma`).
-///
-/// This is the one place the glibc **FMA variants** (`__sinf_fma`, `__powf_fma`, `__log_fma`, ...) are
-/// reproduced: on every x86-64 CPU with FMA3 glibc's `ifunc` picks these variants, whose polynomial
-/// evaluations GCC compiled to fused operations, and the results differ from the plain-SSE2 variants
-/// in the last bit for a few inputs. `f64::mul_add` is correctly rounded on every platform (a hardware
-/// instruction where the target has it, the C library's `fma` elsewhere), so the ports give the same
-/// bits everywhere. See the crate docs.
-#[inline(always)]
-pub(crate) fn fma(a: f64, b: f64, c: f64) -> f64 {
-    a.mul_add(b, c)
+/// The fused multiply-add a port runs with, chosen once per public call (see [`dispatch`]) so that the choice is a branch per
+/// call of `sinf`, `powf`, ... and not one per fused operation.
+pub(crate) trait Fma {
+    /// `a * b + c` with a single, correct rounding (C `fma`, `__builtin_fma`, and what GCC emits when it contracts `a * b + c`
+    /// while compiling for `-mfma`).
+    ///
+    /// This is the one place the glibc **FMA variants** (`__sinf_fma`, `__powf_fma`, `__log_fma`, ...) are reproduced: on every
+    /// x86-64 CPU with FMA3 glibc's `ifunc` picks these variants, whose polynomial evaluations GCC compiled to fused operations,
+    /// and the results differ from the plain-SSE2 variants in the last bit for a few inputs. All implementations give the same
+    /// bits; which one runs is decided in [`crate::softfma`]. See the crate docs.
+    fn fma(a: f64, b: f64, c: f64) -> f64;
 }
+
+/// The instruction, or the C library's `fma` after it passed the self-check of [`crate::softfma`].
+pub(crate) struct Fused;
+
+/// The crate's own integer `fma` ([`crate::softfma::soft_fma`]).
+pub(crate) struct Soft;
+
+impl Fma for Fused {
+    #[inline(always)]
+    fn fma(a: f64, b: f64, c: f64) -> f64 {
+        a.mul_add(b, c)
+    }
+}
+
+impl Fma for Soft {
+    #[inline(always)]
+    fn fma(a: f64, b: f64, c: f64) -> f64 {
+        crate::softfma::soft_fma(a, b, c)
+    }
+}
+
+/// `dispatch!(name_impl(args))`: calls `name_impl::<Soft>` or `name_impl::<Fused>` as [`crate::softfma::use_soft`] says.
+macro_rules! dispatch {
+    ($f:ident($($arg:expr),* $(,)?)) => {
+        if $crate::softfma::use_soft() {
+            $f::<$crate::util::Soft>($($arg),*)
+        } else {
+            $f::<$crate::util::Fused>($($arg),*)
+        }
+    };
+}
+pub(crate) use dispatch;
 
 /// `x + y` where at least one operand is a NaN: the result is the first NaN operand, quieted (the x86 SSE
 /// rule for `addss xmm_x, xmm_y`, which is how GCC compiled glibc's `x + y`). Written out so the payload of
