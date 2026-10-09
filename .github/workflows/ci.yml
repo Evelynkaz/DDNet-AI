@@ -96,8 +96,9 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked --no-fail-fast
 
-      # ddai-libm picks its fused multiply-add once per process (crates/ddai-libm/src/softfma.rs). The MSVC runtime's fma gave other bits
-      # than glibc on this runner, so on Windows the crate uses its own integer fma; the debug test run above covers that. This step
+      # ddai-libm picks its fused multiply-add once per process (crates/ddai-libm/src/softfma.rs). The MSVC runtime's fma is not trusted (its
+      # software path for CPUs without FMA3 is unchecked, and this runner cannot show it), so on Windows the crate uses its own integer
+      # fma by choice; the debug test run above covers that. This step
       # repeats the golden hashes, the fma tests and the self-test with the integer fma forced, in a release build. The second step
       # prints which fma the normal build chose on this runner.
       - name: ddai-libm with the software fma forced

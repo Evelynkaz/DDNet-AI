@@ -46,9 +46,9 @@
 //!   `linux-gnu` with an FMA CPU, glibc's own `fma` after it has agreed with [`soft_fma`] on a self-check of a few
 //!   tens of thousands of corner-case operands; else (Windows, musl, macOS, a CPU without FMA) the crate's own
 //!   integer [`soft_fma`], a correctly rounded fused multiply-add in safe Rust written for this crate. The reason:
-//!   glibc's `fma` is the reference, but mingw-w64's is known to be wrong in corner cases and the MSVC UCRT's
-//!   gave other bits than glibc on `windows-latest` (the first Windows CI run), so no other C library's `fma` is
-//!   trusted. The results never depend on which of the three runs; [`self_test`] checks that, and the bot
+//!   glibc's `fma` is the reference, mingw-w64's is known to be wrong in corner cases, and the MSVC UCRT's software
+//!   path (CPUs without FMA3) is unchecked and cannot be checked on CI (its `fma` has not been shown to be wrong),
+//!   so no other C library's `fma` is trusted: a deliberate safety margin, not a measured need. The results never depend on which of the three runs; [`self_test`] checks that, and the bot
 //!   refuses to play if it fails.
 //!   Without `+fma` on `linux-gnu` each fused operation is a library call, so the functions are 2 to 5 times slower
 //!   than glibc's on the `fma`-heavy ones (no measurable effect on `World::step`); with [`soft_fma`] (about 54 ns per

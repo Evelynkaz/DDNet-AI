@@ -5,12 +5,14 @@
 //! a single, correct rounding. `f64::mul_add` is that on a target that has the instruction; on a target
 //! without it (the default x86-64 builds, see D-001) it is a call to the C library's `fma`, and C libraries
 //! differ: glibc's is correct (and is what the reference results come from); mingw-w64's is known to be wrong
-//! in corner cases (Rust issue 140515, mingw-w64 bug 848); the MSVC UCRT's was found wrong on ordinary inputs
-//! by the first Windows CI run of this crate (`log` gave other bits than glibc on `windows-latest`, which has
-//! FMA hardware: the UCRT's `fma` is not reliable even there). A wrong `fma` changes the last bit of
-//! `sinf`/`powf`/`log`/`atan2`/`pow` for a few inputs and the physics silently drifts from the server. So
-//! [`mode`] decides once per process which `fma` the ports use, and **the C library's is used only where it is
-//! known to be glibc's**:
+//! in corner cases (Rust issue 140515, mingw-w64 bug 848); the MSVC UCRT's software path (used on CPUs without
+//! FMA3) has not been checked by anyone, and the CI runner, which has FMA hardware, cannot show it. (The first
+//! Windows CI run looked as if the UCRT's `fma` were wrong; it was not: the self-test computed one of its own
+//! inputs with `exp2` of the platform's libm. The UCRT's `fma` has not been shown to be wrong.) A wrong `fma`
+//! changes the last bit of `sinf`/`powf`/`log`/`atan2`/`pow` for a few inputs and the physics silently drifts from
+//! the server. So [`mode`] decides once per process which `fma` the ports use, and **the C library's is used only
+//! where it is known to be glibc's**; everywhere else the software `fma` is a deliberate safety margin that costs
+//! about 7% on `World::step`:
 //!
 //! * the target has the `fma` feature at compile time (`-C target-feature=+fma`): the instruction, no check;
 //! * `linux-gnu` (glibc), on a CPU with FMA: glibc's `fma`, after it agreed with the software one on a fixed
