@@ -381,7 +381,7 @@ cargo build --release --locked -p ddnet-ai   # -> target\release\ddnet-ai.exe
 target\release\ddnet-ai.exe --help
 ```
 
-Готовый `.exe` в релизах и простой запуск — задача 5.5b (упаковка); пока `ddnet-ai.exe` собирается из исходников.
+Готовый `ddnet-ai.exe` (с v0.2.0) — на странице [релизов](https://github.com/Evelynkaz/DDNet-AI/releases): он собран задачей CI `windows` на `windows-latest` после всех тестов. Упаковка и простой запуск — задача 5.5b.
 
 **Где лежат данные.** Вместо `~/aiddnet/data` — `%USERPROFILE%\ddnet-ai\data` (карты, настройки, память о фризах, клипы, секреты сайта). Любая команда
 берёт другой каталог через `--data-dir`, а переменная окружения `DDNET_AI_DATA_DIR` меняет умолчание сразу для всех. Секреты (`secrets\`, файл

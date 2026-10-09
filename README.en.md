@@ -380,7 +380,7 @@ cargo build --release --locked -p ddnet-ai   # -> target\release\ddnet-ai.exe
 target\release\ddnet-ai.exe --help
 ```
 
-A ready-made `.exe` in the releases and an easy start are task 5.5b (packaging); for now `ddnet-ai.exe` is built from source.
+A ready-made `ddnet-ai.exe` (since v0.2.0) is on the [releases](https://github.com/Evelynkaz/DDNet-AI/releases) page: the CI job `windows` builds it on `windows-latest` after all tests pass. Packaging and an easy start are task 5.5b.
 
 **Where the data lives.** `%USERPROFILE%\ddnet-ai\data` instead of `~/aiddnet/data` (maps, settings, freeze memory, clips, the site's secrets). Every
 command takes another directory with `--data-dir`, and the environment variable `DDNET_AI_DATA_DIR` changes the default for all of them. Secrets
