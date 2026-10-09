@@ -59,7 +59,7 @@
 | 1 МиБ стека главного потока Windows | `ddnet-ai` | `build.rs` просит у линкера 8 МиБ (как Linux) |
 | `\r\n` при checkout на Windows | текстовые фикстуры, хэши | `.gitattributes`: `* text=auto eol=lf` |
 | UDP `ConnectionReset` на Windows (ICMP) | `ddai-client` `driver.rs` | уже терпится в цикле приёма (`ConnectionRefused \| ConnectionReset`) |
-| тесты: `symlink`, `PermissionsExt`, `python3`, `bash`, `sh`, `kill`, `chrt`, `mkfifo`, сокеты Unix | ≈35 файлов тестов | `cfg(unix)`/`cfg(target_os = "linux")` с причиной в файле; кроссплатформенные аналоги — в `ddai-os` (`icacls` на CI) |
+| тесты: `symlink`, `PermissionsExt`, `python3`, `bash`, `sh`, `kill`, `chrt`, `mkfifo`, сокеты Unix | ≈50 файлов (тесты, модули тестов, несколько команд) | `cfg(unix)`/`cfg(target_os = "linux")` с причиной в файле; кроссплатформенные аналоги — в `ddai-os` (`icacls` на CI) |
 
 ## 3. Как проверено без Windows
 
