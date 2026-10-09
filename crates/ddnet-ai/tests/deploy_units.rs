@@ -729,15 +729,20 @@ fn the_installer_skips_apt_on_a_redeploy_waits_for_the_apt_lock_and_keeps_the_ke
 
 /// Runs the apt section of `install.sh` (the functions it uses and the branch itself, cut out of the real file) against fake `sudo`,
 /// `apt-get`, `dpkg-query`, `gpg` and `caddy` in a temporary directory. Nothing real is touched. Returns (exit ok, stderr, apt-get calls).
+// The harness runs the real `install.sh` against fake `bash` scripts: a Linux deployment test (D-127: not built on Windows).
+#[cfg(unix)]
 struct Harness {
     dir: tempfile::TempDir,
 }
 
+#[cfg(unix)]
 const GOOD_KEY: &str =
     "pub:-:4096:1:155B6D79CA56EA34:1:::-:::scESC:::::::\nfpr:::::::::65760C51EDEA2017CEA2CA15155B6D79CA56EA34:\n";
+#[cfg(unix)]
 const BAD_KEY: &str =
     "pub:-:4096:1:AAAAAAAAAAAAAAAA:1:::-:::scESC:::::::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n";
 
+#[cfg(unix)]
 impl Harness {
     fn new() -> Self {
         use std::os::unix::fs::PermissionsExt;
@@ -841,8 +846,10 @@ impl Harness {
     }
 }
 
+#[cfg(unix)]
 const INSTALLED: &str = "install ok installed";
 
+#[cfg(unix)]
 #[test]
 fn the_installer_apt_section_behaves_on_a_redeploy_a_first_install_and_a_broken_repository() {
     // Redeploy of a working host: no apt at all, keyring still verified; a held package counts as installed.
