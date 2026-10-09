@@ -594,12 +594,11 @@ impl Drop for ControlServer {
     }
 }
 
+// The control channel is a Unix-domain socket (no Windows equivalent yet, `ddai_os::ipc`); the owner-chat census
+// (`tests/owner_chat_census.rs`) recognises test code by the `#[cfg(test)]` line, so that stays first and the platform gate follows it.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
-    // The control channel is a Unix-domain socket (no Windows equivalent yet, `ddai_os::ipc`); the owner-chat census
-    // (`tests/owner_chat_census.rs`) recognises test code by the exact `#[cfg(test)]` above, so the platform gate sits inside.
-    #![cfg(unix)]
-
     use super::*;
     use crate::command::{CommandBus, CommandInbox, CommandReply};
     use std::os::unix::fs::PermissionsExt;

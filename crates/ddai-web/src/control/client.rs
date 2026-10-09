@@ -103,11 +103,10 @@ impl ControlClient {
     }
 }
 
+// The tests serve a scripted bot on a real Unix-domain socket (none on Windows, `crate::local_socket`).
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
-    // The tests serve a scripted bot on a real Unix-domain socket (none on Windows, `crate::local_socket`).
-    #![cfg(unix)]
-
     use super::*;
     use ddai_botctl::proto::{ModeArg, ReplyCode};
     use tokio::net::UnixListener;

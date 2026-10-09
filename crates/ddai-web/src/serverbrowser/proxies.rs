@@ -329,11 +329,10 @@ impl ProxyStore {
     }
 }
 
+// POSIX permission bits and symlinks (the proxy profiles belong to the VPS launcher, D-099).
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
-    // POSIX permission bits and symlinks (the proxy profiles belong to the VPS launcher, D-099).
-    #![cfg(unix)]
-
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
