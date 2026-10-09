@@ -103,7 +103,7 @@ mod tests {
         assert!(store.load().unwrap().favourites.is_empty());
         store
             .change(|l| {
-                l.favourites.push(fav("45.141.57.35:8308"));
+                l.favourites.push(fav("93.184.216.35:8308"));
                 Ok(())
             })
             .unwrap();
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(err, StoreError::Refused(FavouriteError::BadAddress));
         let err = store
             .change(|l| {
-                l.favourites.push(fav("45.141.57.35:8308"));
+                l.favourites.push(fav("93.184.216.35:8308"));
                 Ok(())
             })
             .unwrap_err();

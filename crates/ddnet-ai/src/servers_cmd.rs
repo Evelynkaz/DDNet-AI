@@ -131,9 +131,9 @@ mod tests {
     fn the_listing_marks_what_the_bot_may_use_and_makes_no_connection() {
         let rows = server_list::parse_master(FIXTURE).unwrap();
         let list: LiveServers =
-            toml::from_str("[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\n").unwrap();
+            toml::from_str("[[server]]\naddress = \"93.184.216.35:8308\"\nnick = \"Muha\"\nready = true\n").unwrap();
         let text = render(&rows, &list, "Muha", true, 100);
-        let line = text.lines().find(|l| l.contains("45.141.57.35:8308")).unwrap();
+        let line = text.lines().find(|l| l.contains("93.184.216.35:8308")).unwrap();
         assert!(line.starts_with("READY"), "{line}");
         let other = text.lines().find(|l| l.contains("46.174.54.240:8302")).unwrap();
         assert!(other.starts_with("      "), "a public server is never marked: {other}");
@@ -141,11 +141,11 @@ mod tests {
         assert!(!text.contains("CTF server"), "--block hides the others");
         // Not ready: only listed.
         let list: LiveServers =
-            toml::from_str("[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\n").unwrap();
+            toml::from_str("[[server]]\naddress = \"93.184.216.35:8308\"\nnick = \"Muha\"\n").unwrap();
         let text = render(&rows, &list, "Muha", true, 100);
         assert!(
             text.lines()
-                .find(|l| l.contains("45.141.57.35:8308"))
+                .find(|l| l.contains("93.184.216.35:8308"))
                 .unwrap()
                 .starts_with("listed")
         );

@@ -322,17 +322,17 @@ mod tests {
 
     #[test]
     fn the_target_matches_every_spelling_of_each_of_its_ips() {
-        let mut t = RelayTarget::new("[::ffff:45.141.57.35]:8308".parse().unwrap());
-        assert!(t.has_ip(ip("45.141.57.35")));
-        assert!(t.has_ip(ip("::ffff:45.141.57.35")));
-        assert!(!t.has_ip(ip("45.141.57.36")));
+        let mut t = RelayTarget::new("[::ffff:192.0.2.35]:8308".parse().unwrap());
+        assert!(t.has_ip(ip("192.0.2.35")));
+        assert!(t.has_ip(ip("::ffff:192.0.2.35")));
+        assert!(!t.has_ip(ip("192.0.2.36")));
         assert_eq!(t.port(), Some(8308));
-        t.add_ips([ip("2001:db8::7"), ip("45.141.57.35"), ip("::ffff:9.9.9.9")]);
+        t.add_ips([ip("2001:db8::7"), ip("192.0.2.35"), ip("::ffff:9.9.9.9")]);
         assert!(t.has_ip(ip("2001:db8::7")));
         assert!(t.has_ip(ip("9.9.9.9")));
         assert_eq!(t.ips.len(), 3, "no duplicates");
         // The family of the relay against the family of the server's IPs.
-        let v4_only = RelayTarget::new("45.141.57.35:8308".parse().unwrap());
+        let v4_only = RelayTarget::new("192.0.2.35:8308".parse().unwrap());
         assert!(v4_only.lacks_family_of(ip("2606:4700::1")));
         assert!(!v4_only.lacks_family_of(ip("8.8.8.8")));
         assert!(!v4_only.lacks_family_of(ip("::ffff:8.8.8.8")), "mapped is IPv4");

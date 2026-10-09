@@ -683,7 +683,7 @@
       var manual = el("details", "sv-manual");
       manual.appendChild(el("summary", null, "Добавить сервер по адресу"));
       var form = el("div", "sv-form");
-      var addr = input("text", "IP:порт, например 45.141.57.35:8308", 64);
+      var addr = input("text", "IP:порт, например 93.184.216.35:8308", 64);
       var name = input("text", "название", 64);
       var nick = input("text", DEFAULT_NICK, 15);
       nick.value = DEFAULT_NICK;

@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn a_good_favourite_round_trips() {
-        let f = file(vec![fav("45.141.57.35:8308"), fav("[2a01:4f8::1]:8303")]);
+        let f = file(vec![fav("93.184.216.35:8308"), fav("[2a01:4f8::1]:8303")]);
         let bytes = f.to_bytes(Rules::default()).unwrap();
         assert_eq!(Favourites::parse(&bytes, Rules::default()).unwrap(), f);
         assert_eq!(f.favourites[0].proxy_name(), None);
@@ -429,7 +429,7 @@ mod tests {
     fn only_a_canonical_public_ip_and_port_is_an_address() {
         let rules = Rules::default();
         for good in [
-            "45.141.57.35:8308",
+            "93.184.216.35:8308",
             "8.8.8.8:1",
             "[2a01:4f8::1]:65535",
             "93.184.216.34:8303",
@@ -438,23 +438,23 @@ mod tests {
         }
         for bad in [
             "",
-            "45.141.57.35",
-            "45.141.57.35:0",
-            "45.141.57.35:65536",
-            "45.141.57.35:-1",
-            "45.141.57.35:8308 ",
-            " 45.141.57.35:8308",
-            "45.141.57.35:08308",
-            "045.141.57.35:8308",
-            "45.141.57.035:8308",
+            "93.184.216.35",
+            "93.184.216.35:0",
+            "93.184.216.35:65536",
+            "93.184.216.35:-1",
+            "93.184.216.35:8308 ",
+            " 93.184.216.35:8308",
+            "93.184.216.35:08308",
+            "093.184.216.35:8308",
+            "93.184.216.035:8308",
             "example.com:8303",
             "localhost:8303",
-            "0x2d.141.57.35:8303",
-            "755011875:8303",
-            "45.141.57.35:8308\n",
-            "45.141.57.35:8308#x",
-            "http://45.141.57.35:8308",
-            "[::ffff:45.141.57.35]:8308",
+            "0x5d.184.216.35:8303",
+            "1572395043:8303",
+            "93.184.216.35:8308\n",
+            "93.184.216.35:8308#x",
+            "http://93.184.216.35:8308",
+            "[::ffff:93.184.216.35]:8308",
             "[2A01:4F8::1]:8303",
             "[2a01:4f8:0:0:0:0:0:1]:8303",
             // Not public unicast.
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn names_nicks_notes_connections_and_consent_are_checked() {
         let rules = Rules::default();
-        let mut ok = fav("45.141.57.35:8308");
+        let mut ok = fav("93.184.216.35:8308");
         assert!(ok.validate(rules).is_ok());
         for bad in [
             "",
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn the_file_is_strict() {
         let rules = Rules::default();
-        let good = serde_json::to_value(file(vec![fav("45.141.57.35:8308")])).unwrap();
+        let good = serde_json::to_value(file(vec![fav("93.184.216.35:8308")])).unwrap();
         assert!(Favourites::parse(good.to_string().as_bytes(), rules).is_ok());
         // Unknown fields, at either level.
         let mut v = good.clone();
@@ -620,7 +620,7 @@ mod tests {
         // One bad entry refuses the whole file.
         let mut bad = fav("10.0.0.1:8303");
         bad.name = "x".into();
-        let f = file(vec![fav("45.141.57.35:8308"), bad]);
+        let f = file(vec![fav("93.184.216.35:8308"), bad]);
         assert_eq!(f.validate(rules), Err(FavouriteError::BadAddress));
         assert!(
             f.to_bytes(rules).is_err(),
@@ -631,11 +631,11 @@ mod tests {
             Favourites::parse(&vec![b' '; MAX_FILE_BYTES + 1], rules),
             Err(FavouriteError::BadFile)
         );
-        let dup = file(vec![fav("45.141.57.35:8308"), fav("45.141.57.35:8308")]);
+        let dup = file(vec![fav("93.184.216.35:8308"), fav("93.184.216.35:8308")]);
         assert_eq!(dup.validate(rules), Err(FavouriteError::Duplicate));
         let many = file(
             (0..=MAX_FAVOURITES)
-                .map(|i| fav(&format!("45.141.{}.{}:8308", i / 200, 10 + i % 200)))
+                .map(|i| fav(&format!("93.184.{}.{}:8308", i / 200, 10 + i % 200)))
                 .collect(),
         );
         assert_eq!(many.validate(rules), Err(FavouriteError::TooMany));
@@ -643,11 +643,11 @@ mod tests {
 
     #[test]
     fn a_favourite_stands_for_a_ready_entry_with_its_proxy() {
-        let mut p = fav("45.141.57.35:8308");
+        let mut p = fav("93.184.216.35:8308");
         p.connection = "proxy:hp".to_string();
         let f = file(vec![p, fav("1.2.3.4:8303")]);
         let list = LiveServers::default().with_favourites(&f).unwrap();
-        let addr: SocketAddr = "45.141.57.35:8308".parse().unwrap();
+        let addr: SocketAddr = "93.184.216.35:8308".parse().unwrap();
         assert_eq!(list.ready_nick(addr), Some("Muha"));
         assert_eq!(list.proxy_binding(addr, "Muha").unwrap(), Some("hp"));
         assert_eq!(
@@ -658,16 +658,16 @@ mod tests {
         assert!(crate::live_servers::check(addr, "Muha", &list).is_ok());
         assert!(crate::live_servers::check(addr, "Other", &list).is_err());
         // An address that is not a favourite stays refused.
-        assert!(crate::live_servers::check("45.141.57.36:8308".parse().unwrap(), "Muha", &list).is_err());
+        assert!(crate::live_servers::check("93.184.216.36:8308".parse().unwrap(), "Muha", &list).is_err());
     }
 
     #[test]
     fn a_favourite_that_is_also_an_allow_list_entry_is_a_clash() {
         let live: LiveServers = toml::from_str(
-            "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"swarfey\"\n",
+            "[[server]]\naddress = \"93.184.216.35:8308\"\nnick = \"Muha\"\nready = true\nproxy = \"swarfey\"\n",
         )
         .unwrap();
-        let f = file(vec![fav("45.141.57.35:8308")]);
+        let f = file(vec![fav("93.184.216.35:8308")]);
         assert!(live.clone().with_favourites(&f).is_err());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn a_reopening_dated_in_the_future_is_refused() {
         let rules = Rules::default();
-        let mut f = fav("45.141.57.35:8308");
+        let mut f = fav("93.184.216.35:8308");
         f.reopened_at = 99_999_999_999;
         assert_eq!(f.validate(rules), Err(FavouriteError::ReopenedInFuture));
         assert!(file(vec![f.clone()]).to_bytes(rules).is_err());
@@ -688,7 +688,7 @@ mod tests {
             Favourites::parse(serde_json::to_string(&file(vec![f])).unwrap().as_bytes(), rules),
             Err(FavouriteError::ReopenedInFuture)
         );
-        let mut ok = fav("45.141.57.35:8308");
+        let mut ok = fav("93.184.216.35:8308");
         ok.reopened_at = unix_now() + MAX_FUTURE_SKEW_SECS - 5;
         assert!(ok.validate(rules).is_ok());
         ok.reopened_at = unix_now() + MAX_FUTURE_SKEW_SECS + 60;
@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(why, Some("favourites_invalid"));
         std::fs::remove_file(&path).unwrap();
         let real = dir.path().join("real.json");
-        std::fs::write(&real, file(vec![fav("45.141.57.35:8308")]).to_bytes(rules).unwrap()).unwrap();
+        std::fs::write(&real, file(vec![fav("93.184.216.35:8308")]).to_bytes(rules).unwrap()).unwrap();
         std::os::unix::fs::symlink(&real, &path).unwrap();
         let (m, why) = LiveServers::load_with_favourites(LiveServers::default(), &path, rules);
         assert!(m.servers.is_empty());

@@ -1698,7 +1698,7 @@ fn a_ban_on_a_favourite_blocks_it_until_the_explicit_reopen_and_no_proxy_switch_
     let rig = Rig::new();
     let addr = format!("{FAV_IP}:8303");
     let sibling = format!("{FAV_IP}:8304");
-    let other = "45.141.57.35:8308";
+    let other = "93.184.216.35:8308";
     rig.profile("hp-1", "relay = \"public\"\n");
     rig.profile("hp-2", "");
     rig.favourites(&[(&addr, "proxy:hp-1", 0), (&sibling, "direct", 0), (other, "direct", 0)]);

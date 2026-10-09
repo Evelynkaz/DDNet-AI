@@ -2150,19 +2150,19 @@ mod tests {
         let proxy: IpAddr = "92.204.171.83".parse().unwrap();
         let ok = |relay: &str, target: &RelayTarget| check_relay_is_not_target(relay.parse().unwrap(), proxy, target);
         let refused = Err(Socks5Error::RelayAddress("the relay address is the game server itself"));
-        let target = RelayTarget::new(v4("45.141.57.35:8308"));
+        let target = RelayTarget::new(v4("192.0.2.35:8308"));
         assert_eq!(ok("104.171.172.27:51234", &target), Ok(()));
         // The target's own IP, whatever the port; and the target's port, whatever the IP.
-        assert_eq!(ok("45.141.57.35:51234", &target), refused);
-        assert_eq!(ok("45.141.57.35:8308", &target), refused);
+        assert_eq!(ok("192.0.2.35:51234", &target), refused);
+        assert_eq!(ok("192.0.2.35:8308", &target), refused);
         assert_eq!(ok("104.171.172.27:8308", &target), refused);
         assert_eq!(ok("[2606:4700::1]:8308", &target), refused);
         // v4-mapped spellings of the target's IP.
-        assert_eq!(ok("[::ffff:45.141.57.35]:51234", &target), refused);
-        let mapped_target = RelayTarget::new("[::ffff:45.141.57.35]:8308".parse().unwrap());
-        assert_eq!(ok("45.141.57.35:51234", &mapped_target), refused);
+        assert_eq!(ok("[::ffff:192.0.2.35]:51234", &target), refused);
+        let mapped_target = RelayTarget::new("[::ffff:192.0.2.35]:8308".parse().unwrap());
+        assert_eq!(ok("192.0.2.35:51234", &mapped_target), refused);
         // Every IP the target resolves to counts, not just the one in hand.
-        let mut multi = RelayTarget::new(v4("45.141.57.35:8308"));
+        let mut multi = RelayTarget::new(v4("192.0.2.35:8308"));
         multi.add_ips(["104.171.172.27".parse().unwrap(), "2001:4860::8888".parse().unwrap()]);
         assert_eq!(ok("104.171.172.27:51234", &multi), refused);
         assert_eq!(ok("[2001:4860::8888]:51234", &multi), refused);
@@ -2170,8 +2170,8 @@ mod tests {
         // Port 0 is never a relay.
         assert_eq!(ok("8.8.8.8:0", &target), refused);
         // A known IP list without a port (`proxy-check` with an unresolvable `for_server` port) still guards the IPs.
-        let ips_only = RelayTarget::from_ips(["45.141.57.35".parse().unwrap()]);
-        assert_eq!(ok("45.141.57.35:1234", &ips_only), refused);
+        let ips_only = RelayTarget::from_ips(["192.0.2.35".parse().unwrap()]);
+        assert_eq!(ok("192.0.2.35:1234", &ips_only), refused);
         assert_eq!(ok("8.8.8.8:8308", &ips_only), Ok(()));
     }
 
@@ -2313,7 +2313,7 @@ mod tests {
         let refused = Err(Socks5Error::RelayAddress(
             "the relay is in another address family than the game server (relay = public)",
         ));
-        let v4_server = RelayTarget::new(v4("45.141.57.35:8308"));
+        let v4_server = RelayTarget::new(v4("192.0.2.35:8308"));
         let check = |relay: &str, t: &RelayTarget| check_relay_is_not_target(relay.parse().unwrap(), proxy, t);
         assert_eq!(check("[2606:4700::1]:51234", &v4_server), refused);
         assert_eq!(check("104.171.172.27:51234", &v4_server), Ok(()));

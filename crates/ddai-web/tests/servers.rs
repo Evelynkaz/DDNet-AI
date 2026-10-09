@@ -146,7 +146,7 @@ fn favourites_on_disk(server: &TestServer) -> Favourites {
     Favourites::parse(&bytes, Rules::default()).expect("the file the web wrote passes the strict parser")
 }
 
-const PUB1: &str = "45.141.57.35:8308";
+const PUB1: &str = "93.184.216.35:8308";
 const PUB2: &str = "93.184.216.34:8303";
 
 fn proxy_body(name: &str) -> serde_json::Value {
@@ -484,16 +484,16 @@ async fn malicious_addresses_names_nicks_connections_and_extra_fields_are_refuse
         "169.254.169.254:80",
         "0.0.0.0:8303",
         "example.com:8303",
-        "45.141.57.35",
-        "45.141.57.35:0",
-        "45.141.57.35:70000",
-        "45.141.57.35:8308 ",
-        " 45.141.57.35:8308",
-        "45.141.57.35:8308\n",
-        "45.141.57.35:8308/../x",
-        "http://45.141.57.35:8308",
-        "[::ffff:45.141.57.35]:8308",
-        "045.141.057.035:8308",
+        "93.184.216.35",
+        "93.184.216.35:0",
+        "93.184.216.35:70000",
+        "93.184.216.35:8308 ",
+        " 93.184.216.35:8308",
+        "93.184.216.35:8308\n",
+        "93.184.216.35:8308/../x",
+        "http://93.184.216.35:8308",
+        "[::ffff:93.184.216.35]:8308",
+        "093.184.216.035:8308",
         "203.0.113.5:8308",
         "100.64.0.1:8303",
         "255.255.255.255:8303",
@@ -629,7 +629,7 @@ async fn a_ban_closes_the_favourite_until_the_owner_reopens_it_and_nothing_else_
     assert_eq!(post(&server, &l, "/api/favourites/add", &add_body(PUB1)).status, 201);
     // Same IP, another port: the ban is the machine's.
     assert_eq!(
-        post(&server, &l, "/api/favourites/add", &add_body("45.141.57.35:8309")).status,
+        post(&server, &l, "/api/favourites/add", &add_body("93.184.216.35:8309")).status,
         201
     );
     assert_eq!(post(&server, &l, "/api/favourites/add", &add_body(PUB2)).status, 201);
@@ -653,7 +653,7 @@ async fn a_ban_closes_the_favourite_until_the_owner_reopens_it_and_nothing_else_
     };
     assert_eq!(by(PUB1)["blocked"]["at"], ban_at);
     assert_eq!(
-        by("45.141.57.35:8309")["blocked"]["at"],
+        by("93.184.216.35:8309")["blocked"]["at"],
         ban_at,
         "the same IP is closed too"
     );
@@ -783,7 +783,7 @@ async fn a_ban_closes_the_favourite_until_the_owner_reopens_it_and_nothing_else_
     assert_eq!(post(&server, &l, "/api/bot/launch", &start).status, 202);
     // The sibling port on the same IP is still closed: it has its own re-open to press.
     fs::remove_file(dirs(&server).0.join("request.json")).unwrap();
-    let sibling = serde_json::json!({"action":"start","brain":"hybrid","server":"45.141.57.35:8309","duration":"15m"});
+    let sibling = serde_json::json!({"action":"start","brain":"hybrid","server":"93.184.216.35:8309","duration":"15m"});
     assert_eq!(
         err(&post(&server, &l, "/api/bot/launch", &sibling)),
         (409, Some("blocked_after_ban".into()))
@@ -847,8 +847,8 @@ async fn the_launcher_card_offers_favourites_and_refuses_what_is_not_one() {
     fs::remove_file(dirs(&server).0.join("request.json")).unwrap();
     for bad in [
         PUB2,
-        "45.141.57.35:8309",
-        "45.141.57.36:8308",
+        "93.184.216.35:8309",
+        "93.184.216.36:8308",
         "127.0.0.1:8303",
         "example.com:8303",
     ] {

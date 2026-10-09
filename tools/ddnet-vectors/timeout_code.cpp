@@ -48,7 +48,7 @@ int main()
 	memset(&a, 0, sizeof(a)); a.type = 1; a.ip[0]=127; a.ip[3]=1; a.port = 8443;
 	code("ABCDEFGHKLMNPRST", &a, 1, false);
 	code("ABCDEFGHKLMNPRST", &a, 1, true);
-	memset(&a, 0, sizeof(a)); a.type = 1; a.ip[0]=45; a.ip[1]=141; a.ip[2]=57; a.ip[3]=35; a.port = 8308;
+	memset(&a, 0, sizeof(a)); a.type = 1; a.ip[0]=192; a.ip[1]=0; a.ip[2]=2; a.ip[3]=35; a.port = 8308;
 	code("ABCDEFGHKLMNPRST", &a, 1, false);
 	code("n2e9mUWqk3HdGPt8", &a, 1, false);
 	memset(&a, 0, sizeof(a)); a.type = 1; a.ip[0]=127; a.ip[3]=1; a.port = 8444;

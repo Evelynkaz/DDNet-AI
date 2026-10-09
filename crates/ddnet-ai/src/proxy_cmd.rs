@@ -357,9 +357,9 @@ mod tests {
 
     #[test]
     fn a_favourite_passes_the_bots_gate_with_the_proxy_the_owner_assigned() {
-        let dir = favourites_dir(&fav_json("45.141.57.35:8308", "proxy:hp"), true);
+        let dir = favourites_dir(&fav_json("93.184.216.35:8308", "proxy:hp"), true);
         let none = dir.path().join("no-live-servers.toml");
-        let addr: SocketAddr = "45.141.57.35:8308".parse().unwrap();
+        let addr: SocketAddr = "93.184.216.35:8308".parse().unwrap();
         let mut c = fresh_config("Muha");
         prepare_client(&mut c, Some(&none), addr, dir.path()).expect("prepared");
         assert!(ddai_client::live_servers::check(addr, "Muha", &c.live_servers).is_ok());
@@ -367,7 +367,7 @@ mod tests {
         // Another nick and another address are not admitted.
         assert!(ddai_client::live_servers::check(addr, "Other", &c.live_servers).is_err());
         assert!(
-            ddai_client::live_servers::check("45.141.57.35:8309".parse().unwrap(), "Muha", &c.live_servers).is_err()
+            ddai_client::live_servers::check("93.184.216.35:8309".parse().unwrap(), "Muha", &c.live_servers).is_err()
         );
         // The assigned proxy's file is gone: an error, never a direct connection or another proxy.
         std::fs::remove_file(dir.path().join("secrets/hp-proxy.toml")).unwrap();
@@ -375,7 +375,7 @@ mod tests {
         let e = prepare_client(&mut c, Some(&none), addr, dir.path()).unwrap_err();
         assert!(c.proxy.is_none() && e.exit == 1, "{e}");
         // A direct favourite has no proxy.
-        let dir = favourites_dir(&fav_json("45.141.57.35:8308", "direct"), false);
+        let dir = favourites_dir(&fav_json("93.184.216.35:8308", "direct"), false);
         let mut c = fresh_config("Muha");
         prepare_client(&mut c, Some(&none), addr, dir.path()).unwrap();
         assert!(c.proxy.is_none());
@@ -384,11 +384,11 @@ mod tests {
 
     #[test]
     fn a_favourites_file_that_cannot_be_trusted_adds_nothing_to_the_bots_gate() {
-        let addr: SocketAddr = "45.141.57.35:8308".parse().unwrap();
+        let addr: SocketAddr = "93.184.216.35:8308".parse().unwrap();
         let none = tempfile::tempdir().unwrap().path().join("no-live-servers.toml");
         for bad in [
-            serde_json::json!({"v":1,"favourites":[{"address":"45.141.57.35:8308","name":"S","nick":"Muha","connection":"direct","consent_at":0,"added_at":5}]}),
-            serde_json::json!({"v":1,"favourites":[{"address":"45.141.57.35:8308","name":"S","nick":"Muha","connection":"direct","consent_at":5,"added_at":5,"ready":true}]}),
+            serde_json::json!({"v":1,"favourites":[{"address":"93.184.216.35:8308","name":"S","nick":"Muha","connection":"direct","consent_at":0,"added_at":5}]}),
+            serde_json::json!({"v":1,"favourites":[{"address":"93.184.216.35:8308","name":"S","nick":"Muha","connection":"direct","consent_at":5,"added_at":5,"ready":true}]}),
             serde_json::json!({"v":2,"favourites":[]}),
             serde_json::json!("junk"),
         ] {

@@ -49,7 +49,7 @@ mod tests {
         std::fs::write(dir.path().join(CACHE_FILE), b"{\"v\":1}").unwrap();
         assert_eq!(read_master(dir.path()).unwrap_err(), CacheProblem::Invalid);
         let rows: Vec<ServerRow> = parse_master(
-            r#"{"servers":[{"addresses":["tw-0.6+udp://45.141.57.35:8308"],"location":"eu:it","info":{"name":"S","map":{"name":"M"},"clients":[]}}]}"#,
+            r#"{"servers":[{"addresses":["tw-0.6+udp://93.184.216.35:8308"],"location":"eu:it","info":{"name":"S","map":{"name":"M"},"clients":[]}}]}"#,
         )
         .unwrap();
         let cache = MasterCache::from_rows(&rows, 77, 1);
