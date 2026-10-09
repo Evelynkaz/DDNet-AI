@@ -352,7 +352,7 @@ Parity with TypeScript (needs Node >= 24 and `npm ci` in `tools/ts-reference`): 
 
 ## Running on Windows
 
-The bot builds and runs on Windows 10/11 (x86-64) and computes exactly what it computes on Linux: the physics math (`sinf`, `cosf`, `atanf`,
+The bot builds and runs on Windows 10/11 (x86-64). Physics and the planner (world prediction, exact search, distances) compute the same numbers as on Linux and as the DDNet server: the physics math (`sinf`, `cosf`, `atanf`,
 `atan2f`, `powf`, and in `double` `atan2` and `log`) is no longer taken from the operating system's C library but built into the bot as bit-exact
 ports of glibc ([crates/ddai-libm](crates/ddai-libm/README.md), decision D-127). The CI job `windows` builds everything, runs clippy and the tests
 on `windows-latest`, and among them hashes of results recorded on Linux with the real glibc must come out identical on Windows. This is what makes
@@ -361,6 +361,8 @@ bot never writes in chat, a kick or ban means stop, no evasion).
 
 **What works.** Everything in the quick start except launching through systemd: `play`, `record`, `arena`, `web`, `web-passwd`, `servers`, `clip`,
 `map`, `dataset`, fly training, and so on. The bot stops on Ctrl-C or when the console window is closed.
+
+**Caveats.** (a) The fly's networks (`--brain fly`, `--fly-bundle`: `ddai-fly`) compute `exp`, `tanh`, `ln` and related functions with the system's library, so on Windows its proposals can differ from Linux in the last bits and hybrid decisions can occasionally differ; physics and search exactness is not affected, but "exactly what Linux computes" is not promised for the fly yet. (b) Before playing, the bot checks that its math gives the required bits (including its own fused multiply-add `fma`: on a CPU without FMA, or when the system's `fma` is wrong, the bot uses its own) and refuses to play if the check fails. (c) Secrets (`secrets/`, the `/timeout` seed) are protected on Windows by an ACL for you alone; if that fails and the data directory is not under your profile folder, the bot refuses to write them (`DDNET_AI_ALLOW_UNRESTRICTED=1` accepts the risk).
 
 **What is not there yet.** (1) The `launch` command and the site's launcher card: that is the root-side systemd helper of the VPS and builds on
 Unix only. (2) The bot-to-site link (the live map and the bot controls on the site): it runs over Unix-domain sockets today, and how it works on
