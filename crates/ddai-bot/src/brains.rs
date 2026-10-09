@@ -110,6 +110,8 @@ pub struct BrainOptions {
     pub hybrid_budget_ms: Option<u32>,
     /// Task 3.19 (D-116, opt-in, `--duel-hammer`): the hybrid's reflex hammer and hammer-safe envelope, which act only in a detected duel.
     pub reflex: ddai_planner::hybrid::ReflexConfig,
+    /// Task 3.23 (D-121, opt-in, `--duel-fixes`): the hybrid's fixes for the weaknesses of the 2026-10-08 duel against a human; they act only in a detected duel.
+    pub duel_fixes: ddai_planner::hybrid::DuelFixConfig,
     pub seed: u64,
 }
 
@@ -154,6 +156,7 @@ impl Default for BrainOptions {
             hybrid_wb_hold: false,
             hybrid_budget_ms: None,
             reflex: ddai_planner::hybrid::ReflexConfig::default(),
+            duel_fixes: ddai_planner::hybrid::DuelFixConfig::default(),
             seed: 1,
         }
     }
@@ -200,6 +203,59 @@ pub fn duel_hammer(mode: &str) -> Option<ddai_planner::hybrid::ReflexConfig> {
     }
 }
 
+/// What `--duel-fixes` means (task 3.23, D-121): `off` (the default), `all`, or a comma list of `static` (fix 1: the duel opponent is never dropped as AFK -- the
+/// bot's [`BotConfig::duel_afk`] -- and the hybrid answers a standing opponent by a plan that acts), `counter` (fix 2: the reacting opponent of the robust stage
+/// lets go of us once he is below us while we rise, believed whenever his hook holds us, with the defensive techniques re-scored) and `finish` (fix 3: a frozen
+/// victim lying off the freeze is answered by a plan that acts, approach plans join the pool, no swing at a frozen tee). They act only in a detected duel
+/// ([`ddai_planner::hybrid::DuelFixConfig::duel_only`]). `None` for anything else. The result is the hybrid's configuration and whether the picker's AFK
+/// exemption is on.
+pub fn duel_fixes(list: &str) -> Option<(ddai_planner::hybrid::DuelFixConfig, bool)> {
+    use ddai_planner::hybrid::DuelFixConfig;
+    let mut c = DuelFixConfig::default();
+    let mut afk = false;
+    for part in list.split(',').map(|p| p.trim().to_ascii_lowercase()) {
+        match part.as_str() {
+            "off" | "" => {}
+            "static" => {
+                c.static_push = true;
+                afk = true;
+            }
+            "counter" => {
+                c.counter_release = true;
+                c.hooked_belief = COUNTER_HOOKED_BELIEF;
+                c.protect_defence = true;
+            }
+            "finish" => {
+                c.finish_push = true;
+                c.finish_approach = FINISH_APPROACH_PLANS;
+                c.no_hammer_frozen = true;
+            }
+            "all" => {
+                return Some((
+                    DuelFixConfig {
+                        static_push: true,
+                        counter_release: true,
+                        hooked_belief: COUNTER_HOOKED_BELIEF,
+                        protect_defence: true,
+                        finish_push: true,
+                        finish_approach: FINISH_APPROACH_PLANS,
+                        no_hammer_frozen: true,
+                        ..c
+                    },
+                    true,
+                ));
+            }
+            _ => return None,
+        }
+    }
+    Some((c, afk))
+}
+
+/// The belief that the opponent reacts while his hook holds us, with `--duel-fixes counter` (E-038).
+pub const COUNTER_HOOKED_BELIEF: f64 = 0.8;
+/// Approach plans (technique T30) per decision against a frozen victim lying off the freeze, with `--duel-fixes finish` (E-038).
+pub const FINISH_APPROACH_PLANS: usize = 6;
+
 /// The live hybrid's configuration: the library defaults plus what the options set.
 pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
     let cfg = HybridConfig {
@@ -208,6 +264,7 @@ pub fn hybrid_config(opts: &BrainOptions) -> HybridConfig {
         mirror: opts.hybrid_mirror,
         wb_hold: opts.hybrid_wb_hold,
         reflex: opts.reflex,
+        duel_fixes: opts.duel_fixes,
         ..HybridConfig::default()
     };
     let cfg = if opts.hybrid_finish { cfg.with_finish() } else { cfg };
@@ -255,6 +312,10 @@ fn load_bundle_template(opts: &BrainOptions) -> Result<ddai_fly::bundle::FlyBrai
     // The encoder-input control readout (task 8.7) is a measurement control, not a fly: never played live.
     template
         .require_fly_readout("live bot")
+        .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
+    // The Gm neuron model (task 8.8) is a pilot measured in the arena only: not played live until the owner confirms it.
+    template
+        .require_rate("live bot")
         .map_err(|e| BrainError::Fly(format!("bundle {}: {e}", bundle.display())))?;
     Ok(template)
 }
@@ -323,6 +384,46 @@ fn make_fly(opts: &BrainOptions) -> Result<Box<dyn Brain>, BrainError> {
 mod tests {
     use super::*;
 
+    /// Task 3.23 (D-121): `--duel-fixes` is off by default and then changes nothing; each name switches its own fix on, `all` the three; all of them duel-only.
+    #[test]
+    fn duel_fixes_are_off_by_default_and_each_name_switches_its_own_fix_on() {
+        use ddai_planner::hybrid::DuelFixConfig;
+        assert_eq!(BrainOptions::default().duel_fixes, DuelFixConfig::default());
+        assert_eq!(duel_fixes("off"), Some((DuelFixConfig::default(), false)));
+        assert_eq!(
+            hybrid_config(&BrainOptions::default()).duel_fixes,
+            DuelFixConfig::default()
+        );
+        let (st, afk) = duel_fixes("static").unwrap();
+        assert!(afk && st.static_push && !st.counter_release && !st.finish_push && st.duel_only);
+        let (co, afk) = duel_fixes("COUNTER").unwrap();
+        assert!(
+            !afk && !co.static_push
+                && co.counter_release
+                && co.protect_defence
+                && co.hooked_belief == COUNTER_HOOKED_BELIEF
+        );
+        assert!(!co.finish_push && co.duel_only);
+        let (fi, afk) = duel_fixes("finish").unwrap();
+        assert!(
+            !afk && fi.finish_push
+                && fi.no_hammer_frozen
+                && fi.finish_approach == FINISH_APPROACH_PLANS
+                && !fi.counter_release
+        );
+        let (all, afk) = duel_fixes("all").unwrap();
+        assert!(afk && all.static_push && all.counter_release && all.finish_push && all.duel_only);
+        let (two, _) = duel_fixes("static, finish").unwrap();
+        assert!(two.static_push && two.finish_push && !two.counter_release);
+        assert_eq!(duel_fixes("sometimes"), None);
+        assert_eq!(duel_fixes("static,sometimes"), None);
+        let opts = BrainOptions {
+            duel_fixes: all,
+            ..BrainOptions::default()
+        };
+        assert_eq!(hybrid_config(&opts).duel_fixes, all, "the live hybrid carries them");
+    }
+
     #[test]
     fn duel_hammer_modes_are_off_by_default_and_duel_only() {
         use ddai_planner::hybrid::ReflexConfig;
@@ -388,6 +489,46 @@ mod tests {
             let o = opts_for(readout);
             assert!(make_brain(BrainKind::Fly, &o).is_ok(), "{readout:?} fly");
             assert!(make_brain(BrainKind::Hybrid, &o).is_ok(), "{readout:?} hybrid");
+        }
+    }
+
+    /// 8.8 review F3: a `Gm` neuron-model checkpoint (a pilot that is measured in the arena only) is refused by the live loader, in the plain fly and
+    /// in the hybrid; the same bundle with the rate model is fine.
+    #[test]
+    fn a_gm_fly_is_refused_by_the_live_loader_and_the_hybrid() {
+        use ddai_fly::bc::HookView;
+        use ddai_fly::bundle::{NeuronModel, load_bundle, save_bundle};
+        use ddai_fly::gm::GmConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let (path, flyg_path) = ddai_fly::brain_fixtures::write_tiny_fly_bundle(dir.path(), HookView::Shared);
+        let rate = load_bundle(&path).unwrap();
+        let model = rate
+            .build_model(ddai_flyg::load(&flyg_path).unwrap())
+            .unwrap()
+            .with_gm(GmConfig::default(), None, 3)
+            .unwrap();
+        let mut gm = rate.clone();
+        gm.neuron_model = NeuronModel::Gm {
+            config: GmConfig::default(),
+            params: model.gm().unwrap().params().clone(),
+        };
+        let gm_path = dir.path().join("gm.bundle");
+        save_bundle(&gm_path, &gm).unwrap();
+        let opts_of = |p: &std::path::Path| BrainOptions {
+            fly_bundle: Some(p.to_path_buf()),
+            fly_flyg: flyg_path.clone(),
+            ..BrainOptions::default()
+        };
+        for kind in [BrainKind::Fly, BrainKind::Hybrid] {
+            let e = make_brain(kind, &opts_of(&gm_path))
+                .err()
+                .expect("a Gm fly must be refused")
+                .to_string();
+            assert!(e.contains("Gm neuron model"), "{kind:?}: {e}");
+            assert!(
+                make_brain(kind, &opts_of(&path)).is_ok(),
+                "{kind:?}: the rate fly plays"
+            );
         }
     }
 

@@ -281,8 +281,8 @@ mod tests {
     /// Each line: seed, server, the code the C++ printed (the harness is `tools/ddnet-vectors/timeout_code.cpp`).
     const CPP_VECTORS: &[(&str, &str, &str)] = &[
         ("ABCDEFGHKLMNPRST", "127.0.0.1:8443", "KbCS2mj3DjD2YRE2"),
-        ("ABCDEFGHKLMNPRST", "45.141.57.35:8308", "echZMV7Y23Dh4WtZ"),
-        ("n2e9mUWqk3HdGPt8", "45.141.57.35:8308", "LLYaq6NjXE2F6a2K"),
+        ("ABCDEFGHKLMNPRST", "192.0.2.35:8308", "4HkFtCM5kgLapeeN"),
+        ("n2e9mUWqk3HdGPt8", "192.0.2.35:8308", "RN6gTPkCHcnZnp5E"),
         ("n2e9mUWqk3HdGPt8", "127.0.0.1:8444", "YjPtdL5fPKf2mGbZ"),
         ("n2e9mUWqk3HdGPt8", "[::1]:8303", "K2Xj3daZftB2oKme"),
     ];

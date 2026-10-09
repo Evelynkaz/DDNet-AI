@@ -98,6 +98,9 @@ const PASSIVE_DECISIONS: u32 = 6;
 /// The opponent model's search is cut after this long at most (ms, task 3.7b review F2); the cap can shorten it.
 const MIRROR_MAX_MS: f64 = 2.0;
 
+/// Task 3.23: how many of the best active plans a decision against a static victim adds to the robust stage.
+const STATIC_ACTIVE_EXTRA: usize = 2;
+
 /// The search never gets less than this under the decision cap (ms).
 const MIN_SEARCH_MS: f64 = 1.0;
 
@@ -276,6 +279,10 @@ pub struct DecisionTelemetry {
     /// Time the opponent model took (ms on the decision's clock; 0 when it did not run) and whether its deadline cut it short.
     pub mirror_ms: f64,
     pub mirror_cut: bool,
+    /// Task 3.23 (fix 1): the decision chose among the plans that act, against a static victim.
+    pub static_push: bool,
+    /// Task 3.23 (fix 3): the same for a frozen victim lying off the freeze.
+    pub finish_push: bool,
     /// Task 3.9 fire counters of the opt-in switches (so an inert one is visible): polish variants and wall-throw candidates put in
     /// the pool (they are counted under `generated` as `cem` / `throw`, too). JSON: `generated.polish` / `generated.wall`, only when non-zero.
     pub polished: u32,
@@ -510,6 +517,8 @@ pub struct DecisionInput<'a> {
     pub roll_ticks: u64,
     /// Task 3.16 (opt-in): the decision cap of this decision is at most this many ms (the time left to the input slot the caller aims at).
     pub deadline_ms: Option<f64>,
+    /// Task 3.23: the bot has detected a duel (or the arena is one): the duel fixes of [`HybridConfig::duel_fixes`] may act.
+    pub duel: bool,
 }
 
 /// The decision procedure and everything it keeps between decisions.
@@ -562,6 +571,10 @@ pub struct HybridSearch {
     /// The victim that has kept its direction neutral and its hook in for `.1` decisions in a row (an idle or camping opponent,
     /// for which "it keeps its input" is the right model and the opponent model has nothing to add).
     passive: (i32, u32),
+    /// Task 3.23 (fix 1): this decision is against a static victim and chooses among the plans that act ([`crate::hybrid::duelfix::static_push`]).
+    push_static: bool,
+    /// Task 3.23 (fix 2): the victim's hook holds us and the counter is on: the best defensive techniques get the robust re-score whatever their cheap rank.
+    protect_hooked: bool,
     /// What the last decision's proposer cost against the cap (ms): the opponent model's deadline leaves room for it.
     last_proposal_ms: f64,
     /// Two-world search: the decision snapshot without the threats, the threat set to switch back to, and
@@ -619,6 +632,7 @@ impl HybridSearch {
             threats: None,
             self_freeze_bias: 1.0,
             steps: 0,
+            counter: false,
         });
         let engine = Engine::new(&cfg, &world, ctx, clock);
         HybridSearch {
@@ -650,6 +664,8 @@ impl HybridSearch {
             mirror_hist: Vec::new(),
             pre_units: 0,
             passive: (-1, 0),
+            push_static: false,
+            protect_hooked: false,
             last_proposal_ms: 0.0,
             saved_red,
             lens_threats: None,
@@ -1542,13 +1558,23 @@ impl HybridSearch {
         // Probability of each combination from the per-opponent beliefs, and how much the worst
         // case counts: it fades when the opponents look like they hold (an idle victim must not
         // make us play scared).
+        // Task 3.23 (fix 2): a victim whose hook holds us (or flies at us) reacts, whatever the learned belief says.
+        let victim_hooks_us = (!cfg.duel_fixes.duel_only || inp.duel)
+            && (victim.hooked_player == self_id || (victim.hook_state == HOOK_FLYING && hook_flying_at(&victim, &me)));
+        let hooked_floor = if victim_hooks_us {
+            cfg.duel_fixes.hooked_belief
+        } else {
+            0.0
+        };
+        self.protect_hooked = cfg.duel_fixes.protect_defence && victim_hooks_us;
         let belief_of = |bit: u32| -> f64 {
             let id = if bit == 0 {
                 victim_id
             } else {
                 threats[bit as usize - 1].id
             };
-            self.beliefs.get(&id).copied().unwrap_or_default().p
+            let p = self.beliefs.get(&id).copied().unwrap_or_default().p;
+            if bit == 0 { p.max(hooked_floor) } else { p }
         };
         self.mask_weights.clear();
         for &mask in &self.masks {
@@ -1569,6 +1595,8 @@ impl HybridSearch {
         } else {
             cfg.robust.lambda
         };
+
+        let counter_on = cfg.duel_fixes.counter_release && (!cfg.duel_fixes.duel_only || inp.duel);
 
         // ---- decision snapshot for the workers -----------------------------------------------
         self.world.save_state_into(&mut self.saved);
@@ -1599,6 +1627,7 @@ impl HybridSearch {
                 c.threats = ts;
                 c.self_freeze_bias = 1.0;
                 c.steps = cfg.planner.steps;
+                c.counter = counter_on;
             });
         }
 
@@ -1650,6 +1679,19 @@ impl HybridSearch {
         } else {
             (victim_id, u32::from(victim.direction == 0 && victim.hook_state <= 0))
         };
+        let fixes_on = !cfg.duel_fixes.duel_only || inp.duel;
+        let finishing =
+            fixes_on && crate::hybrid::duelfix::finish_push(&cfg.duel_fixes, self.world.collision(), &me, &victim);
+        let standing = fixes_on
+            && crate::hybrid::duelfix::static_push(
+                &cfg.duel_fixes,
+                &me,
+                &victim,
+                if self.passive.0 == victim_id { self.passive.1 } else { 0 },
+            );
+        self.push_static = finishing || standing;
+        tel.static_push = standing;
+        tel.finish_push = finishing;
         self.mirror_inputs.clear();
         // The clock is read only when the model runs: a step clock (tests) advances on every read.
         let (mut t_mirror, mut mirror_ms) = (0.0, 0.0);
@@ -1828,7 +1870,11 @@ impl HybridSearch {
                 &TechCaps {
                     generic_escape: danger.flagged(),
                     frozen_offence: cfg.finish_families,
-                    approach: cfg.approach_plans,
+                    approach: if finishing {
+                        cfg.approach_plans.max(cfg.duel_fixes.finish_approach)
+                    } else {
+                        cfg.approach_plans
+                    },
                     ..TechCaps::default()
                 },
             );
@@ -2249,7 +2295,7 @@ impl HybridSearch {
         let lambda = lambda_eff;
         let mut pick = choose(
             &cands,
-            &top,
+            &self.restrict_top(&cands, &top, ncombos),
             ncombos,
             &self.mask_weights,
             lambda,
@@ -2313,7 +2359,7 @@ impl HybridSearch {
                 }
                 pick = choose(
                     &cands,
-                    &top,
+                    &self.restrict_top(&cands, &top, ncombos),
                     ncombos,
                     &self.mask_weights,
                     lambda,
@@ -2364,7 +2410,7 @@ impl HybridSearch {
                     }
                     pick = choose(
                         &cands,
-                        &top,
+                        &self.restrict_top(&cands, &top, ncombos),
                         ncombos,
                         &self.mask_weights,
                         lambda,
@@ -2723,7 +2769,37 @@ impl HybridSearch {
         {
             top.push(stay);
         }
+        if self.protect_hooked {
+            self.add_protected(cands, &mut top, true);
+        }
+        if self.push_static {
+            // Task 3.23: the plans that act get their robust re-score even when the idle ones rank above them on the cheap score.
+            let extra: Vec<usize> = idx
+                .iter()
+                .copied()
+                .filter(|&i| !crate::hybrid::duelfix::is_idle(&cands[i].plan) && !top.contains(&i))
+                .take(STATIC_ACTIVE_EXTRA)
+                .collect();
+            top.extend(extra);
+        }
         top
+    }
+
+    /// Task 3.23 (fix 1): against a static victim the choice is made among the plans that act and are safe under every modelled reply, when there is one;
+    /// otherwise (or in any other decision) among all of `top`.
+    fn restrict_top(&self, cands: &[Cand], top: &[usize], combos: usize) -> Vec<usize> {
+        if !self.push_static {
+            return top.to_vec();
+        }
+        let active: Vec<usize> = top
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let c = &cands[i];
+                !crate::hybrid::duelfix::is_idle(&c.plan) && c.complete(combos) && c.worst_self_out(combos) == 0
+            })
+            .collect();
+        if active.is_empty() { top.to_vec() } else { active }
     }
 }
 

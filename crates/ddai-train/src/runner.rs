@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ddai_controls::bundle::{ControlBundle, load_control_bundle};
-use ddai_controls::features::input_dim;
+use ddai_controls::features::{input_dim, input_dim_with_opponent_state};
 use ddai_controls::gru::Gru;
 use ddai_controls::mlp::Mlp;
 use ddai_env::config::{Condition, PlayerSpec, Rules, RunConfig};
@@ -49,6 +49,10 @@ pub struct ModelSpec {
     /// Learning rate of a control (the fly has its own per-group rates).
     #[serde(default = "default_lr")]
     pub lr: f32,
+    /// A control also reads the five opponent-state channels (frozen, freeze time left, velocity, hook; task 8.8), the information
+    /// the fly's encoder has had since 8.5a. Default off: the controls of E-005..E-008 are unchanged.
+    #[serde(default)]
+    pub opponent_state: bool,
 }
 
 fn default_lr() -> f32 {
@@ -417,7 +421,11 @@ pub fn make_learner(cfg: &ExperimentConfig, teacher: &Corpus) -> Result<Box<dyn 
             let text =
                 std::fs::read_to_string(&brain_cfg_path).map_err(|e| format!("{}: {e}", brain_cfg_path.display()))?;
             let bc = parse_brain_config(&text).map_err(|e| e.to_string())?;
-            let d = input_dim(&bc.ray_grid);
+            let d = if cfg.model.opponent_state {
+                input_dim_with_opponent_state(&bc.ray_grid)
+            } else {
+                input_dim(&bc.ray_grid)
+            };
             if cfg.model.hidden == 0 {
                 return Err("controls need model.hidden > 0".to_string());
             }
@@ -1212,6 +1220,7 @@ mod tests {
                 kind: "mlp".into(),
                 hidden: 4,
                 lr: 1e-3,
+                opponent_state: false,
             },
             flyg: String::new(),
             brain_config: String::new(),

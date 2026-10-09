@@ -204,10 +204,17 @@ fn tiny_map() -> ddai_physics::map::MapData {
 }
 
 fn make_brain() -> FlyBrain {
+    make_brain_with(None)
+}
+
+fn make_brain_with(gm: Option<ddai_fly::gm::GmConfig>) -> FlyBrain {
     let flyg = tiny_brain_flyg();
     let config = FlyConfig::default();
     let params = FlyParams::init_default(&flyg, &config, 1);
-    let model = FlyModel::new(flyg, config, params).unwrap();
+    let mut model = FlyModel::new(flyg, config, params).unwrap();
+    if let Some(gm) = gm {
+        model = model.with_gm(gm, None, 3).unwrap();
+    }
     let encoder = EncoderModel::new(
         &model,
         RayGridConfig::default(),
@@ -282,6 +289,32 @@ fn decide_allocates_nothing() {
         info.count_current, 0,
         "FlyBrain::decide must not deallocate either: {info:?} over 100 calls"
     );
+}
+
+/// Task 8.8: the `Gm` neuron model's `decide` (injection, message passing, update network, DN readout, decoder) allocates nothing either, in
+/// both update kinds and with a viewer pulling a frame every decision.
+#[test]
+fn gm_decide_allocates_nothing() {
+    use ddai_fly::gm::{GmConfig, GmUpdate};
+    for update in [GmUpdate::Plain, GmUpdate::Gated] {
+        let mut brain = make_brain_with(Some(GmConfig {
+            update,
+            steps: 3,
+            ..GmConfig::default()
+        }));
+        brain.set_viz_every(1);
+        let _ = brain.decide(&sample_observation(400.0));
+        let _ = brain.viz_frame_with(0, None);
+        let observations: Vec<Observation> = (0..100).map(|i| sample_observation(300.0 + i as f32)).collect();
+        let info = measure(|| {
+            for (i, obs) in observations.iter().enumerate() {
+                std::hint::black_box(brain.decide(obs));
+                std::hint::black_box(brain.viz_frame_with(i as u32, None));
+            }
+        });
+        assert_eq!(info.count_total, 0, "{update:?}: Gm decide must not allocate: {info:?}");
+        assert_eq!(info.count_current, 0, "{update:?}: nor deallocate: {info:?}");
+    }
 }
 
 /// Task 7.4: with a viewer attached, `decide` plus the pull of a frame (every decision, nothing

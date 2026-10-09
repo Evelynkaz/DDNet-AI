@@ -227,7 +227,7 @@ fn play_uses_the_proxy_the_entry_names_even_if_the_file_was_issued_for_another_s
         dir.path(),
         "named",
         &format!(
-            "host = \"127.0.0.1\"\nport = {}\nfor_server = \"45.141.57.35:8308\"\n",
+            "host = \"127.0.0.1\"\nport = {}\nfor_server = \"93.184.216.35:8308\"\n",
             server.addr().port()
         ),
         0o600,
@@ -255,7 +255,7 @@ fn play_uses_the_proxy_the_entry_names_even_if_the_file_was_issued_for_another_s
         .output()
         .expect("run ddnet-ai play");
     assert!(!text(&out).contains("issued for another server"), "{}", text(&out));
-    assert!(!text(&out).contains("45.141.57.35"), "{}", text(&out));
+    assert!(!text(&out).contains("93.184.216.35"), "{}", text(&out));
     assert!(server.tcp_accepts() >= 1, "the entry's proxy was contacted");
     // The "game server" here is a bare socket: whatever reached it came from the relay, never from the bot's own port.
     let mut buf = [0u8; 2048];

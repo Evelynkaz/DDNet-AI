@@ -337,8 +337,8 @@ pub fn rope_intercept(col: &impl PlanCollision, from: Vec2, pos: Vec2, vel: Vec2
 /// `hazardNearness(field, x, y)` (`planner.ts:500-507`): `floor(x/32)` tile addressing (not the
 /// collision's own `indexAt`/`getMapIndex`), out of bounds -> `0`.
 pub fn hazard_nearness(field: &HazardField, x: f64, y: f64) -> f64 {
-    let tx = js::floor(x / TILE_PX) as i32;
-    let ty = js::floor(y / TILE_PX) as i32;
+    let tx = crate::vmath::floor_i32(x / TILE_PX);
+    let ty = crate::vmath::floor_i32(y / TILE_PX);
     if tx < 0 || ty < 0 || tx >= field.width || ty >= field.height {
         return 0.0;
     }
@@ -353,8 +353,8 @@ pub fn hazard_nearness(field: &HazardField, x: f64, y: f64) -> f64 {
 /// from; `i32::MAX` outside the map or when no hazard is reachable. Task 3.5b: the hybrid shield is
 /// skipped when this is large (nothing to freeze on within reach of the own path).
 pub fn hazard_tiles(field: &HazardField, x: f64, y: f64) -> i32 {
-    let tx = js::floor(x / TILE_PX) as i32;
-    let ty = js::floor(y / TILE_PX) as i32;
+    let tx = crate::vmath::floor_i32(x / TILE_PX);
+    let ty = crate::vmath::floor_i32(y / TILE_PX);
     if tx < 0 || ty < 0 || tx >= field.width || ty >= field.height {
         return i32::MAX;
     }
@@ -444,6 +444,8 @@ pub fn rope_catch_along(from: Vec2, dir: Vec2, at: Vec2, hook_length: f64) -> f6
 
 const LAUNCH_FLIGHT_TICKS: i32 = 50;
 const LAUNCH_PROBE_STEP_PX: f64 = TILE_PX / 2.0;
+/// `sqrt(2)` with a margin of 1e-9 over the rounding of `hypot`: an upper bound of `hypot(a, b) / max(|a|, |b|)`.
+const SQRT_2_PADDED: f64 = 1.414_213_563;
 const NO_VEL: Vec2 = vec2(0.0, 0.0);
 
 /// `freeFraction(collision, x, y, dx, dy)` (`planner.ts:697-711`): fraction of `(dx, dy)` the
@@ -514,33 +516,53 @@ pub fn launch_flight_lands_in_hazard(
         vx *= if grounded { ground_friction } else { air_friction };
         grounded = false;
 
-        let speed = js::hypot2(vx, vy) * 50.0;
-        let ramp = if speed < ramp_start {
+        let big = js::max(js::abs(vx), js::abs(vy));
+        // `hypot(vx, vy) <= sqrt(2) * big` up to a few ulp: below `ramp_start / 50` by a wide margin the ramp is `1`
+        // without computing the hypot (task 4.13). NaN fails the comparison and takes the exact route.
+        let ramp = if big * (SQRT_2_PADDED * 50.0) < ramp_start {
             1.0
         } else {
-            1.0 / js::pow(ramp_curvature, (speed - ramp_start) / ramp_range)
+            let speed = js::hypot2(vx, vy) * 50.0;
+            if speed < ramp_start {
+                1.0
+            } else {
+                1.0 / js::pow(ramp_curvature, (speed - ramp_start) / ramp_range)
+            }
         };
-        let n = js::max(1.0, js::ceil(js::max(js::abs(vx), js::abs(vy)) / LAUNCH_PROBE_STEP_PX)) as i32;
+        let n = js::max(1.0, js::ceil(big / LAUNCH_PROBE_STEP_PX)) as i32;
+        let nf = f64::from(n);
         for _i in 0..n {
-            let sx = (vx * ramp) / f64::from(n);
+            // One substep moves each axis by at most `LAUNCH_PROBE_STEP_PX` (16 px: `n` was chosen for that, `ramp <= 1`).
+            // When nothing solid or hazardous is within a tile of where it starts, neither axis meets a wall
+            // (`free_fraction` is `1`) and the new cell is no hazard: take the two moves without the probes.
+            let clear = ramp <= 1.0 && col.flight_clear(x, y);
+            let sx = if n == 1 { vx * ramp } else { (vx * ramp) / nf };
             if sx != 0.0 {
-                let f = free_fraction(col, x, y, sx, 0.0);
-                x += sx * f;
-                if f < 1.0 {
-                    vx = 0.0;
+                if clear {
+                    x += sx;
+                } else {
+                    let f = free_fraction(col, x, y, sx, 0.0);
+                    x += sx * f;
+                    if f < 1.0 {
+                        vx = 0.0;
+                    }
                 }
             }
             let mut landed = false;
-            let sy = vy / f64::from(n);
+            let sy = if n == 1 { vy } else { vy / nf };
             if sy != 0.0 {
-                let f = free_fraction(col, x, y, 0.0, sy);
-                y += sy * f;
-                if f < 1.0 {
-                    landed = vy > 0.0;
-                    vy = 0.0;
+                if clear {
+                    y += sy;
+                } else {
+                    let f = free_fraction(col, x, y, 0.0, sy);
+                    y += sy * f;
+                    if f < 1.0 {
+                        landed = vy > 0.0;
+                        vy = 0.0;
+                    }
                 }
             }
-            if col.is_hazard(x, y) {
+            if !clear && col.is_hazard(x, y) {
                 return 1.0;
             }
             if landed {
@@ -665,8 +687,8 @@ pub const EDGE_GAP_PX: f64 = (EDGE_GAP_TILES as i64 as f64) * TILE_PX;
 
 /// `freezeGapPx(collision, x, y)` (`planner.ts:797-815`).
 pub fn freeze_gap_px(col: &impl PlanCollision, x: f64, y: f64) -> f64 {
-    let tx = js::floor(x / TILE_PX) as i32;
-    let ty = js::floor(y / TILE_PX) as i32;
+    let tx = crate::vmath::floor_i32(x / TILE_PX);
+    let ty = crate::vmath::floor_i32(y / TILE_PX);
     let mut best = EDGE_GAP_PX;
     for oy in -EDGE_GAP_TILES..=EDGE_GAP_TILES {
         for ox in -EDGE_GAP_TILES..=EDGE_GAP_TILES {
@@ -758,8 +780,8 @@ mod tests {
     }
     impl FlatCol {
         fn tile_at(&self, x: f64, y: f64) -> u8 {
-            let tx = js::floor(x / TILE_PX) as i32;
-            let ty = js::floor(y / TILE_PX) as i32;
+            let tx = crate::vmath::floor_i32(x / TILE_PX);
+            let ty = crate::vmath::floor_i32(y / TILE_PX);
             if tx < 0 || ty < 0 || tx >= self.w || ty >= self.h {
                 return TILE_SOLID;
             }

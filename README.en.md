@@ -209,7 +209,7 @@ More in [docs/FLY.md](docs/FLY.md) (in Russian).
 ## Results
 
 Only what was measured and written in the log; the arena is offline, on the bot's physics, against the scripted bot and the **fixed planner**
-(a port of the old TS planner). There are no live games with humans behind these numbers. "Credited wins" are wins by the player's own block (D-059); the 95%
+(a port of the old TS planner). Live games are in a separate table below. "Credited wins" are wins by the player's own block (D-059); the 95%
 Wilson interval is in brackets.
 
 | What | Result | Where |
@@ -225,23 +225,36 @@ Wilson interval is in brackets.
 | Against its real live configuration (`v2live`): three samples (1,200, 1,200 and 330 games) | 56.1% / 53.3% / 49.0% of decided; credited 51.2% / 49.0% / 45.8%: by the D-059 bar we **do not win** | E-019, E-020 §5 |
 | Held block in crowds (clb-left 1v3 / 1v5 / 8 players, 600 games): the target rule `hold_target` | held 259 → **342** (p < 10⁻⁴), credited first freezes 580 → 579 | [E-021](docs/EXPERIMENTS.md) |
 
+**Live games** (DDNet servers with people; round score of the 1-on-1 F-DDrace mini-game; write-ups in `docs/research/`):
+
+| Date | What | Result | Write-up |
+|---|---|---|---|
+| 7 Oct | Test duel against the competitor's bot (our machine loaded by builds) | lost 2:9 | [duel-2026-10-07](docs/research/duel-2026-10-07.md) |
+| 8 Oct | Duel against a human player (machine loaded) | lost 9:10 | [duel-2026-10-08-human](docs/research/duel-2026-10-08-human.md) |
+| 8 Oct | Two duels against the competitor bot's author (a human), «Дуэль» preset, quiet machine | **won both** | [STATUS](docs/STATUS.md) |
+| 7 Oct | 15 minutes on a public DDNet block server (crowd, wayblock) | 64 blocks, 29 held; we were blocked 21 times | [preinput](docs/research/preinput.md) |
+
+The main lesson so far: under machine load the bot evaluates half as many candidates and misses its input tick; on a
+quiet machine with full finishing it wins (E-034, D-116, D-120).
+
 | Parity and accuracy | Result | Where |
 |---|---|---|
-| Physics against C++ DDNet 20.1 (oracle A) | 0 mismatches over ≈ 57 million tee-ticks | [STATUS](docs/STATUS.md), 1.3 |
-| Server world, stage A (oracle B) | 0 mismatches over 650 games of the corpus | STATUS, 1.6 |
-| Server world, stage B: laser, shotgun, draggers, turrets, light, ninja | 0 mismatches over 8.8 million ticks | STATUS, 1.6b |
-| Map reader against DDNet's own loader | 2,440 of 2,440 maps byte for byte | STATUS, 1.4 |
-| The old TS world (Rust port) against real Node | 0 mismatches over 1.56 million operation steps and 3 million steps on maps | STATUS, 1.9 |
+| Physics against C++ DDNet 20.1 (oracle A) | 0 mismatches over ≈ 57 million tee-ticks | [HISTORY](docs/HISTORY.md), 1.3 |
+| Server world, stage A (oracle B) | 0 mismatches over 650 games of the corpus | HISTORY, 1.6 |
+| Server world, stage B: laser, shotgun, draggers, turrets, light, ninja | 0 mismatches over 8.8 million ticks | HISTORY, 1.6b |
+| Map reader against DDNet's own loader | 2,440 of 2,440 maps byte for byte | HISTORY, 1.4 |
+| The old TS world (Rust port) against real Node | 0 mismatches over 1.56 million operation steps and 3 million steps on maps | HISTORY, 1.9 |
 | Planner port against TS: decisions (teacher-forced, free games) | 19,360 and 3,604, 0 mismatches | E-017, §6 |
 | Navigation and wayblock against TS `af49dfb` (five maps) | 0 mismatches | E-018, §1 |
-| Forecast of our own tee from snapshots (BlockField, 8.6% late inputs) | 100% bit-exact 2 and 10 ticks ahead | STATUS, 2.4 |
+| Forecast of our own tee from snapshots (BlockField, 8.6% late inputs) | 100% bit-exact 2 and 10 ticks ahead | HISTORY, 2.4 |
 
 **What is not proven yet.**
 - **The fly alone, without the planner, has not reached the F1/F2 targets**: direction and jump are learned, while the hook is held only if it is already out
-  and it almost never starts or releases it (E-005, [STATUS](docs/STATUS.md) 8.2). In live play its role is candidates for the hybrid. The hybrid's edge over the
+  and it almost never starts or releases it (E-005, [HISTORY](docs/HISTORY.md) 8.2). In live play its role is candidates for the hybrid. The hybrid's edge over the
   planner in the table comes from the opponent model, not from the fly.
 - The 5 ms p99 budget is measured on the work clock (tee-ticks), not on the wall clock of a quiet machine; the live bot's wall-clock p99 is not confirmed (3.7a, PARTIAL).
-- The opponent model was tested against the planner and the scripted bot, not against humans.
+- There are only a few live duels so far (four, see the table above): too few for conclusions about strength against people.
+- The learned opponent-input predictor adds no strength at the live 2-tick lag (E-036, D-118).
 - Against the competitor's real live configuration (`v2live`) we do not win on credited wins; a clear edge exists only over its plain configuration.
 - Finishing (`--finish target`) is measured in the arena; its effect against people is not measured.
 - After freezing an opponent the fly holds the block poorly: on starts where the victim can get away, 0–3% against the planner's 84%; the ES pilot
@@ -357,6 +370,7 @@ These rules are written down as decisions ([docs/DECISIONS.md](docs/DECISIONS.md
 - **We do not evade kicks or bans** (D-016). If kicked or banned the bot stops (exit code 3, the unit is not restarted), the case is written down and the owner decides.
   The server (and every port on its IP) stays closed until the owner presses «Открыть снова» himself (D-099). No changing of nicknames or addresses,
   no VPN or proxy to get around it.
+- **Addresses in examples and tests are made up.** Examples, tests and fixtures name no third-party servers: they use documentation addresses (RFC 5737, 192.0.2.0/24 and the like), or a neutral example (`93.184.216.0/24`, the former example.com address, not a game server) where the check requires a public IP.
 - **One bot per server**, at most 5 connections per 20 s to one server, at most two join attempts before entering the game (D-037, D-050, D-058).
 - **The owner chooses the servers.** Before every connection the client checks the address: apart from the local one, a connection is possible only to a
   server in the owner's favourites (marked as "the admin allows the bot") or to an entry of `live-servers.toml` with `ready = true` (D-099); `--server auto`
@@ -394,7 +408,7 @@ These rules are written down as decisions ([docs/DECISIONS.md](docs/DECISIONS.md
 
 Most of the documents are in Russian.
 
-- [docs/STATUS.md](docs/STATUS.md): what is done and where to continue; [docs/PLAN.md](docs/PLAN.md): phases, milestones, acceptance criteria.
+- [docs/STATUS.md](docs/STATUS.md): where we are and where to continue; [docs/HISTORY.md](docs/HISTORY.md): the task log; [docs/PLAN.md](docs/PLAN.md): phases, milestones, acceptance criteria.
 - [docs/DECISIONS.md](docs/DECISIONS.md): the decision log (D-NNN); [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): the measurement log (E-NNN).
 - [docs/FLY.md](docs/FLY.md): the fly and the connectome; [docs/ORIGINAL.md](docs/ORIGINAL.md): how the original is built.
 - [docs/formats.md](docs/formats.md): data and protocol formats; [docs/SETUP.md](docs/SETUP.md): the environment and the local server.

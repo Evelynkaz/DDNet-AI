@@ -1705,14 +1705,37 @@ impl<R: Real> World<R> {
     /// on a genuinely different map's `Collision` pays for the `Arc::clone` (still just a refcount
     /// bump, never a deep copy — see the struct's own doc comment).
     pub fn restore_from(&mut self, source: &World<R>) {
+        self.restore_from_bounded(source, MAX_CLIENTS);
+    }
+
+    /// [`World::restore_from`] for a caller that knows every `Some` entry of [`World::characters`] and
+    /// [`World::players`], in `self` as well as in `source`, has an index below `id_hi`: only that prefix of the two
+    /// arrays is looked at and copied (task 4.13; [`World::restore_from`] finds the high-water marks by scanning all
+    /// 128 slots of four arrays, which showed up in the profile of the search's per-rollout restore). With
+    /// `id_hi = MAX_CLIENTS` this is exactly [`World::restore_from`]. A caller that gets the bound wrong (a `Some`
+    /// entry at or above it) leaves such entries of `self` stale, so it must be an upper bound.
+    pub fn restore_from_bounded(&mut self, source: &World<R>, id_hi: usize) {
+        let id_hi = id_hi.min(MAX_CLIENTS);
+        debug_assert!(
+            self.characters[id_hi..].iter().all(Option::is_none)
+                && self.players[id_hi..].iter().all(Option::is_none)
+                && source.characters[id_hi..].iter().all(Option::is_none)
+                && source.players[id_hi..].iter().all(Option::is_none),
+            "restore_from_bounded: an entry at or above id_hi = {id_hi}"
+        );
         if !std::sync::Arc::ptr_eq(&self.collision, &source.collision) {
             self.collision = std::sync::Arc::clone(&source.collision);
         }
         self.cores.clone_from(&source.cores);
         self.teams_core = source.teams_core;
         self.race_teams.clone_from(&source.race_teams);
-        restore_id_indexed_array(&mut self.characters, &source.characters);
-        restore_id_indexed_array(&mut self.players, &source.players);
+        if id_hi == MAX_CLIENTS {
+            restore_id_indexed_array(&mut self.characters, &source.characters);
+            restore_id_indexed_array(&mut self.players, &source.players);
+        } else {
+            self.characters[..id_hi].copy_from_slice(&source.characters[..id_hi]);
+            self.players[..id_hi].copy_from_slice(&source.players[..id_hi]);
+        }
         self.entity_order.clone_from(&source.entity_order);
         // Scratch buffers are never part of the saved state (see each one's own doc comment on
         // `World`): always empty except transiently inside a call already in progress on this
@@ -4979,6 +5002,19 @@ impl<R: Real> World<R> {
     ///
     /// In debug builds, if `inputs` isn't sorted by ascending `id`.
     pub fn step(&mut self, inputs: &[TickInput]) {
+        self.step_bounded(inputs, MAX_CLIENTS);
+    }
+
+    /// [`World::step`] for a caller that knows every `Some` entry of [`World::players`] has an index below `id_hi`:
+    /// the per-player pass (step 6) then visits only that prefix instead of all 128 slots (task 4.13: the scan was
+    /// about a twentieth of a rollout tick). Identical to [`World::step`] when the bound holds; with
+    /// `id_hi = MAX_CLIENTS` it is [`World::step`].
+    pub fn step_bounded(&mut self, inputs: &[TickInput], id_hi: usize) {
+        let id_hi = id_hi.min(MAX_CLIENTS);
+        debug_assert!(
+            self.players[id_hi..].iter().all(Option::is_none),
+            "step_bounded: a player at or above id_hi = {id_hi}"
+        );
         debug_assert!(
             inputs.windows(2).all(|w| w[0].id < w[1].id),
             "World::step: inputs must be sorted by ascending client id"
@@ -5042,7 +5078,7 @@ impl<R: Real> World<R> {
         //    instead, so a player who sent no input this tick (an idle spectator-turned-player,
         //    or simply every id `step`'s caller didn't bother building an entry for) never got
         //    its own respawn bookkeeping run and could never respawn.
-        for id in 0..MAX_CLIENTS {
+        for id in 0..id_hi {
             if self.players[id].is_some() {
                 player_tick(self, id as i32);
             }

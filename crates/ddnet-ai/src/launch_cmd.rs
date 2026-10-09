@@ -39,8 +39,8 @@ use ddai_client::live_servers::{LiveServers, is_loopback};
 use ddai_client::socks5::{ProxyCheck, RelayHost, Socks5Error, Timeouts};
 use ddai_web::launch::{
     Action, Brain, DurationChoice, Finish, LOCAL_SERVER, LaunchConfig, LaunchRequest, LaunchStatus, MAX_REQUEST_BYTES,
-    MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, State as RunState, WbSmart,
-    bundle_run_name, no_selfkill_flag_value, parse_request, preinput_flag_value, read_regular_nofollow,
+    MAX_SPARRING, Mirror, REQUEST_FILE, ReadError, START_INTERVAL_SECS, STATUS_FILE, SearchThreads, State as RunState,
+    WbSmart, bundle_run_name, no_selfkill_flag_value, parse_request, preinput_flag_value, read_regular_nofollow,
     read_regular_nofollow_with_mtime, request_is_fresh, unix_now, write_atomic,
 };
 use ddai_web::serverbrowser::{
@@ -190,6 +190,9 @@ struct LaunchInfo {
     /// The server's pre-inputs played in the prediction (task 3.20b); older state files have none, which is `false`.
     #[serde(default)]
     preinput: bool,
+    /// The hybrid's search threads of the launch (task 5.17); older state files have none, which is one thread.
+    #[serde(default)]
+    search_threads: SearchThreads,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +333,8 @@ struct Plan {
     window_model: Option<PathBuf>,
     /// The server's pre-inputs in the prediction (task 3.20b, D-112): `false` unless the request says otherwise; hybrid brains only.
     preinput: bool,
+    /// The hybrid's search threads (task 5.17, D-125): one unless the request says otherwise; the pure fly takes one only.
+    search_threads: SearchThreads,
 }
 
 fn valid_nick(nick: &str) -> bool {
@@ -509,6 +514,12 @@ fn decide(
     if brain == Brain::Fly && preinput {
         return Err(Refuse("preinput_hybrid_only"));
     }
+    // Task 5.17 (D-125): the pure fly does not search, so more than one search thread means nothing to it. The web refuses the same request first.
+    // The field itself is a closed list (1 to 4) already at the parse.
+    let search_threads = req.search_threads.unwrap_or_default();
+    if brain == Brain::Fly && search_threads.is_more_than_one() {
+        return Err(Refuse("search_threads_hybrid_only"));
+    }
     let target = resolve_server(selector, cat.live, cat.favs, cat.rules)?;
     if sparring > 0 && target.public {
         return Err(Refuse("sparring_local_only"));
@@ -550,6 +561,7 @@ fn decide(
         no_selfkill: req.no_selfkill.unwrap_or_default(),
         window_model,
         preinput,
+        search_threads,
     })
 }
 
@@ -597,6 +609,8 @@ fn render_env(id: &str, plan: &Plan) -> Result<String, Refuse> {
     out += &env_line("BOT_WINDOW_MODEL", &model)?;
     // Always written (`on` or `off`): the unit passes `--preinput ${BOT_PREINPUT}`, so a stale value can never leak into a run.
     out += &env_line("BOT_PREINPUT", preinput_flag_value(plan.preinput))?;
+    // Always written (`1` to `4`, a static word): the unit passes `--search-threads ${BOT_SEARCH_THREADS}`, so a stale value can never leak into a run.
+    out += &env_line("BOT_SEARCH_THREADS", plan.search_threads.flag_value())?;
     Ok(out)
 }
 
@@ -839,6 +853,7 @@ fn status_of(info: &LaunchInfo, state: RunState, now: u64) -> LaunchStatus {
     status.no_selfkill = Some(info.no_selfkill);
     status.window_model = Some(info.window_model);
     status.preinput = Some(info.preinput);
+    status.search_threads = Some(info.search_threads);
     status
 }
 
@@ -1056,6 +1071,7 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         no_selfkill: plan.no_selfkill,
         window_model: plan.window_model.is_some(),
         preinput: plan.preinput,
+        search_threads: plan.search_threads,
     };
     let fail = |code: &str| {
         let mut status = status_of(&info, RunState::Error, now);
@@ -1120,7 +1136,7 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         }
     }
     eprintln!(
-        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {}, window-model {}, preinput {})",
+        "launch: started (brain {:?}, local {}, sparring {}, finish {}, wb-smart {}, no-selfkill {}, window-model {}, preinput {}, search-threads {})",
         plan.brain,
         !plan.target.public,
         plan.sparring,
@@ -1128,7 +1144,8 @@ fn apply_start(paths: &Paths, req: &LaunchRequest, now: u64) -> ExitCode {
         plan.wb_smart.flag_value(),
         no_selfkill_flag_value(plan.no_selfkill),
         plan.window_model.is_some(),
-        plan.preinput
+        plan.preinput,
+        plan.search_threads.flag_value()
     );
     ExitCode::SUCCESS
 }
@@ -1412,6 +1429,7 @@ mod tests {
             no_selfkill: None,
             window_model: None,
             preinput: None,
+            search_threads: None,
         }
     }
 
@@ -1761,6 +1779,7 @@ mod tests {
             no_selfkill: false,
             window_model: false,
             preinput: false,
+            search_threads: SearchThreads::ONE,
         };
         assert_eq!(status_of(&info, RunState::Started, 5).finish, Some(Finish::Target));
         let mut old = serde_json::to_value(&info).unwrap();
@@ -1819,6 +1838,7 @@ mod tests {
             no_selfkill: true,
             window_model: false,
             preinput: false,
+            search_threads: SearchThreads::ONE,
         };
         let status = status_of(&info, RunState::Started, 5);
         assert_eq!((status.wb_smart, status.no_selfkill), (Some(WbSmart::On), Some(true)));
@@ -1899,6 +1919,7 @@ mod tests {
             no_selfkill: false,
             window_model: true,
             preinput: false,
+            search_threads: SearchThreads::ONE,
         };
         assert_eq!(status_of(&info, RunState::Started, 5).window_model, Some(true));
         let mut old = serde_json::to_value(&info).unwrap();
@@ -1957,6 +1978,7 @@ mod tests {
             no_selfkill: false,
             window_model: false,
             preinput: true,
+            search_threads: SearchThreads::ONE,
         };
         let status = status_of(&info, RunState::Started, 5);
         assert_eq!((status.preinput, status.finish), (Some(true), Some(Finish::Wb)));
@@ -1964,6 +1986,75 @@ mod tests {
         old.as_object_mut().unwrap().remove("preinput");
         let old: LaunchInfo = serde_json::from_value(old).unwrap();
         assert!(!old.preinput);
+    }
+
+    #[test]
+    fn the_search_threads_are_one_unless_asked_are_written_always_and_the_pure_fly_takes_one_only() {
+        // Task 5.17 (D-125).
+        let plan_for = |brain: Brain, n: Option<u8>| {
+            let mut r = req("local");
+            r.brain = Some(brain);
+            r.search_threads = n.map(|n| SearchThreads::new(n).unwrap());
+            decide_with(&r, &LiveServers::default(), Some(&State::default()), 0, 1000)
+        };
+        let env_of = |plan: &Plan| render_env("0123456789abcdef", plan).unwrap();
+        // No field (an old request) and `1`: the line is written explicitly as `1`, so a stale value in the environment never leaks in.
+        for n in [None, Some(1)] {
+            let plan = plan_for(Brain::Hybrid, n).unwrap();
+            assert_eq!(plan.search_threads, SearchThreads::ONE);
+            let env = env_of(&plan);
+            assert!(env.contains("BOT_SEARCH_THREADS=\"1\"\n"), "{env}");
+        }
+        // 2 to 4: both hybrids; the other lines are unchanged.
+        for brain in [Brain::Hybrid, Brain::HybridFly] {
+            for n in 2..=4u8 {
+                let plan = plan_for(brain, Some(n)).unwrap();
+                assert_eq!(plan.search_threads.get(), n);
+                let env = env_of(&plan);
+                assert!(
+                    env.contains(&format!("BOT_SEARCH_THREADS=\"{n}\"\n"))
+                        && env.contains("BOT_PREINPUT=\"off\"\n")
+                        && env.contains("BOT_FINISH=\"off\"\n"),
+                    "{env}"
+                );
+            }
+        }
+        // The pure fly does not search: one thread (the same as absent) is fine, more is refused.
+        assert!(plan_for(Brain::Fly, None).is_ok() && plan_for(Brain::Fly, Some(1)).is_ok());
+        for n in 2..=4u8 {
+            assert_eq!(
+                plan_for(Brain::Fly, Some(n)).unwrap_err(),
+                Refuse("search_threads_hybrid_only"),
+                "{n}"
+            );
+        }
+        // The status the site reads names it; a launch remembered before the field existed reads as one thread.
+        let info = LaunchInfo {
+            id: "0123456789abcdef".to_string(),
+            brain: Brain::Hybrid,
+            server: "local".to_string(),
+            duration: DurationChoice::M15,
+            sparring: 0,
+            public: false,
+            favourite: false,
+            bundle: None,
+            finish: Finish::Full,
+            wb_smart: WbSmart::Off,
+            no_selfkill: true,
+            window_model: false,
+            preinput: false,
+            search_threads: SearchThreads::new(3).unwrap(),
+        };
+        assert_eq!(
+            status_of(&info, RunState::Started, 5)
+                .search_threads
+                .map(SearchThreads::get),
+            Some(3)
+        );
+        let mut old = serde_json::to_value(&info).unwrap();
+        old.as_object_mut().unwrap().remove("search_threads");
+        let old: LaunchInfo = serde_json::from_value(old).unwrap();
+        assert_eq!(old.search_threads, SearchThreads::ONE);
     }
 
     #[test]
@@ -2265,8 +2356,8 @@ mod tests {
 
     // --- task 5.12 (D-099): favourites -------------------------------------------------------------------------
 
-    const FAV_ADDR: &str = "45.141.57.35:8308";
-    const FAV_SIBLING: &str = "45.141.57.35:8309";
+    const FAV_ADDR: &str = "93.184.216.35:8308";
+    const FAV_SIBLING: &str = "93.184.216.35:8309";
     const FAV_OTHER: &str = "93.184.216.34:8303";
 
     fn fav(address: &str, connection: &str) -> Favourite {
@@ -2323,11 +2414,11 @@ mod tests {
         for s in [
             FAV_OTHER,
             FAV_SIBLING,
-            "45.141.57.36:8308",
+            "93.184.216.36:8308",
             "127.0.0.1:8463",
             "Local",
             "",
-            "45.141.57.35:8308 ",
+            "93.184.216.35:8308 ",
         ] {
             assert_eq!(
                 decide_fav(
@@ -2600,7 +2691,7 @@ mod tests {
             let merged = live.with_favourites(&list).unwrap();
             (plan, merged)
         };
-        let server: IpAddr = "45.141.57.35".parse().unwrap();
+        let server: IpAddr = "93.184.216.35".parse().unwrap();
         // A public relay: the server's IP is denied, nothing is allowed.
         let (plan, merged) = plan_of(fav(FAV_ADDR, "proxy:hp-pub"));
         assert_eq!(
@@ -2791,7 +2882,7 @@ mod tests {
 
     #[test]
     fn an_allow_list_edit_never_lifts_a_ban_recorded_for_a_favourite() {
-        // The favourite 45.141.57.35:8308 was banned; the allow-list names a sibling port on the same IP.
+        // The favourite 93.184.216.35:8308 was banned; the allow-list names a sibling port on the same IP.
         let sibling = live(&format!(
             "[[server]]\naddress = \"{FAV_SIBLING}\"\nnick = \"Muha\"\nready = true\n"
         ));

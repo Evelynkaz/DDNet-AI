@@ -514,7 +514,7 @@ fn a_proxy_file_issued_for_another_server_is_used_where_the_entry_assigns_it() {
     let game = GameDouble::start(false);
     let cfg = config(
         entry(game.addr, Some(PROXY)),
-        Some(proxy_cfg(&proxy, None).with_for_server("45.141.57.35:8308")),
+        Some(proxy_cfg(&proxy, None).with_for_server("192.0.2.35:8308")),
     );
     let mut client = Client::connect(game.addr, cfg);
     let events = collect(&mut client, Duration::from_secs(5), |e| connected_count(e) >= 1);

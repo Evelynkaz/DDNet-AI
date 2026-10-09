@@ -295,6 +295,11 @@ pub struct PlannerConfig {
     /// the ceiling and carries us in after it, 3-5 ticks later -- scores about zero, and the arena credits it as a win: in E-030 it is 47 of the 83
     /// duel wins whose block does not hold (26 of them a follow-in within 3 ticks; diagnosed against the old planner) (we thaw together with the victim, which walks off).
     pub mutual_freeze_cost: f64,
+    /// Task 3.23 (D-121, hybrid only, `false` = off; the TS-parity path never reads it): **the counter**. A victim that reacts (`scripted_action`) holds its
+    /// hook on us for as long as we are in rope range. A human who has pulled us up releases it on passing below us, and the speed it gave us carries us into the
+    /// ceiling (9 of 10 losses of the 2026-10-08 duel). With this switch the reacting victim lets go while it is below us and we rise
+    /// ([`crate::hybrid::duelfix::counter_releases`]), so the rollouts of the robust stage see the plans that leave us rising under him.
+    pub counter_release: bool,
 }
 
 /// The opponent distance within which the ceiling guard applies (the hook's length plus two decisions of closing speed, the hybrid's threat radius).
@@ -459,6 +464,7 @@ impl Default for PlannerConfig {
             frozen_seal_weight: 0.0,
             sealed_forecast_weight: 0.0,
             mutual_freeze_cost: 0.0,
+            counter_release: false,
         }
     }
 }

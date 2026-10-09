@@ -209,7 +209,7 @@ mod tests {
     use std::cell::RefCell;
 
     const FIXTURE: &str = include_str!("../../ddai-client/tests/fixtures/master-servers.json");
-    const GOOD: &str = r#"{"servers":[{"addresses":["tw-0.6+udp://45.141.57.35:8308"],"location":"eu:it","info":{"name":"S","map":{"name":"Copy Love Box"},"game_type":"Block","passworded":false,"max_clients":64,"clients":[{"name":"SECRETNICK","is_player":true}]}}]}"#;
+    const GOOD: &str = r#"{"servers":[{"addresses":["tw-0.6+udp://93.184.216.35:8308"],"location":"eu:it","info":{"name":"S","map":{"name":"Copy Love Box"},"game_type":"Block","passworded":false,"max_clients":64,"clients":[{"name":"SECRETNICK","is_player":true}]}}]}"#;
 
     fn masters() -> Vec<String> {
         MASTERS.iter().map(|m| (*m).to_string()).collect()

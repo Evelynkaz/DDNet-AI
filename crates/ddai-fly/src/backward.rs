@@ -286,6 +286,7 @@ pub fn backward(
     want_v_init_grad: bool,
     scratch: &mut BpttScratch,
 ) -> BpttGradients {
+    model.assert_rate("the rate model's backward pass");
     let n = model.num_neurons();
     let s = model.config().substeps_per_decision as usize;
     let l_total = t_decisions * s;

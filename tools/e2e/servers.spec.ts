@@ -176,7 +176,7 @@ test("a favourite needs the owner's consent; malicious addresses are refused", a
   const consent = manual.locator(".sv-check input");
   const before = await favPanel(page).locator(".sv-row").count();
   await consent.check();
-  for (const bad of ["10.0.0.5:8303", "localhost:8303", "example.com:8303", "45.141.57.35", "8.8.8.8:0", "169.254.169.254:80", "8.8.8.8:8303/../x"]) {
+  for (const bad of ["10.0.0.5:8303", "localhost:8303", "example.com:8303", "93.184.216.35", "8.8.8.8:0", "169.254.169.254:80", "8.8.8.8:8303/../x"]) {
     await addr.fill(bad);
     await manual.getByRole("button", { name: "Добавить в избранное" }).click();
     await expect(manual.locator(".sv-result")).toContainText("Адрес должен быть вида IP:порт", { timeout: 10_000 });

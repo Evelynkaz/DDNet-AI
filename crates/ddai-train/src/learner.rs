@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use ddai_controls::bundle::{ControlBundle, save_control_bundle};
-use ddai_controls::features::{extract, input_dim};
+use ddai_controls::features::{extract_with, reads_opponent_state};
 use ddai_controls::net::SeqNet;
 use ddai_fly::backward::BackwardIndex;
 use ddai_fly::batched::{BatchedEngine, BatchedPlan, TrainBackend};
@@ -28,13 +28,14 @@ use ddai_fly::brain_bc::{
 };
 use ddai_fly::brain_bc_batched::brain_bc_batched_step;
 use ddai_fly::brain_config::{BrainConfig, parse_brain_config};
-use ddai_fly::bundle::{BUNDLE_FORMAT_VERSION, BundleMeta, FlyBundle, save_bundle, sha256_hex_of_file};
+use ddai_fly::bundle::{BUNDLE_FORMAT_VERSION, BundleMeta, FlyBundle, NeuronModel, save_bundle, sha256_hex_of_file};
 use ddai_fly::calibration::calibrate_from_windows;
 use ddai_fly::config::FlyConfig;
 use ddai_fly::decoder::{
     DecoderGradients, DecoderModel, DecoderParams, DnCalibration, HookRelease, calibrate_from_rest,
 };
 use ddai_fly::encoder::{EncoderGradients, EncoderModel, EncoderParams, RayGridConfig, RayGridFeatures};
+use ddai_fly::gm::{GmConfig, GmParams, GmShape};
 use ddai_fly::hook_wide::{HookReadout, HookWide};
 use ddai_fly::model::FlyModel;
 use ddai_fly::optim::{ActivityRegularizerConfig, ParamGradients};
@@ -194,6 +195,13 @@ pub struct FlyTrainConfig {
     /// of *every* window as unscored, also for a window that starts at the beginning of a
     /// sequence. Set it to the `[train]` `burn_in`.
     pub batched_stop_grad_decisions: usize,
+    /// **Task 8.8:** `Some` makes the fly a FlyGM-style `Gm` fly (`[fly.gm]` in the config; absent = the rate model of FLY.md section 4, the
+    /// default, bit for bit as before). A fresh `Gm` fly is initialised from the train seed; restoring a bundle takes the model from the bundle
+    /// (then this must be absent). The connectome's `a`, `b`, `theta` do not exist for it; the per-parameter learning rates are `lr_gm`
+    /// (the update network, the injection and the readout) and `lr_gm_eta` (the descriptors, `0` = `lr_gm`). The per-seq backend only; no activity regulariser.
+    pub gm: Option<GmConfig>,
+    pub lr_gm: f32,
+    pub lr_gm_eta: f32,
 }
 
 impl Default for FlyTrainConfig {
@@ -217,6 +225,9 @@ impl Default for FlyTrainConfig {
             batched_parallel_threshold: None,
             batched_subengines: 1,
             batched_stop_grad_decisions: 0,
+            gm: None,
+            lr_gm: 3e-3,
+            lr_gm_eta: 0.0,
         }
     }
 }
@@ -241,14 +252,24 @@ pub(crate) struct Layout {
     release_w: usize,
     /// Task 8.7: a wide hook readout appends `(w1, b1, w2)` after the release hazard.
     wide: Option<(usize, usize, usize)>,
+    /// Task 8.8: the `Gm` neuron model's parameters sit between the encoder and the decoder (`a`, `b`, `theta` are then empty: the rate
+    /// model's connectome parameters do not exist for it).
+    pub(crate) gm: Option<GmShape>,
 }
 
 impl Layout {
     pub(crate) fn of(fly: &FlyParams, enc: &EncoderParams, dec: &DecoderParams) -> Layout {
+        Self::of_model(fly, enc, dec, None)
+    }
+
+    /// The layout of a fly with the rate model (`gm == None`) or the `Gm` model of the given shape.
+    pub(crate) fn of_model(fly: &FlyParams, enc: &EncoderParams, dec: &DecoderParams, gm: Option<GmShape>) -> Layout {
+        let rate = gm.is_none();
         Layout {
-            a: fly.a.len(),
-            b: fly.b.len(),
-            theta: fly.theta.len(),
+            gm,
+            a: if rate { fly.a.len() } else { 0 },
+            b: if rate { fly.b.len() } else { 0 },
+            theta: if rate { fly.theta.len() } else { 0 },
             g: enc.g.len(),
             c: enc.c.len(),
             bin: enc.bin_gain.len(),
@@ -265,6 +286,11 @@ impl Layout {
         }
     }
 
+    /// Length of the `Gm` region (`0` for the rate model).
+    pub(crate) fn gm_len(&self) -> usize {
+        self.gm.as_ref().map_or(0, GmShape::total)
+    }
+
     pub(crate) fn total(&self) -> usize {
         self.a
             + self.b
@@ -272,6 +298,7 @@ impl Layout {
             + self.g
             + self.c
             + self.bin
+            + self.gm_len()
             + self.dir_lr_w
             + 1
             + self.stop_w
@@ -299,7 +326,7 @@ impl Layout {
 
     /// Start offsets of `(a, b, theta, g, c, decoder...)`.
     pub(crate) fn decoder_start(&self) -> usize {
-        self.a + self.b + self.theta + self.g + self.c + self.bin
+        self.a + self.b + self.theta + self.g + self.c + self.bin + self.gm_len()
     }
 }
 
@@ -422,6 +449,7 @@ impl FlyLearner {
         } else {
             FlyParams::init_default(&flyg, &fly_config, seed)
         };
+        let gm = cfg.gm.map(|c| (c, None));
         let mut learner = Self::build(
             flyg,
             flyg_path.to_path_buf(),
@@ -429,6 +457,8 @@ impl FlyLearner {
             toml,
             fly_config,
             fly_params,
+            gm,
+            seed,
             None,
             None,
             None,
@@ -471,7 +501,30 @@ impl FlyLearner {
             ));
         }
         bundle.validate_hook()?;
+        // A bundle brings its own neuron model. `[fly.gm]` next to it must name that same model (a resumed run keeps its config),
+        // and cannot turn a rate checkpoint into a Gm one.
+        match (&cfg.gm, &bundle.neuron_model) {
+            (None, _) => {}
+            (Some(want), NeuronModel::Gm { config, .. }) if want == config => {}
+            (Some(want), NeuronModel::Gm { config, .. }) => {
+                return Err(format!(
+                    "[fly.gm] ({}) does not match the checkpoint's neuron model ({})",
+                    want.label(),
+                    config.label()
+                ));
+            }
+            (Some(want), NeuronModel::Rate) => {
+                return Err(format!(
+                    "[fly.gm] ({}) given, but the checkpoint is a rate fly: a checkpoint's neuron model cannot be changed",
+                    want.label()
+                ));
+            }
+        }
         let (thresholds, hook_view, hook_decode) = (bundle.thresholds, bundle.hook_view, bundle.hook_decode);
+        let gm = match bundle.neuron_model {
+            NeuronModel::Rate => None,
+            NeuronModel::Gm { config, params } => Some((config, Some(params))),
+        };
         let mut l = Self::build(
             flyg,
             flyg_path.to_path_buf(),
@@ -479,6 +532,8 @@ impl FlyLearner {
             bundle.brain_config_toml,
             bundle.fly_config,
             bundle.fly_params,
+            gm,
+            0,
             Some(bundle.encoder_params),
             Some(bundle.decoder_params),
             Some(bundle.calibration),
@@ -500,6 +555,8 @@ impl FlyLearner {
         brain_config_toml: String,
         fly_config: FlyConfig,
         fly_params: FlyParams,
+        gm: Option<(GmConfig, Option<GmParams>)>,
+        gm_seed: u64,
         enc_params: Option<EncoderParams>,
         dec_params: Option<DecoderParams>,
         calib: Option<DnCalibration>,
@@ -507,7 +564,20 @@ impl FlyLearner {
         cfg: FlyTrainConfig,
     ) -> LearnerResult<Self> {
         let brain_config = parse_brain_config(&brain_config_toml).map_err(|e| format!("brain config: {e}"))?;
-        let model = FlyModel::new(flyg, fly_config, fly_params.clone()).map_err(|e| format!("fly model: {e}"))?;
+        let mut model = FlyModel::new(flyg, fly_config, fly_params.clone()).map_err(|e| format!("fly model: {e}"))?;
+        if let Some((gm_config, gm_params)) = gm {
+            if cfg.backend == TrainBackend::Batched {
+                return Err(
+                    "the Gm neuron model trains on the per-seq backend (fly.backend = \"per-seq\")".to_string(),
+                );
+            }
+            if cfg.activity_weight != 0.0 {
+                return Err("fly.activity_weight is defined for the rate model only".to_string());
+            }
+            model = model
+                .with_gm(gm_config, gm_params, gm_seed)
+                .map_err(|e| format!("gm neuron model: {e}"))?;
+        }
         let index = BackwardIndex::build(&model);
         let encoder = brain_config
             .encoder_model(&model)
@@ -541,7 +611,7 @@ impl FlyLearner {
                 sigma: vec![1.0; decoder.num_outputs()],
             },
         };
-        let layout = Layout::of(&fly_params, &enc_params, &dec_params);
+        let layout = Layout::of_model(&fly_params, &enc_params, &dec_params, model.gm().map(|g| *g.shape()));
         let batched = (cfg.backend == TrainBackend::Batched).then(|| {
             let mut plan = BatchedPlan::new(&model);
             if let Some(threshold) = cfg.batched_parallel_threshold {
@@ -558,8 +628,12 @@ impl FlyLearner {
             flyg_sha256,
             brain_config_toml,
             brain_config,
-            a_init: fly_params.a.clone(),
-            v_rest: vec![0.0; model.num_neurons()],
+            a_init: if model.gm().is_some() {
+                Vec::new()
+            } else {
+                fly_params.a.clone()
+            },
+            v_rest: vec![0.0; model.state_len()],
             model,
             index,
             encoder,
@@ -579,6 +653,10 @@ impl FlyLearner {
 
     pub fn model(&self) -> &FlyModel {
         &self.model
+    }
+    /// Index in the flat parameter vector where the decoder's parameters start (the encoder and the `Gm` network come before).
+    pub fn decoder_param_start(&self) -> usize {
+        self.layout.decoder_start()
     }
     pub fn calibration(&self) -> &DnCalibration {
         &self.calib
@@ -646,6 +724,13 @@ impl FlyLearner {
             hook_param: self.hook_param(),
             hook_decode: self.hook_decode,
             hook_readout: self.decoder.hook_readout(),
+            neuron_model: match self.model.gm() {
+                None => NeuronModel::Rate,
+                Some(g) => NeuronModel::Gm {
+                    config: *g.config(),
+                    params: g.params().clone(),
+                },
+            },
         }
     }
 
@@ -659,6 +744,22 @@ impl FlyLearner {
 
     fn add_step_grads(&self, out: &BcStepOutput, grad: &mut [f32]) {
         self.add_parts_grads(&out.fly, &out.encoder, &out.decoder, grad);
+        self.add_gm_grads(out.gm.as_ref(), grad);
+    }
+
+    /// Adds the `Gm` model's gradient into its region of the flat vector (nothing for the rate model).
+    pub(crate) fn add_gm_grads(&self, gm: Option<&GmParams>, grad: &mut [f32]) {
+        let Some(shape) = self.layout.gm else { return };
+        let Some(gm) = gm else { return };
+        let start = self.layout.a + self.layout.b + self.layout.theta + self.layout.g + self.layout.c + self.layout.bin;
+        let mut at = start;
+        for f in gm.fields() {
+            for (g, s) in grad[at..at + f.len()].iter_mut().zip(f.iter()) {
+                *g += s;
+            }
+            at += f.len();
+        }
+        debug_assert_eq!(at, start + shape.total());
     }
 
     /// Adds the three gradient groups of a step into the flat vector (the layout of
@@ -671,12 +772,13 @@ impl FlyLearner {
         grad: &mut [f32],
     ) {
         let l = &self.layout;
-        let mut at = 0;
+        let at = std::cell::Cell::new(0usize);
         let mut add = |src: &[f32]| {
-            for (g, s) in grad[at..at + src.len()].iter_mut().zip(src) {
+            let from = at.get();
+            for (g, s) in grad[from..from + src.len()].iter_mut().zip(src) {
                 *g += s;
             }
-            at += src.len();
+            at.set(from + src.len());
         };
         add(&fly.a);
         add(&fly.b);
@@ -684,6 +786,7 @@ impl FlyLearner {
         add(&encoder.g);
         add(&encoder.c);
         add(&encoder.bin_gain);
+        at.set(at.get() + l.gm_len()); // the Gm model's own region, added by `add_gm_grads`
         add(&d.direction_lr_w);
         add(&[d.direction_lr_b]);
         add(&d.direction_stop_w);
@@ -705,13 +808,16 @@ impl FlyLearner {
             add(&d.hook_wide.b1);
             add(&d.hook_wide.w2);
         }
-        debug_assert_eq!(at, l.total());
+        debug_assert_eq!(at.get(), l.total());
     }
 }
 
 impl Learner for FlyLearner {
     fn label(&self) -> String {
-        "fly".to_string()
+        match self.model.gm() {
+            None => "fly".to_string(),
+            Some(g) => format!("fly-{}", g.config().label()),
+        }
     }
 
     fn num_params(&self) -> usize {
@@ -720,12 +826,17 @@ impl Learner for FlyLearner {
 
     fn params(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.layout.total());
-        out.extend_from_slice(&self.fly_params.a);
-        out.extend_from_slice(&self.fly_params.b);
-        out.extend_from_slice(&self.fly_params.theta);
+        if self.model.gm().is_none() {
+            out.extend_from_slice(&self.fly_params.a);
+            out.extend_from_slice(&self.fly_params.b);
+            out.extend_from_slice(&self.fly_params.theta);
+        }
         out.extend_from_slice(&self.enc_params.g);
         out.extend_from_slice(&self.enc_params.c);
         out.extend_from_slice(&self.enc_params.bin_gain);
+        if let Some(g) = self.model.gm() {
+            out.extend(g.params().to_flat());
+        }
         push_decoder(&mut out, &self.dec_params);
         out
     }
@@ -742,10 +853,15 @@ impl Learner for FlyLearner {
         let g = take(flat, &mut at, l.g).to_vec();
         let c = take(flat, &mut at, l.c).to_vec();
         let bin_gain = take(flat, &mut at, l.bin).to_vec();
+        if let Some(shape) = l.gm {
+            let gm = GmParams::from_flat(&shape, take(flat, &mut at, shape.total())).map_err(|e| e.to_string())?;
+            self.model.set_gm_params(gm).map_err(|e| e.to_string())?;
+        } else {
+            let fly = FlyParams { a, b, theta };
+            self.model.set_params(fly.clone()).map_err(|e| e.to_string())?;
+            self.fly_params = fly;
+        }
         let dec = decoder_from_flat(&flat[l.decoder_start()..], l);
-        let fly = FlyParams { a, b, theta };
-        self.model.set_params(fly.clone()).map_err(|e| e.to_string())?;
-        self.fly_params = fly;
         self.enc_params = EncoderParams { g, c, bin_gain };
         self.dec_params = dec;
         Ok(())
@@ -759,6 +875,11 @@ impl Learner for FlyLearner {
         lrs.extend(std::iter::repeat_n(cfg.lr_b, l.b));
         lrs.extend(std::iter::repeat_n(cfg.lr_theta, l.theta));
         lrs.extend(std::iter::repeat_n(cfg.lr_encoder, l.g + l.c + l.bin));
+        if let Some(shape) = l.gm {
+            let eta_lr = if cfg.lr_gm_eta > 0.0 { cfg.lr_gm_eta } else { cfg.lr_gm };
+            lrs.extend(std::iter::repeat_n(eta_lr, shape.lens()[0]));
+            lrs.extend(std::iter::repeat_n(cfg.lr_gm, shape.total() - shape.lens()[0]));
+        }
         let n_dec = l.total() - l.decoder_start();
         lrs.extend(std::iter::repeat_n(cfg.lr_decoder, n_dec));
         let (pooled, wide) = l.hook_ranges();
@@ -911,7 +1032,7 @@ impl Learner for FlyLearner {
     }
 
     fn regularizer_grad(&self, grad: &mut [f32]) -> f32 {
-        if self.cfg.l2_a == 0.0 || self.cfg.readout_only {
+        if self.cfg.l2_a == 0.0 || self.cfg.readout_only || self.model.gm().is_some() {
             return 0.0;
         }
         let mut value = 0.0f32;
@@ -984,6 +1105,8 @@ impl Learner for FlyLearner {
 pub struct ControlLearner {
     net: Box<dyn SeqNet>,
     ray_grid: RayGridConfig,
+    /// Whether the net also reads the opponent-state channels (its input is longer by `OPPONENT_STATE_DIM`, task 8.8).
+    opponent_state: bool,
     lr: f32,
     thresholds: HeadThresholds,
     hook_view: HookView,
@@ -991,10 +1114,12 @@ pub struct ControlLearner {
 
 impl ControlLearner {
     pub fn new(net: Box<dyn SeqNet>, ray_grid: RayGridConfig, lr: f32) -> Self {
-        assert_eq!(net.input_dim(), input_dim(&ray_grid));
+        let opponent_state =
+            reads_opponent_state(&ray_grid, net.input_dim()).expect("the control's input size matches its ray grid");
         ControlLearner {
             net,
             ray_grid,
+            opponent_state,
             lr,
             thresholds: HeadThresholds::default(),
             hook_view: HookView::Shared,
@@ -1012,7 +1137,7 @@ impl ControlLearner {
             .iter()
             .map(|o| {
                 let mut x = Vec::with_capacity(self.net.input_dim());
-                extract(o, &self.ray_grid, &mut scratch, &mut x);
+                extract_with(o, &self.ray_grid, &mut scratch, self.opponent_state, &mut x);
                 x
             })
             .collect()

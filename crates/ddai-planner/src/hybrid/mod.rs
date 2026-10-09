@@ -19,6 +19,7 @@
 //! * [`engine`]: candidate scoring on worker worlds, serial or on a persistent worker pool.
 //! * [`search`]: the decision procedure (pool of candidates, two-stage robust choice, adaptive
 //!   budget, shield) and its telemetry.
+//! * [`duelfix`]: the three duel fixes of task 3.23 (static victim, the counter, finishing; off by default).
 //! * [`reflex`]: the reflex hammer and the hammer-safe envelope on top of the decision (task 3.19, off by default).
 //! * [`window`]: the lag-window model, a learned prediction of the victim's inputs (task 3.15, opt-in).
 //! * [`work`]: the work clock (deadline mode counted in physics ticks: reproducible, load-independent).
@@ -27,6 +28,7 @@
 pub mod anchors;
 pub mod brain;
 pub mod config;
+pub mod duelfix;
 pub mod engine;
 pub mod proposer;
 pub mod reflex;
@@ -41,6 +43,7 @@ pub use config::{
     BUDGET_MS_RANGE, CAP_HEADROOM_MS, DEFAULT_BUDGET_MS, FINISH_DRAG_WEIGHT, HybridConfig, HybridMode, RobustMode,
     hybrid_planner_preset, hybrid_terms,
 };
+pub use duelfix::DuelFixConfig;
 pub use proposer::{
     ActionDistribution, NoProposer, ProposalOutcome, ProposeCtx, Proposer, ScriptedProposer, plans_from_distribution,
 };

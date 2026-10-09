@@ -962,7 +962,7 @@ mod tests {
             "ddnet-ai",
             "record",
             "--server",
-            "45.141.57.35:8308",
+            "93.184.216.35:8308",
             "--name",
             "TestObserver",
             "--duration",

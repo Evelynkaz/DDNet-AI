@@ -69,9 +69,60 @@ pub fn clamp(val: f64, min: f64, max: f64) -> f64 {
     val
 }
 
+/// `v.floor() as i32` without the libm call (task 4.13): for `|v|` below 2^31 - 647 the truncating cast is in range, and
+/// one less than it when the truncation rounded up (a negative non-integer). NaN and larger magnitudes take the plain route
+/// (saturating cast, as before), so the result is the same for every input.
+#[inline(always)]
+pub fn floor_i32(v: f64) -> i32 {
+    if v > -2_147_483_000.0 && v < 2_147_483_000.0 {
+        let t = v as i32;
+        t - i32::from(f64::from(t) > v)
+    } else {
+        v.floor() as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floor_i32_equals_floor_then_cast() {
+        let mut vals = vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.0,
+            -1.0,
+            31.999999999,
+            -31.999999999,
+            2_147_482_999.5,
+            -2_147_482_999.5,
+            2_147_483_000.0,
+            2_147_483_647.0,
+            2_147_483_648.0,
+            -2_147_483_648.0,
+            -2_147_483_649.0,
+            1e300,
+            -1e300,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        for _ in 0..500_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let u = (state >> 11) as f64 / (1u64 << 53) as f64;
+            vals.push((u - 0.5) * 2.0 * [1.0, 40.0, 1e4, 1e9, 4e9][(state % 5) as usize]);
+            vals.push(f64::from_bits(state));
+        }
+        for v in vals {
+            assert_eq!(floor_i32(v), v.floor() as i32, "{v}");
+        }
+    }
 
     #[test]
     fn distance_matches_pythagoras() {

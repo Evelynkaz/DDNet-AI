@@ -85,7 +85,7 @@ def analyse(ev):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("journal")
-    ap.add_argument("--server", default="45.141.57.35:8308")
+    ap.add_argument("--server", required=True, help="server address as in the journal")
     a = ap.parse_args()
     tot = Counter()
     gaps = []

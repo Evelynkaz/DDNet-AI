@@ -376,3 +376,175 @@ fn the_launcher_installer_refuses_a_binary_without_the_preinput_flag() {
         assert!(check < first_use, "the binary check must come before `{later}`");
     }
 }
+
+#[test]
+fn the_bot_unit_has_cpu_priority_over_the_agents_with_soft_settings_only_and_keeps_its_hardening() {
+    // Task 4.14 (D-124): builds, tests, arenas and training on the same VPS starved the bot's search (14 candidates per decision against 28).
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    // CPUWeight= (systemd.resource-control: 1..10000, default 100) well above the default; exactly one value, no drop-in-style reset.
+    let weight = values(&s, "CPUWeight");
+    assert_eq!(weight.len(), 1, "{weight:?}");
+    let w: u32 = weight[0].parse().expect("CPUWeight is a plain number");
+    assert!((500..=10000).contains(&w), "CPUWeight={w}");
+    // Nice= (systemd.exec: -20..19): negative, but not the extreme that would starve the game server (it shares system.slice with other units, not the bot's slice).
+    let nice = values(&s, "Nice");
+    assert_eq!(nice.len(), 1, "{nice:?}");
+    let n: i32 = nice[0].parse().expect("Nice is a plain number");
+    assert!((-10..=-1).contains(&n), "Nice={n}");
+    let io = values(&s, "IOWeight");
+    assert_eq!(io.len(), 1, "{io:?}");
+    assert!(io[0].parse::<u32>().is_ok_and(|v| (100..=10000).contains(&v)), "{io:?}");
+    // The setting that counts: a top-level slice of its own, whose weight competes with user.slice (the agents) directly.
+    let slice = values(&s, "Slice");
+    assert_eq!(slice, vec!["ddnetaibot.slice"]);
+    let sl = settings(&unit("ddnetaibot.slice"));
+    let sw: u32 = values(&sl, "CPUWeight")[0]
+        .parse()
+        .expect("the slice's CPUWeight is a plain number");
+    assert!((500..=10000).contains(&sw), "slice CPUWeight={sw}");
+    assert!(
+        values(&sl, "IOWeight")[0]
+            .parse::<u32>()
+            .is_ok_and(|v| (100..=10000).contains(&v))
+    );
+    // No dash in the slice name: systemd would read `a-b.slice` as a child of `a.slice` (default weight 100), and the weight that competes
+    // at the top would be that parent's, not ours.
+    assert!(!slice[0].trim_end_matches(".slice").contains('-'), "{slice:?}");
+    // The slice sets only weights: no limits, no quota, no real-time, no affinity, and nothing but the [Unit] and [Slice] sections.
+    let keys: Vec<&str> = sl.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(
+        keys.iter()
+            .all(|k| ["Description", "Documentation", "CPUWeight", "IOWeight"].contains(k)),
+        "{keys:?}"
+    );
+    // No real-time scheduling, ever: the policy is not set and the sandbox still forbids it.
+    for key in ["CPUSchedulingPolicy", "CPUSchedulingPriority", "CPUAffinity"] {
+        assert!(values(&s, key).is_empty(), "{key} must not be set");
+    }
+    assert_eq!(values(&s, "RestrictRealtime"), vec!["true"]);
+    // Nice=-5 must not need a capability in the running unit: the bounding set stays empty (systemd applies Nice= as PID 1), and no new privileges.
+    assert_eq!(values(&s, "CapabilityBoundingSet"), vec![""]);
+    assert_eq!(values(&s, "AmbientCapabilities"), vec![""]);
+    assert_eq!(values(&s, "NoNewPrivileges"), vec!["true"]);
+    // The existing hardening is all still there.
+    for (key, want) in [
+        ("ProtectSystem", "strict"),
+        ("ProtectHome", "read-only"),
+        ("PrivateTmp", "true"),
+        ("PrivateDevices", "true"),
+        ("ProtectKernelTunables", "true"),
+        ("ProtectKernelModules", "true"),
+        ("ProtectKernelLogs", "true"),
+        ("ProtectControlGroups", "true"),
+        ("ProtectClock", "true"),
+        ("ProtectHostname", "true"),
+        ("RestrictNamespaces", "true"),
+        ("RestrictSUIDSGID", "true"),
+        ("LockPersonality", "true"),
+        ("MemoryDenyWriteExecute", "true"),
+        ("RemoveIPC", "true"),
+        ("RestrictAddressFamilies", "AF_INET AF_INET6 AF_UNIX"),
+        ("SystemCallArchitectures", "native"),
+        ("MemoryMax", "2G"),
+        ("TasksMax", "256"),
+        ("UMask", "0077"),
+        ("IPAddressAllow", "127.0.0.0/8 ::1"),
+        ("IPAddressDeny", "any"),
+    ] {
+        assert_eq!(values(&s, key), vec![want], "{key}");
+    }
+}
+
+#[test]
+fn the_launcher_installer_installs_the_bot_slice_and_checks_that_the_bot_unit_really_has_the_cpu_priority() {
+    // Task 4.14: the slice file is installed with the units (and removed by --uninstall); after `daemon-reload` the installer asks systemd what
+    // it now loads (a foreign drop-in or a stale copy would show here) and compares it with the repository's files; it only warns (the install
+    // itself is done, and it never starts or stops the bot).
+    let script = fs::read_to_string(deploy().join("install-launcher.sh")).unwrap();
+    let units_line = script.find("UNITS=(").expect("UNITS array");
+    assert!(
+        script[units_line..]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("ddnetaibot.slice")
+    );
+    let uninstall = script.find("if [[ \"$UNINSTALL\" -eq 1 ]]").expect("uninstall branch");
+    assert!(
+        script[uninstall..].contains("ddnet-ai-proxycheck.service ddnetaibot.slice; do"),
+        "--uninstall removes the slice file"
+    );
+    let reload = script.rfind("sudo systemctl daemon-reload").expect("daemon-reload");
+    let readback = script
+        .find("for key in Slice CPUWeight Nice IOWeight; do check_prop \"$BOT_UNIT\" \"$key\"; done")
+        .expect("the read-back of the bot unit");
+    assert!(reload < readback, "the read-back comes after the reload");
+    assert!(script.contains("for key in CPUWeight IOWeight; do check_prop ddnetaibot.slice \"$key\"; done"));
+    let f = script.find("check_prop() {").expect("check_prop");
+    let body = &script[f..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    assert!(body.contains("systemctl show -p \"$key\" --value \"$unit\""), "{body}");
+    assert!(
+        body.contains("\"$UNIT_SRC/$unit\""),
+        "the wanted value is read from the repository's file: {body}"
+    );
+    assert!(body.contains("WARNING"), "{body}");
+    assert!(!body.contains("die "), "a mismatch warns, it does not abort: {body}");
+    // Every key it reads back is present in the file it reads it from.
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    for key in ["Slice", "CPUWeight", "Nice", "IOWeight"] {
+        assert_eq!(values(&s, key).len(), 1, "{key}");
+    }
+    let sl = settings(&unit("ddnetaibot.slice"));
+    for key in ["CPUWeight", "IOWeight"] {
+        assert_eq!(values(&sl, key).len(), 1, "{key}");
+    }
+}
+
+#[test]
+fn the_bot_unit_passes_the_search_threads_as_two_words_and_it_is_one_by_default() {
+    // Task 5.17 (D-125): `--search-threads ${BOT_SEARCH_THREADS}` (a digit 1 to 4), the form of `--preinput`; the helper always writes the line.
+    let s = settings(&unit("ddnet-ai-bot.service"));
+    let env = values(&s, "Environment");
+    assert!(env.contains(&"BOT_SEARCH_THREADS=1"), "{env:?}");
+    let exec = values(&s, "ExecStart");
+    assert_eq!(exec.len(), 1);
+    assert!(
+        exec[0].contains(" --search-threads ${BOT_SEARCH_THREADS} "),
+        "{}",
+        exec[0]
+    );
+    // Once; never split by `$VAR`, never the equals form, never hard-coded, never `auto` (the free cores are not the owner's choice here).
+    assert_eq!(exec[0].matches("--search-threads").count(), 1, "{}", exec[0]);
+    assert!(
+        !exec[0].contains("$BOT_SEARCH_THREADS")
+            && !exec[0].contains("--search-threads=")
+            && !exec[0].contains("--search-threads auto")
+            && !exec[0].contains("--search-threads 1")
+            && !exec[0].contains("--search-threads 3"),
+        "{}",
+        exec[0]
+    );
+    // The earlier switches are untouched.
+    assert!(exec[0].contains(" --preinput ${BOT_PREINPUT} "), "{}", exec[0]);
+    assert!(exec[0].contains(" --finish ${BOT_FINISH} "), "{}", exec[0]);
+}
+
+#[test]
+fn the_launcher_installer_refuses_a_binary_without_the_search_threads_flag() {
+    let script = fs::read_to_string(deploy().join("install-launcher.sh")).unwrap();
+    let check = script
+        .find("grep -q -- '--search-threads' <<<\"$play_help\"")
+        .expect("install-launcher.sh checks the binary for --search-threads");
+    assert!(
+        script[check..]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("run deploy/install.sh first")
+    );
+    for later in ["daemon-reload", "install -o root -g root -m 0644"] {
+        let first_use = script.rfind(later).unwrap();
+        assert!(check < first_use, "the binary check must come before `{later}`");
+    }
+}

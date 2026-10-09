@@ -620,6 +620,109 @@ async fn the_page_gets_the_preinput_of_the_helpers_status_and_an_old_status_has_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_search_threads_choice_reaches_the_request_as_a_whole_number_from_one_to_four() {
+    // Task 5.17 (D-125): a closed list of four integers; no file, no word.
+    let with = |brain: &str, val: serde_json::Value| {
+        let mut body = start_body();
+        body["brain"] = serde_json::json!(brain);
+        body["search_threads"] = val;
+        body
+    };
+    // Both hybrid brains carry each of 1 to 4 into the request, and the helper's own parser reads it back.
+    for brain in ["hybrid", "hybrid-fly"] {
+        for n in 1..=4u8 {
+            // (a fresh site each time: it takes at most six requests a minute)
+            let server = deployed().await;
+            let l = login(&server);
+            let r = post(&server, &l, &with(brain, serde_json::json!(n)));
+            assert_eq!(r.status, 202, "{brain} {n}: {r:?}");
+            let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
+            let req = parse_request(text.as_bytes()).expect("the helper's own parser accepts it");
+            assert_eq!(req.search_threads.map(|t| t.get()), Some(n), "{brain}");
+            assert!(text.contains(&format!(r#""search_threads":{n}"#)), "{text}");
+        }
+    }
+    // An absent field stays absent: the request is byte-identical to one from before the field existed.
+    let server = deployed().await;
+    let l = login(&server);
+    let r = post(&server, &l, &start_body());
+    assert_eq!(r.status, 202, "{r:?}");
+    let text = String::from_utf8(fs::read(request_file(&server)).unwrap()).unwrap();
+    assert!(!text.contains("search_threads"), "{text}");
+    fs::remove_file(request_file(&server)).unwrap();
+    // The pure fly does not search: one is the same as absent and goes through, more is refused with its own code.
+    let r = post(&server, &l, &with("fly", serde_json::json!(1)));
+    assert_eq!(r.status, 202, "{r:?}");
+    fs::remove_file(request_file(&server)).unwrap();
+    for n in 2..=4u8 {
+        let r = post(&server, &l, &with("fly", serde_json::json!(n)));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("search_threads_hybrid_only")),
+            "{n}: {r:?}"
+        );
+    }
+    // Nothing but the whole numbers 1 to 4; a stop carries none. Refused, nothing written.
+    for bad in [
+        serde_json::json!(0),
+        serde_json::json!(5),
+        serde_json::json!(16),
+        serde_json::json!(-1),
+        serde_json::json!(2.5),
+        serde_json::json!("2"),
+        serde_json::json!("auto"),
+        serde_json::json!("2\nBOT_NAME=\"evil\""),
+        serde_json::json!(true),
+        serde_json::json!(""),
+        serde_json::json!([2]),
+    ] {
+        let r = post(&server, &l, &with("hybrid", bad.clone()));
+        assert_eq!(
+            (r.status, r.json()["error"].as_str()),
+            (400, Some("bad_request")),
+            "{bad}"
+        );
+    }
+    let r = post(&server, &l, &serde_json::json!({"action":"stop","search_threads":1}));
+    assert_eq!((r.status, r.json()["error"].as_str()), (400, Some("bad_request")));
+    assert!(
+        files_in(&launch_dir(&server)).is_empty(),
+        "a refused call writes nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_page_gets_the_search_threads_of_the_helpers_status_and_an_old_status_has_none() {
+    let server = deployed().await;
+    let l = login(&server);
+    let status = server.config.status_dir.join("status.json");
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"request_id":"0123456789abcdef","brain":"hybrid","server":"local","duration":"15m","sparring":0,"search_threads":3}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["search_threads"].as_u64(), Some(3));
+    fs::write(
+        &status,
+        r#"{"v":1,"state":"started","at":5,"brain":"hybrid","server":"local","duration":"15m","sparring":0}"#,
+    )
+    .unwrap();
+    let j = get(&server, &l).json();
+    assert_eq!(j["status"]["state"], "started");
+    assert!(j["status"].get("search_threads").is_none(), "{j}");
+    // A value outside the list makes the whole status unreadable, never a number of its own.
+    for bad in ["0", "5", "\"3\"", "2.5", "true"] {
+        fs::write(
+            &status,
+            format!(r#"{{"v":1,"state":"started","at":5,"search_threads":{bad}}}"#),
+        )
+        .unwrap();
+        assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null, "{bad}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_opponent_model_switch_reaches_the_request_and_only_as_on_or_off() {
     // Task 3.7b F9 (D-090).
     let server = deployed().await;
@@ -889,16 +992,17 @@ async fn a_symlinked_or_garbage_status_file_is_not_shown() {
     assert_eq!(get(&server, &l).json()["status"], serde_json::Value::Null);
 }
 
-/// Task 5.16 (D-120): the «Дуэль» preset only fills the form, so the request it leads to is made of the fields that were already there. This is
+/// Task 5.16 (D-120): the «Дуэль» preset only fills the form, so the request it leads to is made of the request's own fields. This is
 /// the exact body `launch.js` builds with the preset's values (brain «Гибрид», «Дожим: полный», «Без самоубийств»: вкл, «Настоящие ходы»: выкл, the
-/// predictor and the smart wayblock off, i.e. absent): the site takes it, the helper's own parser reads it back, and nothing else is in the file.
+/// predictor and the smart wayblock off, i.e. absent, «Потоки поиска»: 3, task 5.17, D-125): the site takes it, the helper's own parser reads it back,
+/// and nothing else is in the file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
+async fn the_duel_presets_request_is_made_of_the_requests_own_fields_only() {
     let server = deployed().await;
     let l = login(&server);
     let body = serde_json::json!({
         "action": "start", "brain": "hybrid", "server": "local", "duration": "15m", "sparring": 0,
-        "mirror": "on", "finish": "full", "no_selfkill": true
+        "mirror": "on", "finish": "full", "no_selfkill": true, "search_threads": 3
     });
     let r = post(&server, &l, &body);
     assert_eq!(r.status, 202, "{r:?}");
@@ -912,7 +1016,8 @@ async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
             req.preinput,
             req.mirror,
             req.wb_smart,
-            req.window_model
+            req.window_model,
+            req.search_threads.map(|t| t.get())
         ),
         (
             Some(Brain::Hybrid),
@@ -921,7 +1026,8 @@ async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
             None,
             Some(Mirror::On),
             None,
-            None
+            None,
+            Some(3)
         ),
         "{text}"
     );
@@ -930,7 +1036,7 @@ async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
         !text.contains("wb_smart") && !text.contains("window_model") && !text.contains("preinput"),
         "{text}"
     );
-    // There is no preset field and no other new one: a request that names one is refused whole, nothing written.
+    // The only field the preset adds is `search_threads`; there is no preset field and no other new one: a request that names one is refused whole, nothing written.
     fs::remove_file(request_file(&server)).unwrap();
     for (name, value) in [("preset", serde_json::json!("duel")), ("duel", serde_json::json!(true))] {
         let mut b = body.clone();
@@ -967,6 +1073,7 @@ async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
         "no_selfkill",
         "window_model",
         "preinput",
+        "search_threads",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -978,7 +1085,12 @@ async fn the_duel_presets_request_is_made_of_the_old_fields_only() {
             "launch.js sets a request field the format does not know: {f}"
         );
     }
-    assert!(fields.contains("finish") && fields.contains("no_selfkill") && fields.contains("preinput"));
+    assert!(
+        fields.contains("finish")
+            && fields.contains("no_selfkill")
+            && fields.contains("preinput")
+            && fields.contains("search_threads")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1026,6 +1138,24 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
         "при запасе предсказания соперника по умолчанию (10 мс) решение почти ничего не узнаёт заранее",
         "preinput_hybrid_only",
         "body.preinput",
+        // Task 5.17: the search-threads select, its honest hint (the numbers of 4.13, the quiet machine only, strength not measured), the preset's value and its refusal.
+        "Потоки поиска",
+        "1 (по умолчанию)",
+        "24–25 / 29 / 38 / 44 при 1 / 2 / 3 / 4 потоках",
+        "каждый помощник занимает около 5% ядра",
+        "Только на тихой машине: под нагрузкой больше потоков отнимает процессор у сборок и может не помочь",
+        "Больше кандидатов не значит больше побед",
+        // Review round 1: the research's quiet condition, medians (one run per value), the load sentence, the thread-scaled candidate threshold.
+        "Тихая — это нагрузка < 2 и не меньше 4 свободных ядер",
+        "медиана, один прогон на значение",
+        "Машина загружена: потоки поиска сверх 1 отнимают процессор у сборок и могут не помочь — выберите 1",
+        "Тихая машина — нагрузка < 2 и не меньше 4 свободных ядер",
+        "CANDIDATES_WARN_BY_THREADS",
+        "потоков поиска: ",
+        "Потоки поиска: 3",
+        "рекомендация сборщика 4.13 для дуэли на тихой машине",
+        "search_threads_hybrid_only",
+        "body.search_threads",
         "ВБ (эксперимент)",
         "заранее объявленной планки (+4,0 п.п.) это не берёт",
         "Эксперимент для игры на ВБ, не для дуэли",
@@ -1054,6 +1184,8 @@ async fn the_cards_script_and_styles_are_served_and_linked_from_the_page() {
     assert!(html.contains(r#"id="bs-wbsmart""#));
     assert!(html.contains(r#"id="bs-windowmodel""#));
     assert!(html.contains(r#"id="bs-preinput""#));
+    assert!(html.contains(r#"id="bs-searchthreads""#));
+    assert!(html.contains("при 2 / 3 / 4 потоках порог 24 / 31 / 36"));
     // Task 5.16: the machine's quietness rows and warning of the «Бот» card.
     for id in ["bs-load", "bs-search", "bs-quiet-warn", "bs-quiet-note"] {
         assert!(html.contains(&format!(r#"id="{id}""#)), "{id}");

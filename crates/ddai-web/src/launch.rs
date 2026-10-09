@@ -174,6 +174,64 @@ pub fn preinput_flag_value(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
+/// The hybrid's search threads (task 5.17, D-125; `ddnet-ai play --search-threads`): a closed list of the whole numbers 1 to 4. A JSON number
+/// outside the list, a float, a string or a boolean is no request at all (the parse fails), so the helper only ever holds one of four values and
+/// writes one of four static words to the unit's environment. 1 is the default and what a request without the field means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct SearchThreads(u8);
+
+impl SearchThreads {
+    /// The one-thread default (the bot's own default, D-080).
+    pub const ONE: SearchThreads = SearchThreads(1);
+    /// The most the list allows (the cores beyond the fourth buy little: E-012, D-123).
+    pub const MAX: u8 = 4;
+
+    /// `Some` for 1 to 4.
+    pub fn new(n: u8) -> Option<SearchThreads> {
+        (1..=Self::MAX).contains(&n).then_some(SearchThreads(n))
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+
+    /// The value of `ddnet-ai play --search-threads`: one of four fixed words, never a formatted number.
+    pub fn flag_value(self) -> &'static str {
+        match self.0 {
+            1 => "1",
+            2 => "2",
+            3 => "3",
+            _ => "4",
+        }
+    }
+
+    /// Whether this is more than the one-thread default (the pure fly brain, which does not search, refuses such a request).
+    pub fn is_more_than_one(self) -> bool {
+        self.0 > 1
+    }
+}
+
+impl Default for SearchThreads {
+    fn default() -> SearchThreads {
+        SearchThreads::ONE
+    }
+}
+
+impl TryFrom<u8> for SearchThreads {
+    type Error = String;
+
+    fn try_from(n: u8) -> Result<SearchThreads, String> {
+        SearchThreads::new(n).ok_or_else(|| format!("search_threads must be 1 to {}", SearchThreads::MAX))
+    }
+}
+
+impl From<SearchThreads> for u8 {
+    fn from(t: SearchThreads) -> u8 {
+        t.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurationChoice {
     #[serde(rename = "15m")]
@@ -237,6 +295,11 @@ pub struct LaunchRequest {
     /// the helper writes `on` or `off` to the unit's environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preinput: Option<bool>,
+    /// The hybrid's search threads (task 5.17, D-125; `ddnet-ai play --search-threads`): a JSON integer from the closed list 1 to 4, `1` when absent.
+    /// The pure fly does not search, so the helper refuses `search_threads_hybrid_only` for the fly with more than 1 (`1` is the same as absent).
+    /// It names no file and no word: the helper writes one of four static digits to the unit's environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_threads: Option<SearchThreads>,
 }
 
 /// Whether a request made at `ts` (and written to a file last modified at `mtime`), seen at `now`, is fresh: neither older than
@@ -290,7 +353,8 @@ pub fn parse_request(bytes: &[u8]) -> Result<LaunchRequest, ParseError> {
         && req.wb_smart.is_none()
         && req.no_selfkill.is_none()
         && req.window_model.is_none()
-        && req.preinput.is_none();
+        && req.preinput.is_none()
+        && req.search_threads.is_none();
     match req.action {
         Action::Start if !complete => Err(ParseError::Invalid),
         Action::Stop if !empty => Err(ParseError::Invalid),
@@ -353,6 +417,9 @@ pub struct LaunchStatus {
     /// The server's pre-inputs played in the prediction, for the launch (task 3.20b); none in the status of a launch made before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preinput: Option<bool>,
+    /// The hybrid's search threads of the launch (task 5.17); none in the status of a launch made before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_threads: Option<SearchThreads>,
 }
 
 impl LaunchStatus {
@@ -374,6 +441,7 @@ impl LaunchStatus {
             no_selfkill: None,
             window_model: None,
             preinput: None,
+            search_threads: None,
         }
     }
 }
@@ -737,6 +805,66 @@ mod tests {
         // A stop carries nothing.
         let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
         stop["preinput"] = serde_json::json!(false);
+        assert_eq!(parse(&stop), Err(ParseError::Invalid));
+    }
+
+    #[test]
+    fn the_search_threads_field_is_an_additive_closed_list_of_one_to_four_and_absent_means_one() {
+        // Task 5.17 (D-125). An old request parses and means one thread; an absent field is not written (byte-identical).
+        let old = parse(&start_json()).unwrap();
+        assert_eq!(old.search_threads, None);
+        assert_eq!(old.search_threads.unwrap_or_default(), SearchThreads::ONE);
+        let text = String::from_utf8(serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(!text.contains("search_threads"), "{text}");
+        for n in 1..=4u8 {
+            let mut v = start_json();
+            v["search_threads"] = serde_json::json!(n);
+            let r = parse(&v).unwrap();
+            assert_eq!(r.search_threads.map(SearchThreads::get), Some(n));
+            assert_eq!(r.search_threads.unwrap().flag_value(), n.to_string());
+            let bytes = serde_json::to_vec(&r).unwrap();
+            assert!(
+                String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .contains(&format!(r#""search_threads":{n}"#))
+            );
+            assert_eq!(parse_request(&bytes).unwrap(), r, "round trip");
+        }
+        assert!(
+            SearchThreads::new(0).is_none() && SearchThreads::new(5).is_none() && SearchThreads::new(255).is_none()
+        );
+        assert!(!SearchThreads::ONE.is_more_than_one() && SearchThreads::new(2).unwrap().is_more_than_one());
+        // Nothing but the whole numbers 1 to 4: no zero, no five, no negative, no float, no word, no boolean, no injection.
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(5),
+            serde_json::json!(8),
+            serde_json::json!(16),
+            serde_json::json!(255),
+            serde_json::json!(256),
+            serde_json::json!(-1),
+            serde_json::json!(2.0),
+            serde_json::json!(2.5),
+            serde_json::json!(1e0),
+            serde_json::json!("2"),
+            serde_json::json!("auto"),
+            serde_json::json!("AUTO"),
+            serde_json::json!("2 --report /etc/passwd"),
+            serde_json::json!("2\"\nBOT_SERVER=\"1.2.3.4:5\""),
+            serde_json::json!("$(id)"),
+            serde_json::json!(""),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!([2]),
+            serde_json::json!({"n": 2}),
+        ] {
+            let mut v = start_json();
+            v["search_threads"] = bad.clone();
+            assert_eq!(parse(&v), Err(ParseError::Invalid), "search_threads={bad}");
+        }
+        // A stop carries nothing.
+        let mut stop = serde_json::json!({"v":1,"id":"0123456789abcdef","ts":1000,"action":"stop"});
+        stop["search_threads"] = serde_json::json!(1);
         assert_eq!(parse(&stop), Err(ParseError::Invalid));
     }
 

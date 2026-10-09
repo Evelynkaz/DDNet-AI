@@ -23,15 +23,19 @@ use crate::brain_config::{BrainConfig, parse_brain_config};
 use crate::config::FlyConfig;
 use crate::decoder::{DecoderModel, DecoderParams, DecoderParamsV3, DecoderParamsV4, DnCalibration};
 use crate::encoder::{EncoderModel, EncoderParams};
+use crate::gm::{GmConfig, GmParams};
 use crate::hook_wide::HookReadout;
 use crate::model::FlyModel;
 use crate::params::FlyParams;
 
 /// Version 2 added [`FlyBundle::thresholds`], version 3 [`FlyBundle::hook_view`], version 4 (task 8.6) [`FlyBundle::hook_param`] and
 /// [`FlyBundle::hook_decode`] (and the release hazard in `decoder_params`), version 5 (task 8.7) [`FlyBundle::hook_readout`] (and the wide
-/// readout's parameters in `decoder_params`); version 1 to 4 files (everything trained before 8.7) still load, with the default thresholds /
-/// the shared hook view / the `legacy` hook head and the plain decode / the `pooled` readout, and **play bit for bit** as before.
-pub const BUNDLE_FORMAT_VERSION: u32 = 5;
+/// readout's parameters in `decoder_params`), version 6 (task 8.8) [`FlyBundle::neuron_model`]; version 1 to 5 files (everything trained before
+/// 8.8) still load, with the default thresholds / the shared hook view / the `legacy` hook head and the plain decode / the `pooled` readout /
+/// the `Rate` neuron model, and **play bit for bit** as before.
+pub const BUNDLE_FORMAT_VERSION: u32 = 6;
+/// The version a bundle with a wide hook readout and the `Rate` neuron model is still written as (readable by the 8.7 binaries).
+pub const READOUT_BUNDLE_FORMAT_VERSION: u32 = 5;
 /// The version a `Legacy` + `Plain` + `Pooled` bundle is still written as (readable by every binary since 8.2).
 pub const LEGACY_BUNDLE_FORMAT_VERSION: u32 = 3;
 /// The version an intent head or a latched decode with the `Pooled` readout is still written as (readable by the 8.6 binaries).
@@ -63,6 +67,33 @@ pub struct BundleMeta {
     pub notes: String,
 }
 
+/// Which neuron model the network of a bundle uses (format v6, task 8.8).
+// `Gm` carries the whole network (the checkpoint is built once and moved around rarely); boxing it would only add an indirection to every reader.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub enum NeuronModel {
+    /// The scalar rate model of FLY.md section 4 (`fly_params` are its parameters): every bundle before 8.8.
+    #[default]
+    Rate,
+    /// The FlyGM-style model ([`crate::gm`]): `fly_params` are an inert placeholder (kept so the graph-side shapes stay checkable),
+    /// the network is `config` + `params`.
+    Gm { config: GmConfig, params: GmParams },
+}
+
+impl NeuronModel {
+    pub fn is_rate(&self) -> bool {
+        matches!(self, NeuronModel::Rate)
+    }
+
+    /// `rate` or the `Gm` label (for logs).
+    pub fn label(&self) -> String {
+        match self {
+            NeuronModel::Rate => "rate".to_string(),
+            NeuronModel::Gm { config, .. } => config.label(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlyBundle {
     pub format_version: u32,
@@ -89,9 +120,22 @@ pub struct FlyBundle {
     /// How the hook head reads the network (format v5): `Pooled` (the twelve-parameter head of every earlier bundle) or a wide readout whose
     /// parameters are `decoder_params.hook_wide`.
     pub hook_readout: HookReadout,
+    /// The neuron model of the network (format v6): `Rate` for every bundle written before task 8.8.
+    pub neuron_model: NeuronModel,
 }
 
 impl FlyBundle {
+    /// The fly's network for this bundle on `flyg`: the rate model, or the `Gm` model on the same graph.
+    pub fn build_model(&self, flyg: ddai_flyg::Flyg) -> Result<FlyModel, BundleError> {
+        let model = FlyModel::new(flyg, self.fly_config, self.fly_params.clone()).map_err(err("fly model"))?;
+        match &self.neuron_model {
+            NeuronModel::Rate => Ok(model),
+            NeuronModel::Gm { config, params } => model
+                .with_gm(*config, Some(params.clone()), 0)
+                .map_err(err("gm neuron model")),
+        }
+    }
+
     /// The kind of the hook head must agree with the parameters (an `Intent` bundle carries the release hazard, a `Legacy` one does not;
     /// a wide readout carries its parameters and is not combined with an intent head) and the decode must be valid.
     pub fn validate_hook(&self) -> Result<(), String> {
@@ -121,6 +165,48 @@ impl FlyBundle {
         }
         self.hook_decode.validate()
     }
+}
+
+/// The format-version-5 layout (no neuron model), kept to read old files.
+#[derive(Deserialize)]
+struct FlyBundleV5 {
+    #[allow(dead_code)] // decoded to keep the layout; the version was peeked already
+    format_version: u32,
+    flyg_sha256: String,
+    flyg_path_hint: String,
+    brain_config_toml: String,
+    fly_config: FlyConfig,
+    fly_params: FlyParams,
+    encoder_params: EncoderParams,
+    decoder_params: DecoderParams,
+    calibration: DnCalibration,
+    meta: BundleMeta,
+    thresholds: HeadThresholds,
+    hook_view: HookView,
+    hook_param: HookParam,
+    hook_decode: HookDecode,
+    hook_readout: HookReadout,
+}
+
+/// The version-5 layout to **write**: a `Rate` bundle with a wide hook readout is saved as version 5 so that the 8.7 binaries still read it;
+/// only a `Gm` network, which they could not play, needs version 6.
+#[derive(Serialize)]
+struct FlyBundleV5Out<'a> {
+    format_version: u32,
+    flyg_sha256: &'a str,
+    flyg_path_hint: &'a str,
+    brain_config_toml: &'a str,
+    fly_config: &'a FlyConfig,
+    fly_params: &'a FlyParams,
+    encoder_params: &'a EncoderParams,
+    decoder_params: &'a DecoderParams,
+    calibration: &'a DnCalibration,
+    meta: &'a BundleMeta,
+    thresholds: &'a HeadThresholds,
+    hook_view: HookView,
+    hook_param: HookParam,
+    hook_decode: HookDecode,
+    hook_readout: HookReadout,
 }
 
 /// The format-version-4 layout (no hook readout), kept to read old files.
@@ -322,7 +408,10 @@ pub fn save_bundle(path: &Path, bundle: &FlyBundle) -> Result<(), BundleError> {
     bundle
         .validate_hook()
         .map_err(|e| BundleError(format!("{}: not written: {e}", path.display())))?;
-    if bundle.hook_readout == HookReadout::Pooled && bundle.decoder_params.hook_wide.is_none() {
+    if bundle.neuron_model.is_rate()
+        && bundle.hook_readout == HookReadout::Pooled
+        && bundle.decoder_params.hook_wide.is_none()
+    {
         if bundle.hook_param == HookParam::Legacy
             && bundle.hook_decode == HookDecode::Plain
             && let Some(decoder_params) = bundle.decoder_params.to_v3()
@@ -361,9 +450,29 @@ pub fn save_bundle(path: &Path, bundle: &FlyBundle) -> Result<(), BundleError> {
         };
         return write_zstd_postcard(path, &v4, 3);
     }
-    let mut v5 = bundle.clone();
-    v5.format_version = BUNDLE_FORMAT_VERSION;
-    write_zstd_postcard(path, &v5, 3)
+    if bundle.neuron_model.is_rate() {
+        let v5 = FlyBundleV5Out {
+            format_version: READOUT_BUNDLE_FORMAT_VERSION,
+            flyg_sha256: &bundle.flyg_sha256,
+            flyg_path_hint: &bundle.flyg_path_hint,
+            brain_config_toml: &bundle.brain_config_toml,
+            fly_config: &bundle.fly_config,
+            fly_params: &bundle.fly_params,
+            encoder_params: &bundle.encoder_params,
+            decoder_params: &bundle.decoder_params,
+            calibration: &bundle.calibration,
+            meta: &bundle.meta,
+            thresholds: &bundle.thresholds,
+            hook_view: bundle.hook_view,
+            hook_param: bundle.hook_param,
+            hook_decode: bundle.hook_decode,
+            hook_readout: bundle.hook_readout,
+        };
+        return write_zstd_postcard(path, &v5, 3);
+    }
+    let mut v6 = bundle.clone();
+    v6.format_version = BUNDLE_FORMAT_VERSION;
+    write_zstd_postcard(path, &v6, 3)
 }
 
 /// Reads a bundle, checking its format version (version 1 files load with default thresholds; versions 1 to 3 with the `legacy` hook head
@@ -373,10 +482,34 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
     let bad = |e: String| BundleError(format!("{}: {e}", path.display()));
     match peek_version(path, &bytes)? {
         BUNDLE_FORMAT_VERSION => {
-            let b: FlyBundle = decode_payload(path, &bytes, "a v5 bundle")?;
+            let b: FlyBundle = decode_payload(path, &bytes, "a v6 bundle")?;
             b.thresholds.validate().map_err(bad)?;
             b.validate_hook().map_err(bad)?;
             Ok(b)
+        }
+        5 => {
+            let b: FlyBundleV5 = decode_payload(path, &bytes, "a v5 bundle")?;
+            b.thresholds.validate().map_err(bad)?;
+            let out = FlyBundle {
+                format_version: BUNDLE_FORMAT_VERSION,
+                flyg_sha256: b.flyg_sha256,
+                flyg_path_hint: b.flyg_path_hint,
+                brain_config_toml: b.brain_config_toml,
+                fly_config: b.fly_config,
+                fly_params: b.fly_params,
+                encoder_params: b.encoder_params,
+                decoder_params: b.decoder_params,
+                calibration: b.calibration,
+                meta: b.meta,
+                thresholds: b.thresholds,
+                hook_view: b.hook_view,
+                hook_param: b.hook_param,
+                hook_decode: b.hook_decode,
+                hook_readout: b.hook_readout,
+                neuron_model: NeuronModel::Rate,
+            };
+            out.validate_hook().map_err(bad)?;
+            Ok(out)
         }
         4 => {
             let b: FlyBundleV4 = decode_payload(path, &bytes, "a v4 bundle")?;
@@ -397,6 +530,7 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
                 hook_param: b.hook_param,
                 hook_decode: b.hook_decode,
                 hook_readout: HookReadout::Pooled,
+                neuron_model: NeuronModel::Rate,
             };
             out.validate_hook().map_err(bad)?;
             Ok(out)
@@ -420,6 +554,7 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
                 hook_param: HookParam::Legacy,
                 hook_decode: HookDecode::Plain,
                 hook_readout: HookReadout::Pooled,
+                neuron_model: NeuronModel::Rate,
             })
         }
         1 => {
@@ -440,6 +575,7 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
                 hook_param: HookParam::Legacy,
                 hook_decode: HookDecode::Plain,
                 hook_readout: HookReadout::Pooled,
+                neuron_model: NeuronModel::Rate,
             })
         }
         2 => {
@@ -461,6 +597,7 @@ pub fn load_bundle(path: &Path) -> Result<FlyBundle, BundleError> {
                 hook_param: HookParam::Legacy,
                 hook_decode: HookDecode::Plain,
                 hook_readout: HookReadout::Pooled,
+                neuron_model: NeuronModel::Rate,
             })
         }
         v => Err(BundleError(format!(
@@ -507,7 +644,7 @@ pub fn upgrade_hook_readout(
         )));
     }
     let cfg = parse_brain_config(&bundle.brain_config_toml).map_err(err("embedded brain config"))?;
-    let model = FlyModel::new(flyg, bundle.fly_config, bundle.fly_params.clone()).map_err(err("fly model"))?;
+    let model = bundle.build_model(flyg)?;
     let mut decoder = DecoderModel::new(&model, cfg.decoder.clone()).map_err(err("decoder"))?;
     decoder.set_hook_readout(&model, readout).map_err(err("hook readout"))?;
     let mut out = bundle.clone();
@@ -556,7 +693,7 @@ pub fn upgrade_with_opponent_state(
         .map_err(err("encoding the section"))?
     );
     let new_cfg = parse_brain_config(&new_toml).map_err(err("the upgraded brain config"))?;
-    let model = FlyModel::new(flyg, bundle.fly_config, bundle.fly_params.clone()).map_err(err("fly model"))?;
+    let model = bundle.build_model(flyg)?;
     let old_enc = old_cfg.encoder_model(&model).map_err(err("encoder"))?;
     let new_enc = new_cfg.encoder_model(&model).map_err(err("upgraded encoder"))?;
     let n_old = old_enc.num_params();
@@ -641,7 +778,7 @@ impl FlyBrainTemplate {
         }
         bundle.validate_hook().map_err(err("hook head"))?;
         let brain_config = parse_brain_config(&bundle.brain_config_toml).map_err(err("embedded brain config"))?;
-        let model = FlyModel::new(flyg, bundle.fly_config, bundle.fly_params).map_err(err("fly model"))?;
+        let model = bundle.build_model(flyg)?;
         let encoder = brain_config.encoder_model(&model).map_err(err("encoder"))?;
         let mut decoder = DecoderModel::new(&model, brain_config.decoder.clone()).map_err(err("decoder"))?;
         decoder
@@ -726,6 +863,19 @@ impl FlyBrainTemplate {
             return Err(BundleError(format!(
                 "{what}: this checkpoint has an intent hook head or a latched hook decode; its latch (the fly's own previous hook command) \
                  can diverge from the hook actually played here, so it is refused (task 8.6, review F3)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Refuses a `Gm` neuron model (task 8.8, review F3) where a fly really plays: the live bot and the hybrid's proposer. The `Gm` model is a pilot
+    /// that did not pass its go bars (D-117) and its FLY.md section 1 extension awaits the owner's confirmation, so it is measured in the arena
+    /// (`es eval`, `hook-eval`, the BC tools, which do not call this) and never played on a server. Lift this only with the owner's word.
+    pub fn require_rate(&self, what: &str) -> Result<(), BundleError> {
+        if self.model.gm().is_some() {
+            return Err(BundleError(format!(
+                "{what}: this checkpoint uses the Gm neuron model (task 8.8), a pilot that is measured in the arena only and is refused where a fly \
+                 really plays until the owner confirms the FLY.md section 1 extension (D-117)"
             )));
         }
         Ok(())

@@ -306,6 +306,8 @@ pub struct HybridConfig {
     pub approach_plans: usize,
     /// Task 3.19 (D-116): the reflex hammer and the hammer-safe envelope on top of the decision ([`crate::hybrid::reflex`]). All off by default.
     pub reflex: crate::hybrid::reflex::ReflexConfig,
+    /// Task 3.23 (D-121): the fixes for the weaknesses of the 2026-10-08 duel against a human ([`crate::hybrid::duelfix`]). All off by default.
+    pub duel_fixes: crate::hybrid::duelfix::DuelFixConfig,
 }
 
 /// The longest plan the hybrid can be asked for (`frozen_steps`).
@@ -371,6 +373,7 @@ impl Default for HybridConfig {
             frozen_no_extension: true,
             approach_plans: 0,
             reflex: crate::hybrid::reflex::ReflexConfig::default(),
+            duel_fixes: crate::hybrid::duelfix::DuelFixConfig::default(),
         }
     }
 }
@@ -471,6 +474,7 @@ impl HybridConfig {
             return Err("hybrid: anchors above the ray count".into());
         }
         self.reflex.validate()?;
+        self.duel_fixes.validate()?;
         Ok(())
     }
 }

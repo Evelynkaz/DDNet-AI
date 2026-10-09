@@ -115,8 +115,8 @@ impl PlanCollision for Collision32 {
         self.check_point(x as f32, y as f32)
     }
     fn is_death(&self, x: f64, y: f64) -> bool {
-        let tx = (x / 32.0).floor() as i32;
-        let ty = (y / 32.0).floor() as i32;
+        let tx = crate::vmath::floor_i32(x / 32.0);
+        let ty = crate::vmath::floor_i32(y / 32.0);
         self.game_tile(tx, ty) == ddai_physics::map::TILE_DEATH
     }
     /// Review round 1, F9: real DDNet freezes on a front-layer `TILE_FREEZE` too, not just the
@@ -129,8 +129,8 @@ impl PlanCollision for Collision32 {
     /// "behind the production flag" in the sense the constraint asks for: the fix lives only in
     /// this production-only file, the parity path (`ts_adapter.rs`) is untouched.
     fn is_freeze(&self, x: f64, y: f64) -> bool {
-        let tx = (x / 32.0).floor() as i32;
-        let ty = (y / 32.0).floor() as i32;
+        let tx = crate::vmath::floor_i32(x / 32.0);
+        let ty = crate::vmath::floor_i32(y / 32.0);
         self.game_tile(tx, ty) == ddai_physics::map::TILE_FREEZE
             || front_tile(self, tx, ty) == ddai_physics::map::TILE_FREEZE
             // Task 4.2 (review F2): a heart pickup freezes whoever comes within 48 px of it. The World
@@ -142,24 +142,31 @@ impl PlanCollision for Collision32 {
     /// See [`Collision32::is_freeze`]'s doc comment (review round 1, F9) -- same reasoning for
     /// `TILE_UNFREEZE`.
     fn is_un_freeze(&self, x: f64, y: f64) -> bool {
-        let tx = (x / 32.0).floor() as i32;
-        let ty = (y / 32.0).floor() as i32;
+        let tx = crate::vmath::floor_i32(x / 32.0);
+        let ty = crate::vmath::floor_i32(y / 32.0);
         self.game_tile(tx, ty) == ddai_physics::map::TILE_UNFREEZE
             || front_tile(self, tx, ty) == ddai_physics::map::TILE_UNFREEZE
     }
     /// One table read for `is_freeze || is_death` (same tile arithmetic as both).
     fn is_hazard(&self, x: f64, y: f64) -> bool {
-        let tx = (x / 32.0).floor() as i32;
-        let ty = (y / 32.0).floor() as i32;
+        let tx = crate::vmath::floor_i32(x / 32.0);
+        let ty = crate::vmath::floor_i32(y / 32.0);
         self.hazard_tile(tx, ty)
     }
     fn is_no_hook(&self, x: f64, y: f64) -> bool {
-        let tx = (x / 32.0).floor() as i32;
-        let ty = (y / 32.0).floor() as i32;
+        let tx = crate::vmath::floor_i32(x / 32.0);
+        let ty = crate::vmath::floor_i32(y / 32.0);
         self.game_tile(tx, ty) == ddai_physics::map::TILE_NOHOOK
     }
     fn test_box(&self, pos: Vec2, size: Vec2) -> bool {
         Collision32::test_box(self, to_p_vec2(pos), to_p_vec2(size))
+    }
+    fn flight_clear(&self, x: f64, y: f64) -> bool {
+        // The tile of `(x, y)` by the plain rule (`x / 32` is exact; floor), for coordinates a rollout can reach.
+        if !(x.abs() < 1.0e6 && y.abs() < 1.0e6) {
+            return false;
+        }
+        self.flight_clear_tile(crate::vmath::floor_i32(x / 32.0), crate::vmath::floor_i32(y / 32.0))
     }
     /// Review round 1, F7: `ddai_physics::Collision::intersect_line` (`collision.rs:607`) is the
     /// exact analogue of TS's plain `intersectLine` (`collision.ts:553-581`) -- a bare raymarch
@@ -303,7 +310,8 @@ impl PhysicsSavedState {
     /// derived `clone_from` would build and drop a whole fresh world (~105 kB) instead. Task 3.5:
     /// the hybrid search copies one decision snapshot per worker per decision.
     pub fn assign_from(&mut self, other: &PhysicsSavedState) {
-        self.world.restore_from(&other.world);
+        self.world
+            .restore_from_bounded(&other.world, self.id_end.max(other.id_end));
         copy_id_arrays(
             IdArraysMut {
                 pending_input: &mut self.pending_input,
@@ -363,8 +371,26 @@ pub struct PhysicsWorld {
     /// Exclusive upper bound of the ids whose entry in `pending_input`/`present`/`last_known`/`fresh` was
     /// ever written to a non-default value; every entry at or beyond it is the default (see
     /// [`copy_id_arrays`]). Only ever raised, by [`PhysicsWorld::touch`], and lowered to the source's on a restore.
+    ///
+    /// Task 4.13: it also bounds the world's own per-id arrays -- no `Some` entry of `world.characters` or
+    /// `world.players` has an index at or above it -- so a tick ([`World::step_bounded`]) and a restore
+    /// ([`World::restore_from_bounded`]) need not scan all 128 slots. That part of the invariant is kept by
+    /// `from_world` / `sync_from` (they measure the world they are given), by `touch` (every spawn goes through
+    /// `add_tee` / `apply_tee_state`), and by `id_end_stale` after [`PhysicsWorld::inner_mut`] (anything may have
+    /// been written through it).
     id_end: usize,
+    /// `inner_mut` handed out the world: `id_end` may no longer bound its per-id arrays until
+    /// [`PhysicsWorld::settle_bound`] measures them again.
+    id_end_stale: bool,
     step_scratch: StepScratch,
+}
+
+/// Exclusive upper bound of the client ids that hold a character or a player in `world` (`0` for none): what
+/// [`PhysicsWorld::id_end`] has to cover for [`World::step_bounded`] / [`World::restore_from_bounded`].
+fn world_hi(world: &World<f32>) -> usize {
+    let c = world.characters.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+    let p = world.players.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+    c.max(p)
 }
 
 fn neutral_input_array() -> Box<[PlayerInput; MAX_CLIENTS]> {
@@ -381,6 +407,24 @@ impl PhysicsWorld {
         self.id_end = self.id_end.max(id + 1);
     }
 
+    /// Measures the world's per-id arrays again if [`PhysicsWorld::inner_mut`] handed it out since (see
+    /// [`PhysicsWorld::id_end`]).
+    fn settle_bound(&mut self) {
+        if self.id_end_stale {
+            self.id_end = self.id_end.max(world_hi(&self.world));
+            self.id_end_stale = false;
+        }
+    }
+
+    /// [`PhysicsWorld::id_end`] as a bound on the world's per-id arrays, measured afresh while it is stale (for `&self` callers).
+    fn bound(&self) -> usize {
+        if self.id_end_stale {
+            self.id_end.max(world_hi(&self.world))
+        } else {
+            self.id_end
+        }
+    }
+
     /// Builds a fresh world from a map (`World::from_map` + `World::init`, matching how every
     /// other consumer of `ddai_physics::World` sets one up). `seed`: the core PRNG seed
     /// (`World::from_map`'s own doc comment).
@@ -395,6 +439,7 @@ impl PhysicsWorld {
             last_known: no_last_known(),
             fresh: Box::new([false; MAX_CLIENTS]),
             id_end: 0,
+            id_end_stale: false,
             step_scratch: StepScratch::default(),
         }
     }
@@ -405,6 +450,7 @@ impl PhysicsWorld {
     /// them with [`PlanWorld::add_tee`], or seed everything from another world with
     /// [`PhysicsWorld::sync_from`].
     pub fn from_world(world: World<f32>, map: Arc<MapData>) -> Self {
+        let id_end = world_hi(&world);
         PhysicsWorld {
             world,
             map,
@@ -412,7 +458,8 @@ impl PhysicsWorld {
             present: Box::new([false; MAX_CLIENTS]),
             last_known: no_last_known(),
             fresh: Box::new([false; MAX_CLIENTS]),
-            id_end: 0,
+            id_end,
+            id_end_stale: false,
             step_scratch: StepScratch::default(),
         }
     }
@@ -426,6 +473,8 @@ impl PhysicsWorld {
     /// tee".
     pub fn sync_from(&mut self, src: &World<f32>) {
         self.world.restore_from(src);
+        self.id_end = self.id_end.max(world_hi(&self.world));
+        self.id_end_stale = false;
         for id in 0..MAX_CLIENTS {
             let alive_core = self.world.cores.slot_of(id as u8).is_some();
             if alive_core {
@@ -461,8 +510,9 @@ impl PhysicsWorld {
     /// (e.g. a live caller applying a server snapshot via `ddai_physics`'s own state-sync helpers
     /// before handing control to the planner).
     pub fn inner_mut(&mut self) -> &mut World<f32> {
-        // The caller may change anything: no cached tee state can be trusted afterwards.
+        // The caller may change anything: no cached tee state can be trusted afterwards, nor the bound on the ids it holds.
         self.fresh.fill(false);
+        self.id_end_stale = true;
         &mut self.world
     }
 
@@ -635,9 +685,12 @@ impl PlanWorld for PhysicsWorld {
         sc.fire_before.clear();
         sc.pos_before.clear();
         sc.inputs.clear();
-        // Only up to the highest present id (a rollout has two to four tees; scanning all 128
-        // slots every tick showed up in the profile).
-        let present_end = self.present.iter().rposition(|&p| p).map_or(0, |hi| hi + 1);
+        // Only up to the highest id the per-id arrays ever held (a rollout has two to four tees;
+        // scanning all 128 slots every tick showed up in the profile). `id_end` is raised by every
+        // write that sets a `present` flag and every entry at or beyond it is the default (`false`),
+        // so this visits exactly the ids the former `rposition` scan did (task 4.13).
+        let present_end = self.id_end.min(MAX_CLIENTS);
+        debug_assert!(self.present[present_end..].iter().all(|&p| !p));
         for id in 0..present_end {
             if self.present[id] {
                 sc.ids.push(id as i32);
@@ -664,7 +717,8 @@ impl PlanWorld for PhysicsWorld {
                 kill: false,
             });
         }
-        self.world.step(&sc.inputs);
+        self.settle_bound();
+        self.world.step_bounded(&sc.inputs, self.id_end);
         let (ids, alive_before, fire_before, pos_before) = (&sc.ids, &sc.alive_before, &sc.fire_before, &sc.pos_before);
         for (i, &id) in ids.iter().enumerate() {
             let now_alive = self.world.characters[id as usize].as_ref().is_some_and(|c| c.alive);
@@ -758,13 +812,14 @@ impl PlanWorld for PhysicsWorld {
             present: self.present.clone(),
             last_known: self.last_known.clone(),
             fresh: self.fresh.clone(),
-            id_end: self.id_end,
+            id_end: self.bound(),
         }
     }
     fn save_state_into(&self, into: &mut Self::SavedState) {
         // `World::restore_from` (not the derived `clone_from`, which builds a fresh clone and drops
         // the old one): field-wise copy into the existing buffers, no allocation once warm.
-        into.world.restore_from(&self.world);
+        let end = self.bound();
+        into.world.restore_from_bounded(&self.world, into.id_end.max(end));
         copy_id_arrays(
             IdArraysMut {
                 pending_input: &mut into.pending_input,
@@ -779,12 +834,15 @@ impl PlanWorld for PhysicsWorld {
                 last_known: &self.last_known,
                 fresh: &self.fresh,
             },
-            self.id_end,
+            end,
         );
     }
     fn restore_state(&mut self, state: &Self::SavedState) {
         // See `save_state_into`: `restore_from` reuses the world's buffers.
-        self.world.restore_from(&state.world);
+        self.settle_bound();
+        self.world
+            .restore_from_bounded(&state.world, self.id_end.max(state.id_end));
+        self.id_end_stale = false;
         copy_id_arrays(
             IdArraysMut {
                 pending_input: &mut self.pending_input,
@@ -1337,5 +1395,263 @@ mod tests {
             }
             check(&w, &format!("op {k}"));
         }
+    }
+    /// Task 4.13: the id bound (`id_end`) that lets a tick and a restore skip the 128-slot scans changes nothing: a world run
+    /// with the bound and a twin whose bound is forced to `MAX_CLIENTS` agree after every operation, including a player that
+    /// only exists at a high id (placed through `inner_mut`, with no tee), saves and restores across worlds with different
+    /// bounds, and `sync_from` a world that holds high ids.
+    #[test]
+    fn the_id_bound_never_changes_a_result() {
+        let map = tiny_map();
+        let mut seed = 0x9E37_79B9u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut a = PhysicsWorld::new(map.clone(), 3);
+        let mut b = PhysicsWorld::new(map.clone(), 3);
+        let widen = |w: &mut PhysicsWorld| w.id_end = MAX_CLIENTS;
+        widen(&mut b);
+        for w in [&mut a, &mut b] {
+            w.add_tee(0, Vec2 { x: 100.0, y: 200.0 });
+            w.add_tee(5, Vec2 { x: 140.0, y: 200.0 });
+        }
+        let (mut sa, mut sb) = (a.save_state(), b.save_state());
+        let same = |a: &PhysicsWorld, b: &PhysicsWorld, what: &str| {
+            for id in 0..MAX_CLIENTS as i32 {
+                assert_eq!(a.get_tee(id), b.get_tee(id), "{what}: tee {id}");
+                assert_eq!(
+                    a.inner().characters[id as usize],
+                    b.inner().characters[id as usize],
+                    "{what}: character {id}"
+                );
+                assert_eq!(
+                    a.inner().players[id as usize],
+                    b.inner().players[id as usize],
+                    "{what}: player {id}"
+                );
+            }
+            assert_eq!(a.inner().tick, b.inner().tick, "{what}: tick");
+            assert!(a.id_end <= MAX_CLIENTS);
+        };
+        for k in 0..400 {
+            match next() % 9 {
+                0..=3 => {
+                    let mut input = crate::types::empty_input();
+                    input.direction = (next() % 3) as i32 - 1;
+                    input.jump = (next() % 4 == 0) as i32;
+                    for w in [&mut a, &mut b] {
+                        w.set_input(0, input);
+                        w.set_input(5, crate::types::empty_input());
+                        w.step();
+                    }
+                }
+                4 => {
+                    // A player with no character at a high id, added behind the wrapper's back.
+                    let id = 20 + (next() % 90) as usize;
+                    for w in [&mut a, &mut b] {
+                        w.inner_mut().players[id] = Some(ddai_physics::world::Player::new(0));
+                    }
+                }
+                5 => {
+                    sa = a.save_state();
+                    sb = b.save_state();
+                }
+                6 => {
+                    a.restore_state(&sa);
+                    b.restore_state(&sb);
+                }
+                7 => {
+                    let mut ta = PhysicsWorld::new(map.clone(), 3);
+                    ta.sync_from(a.inner());
+                    let mut tb = PhysicsWorld::new(map.clone(), 3);
+                    tb.sync_from(b.inner());
+                    widen(&mut tb);
+                    ta.set_input(0, crate::types::empty_input());
+                    tb.set_input(0, crate::types::empty_input());
+                    ta.step();
+                    tb.step();
+                    same(&ta, &tb, &format!("synced twin at op {k}"));
+                }
+                _ => {
+                    let mut into_a = a.save_state();
+                    a.save_state_into(&mut into_a);
+                    let mut into_b = b.save_state();
+                    b.save_state_into(&mut into_b);
+                    a.restore_state(&into_a);
+                    b.restore_state(&into_b);
+                }
+            }
+            same(&a, &b, &format!("op {k}"));
+        }
+    }
+    /// A `Collision32` that never claims a clear flight step: the reference for [`PlanCollision::flight_clear`].
+    struct NeverClear<'a>(&'a Collision32);
+
+    impl PlanCollision for NeverClear<'_> {
+        fn identity(&self) -> u64 {
+            PlanCollision::identity(self.0)
+        }
+        fn width(&self) -> i32 {
+            PlanCollision::width(self.0)
+        }
+        fn height(&self) -> i32 {
+            PlanCollision::height(self.0)
+        }
+        fn game_tile(&self, tx: i32, ty: i32) -> u8 {
+            PlanCollision::game_tile(self.0, tx, ty)
+        }
+        fn is_solid(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_solid(self.0, x, y)
+        }
+        fn is_death(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_death(self.0, x, y)
+        }
+        fn is_freeze(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_freeze(self.0, x, y)
+        }
+        fn is_un_freeze(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_un_freeze(self.0, x, y)
+        }
+        fn is_no_hook(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_no_hook(self.0, x, y)
+        }
+        fn is_hazard(&self, x: f64, y: f64) -> bool {
+            PlanCollision::is_hazard(self.0, x, y)
+        }
+        fn test_box(&self, pos: Vec2, size: Vec2) -> bool {
+            PlanCollision::test_box(self.0, pos, size)
+        }
+        fn intersect_line(&self, pos0: Vec2, pos1: Vec2) -> LineHit {
+            PlanCollision::intersect_line(self.0, pos0, pos1)
+        }
+        fn intersect_line_hook(&self, pos0: Vec2, pos1: Vec2) -> LineHit {
+            PlanCollision::intersect_line_hook(self.0, pos0, pos1)
+        }
+        fn has_tele(&self) -> bool {
+            PlanCollision::has_tele(self.0)
+        }
+        fn tele_at(&self, x: f64, y: f64) -> (i32, i32) {
+            PlanCollision::tele_at(self.0, x, y)
+        }
+        fn tele_outs_for(&self, number: i32) -> Vec<Vec2> {
+            PlanCollision::tele_outs_for(self.0, number)
+        }
+    }
+
+    /// Task 4.13: a random map of solid, freeze and death tiles for the flight-clearance tests.
+    fn random_flight_map(seed: u64) -> Arc<MapData> {
+        let (w, h) = (48usize, 36usize);
+        let mut s = seed | 1;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut game = vec![ddai_physics::map::Tile::default(); w * h];
+        for (i, t) in game.iter_mut().enumerate() {
+            let (x, y) = (i % w, i / w);
+            let index = if x == 0 || y == 0 || x == w - 1 || y == h - 1 || next() % 11 == 0 {
+                ddai_physics::map::TILE_SOLID
+            } else if next() % 40 == 0 {
+                ddai_physics::map::TILE_FREEZE
+            } else if next() % 150 == 0 {
+                ddai_physics::map::TILE_DEATH
+            } else {
+                0
+            };
+            t.index = index;
+        }
+        Arc::new(MapData {
+            width: w as u32,
+            height: h as u32,
+            game,
+            front: None,
+            tele: None,
+            speedup: None,
+            switch: None,
+            tune: None,
+            settings: Vec::new(),
+        })
+    }
+
+    /// Task 4.13: whatever `flight_clear` says is true is true: a tee box centred anywhere within 16 px of the point meets no solid cell
+    /// and the hazard test is `false` at every point within 16 px; and the ballistic flight with the shortcut equals the flight without it, bit for bit.
+    #[test]
+    fn flight_clear_is_sound_and_the_flight_with_it_equals_the_flight_without() {
+        let mut s = 0x1357_9BDF_2468_ACE1u64;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let (mut clear, mut not_clear) = (0u32, 0u32);
+        for map_seed in 0..4u64 {
+            let map = random_flight_map(0xC0FFEE + map_seed);
+            let world = PhysicsWorld::new(map, 1);
+            let col = world.collision();
+            let never = NeverClear(col);
+            let box_size = Vec2 { x: 28.0, y: 28.0 };
+            for _ in 0..40_000 {
+                let (x, y) = (
+                    (next() % (48 * 32 * 100)) as f64 / 100.0 - 20.0,
+                    (next() % (36 * 32 * 100)) as f64 / 100.0 - 20.0,
+                );
+                if PlanCollision::flight_clear(col, x, y) {
+                    clear += 1;
+                    for _ in 0..6 {
+                        let (dx, dy) = (
+                            (next() % 3201) as f64 / 100.0 - 16.0,
+                            (next() % 3201) as f64 / 100.0 - 16.0,
+                        );
+                        let p = Vec2 { x: x + dx, y: y + dy };
+                        assert!(
+                            !PlanCollision::test_box(col, p, box_size),
+                            "box at ({}, {}) from ({x}, {y})",
+                            p.x,
+                            p.y
+                        );
+                        assert!(
+                            !PlanCollision::is_hazard(col, p.x, p.y),
+                            "hazard at ({}, {}) from ({x}, {y})",
+                            p.x,
+                            p.y
+                        );
+                    }
+                } else {
+                    not_clear += 1;
+                }
+            }
+            for k in 0..30_000u32 {
+                let at = Vec2 {
+                    x: 40.0 + (next() % ((46 * 32 - 40) * 10)) as f64 / 10.0,
+                    y: 40.0 + (next() % ((34 * 32 - 40) * 10)) as f64 / 10.0,
+                };
+                let from = Vec2 {
+                    x: at.x + (next() % 160) as f64 - 80.0,
+                    y: at.y + (next() % 160) as f64 - 80.0,
+                };
+                let vel = Vec2 {
+                    x: (next() % 600) as f64 / 10.0 - 30.0,
+                    y: (next() % 600) as f64 / 10.0 - 30.0,
+                };
+                let sep = crate::vmath::vdistance(at, from);
+                let fast = crate::fields::launch_flight_lands_in_hazard(col, at, from, sep, vel);
+                let slow = crate::fields::launch_flight_lands_in_hazard(&never, at, from, sep, vel);
+                assert_eq!(
+                    fast.to_bits(),
+                    slow.to_bits(),
+                    "map {map_seed} case {k}: {at:?} {from:?} {vel:?}"
+                );
+            }
+        }
+        assert!(
+            clear > 1_000 && not_clear > 1_000,
+            "both answers must occur ({clear}, {not_clear})"
+        );
     }
 }

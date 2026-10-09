@@ -421,12 +421,12 @@ mod tests {
     const FIXTURE: &str = include_str!("../tests/fixtures/master-servers.json");
 
     fn owner() -> SocketAddr {
-        "45.141.57.35:8308".parse().unwrap()
+        "93.184.216.35:8308".parse().unwrap()
     }
 
     fn list(ready: bool) -> LiveServers {
         toml::from_str(&format!(
-            "[[server]]\naddress = \"45.141.57.35:8308\"\nnick = \"Muha\"\npurpose = \"play\"\nready = {ready}\n"
+            "[[server]]\naddress = \"93.184.216.35:8308\"\nnick = \"Muha\"\npurpose = \"play\"\nready = {ready}\n"
         ))
         .unwrap()
     }
@@ -441,13 +441,13 @@ mod tests {
         // 17 entries: 12 good ones; a duplicate address, no addresses, bad addresses, an entry with no info
         // but a good address, and a string are skipped or kept as the rules say.
         let addrs: Vec<String> = rows.iter().map(|r| r.address.to_string()).collect();
-        assert!(addrs.contains(&"45.141.57.35:8308".to_string()), "{addrs:?}");
+        assert!(addrs.contains(&"93.184.216.35:8308".to_string()), "{addrs:?}");
         assert!(
             addrs.contains(&"203.0.113.30:8303".to_string()),
             "a 0.7-only server falls back: {addrs:?}"
         );
         assert_eq!(
-            addrs.iter().filter(|a| a.as_str() == "46.174.54.240:8302").count(),
+            addrs.iter().filter(|a| a.as_str() == "93.184.216.240:8302").count(),
             1,
             "the duplicate address is dropped"
         );
@@ -583,7 +583,7 @@ mod tests {
             &LiveServers::default()
         ));
         assert!(!is_auto_candidate(
-            "46.174.54.240:8302".parse().unwrap(),
+            "93.184.216.240:8302".parse().unwrap(),
             "Muha",
             &list(true)
         ));
@@ -628,7 +628,11 @@ mod tests {
         assert!(!cache.servers.is_empty());
         // The documentation-range rows of the fixture (203.0.113.x) are not public unicast: dropped. The public ones stay.
         assert!(cache.servers.iter().all(|r| !r.address.starts_with("203.0.113.")));
-        let owner = cache.servers.iter().find(|r| r.address == "45.141.57.35:8308").unwrap();
+        let owner = cache
+            .servers
+            .iter()
+            .find(|r| r.address == "93.184.216.35:8308")
+            .unwrap();
         assert_eq!((owner.players, owner.max_clients, owner.block), (2, 64, true));
         assert_eq!(owner.map, "Copy Love Box");
         assert!(owner.v06);

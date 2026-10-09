@@ -58,6 +58,7 @@ fn tiny_experiment(tmp: &std::path::Path, dagger_jobs: Vec<JobConfig>) -> Experi
             kind: "mlp".into(),
             hidden: 3,
             lr: 5e-3,
+            opponent_state: false,
         },
         flyg: "unused-by-controls".into(),
         brain_config: root().join("configs/fly/S-brain.toml").to_string_lossy().into_owned(),
@@ -184,6 +185,77 @@ fn bc_then_a_dagger_round_writes_a_run_directory_and_resumes_as_a_no_op() {
             .count(),
         lines_before
     );
+}
+
+/// Task 8.8: the same run with the `Gm` fly (`[fly.gm]`): BC from scratch, a DAgger round in which the Gm student plays the arena through its
+/// checkpoint (format v6), the round bundles carry the `Gm` model, and resuming the finished run is a no-op. Skipped when the S graph is absent.
+#[test]
+fn a_gm_fly_goes_through_bc_and_a_dagger_round_and_its_bundles_carry_the_model() {
+    let Some(flyg) = std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join("aiddnet/data/connectome/compiled/fly-S-v1.flyg"))
+        .filter(|p| p.exists())
+    else {
+        eprintln!("note: fly-S-v1.flyg not found, skipping");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = tiny_experiment(tmp.path(), vec![job(500, 2)]);
+    cfg.model = ModelSpec {
+        kind: "fly".into(),
+        hidden: 0,
+        lr: 1e-3,
+        opponent_state: false,
+    };
+    cfg.flyg = flyg.to_string_lossy().into_owned();
+    cfg.brain_config = root()
+        .join("configs/fly/S-brain-dg-os.toml")
+        .to_string_lossy()
+        .into_owned();
+    cfg.fly.gm = Some(ddai_fly::gm::GmConfig::default());
+    cfg.fly.calibration_windows = 8;
+    cfg.dagger.eval_games = 0;
+    cfg.dagger.eval_arenas = Vec::new();
+    let run_dir = tmp.path().join("run");
+    let mut log = Vec::new();
+    run_experiment(&cfg, &mut |l| log.push(l.to_string())).unwrap();
+    assert!(log.iter().any(|l| l.contains("gm-d8-h16-k2-plain")), "{log:?}");
+    for f in [
+        "rounds/round-0.bundle",
+        "rounds/round-1.bundle",
+        "checkpoints/final.bundle",
+    ] {
+        let b = ddai_fly::bundle::load_bundle(&run_dir.join(f)).unwrap();
+        assert!(
+            matches!(b.neuron_model, ddai_fly::bundle::NeuronModel::Gm { .. }),
+            "{f}"
+        );
+    }
+    let ds = TeacherStore::open(&tmp.path().join("dagger")).unwrap();
+    assert!(
+        !ds.manifest.chunks.is_empty() && ds.manifest.chunks[0].actor.starts_with("fly:"),
+        "{:?}",
+        ds.manifest.chunks.first()
+    );
+    let metrics = std::fs::read_to_string(run_dir.join("metrics.jsonl")).unwrap();
+    assert!(metrics.contains("dagger-1") && metrics.contains("\"phase\":\"bc\""));
+    // A finished run resumes as a no-op, and a changed Gm configuration is refused.
+    let lines = metrics.lines().count();
+    run_experiment(&cfg, &mut |_| {}).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(run_dir.join("metrics.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        lines
+    );
+    let mut changed = cfg.clone();
+    changed.fly.gm = Some(ddai_fly::gm::GmConfig {
+        steps: 3,
+        ..ddai_fly::gm::GmConfig::default()
+    });
+    let err = run_experiment(&changed, &mut |_| {}).unwrap_err();
+    assert!(err.contains("refusing to resume"), "{err}");
 }
 
 /// Review F3 of E-005: a run killed between the jobs of a DAgger round must collect only the jobs

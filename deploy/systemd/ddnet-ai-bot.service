@@ -15,8 +15,9 @@
 # written in its one-argument form because a bare boolean flag cannot be given an empty argument), `--window-model=` (task 3.17, D-111: the
 # opponent-input predictor; the path of the model file, EMPTY = off, which is the default and what the helper writes unless the launch card's
 # toggle is on; one argument for the same reason; it also overrides a `window_model` key in settings.toml), `--preinput` (task 3.20b, D-112: the
-# server's pre-inputs played in the prediction, on/off, off unless the helper says otherwise; `--finish` also takes `wb`, task 3.18/D-114) and the
-# optional `--fly-bundle` come from the environment below. The defaults here are today's: local server, hybrid, no time limit. For a launch
+# server's pre-inputs played in the prediction, on/off, off unless the helper says otherwise; `--finish` also takes `wb`, task 3.18/D-114),
+# `--search-threads` (task 5.17, D-125: the hybrid's scoring threads, a digit 1 to 4, 1 unless the helper says otherwise) and the optional
+# `--fly-bundle` come from the environment below. The defaults here are today's: local server, hybrid, no time limit. For a launch
 # from the site the root helper (`ddnet-ai launch apply`, ddnet-ai-launch.service) writes /etc/ddnet-ai/bot-launch.env with validated values only (it
 # overrides the defaults) and a cgroup drop-in /etc/systemd/system/ddnet-ai-bot.service.d/50-launch.conf (IPAddressAllow). After a
 # normal end of a run the stop hook below removes that file, so a later hand start is the plain local default again.
@@ -57,8 +58,9 @@ Environment=BOT_WB_SMART=off
 Environment=BOT_NO_SELFKILL=false
 Environment=BOT_WINDOW_MODEL=
 Environment=BOT_PREINPUT=off
+Environment=BOT_SEARCH_THREADS=1
 EnvironmentFile=-/etc/ddnet-ai/bot-launch.env
-ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} --hybrid-mirror ${BOT_HYBRID_MIRROR} --finish ${BOT_FINISH} --wb-smart ${BOT_WB_SMART} --no-selfkill=${BOT_NO_SELFKILL} --window-model=${BOT_WINDOW_MODEL} --preinput ${BOT_PREINPUT} $BOT_FLY_ARGS --no-console --web-names --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server ${BOT_SERVER} --name ${BOT_NAME} --brain ${BOT_BRAIN} --duration ${BOT_DURATION} --hybrid-mirror ${BOT_HYBRID_MIRROR} --finish ${BOT_FINISH} --wb-smart ${BOT_WB_SMART} --no-selfkill=${BOT_NO_SELFKILL} --window-model=${BOT_WINDOW_MODEL} --preinput ${BOT_PREINPUT} --search-threads ${BOT_SEARCH_THREADS} $BOT_FLY_ARGS --no-console --web-names --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
 # The stop hook runs as root (`+`), and a failure of it never fails the unit (`-`): it records how the bot ended (kick/ban memory
 # for a public server, the status the site shows) and removes the one-run environment file. The binary is the root-owned copy
 # that deploy/install-launcher.sh installs.
@@ -80,6 +82,25 @@ TimeoutStopSec=30
 Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=3 4
+
+# --- CPU priority over everything the agents run on this VPS (task 4.14, D-124; measurements: docs/research/cpu-priority.md) ---
+# Builds, tests, arenas and training share the 8 vCPUs with the bot. Under that load the bot scored fewer candidates per decision (~14 live
+# against ~28 in the arena) and missed its first input slot in 46-59% of the decisions instead of 5.7% (2026-10-08). Soft priorities only: no
+# real-time scheduling (RestrictRealtime=true below stays, CPUSchedulingPolicy= is not set).
+# Slice= is the setting that counts: the bot runs in a top-level slice of its own with CPUWeight=1000 (deploy/systemd/ddnetaibot.slice, which
+# explains why), so it competes with user.slice (the agents) at ten times their weight. It is the closest of the allowed options to the ceiling
+# the measurements found (SCHED_RR, forbidden here) and still far from it; it does not bring the bot back to quiet-machine behaviour.
+# Set on the service as well: CPUWeight= (systemd.resource-control(5), cgroup v2, 1..10000, default 100) keeps the bot ahead of anything else that
+# is ever put in the same cgroup, and Nice= (systemd.exec(5), -20..19, default 0) is the scheduler weight among threads of THIS cgroup only (under
+# cgroup v2 it never ranks the bot against other cgroups, so alone it did nothing in the measurements; here it is a cheap extra for the bot's own threads
+# against its helpers). -5 is mild (weight 3121 against 1024). A negative Nice= needs CAP_SYS_NICE, which systemd applies as PID 1 before it drops
+# the bounding set, so CapabilityBoundingSet= (empty, below) stays empty (checked: the process runs at -5).
+# IOWeight= (cgroup v2 io.weight) only takes effect with the BFQ or iocost I/O controller; this VPS's disk has scheduler `none`, so today it changes
+# nothing. It is kept as a no-cost default.
+Slice=ddnetaibot.slice
+CPUWeight=1000
+Nice=-5
+IOWeight=1000
 
 # --- Hardening (as for ddnet-ai-web.service) ---
 NoNewPrivileges=true

@@ -201,7 +201,7 @@ systemctl is-enabled ddnet-ai-web.service caddy.service   # оба должны 
 ```bash
 mkdir -p -m 700 ~/aiddnet/data/bot      # уже есть, если стоит веб-юнит (его создаёт deploy/install.sh); юнит бота требует, чтобы он был
 mkdir -p ~/aiddnet/data/run ~/aiddnet/data/logs/play ~/aiddnet/data/logs/bot ~/aiddnet/data/maps/cache
-sudo install -m 0644 deploy/systemd/ddnet-ai-bot.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/ddnet-ai-bot.service deploy/systemd/ddnetaibot.slice /etc/systemd/system/   # слайс — приоритет CPU, см. «Приоритет CPU» ниже
 sudo systemctl daemon-reload
 sudo systemctl start ddnet-ai-bot            # НЕ enable
 journalctl -u ddnet-ai-bot -f                # лог (нужен sudo или группа systemd-journal)
@@ -286,20 +286,20 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
 2. **Запись сервера** в `~/aiddnet/data/live-servers.toml` (правит владелец или техлид по его слову):
    ```toml
    [[server]]
-   address = "45.141.57.35:8308"
+   address = "198.51.100.10:8308"
    nick = "Muha"
    ready = true            # D-067: без него клиент откажется подключаться
    proxy = "swarfey"       # новое: имя файла secrets/swarfey-proxy.toml
    ```
    Файл прокси сам хранит `for_server` (адрес сервера, для которого его выдали): если он есть, прокси годится только для него, и запись другого сервера с `proxy = "swarfey"` бот отвергнет.
    Без строки `proxy` бот пойдёт напрямую и получит тот же бан, а с `proxy`, но без файла или с правами шире 0600, **не пойдёт вообще** (отказ до первой датаграммы, прямого запасного пути нет).
-3. **Фильтр cgroup: какой drop-in нужен, зависит от ключа `relay` файла прокси** (D-088, поправка 2.6b, `docs/formats.md` §33.9). Важно в обоих вариантах: `45.141.57.35` (Swarfey) **никогда не разрешается**, и ошибка в коде не пустит бота к нему напрямую.
+3. **Фильтр cgroup: какой drop-in нужен, зависит от ключа `relay` файла прокси** (D-088, поправка 2.6b, `docs/formats.md` §33.9). Важно в обоих вариантах: `198.51.100.10` (Swarfey) **никогда не разрешается**, и ошибка в коде не пустит бота к нему напрямую.
 
    **а) `relay` не задан или `"proxy-host-only"` (по умолчанию).** Ретранслятор на самом прокси: бот шлёт только на IP прокси (адрес из ответа прокси бот не слушается), поэтому в drop-in нужен `IPAddressAllow=<IP прокси>` (посмотреть: `getent hosts <host из файла>`; DNS-заглушка systemd-resolved 127.0.0.53 уже входит в loopback). Если IP прокси сменится, фильтр молча отрежет трафик (бот уйдёт по таймауту): проще записать IP в `host` файла и в drop-in вместе.
    ```
    [Service]
    ExecStart=
-   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 45.141.57.35:8308 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 198.51.100.10:8308 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
    IPAddressAllow=<IP прокси>
    ```
 
@@ -307,10 +307,10 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
    ```
    [Service]
    ExecStart=
-   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 45.141.57.35:8308 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
+   ExecStart=/home/ubuntu/aiddnet/bin/ddnet-ai play --server 198.51.100.10:8308 --name Muha --brain hybrid --duration 0 --no-console --data-dir /home/ubuntu/aiddnet/data --report /home/ubuntu/aiddnet/data/bot/last-report.json
    IPAddressAllow=
    IPAddressDeny=
-   IPAddressDeny=45.141.57.35
+   IPAddressDeny=198.51.100.10
    IPAddressDeny=::/0
    IPAddressDeny=10.0.0.0/8
    IPAddressDeny=172.16.0.0/12
@@ -321,8 +321,8 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
    IPAddressDeny=fe80::/10
    ```
    Строки после адреса сервера (ревью 2.6b, F3): `::/0` закрывает весь IPv6 для IPv4-сервера (клиент и так отвергает IPv6-ретранслятор для него, а прокси должен быть доступен по IPv4; для IPv6-сервера эту строку не писать), остальные — частные диапазоны, которые клиент тоже отвергает (заодно закрывают адрес метаданных облака). Лаунчер (`ddnet-ai launch apply`) пишет ровно этот набор сам. Проверено `tools/e2e/ipfilter_probe.sh`, сценарий S8.
-   Три строки именно в таком порядке и все три нужны (проверено на systemd 255.4 этой машины скриптом `tools/e2e/ipfilter_probe.sh`, таблица в `docs/formats.md` §33.9): **allow сильнее deny**, если совпали оба, поэтому прежний `IPAddressAllow=127.0.0.0/8 ::1` из юнита надо сбросить (иначе запрет сервера мёртв: S2), и `IPAddressAllow=any` писать нельзя (S7); `IPAddressDeny=any` из юнита тоже надо сбросить, иначе наружу ничего не выходит (S3). Адрес в `IPAddressDeny=` — **каждый IP сервера**: если у игрового сервера несколько адресов (имя разрешается в несколько), по строке (или через пробел) на каждый; IPv6-адрес сервера тоже. v4-mapped форма (`::ffff:45.141.57.35`) попадает под запрет IPv4-адреса. Цена: в этом режиме боту доступен весь остальной интернет и сеть VPS (loopback и DNS-заглушка, как и раньше, да), поэтому режим включается только для прокси, у которого ретранслятор на другой машине, и только после `proxy-check`.
-   Перед первым запуском проверить, что фильтр на месте и работает: `sudo systemctl daemon-reload && systemctl show ddnet-ai-bot -p IPAddressAllow -p IPAddressDeny` (в `IPAddressAllow` пусто, в `IPAddressDeny` только IP сервера, systemd показывает их как `45.141.57.35/32`; проверено на пробном юните с таким drop-in), а сам механизм (на самом systemd, на одноразовом юните, без игрового сервера) воспроизводит `tools/e2e/ipfilter_probe.sh`.
+   Три строки именно в таком порядке и все три нужны (проверено на systemd 255.4 этой машины скриптом `tools/e2e/ipfilter_probe.sh`, таблица в `docs/formats.md` §33.9): **allow сильнее deny**, если совпали оба, поэтому прежний `IPAddressAllow=127.0.0.0/8 ::1` из юнита надо сбросить (иначе запрет сервера мёртв: S2), и `IPAddressAllow=any` писать нельзя (S7); `IPAddressDeny=any` из юнита тоже надо сбросить, иначе наружу ничего не выходит (S3). Адрес в `IPAddressDeny=` — **каждый IP сервера**: если у игрового сервера несколько адресов (имя разрешается в несколько), по строке (или через пробел) на каждый; IPv6-адрес сервера тоже. v4-mapped форма (`::ffff:198.51.100.10`) попадает под запрет IPv4-адреса. Цена: в этом режиме боту доступен весь остальной интернет и сеть VPS (loopback и DNS-заглушка, как и раньше, да), поэтому режим включается только для прокси, у которого ретранслятор на другой машине, и только после `proxy-check`.
+   Перед первым запуском проверить, что фильтр на месте и работает: `sudo systemctl daemon-reload && systemctl show ddnet-ai-bot -p IPAddressAllow -p IPAddressDeny` (в `IPAddressAllow` пусто, в `IPAddressDeny` только IP сервера, systemd показывает их как `198.51.100.10/32`; проверено на пробном юните с таким drop-in), а сам механизм (на самом systemd, на одноразовом юните, без игрового сервера) воспроизводит `tools/e2e/ipfilter_probe.sh`.
    Запись в `~/aiddnet/data/secrets/swarfey-proxy.toml` (правит владелец или техлид по его слову): `relay = "public"`. Опционально `session_pick = 4` и `{session}` в `user` (формат имени задаёт поставщик прокси; клиент подставит 8 знаков `[a-z0-9]`): бот перед входом опробует до 4 сессий, оставит с лучшим RTT и запишет в журнал только RTT. Лаунчер (`ddnet-ai launch apply`) пишет этот drop-in сам для прокси с `relay = "public"`.
 4. **Первый запуск короткий и при владельце** (D-068, 10–15 минут), `journalctl -u ddnet-ai-bot -f` открыт. В журнале: `UDP goes through a SOCKS5 proxy`, `socks5: UDP association established` (с именем `swarfey` и портом ретранслятора, но без адреса и учётных данных). Потеря TCP-соединения с прокси бот видит как обрыв: `the proxy's TCP control connection closed`, переподключается тем же путём (новое соединение с прокси на каждую попытку, лимиты те же: 5 за 20 с, два захода до входа, не больше 3 обрывов в игре за 600 с, D-058).
 5. **Откат:** убрать drop-in (`sudo systemctl revert ddnet-ai-bot`) и вернуть `ready = false` или убрать `proxy`. Если Swarfey кикнет или забанит — стоп без обхода (CLAUDE.md, D-016), запись в `docs/STATUS.md`.
@@ -342,6 +342,58 @@ sudo systemctl stop ddnet-ai-bot             # вежливое отключен
 `--data-dir ~/aiddnet/data`, настоящий `data/bot`, боевой веб-юнит читает его мост; на время прогона нужны только `ddnet-local.service` и запущенный `ddnet-ai-web.service`. Стенд ставит юнит, запускает его, в конце останавливает
 и **убирает юнит и drop-in** (после репетиции бот снова не установлен). Сверка после прогона: ни одна запись `data/bot` не пропала и не сменила права, `relations.json` владельца тот же. Для прогона ≥ 5,5 часов анализ судит наклон памяти
 за последние 5 часов (< 50 МиБ за 7 суток). `--fly-bundle <bundle>` добавляет `--fly-bundle` в команду бота (вкладка «Муха», `hybrid:fly`). Результаты — `docs/EXPERIMENTS.md`, E-010.
+
+### Приоритет CPU бота над работой агентов (задача 4.14, D-124)
+
+**Зачем.** Сборки, тесты, арена и обучение агентов делят 8 vCPU с живым ботом. Под такой нагрузкой бот оценивал вдвое меньше кандидатов за решение (≈ 14 вместо ≈ 28 в арене) и в 46–59 % решений
+отдавал ввод не в первый слот (5,7 % на тихой машине; 08.10). Подробные замеры и оговорки — `docs/research/cpu-priority.md`, решение — D-124.
+
+**Что ставится** (всё вместе с юнитом, `deploy/install-launcher.sh`; ничего реального времени: `RestrictRealtime=true` остался, `CPUSchedulingPolicy=` не задан; вся прежняя изоляция юнита на месте):
+
+| Где | Ключ | Значение | Почему |
+|---|---|---|---|
+| `ddnetaibot.slice` (новый файл) | `CPUWeight=` | 1000 | cgroup v2 делит процессор только между *соседями* (`systemd.resource-control(5)`: «split up among all units within one slice»). Агенты живут в `user.slice` (вес 100), юнит в `system.slice` (тоже 100): вес на самом юните сравнивает его только с соседями по `system.slice`. Собственный верхний слайс с весом 1000 сравнивается с `user.slice` напрямую (в 10 раз выше); на тихой машине ничего не меняет, потолка и квоты нет |
+| `ddnetaibot.slice` | `IOWeight=` | 1000 | бот пишет мало (отчёт, клипы, память). **Сейчас ничего не меняет:** `io.weight` действует только под планировщиком BFQ или контроллером iocost, а у диска этой VPS планировщик `none`; оставлено как дешёвое умолчание, замеры его не включали |
+| `ddnet-ai-bot.service` | `Slice=ddnetaibot.slice` | | юнит едет в этом слайсе (в слайсе больше никого нет). Имя **без дефиса**: systemd читает `a-b.slice` как потомка `a.slice`, и на верхнем уровне соревновался бы вес родителя (100), а не наш |
+| `ddnet-ai-bot.service` | `CPUWeight=1000`, `IOWeight=1000` | | то же на самом юните: страховка, если юнит когда-нибудь окажется в общей cgroup (ручной запуск, `Slice=` убран) |
+| `ddnet-ai-bot.service` | `Nice=-5` | | `systemd.exec(5)`: −20…19, при нехватке ресурсов меньшее значение даёт больше. −5 мягко: вес планировщика 3121 против 1024; −20 вредило бы игровому серверу. Отрицательный nice требует `CAP_SYS_NICE`: systemd применяет его до сброса набора возможностей, поэтому пустой `CapabilityBoundingSet=` остаётся (проверено на VPS: процесс бота идёт с NI −5). Под cgroup v2 `Nice` ранжирует потоки только внутри одной cgroup, поэтому **один он бота от других cgroup не защищает** (замеры: «как без настроек»); оставлен как дешёвая страховка внутри cgroup |
+
+**Развёртывание** (боевой `/etc` трогает только лид; бот остановлен, `install-launcher.sh` иначе откажется):
+
+```bash
+cd ~/aiddnet/DDNet-AI
+deploy/install-launcher.sh          # кладёт ddnetaibot.slice и новый ddnet-ai-bot.service (прежние — в /var/backups/ddnet-ai-launcher/<метка>/), daemon-reload
+#   в конце печатает для юнита и слайса: «Slice=ddnetaibot.slice», «CPUWeight=1000», «Nice=-5», «IOWeight=1000» — или WARNING, если drop-in что-то переопределил
+sudo systemctl start ddnet-ai-bot   # (или «Запустить» на сайте); настройки применяются со следующего запуска
+# проверка работающего бота:
+systemctl show -p Slice,CPUWeight,Nice,IOWeight ddnet-ai-bot            # Slice=ddnetaibot.slice, CPUWeight=1000, Nice=-5, IOWeight=1000
+cat /sys/fs/cgroup/ddnetaibot.slice/cpu.weight                           # 1000 (рядом /sys/fs/cgroup/user.slice/cpu.weight = 100)
+ps -o pid,ni,args -p "$(systemctl show -p MainPID --value ddnet-ai-bot)" # NI −5
+```
+
+Откат: `deploy/install-launcher.sh --uninstall` возвращает прежний юнит бота и убирает слайс, либо скопировать прежний `ddnet-ai-bot.service` из резервной копии, `sudo rm /etc/systemd/system/ddnetaibot.slice`,
+`daemon-reload`. Юнит без слайса запускается и сам (systemd создаёт слайс неявно, с весом 100), просто без приоритета; поэтому `tools/e2e/soak.sh --unit` работает как прежде.
+
+**Что агентам.** Бота защищает **только его слайс** (или рычаг на самом `user.slice`, см. `docs/research/cpu-priority.md` §6): всё, что запускают агенты, живёт в `user.slice`, а бот соревнуется с
+`user.slice` целиком; никакая обёртка *внутри* `user.slice` долю бота не меняет. Поэтому `tools/lowprio.sh` — это справедливость между задачами агентов плюс привычка к малому числу потоков (`-j 3`), а не защита бота:
+
+```bash
+tools/lowprio.sh cargo build --release -j 3
+tools/lowprio.sh cargo test --workspace --locked
+tools/lowprio.sh target/release/examples/duel_stats --config … --threads 3
+LOWPRIO_IDLE=1 tools/lowprio.sh <команда>   # + SCHED_IDLE: ниже любого nice внутри вашей cgroup (две такие задачи делят процессор между собой, но уступают всем остальным)
+# без обёртки — то же:  nice -n 15 <команда>
+```
+
+Обёртка делает (каждый шаг пропускается, если инструмента нет; команда запускается всегда, через `exec`: статус выхода, потоки, окружение и **cgroup** — её собственные):
+`chrt --idle 0` (только с `LOWPRIO_IDLE=1`), `ionice -c2 -n7` (на этой VPS без эффекта: планировщик диска `none`, нужен BFQ), `nice -n 15`. Настройки: `LOWPRIO_NICE` (0…19), `LOWPRIO_IDLE=1`, `LOWPRIO_DRYRUN=1`.
+**Не использовать `systemd-run --user --scope` для «низкого приоритета»:** он переносит команду из `session-*.scope` в `user@1000.service/app.slice`, который соревнуется с сессией на равных, и команда получает *больше*
+процессора, чем обычный `nice -n 15` в сессии (проверка ревью 4.14: 1372 против 122 тиков у «самого низкого» процесса). Не больше 3 потоков, `-j 6` и больше — по согласованию с лидом.
+
+**Замер.** `tools/e2e/cpu_priority.sh <метка> 600 old|new|slice none|normal|low [потоков]` — бот и скриптовый соперник на **частном** сервере `127.0.0.1:8479` как транзитные системные юниты
+(`sudo systemd-run`, живут в `/run`, `/etc` не трогается), таблица — `tools/e2e/cpu_priority_table.py`; зонды — `tools/e2e/cpu_priority_probe.sh`. Никогда не 8303 и не публичный сервер.
+
+**Поиск в 2 потока** (`--search-threads 2`) под этими настройками выгоден и на тихой машине, и под нагрузкой (+3…+5 кандидатов, p99 не хуже); умолчание CLI пока 1 — рекомендация в D-124, правку делает лид.
 
 ## Запуск бота с сайта (задача 5.9, D-089)
 
@@ -460,6 +512,27 @@ systemctl cat ddnet-ai-bot | grep -- '--preinput ${BOT_PREINPUT}'   # юнит �
 обычный запуск проходит, а запуск с включённым выбором или с «ВБ» старый помощник отклонит как `bad_request`.
 Откат: прежний юнит из `/var/backups/ddnet-ai-launcher/<метка>/` и бинарник (юнит с `--preinput …` у бинарника старше 3.20 не запустится: сначала юнит, потом бинарник, как в разделе про 5.15); лишние строки окружения старому юниту не мешают.
 Проверка без боевых юнитов: `tools/e2e/options-e2e.sh` (карточка кликается в Playwright, два реальных запуска на приватном сервере: `--finish wb --preinput on`, затем умолчания).
+
+### «Потоки поиска» (задача 5.17, D-125): что меняется при развёртывании
+
+На карточке «Запуск» появился выбор «Потоки поиска» (1–4, по умолчанию 1) для гибридных мозгов; кнопка «Дуэль» ставит 3. Только для тихой машины: под нагрузкой больше потоков отнимает процессор у сборок и может не помочь (страница так и пишет).
+
+- **Поле запроса `search_threads`** — JSON-целое из закрытого списка {1, 2, 3, 4}; сайт шлёт его только при значении выше 1. Помощник пишет в `/etc/ddnet-ai/bot-launch.env` строку `BOT_SEARCH_THREADS="1"` … `"4"` (**всегда**, одна из четырёх статических строк), юнит передаёт её двумя словами, как `--preinput`: `--search-threads ${BOT_SEARCH_THREADS}` (в юните ещё `Environment=BOT_SEARCH_THREADS=1` — умолчание для ручного запуска). Ни файла, ни слова, ни пути: проверять и писать нечего, кроме четырёх цифр. Чистой мухе (она не ищет) — отказ `search_threads_hybrid_only` при значении выше 1 (и сайт, и помощник); `1` то же, что нет поля.
+- **Юнит.** Правятся только строки `Environment=` / `ExecStart=` и комментарий в шапке `ddnet-ai-bot.service`; `Slice` / `CPUWeight` / `Nice` (задача 4.14) этой задачей не тронуты.
+- **Статус.** `status.json` помощника несёт `search_threads`, STATUS бота — `search_threads` (карточка «Бот», строка «Потоки поиска»).
+
+**Порядок выкладки (меняется юнит бота, значит бот должен быть остановлен):**
+
+```bash
+cd ~/aiddnet/DDNet-AI
+deploy/install.sh                  # веб (карточка) и бинарник ~/aiddnet/bin/ddnet-ai
+deploy/install-launcher.sh         # ОБНОВЛЯЕТ юнит бота и помощника; отказывается при работающем боте и при бинарнике без --search-threads
+systemctl cat ddnet-ai-bot | grep -- '--search-threads ${BOT_SEARCH_THREADS}'   # юнит новый
+```
+
+`--search-threads` у бота с задачи 3.7a, поэтому новый юнит запустится и со старым бинарником; проверка `install-launcher.sh` («older build: run deploy/install.sh first») нужна на случай бинарника без флага. Новый помощник со **старым** юнитом молча не передал бы число: признак — после запуска с «3» строка «Потоки поиска» в карточке «Бот» не показывает 3. Пока страница уже новая, а помощник ещё старый (между двумя скриптами, бот остановлен), обычный запуск проходит, а запуск с `search_threads` старый помощник отклонит как `bad_request`.
+Откат: прежний юнит из `/var/backups/ddnet-ai-launcher/<метка>/`; лишняя строка `BOT_SEARCH_THREADS` в окружении старому юниту не мешает.
+Проверка без боевых юнитов: `tools/e2e/options-e2e.sh` (карточка кликается в Playwright; реальные запуски на приватном сервере: `--search-threads 3`, затем умолчание 1).
 
 ### Диагностика
 

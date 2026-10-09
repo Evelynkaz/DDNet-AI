@@ -616,7 +616,7 @@ mod tests {
 
     fn good_body() -> String {
         format!(
-            "# comment\nhost = \"{SECRET_HOST}\"\nport = 1080\nuser = \"{SECRET_USER}\"\npass = \"{SECRET_PASS}\"\nfor_server = \"45.141.57.35:8308\"\nnote = \"y\"\n"
+            "# comment\nhost = \"{SECRET_HOST}\"\nport = 1080\nuser = \"{SECRET_USER}\"\npass = \"{SECRET_PASS}\"\nfor_server = \"93.184.216.35:8308\"\nnote = \"y\"\n"
         )
     }
 
@@ -814,7 +814,7 @@ mod tests {
         let list: LiveServers = toml::from_str(
             r#"
             [[server]]
-            address = "45.141.57.35:8308"
+            address = "93.184.216.35:8308"
             nick = "Muha"
             ready = true
             proxy = "swarfey"
@@ -827,7 +827,7 @@ mod tests {
         )
         .unwrap();
         let addr = |s: &str| -> SocketAddr { s.parse().unwrap() };
-        let with = resolve_for_server(addr("45.141.57.35:8308"), "Muha", &list, dir.path()).unwrap();
+        let with = resolve_for_server(addr("93.184.216.35:8308"), "Muha", &list, dir.path()).unwrap();
         assert_eq!(with.unwrap().name(), "swarfey");
         // An entry without `proxy`, an unlisted address and loopback: direct, the file is never read.
         let empty_dir = tempfile::tempdir().unwrap();
@@ -839,11 +839,11 @@ mod tests {
             );
         }
         // The entry names a proxy whose file is absent: an error, not a silent direct connection.
-        let err = resolve_for_server(addr("45.141.57.35:8308"), "Muha", &list, empty_dir.path()).unwrap_err();
+        let err = resolve_for_server(addr("93.184.216.35:8308"), "Muha", &list, empty_dir.path()).unwrap_err();
         assert!(matches!(err, ProxyResolveError::Load { .. }), "{err:?}");
         // Another nick has no binding either way.
         assert!(
-            resolve_for_server(addr("45.141.57.35:8308"), "Other", &list, dir.path())
+            resolve_for_server(addr("93.184.216.35:8308"), "Other", &list, dir.path())
                 .unwrap()
                 .is_none()
         );
@@ -858,7 +858,7 @@ mod tests {
         let cfg = load_proxy(dir.path(), "swarfey").unwrap();
         assert_eq!(
             cfg.for_server_ips(),
-            vec!["45.141.57.35".parse::<IpAddr>().unwrap()],
+            vec!["93.184.216.35".parse::<IpAddr>().unwrap()],
             "still read, for the deny list"
         );
         // An entry for ANOTHER server that names the proxy gets it (the old refusal is gone).
@@ -870,7 +870,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.name(), "swarfey");
-        assert!(!format!("{got:?}").contains("45.141"));
+        assert!(!format!("{got:?}").contains("93.184"));
         // Bad values are rejected without echoing them.
         for body in ["for_server = 5\n", "for_server = \"\"\n"] {
             write_proxy(dir.path(), "bad", &format!("host = \"h\"\nport = 1\n{body}"), 0o600);
@@ -888,7 +888,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ProxyResolveError::Load { .. }), "{err:?}");
-        for s in [SECRET_USER, SECRET_PASS, SECRET_HOST, "45.141.57.35"] {
+        for s in [SECRET_USER, SECRET_PASS, SECRET_HOST, "93.184.216.35"] {
             assert!(!format!("{err} {err:?}").contains(s), "{s}");
         }
     }
@@ -1051,8 +1051,11 @@ mod tests {
     fn for_server_ips_and_port_are_read_without_printing() {
         let pinned = ProxyConfig::new("p", "h", 1, None)
             .unwrap()
-            .with_for_server("[::ffff:45.141.57.35]:8308");
-        assert_eq!(pinned.for_server_ips(), vec!["45.141.57.35".parse::<IpAddr>().unwrap()]);
+            .with_for_server("[::ffff:93.184.216.35]:8308");
+        assert_eq!(
+            pinned.for_server_ips(),
+            vec!["93.184.216.35".parse::<IpAddr>().unwrap()]
+        );
         assert_eq!(pinned.for_server_port(), Some(8308));
         let none = ProxyConfig::new("p", "h", 1, None).unwrap();
         assert!(none.for_server_ips().is_empty());
