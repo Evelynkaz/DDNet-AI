@@ -28,6 +28,8 @@ pub struct LossCfg {
     pub k_weight: [f32; HORIZON],
     /// Weight of a clip sample against an arena one.
     pub clip_weight: f32,
+    /// Weight of a human-game sample (source 2, task 3.24) against an arena one.
+    pub human_weight: f32,
 }
 
 impl Default for LossCfg {
@@ -42,6 +44,7 @@ impl Default for LossCfg {
             press_pos: 3.0,
             k_weight: [1.0, 1.0, 0.5, 0.5],
             clip_weight: 1.0,
+            human_weight: 1.0,
         }
     }
 }
@@ -100,7 +103,11 @@ pub fn loss_and_grad(out: &[f32], l: &Label, cfg: &LossCfg, src_weight: f32, d: 
 }
 
 fn src_weight(cfg: &LossCfg, r: SampleRef) -> f32 {
-    if r.src == 1 { cfg.clip_weight } else { 1.0 }
+    match r.src {
+        1 => cfg.clip_weight,
+        2 => cfg.human_weight,
+        _ => 1.0,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -317,6 +324,9 @@ pub struct Cell {
     pub n_true: u64,
     pub hold_true: u64,
     pub model_true: u64,
+    /// Paired against the true previous input: samples the model got right and hold wrong / the reverse (task 3.24: the sign test).
+    pub only_model: u64,
+    pub only_hold: u64,
 }
 
 /// Fire head scores by tick: `(logit, label)`.
@@ -351,6 +361,8 @@ impl Metrics {
                 a.n_true += b.n_true;
                 a.hold_true += b.hold_true;
                 a.model_true += b.model_true;
+                a.only_model += b.only_model;
+                a.only_hold += b.only_hold;
             }
             self.aim[k].0 += o.aim[k].0;
             self.aim[k].1 += o.aim[k].1;
@@ -363,20 +375,27 @@ impl Metrics {
     pub fn table(&self) -> String {
         let pct = |a: u64, n: u64| if n == 0 { f64::NAN } else { 100.0 * a as f64 / n as f64 };
         let mut s = format!("samples: {}\n\n", self.samples);
-        s.push_str("| head | k | n | model % | hold(snapshot) % | n (arena) | model % | hold(true) % |\n|---|---:|---:|---:|---:|---:|---:|---:|\n");
+        s.push_str("| head | k | n | model % | hold(snapshot) % | n (true prev) | model % | hold(true) % | only model / only hold | sign-test p |\n|---|---:|---:|---:|---:|---:|---:|---:|---|---:|\n");
         for (name, cells) in [("direction", &self.dir), ("hook", &self.hook), ("jump", &self.jump)] {
             for (k, c) in cells.iter().enumerate() {
                 if c.n == 0 {
                     continue;
                 }
                 s.push_str(&format!(
-                    "| {name} | {k} | {} | {:.1} | {:.1} | {} | {:.1} | {:.1} |\n",
+                    "| {name} | {k} | {} | {:.1} | {:.1} | {} | {:.1} | {:.1} | {} / {} | {} |\n",
                     c.n,
                     pct(c.model, c.n),
                     pct(c.hold_snap, c.n),
                     c.n_true,
                     pct(c.model_true, c.n_true),
-                    pct(c.hold_true, c.n_true)
+                    pct(c.hold_true, c.n_true),
+                    c.only_model,
+                    c.only_hold,
+                    if c.n_true == 0 {
+                        "-".to_string()
+                    } else {
+                        format!("{:.3}", sign_test_p(c.only_model, c.only_hold))
+                    }
                 ));
             }
         }
@@ -409,6 +428,35 @@ impl Metrics {
         }
         s
     }
+}
+
+/// Two-sided exact sign test (binomial, p = 1/2) for `a` wins against `b` losses of a paired comparison (normal approximation with continuity
+/// correction above 1000 discordant pairs).
+pub fn sign_test_p(a: u64, b: u64) -> f64 {
+    let n = a + b;
+    if n == 0 {
+        return 1.0;
+    }
+    let k = a.min(b);
+    if n > 1000 {
+        let z = ((k as f64 + 0.5) - n as f64 / 2.0) / (n as f64 / 4.0).sqrt();
+        // 2 * Phi(z) for z <= 0 through the complementary error function (Abramowitz-Stegun 7.1.26)
+        let t = 1.0 / (1.0 + 0.327_591_1 * (z.abs() / std::f64::consts::SQRT_2));
+        let poly =
+            t * (0.254_829_592 + t * (-0.284_496_736 + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
+        let erfc = poly * (-(z * z) / 2.0).exp();
+        return erfc.clamp(0.0, 1.0);
+    }
+    // sum_{i<=k} C(n, i) / 2^n, accumulated in log space
+    let mut log_c = 0.0f64; // ln C(n, 0)
+    let mut p = 0.0f64;
+    for i in 0..=k {
+        if i > 0 {
+            log_c += ((n - i + 1) as f64).ln() - (i as f64).ln();
+        }
+        p += (log_c - n as f64 * std::f64::consts::LN_2).exp();
+    }
+    (2.0 * p).min(1.0)
 }
 
 /// Area under the ROC curve of `(score, label)` pairs (rank-sum with mid-ranks for ties).
@@ -484,7 +532,10 @@ pub fn evaluate(m: &Mlp, c: &Corpus, samples: &[SampleRef], dec: &Decode) -> Met
                         if let Some(p) = prev {
                             c.n_true += 1;
                             c.model_true += u64::from(dir == l.dir[k]);
-                            c.hold_true += u64::from((i32::from(p.direction) + 1) as u8 == l.dir[k]);
+                            let hold_ok = (i32::from(p.direction) + 1) as u8 == l.dir[k];
+                            c.hold_true += u64::from(hold_ok);
+                            c.only_model += u64::from(dir == l.dir[k] && !hold_ok);
+                            c.only_hold += u64::from(dir != l.dir[k] && hold_ok);
                         }
                     }
                     if l.v_hook >> k & 1 != 0 {
@@ -495,8 +546,11 @@ pub fn evaluate(m: &Mlp, c: &Corpus, samples: &[SampleRef], dec: &Decode) -> Met
                         c.hold_snap += u64::from(snap_hook == lh);
                         if let Some(p) = prev {
                             c.n_true += 1;
-                            c.model_true += u64::from(super::predictor::decode_hook(o[4], dec, snap_hook) == lh);
+                            let model_ok = super::predictor::decode_hook(o[4], dec, snap_hook) == lh;
+                            c.model_true += u64::from(model_ok);
                             c.hold_true += u64::from(p.hook == lh);
+                            c.only_model += u64::from(model_ok && p.hook != lh);
+                            c.only_hold += u64::from(!model_ok && p.hook == lh);
                         }
                     }
                     if l.v_jump >> k & 1 != 0 {
@@ -507,8 +561,11 @@ pub fn evaluate(m: &Mlp, c: &Corpus, samples: &[SampleRef], dec: &Decode) -> Met
                         c.hold_snap += u64::from(!lj);
                         if let Some(p) = prev {
                             c.n_true += 1;
-                            c.model_true += u64::from((o[3] > dec.jump) == lj);
+                            let model_ok = (o[3] > dec.jump) == lj;
+                            c.model_true += u64::from(model_ok);
                             c.hold_true += u64::from(p.jump == lj);
+                            c.only_model += u64::from(model_ok && p.jump != lj);
+                            c.only_hold += u64::from(!model_ok && p.jump == lj);
                         }
                     }
                     if l.v_aim >> k & 1 != 0 {
@@ -644,6 +701,23 @@ mod tests {
             &mut e3,
         );
         assert_eq!(e1[5], e3[5], "a negative label is not reweighted");
+    }
+
+    #[test]
+    fn the_sign_test_matches_known_values() {
+        assert!((sign_test_p(0, 0) - 1.0).abs() < 1e-12);
+        // 9 : 1 of 10 -> two-sided p = 2 * (1 + 10) / 1024
+        assert!((sign_test_p(9, 1) - 22.0 / 1024.0).abs() < 1e-9);
+        assert!((sign_test_p(5, 5) - 1.0).abs() < 1e-9);
+        // the normal branch is continuous with the exact one
+        let exact = sign_test_p(480, 520);
+        let approx = sign_test_p(480, 521);
+        assert!(
+            (exact - 0.2175).abs() < 0.002 && (approx - exact).abs() < 0.015,
+            "{exact} {approx}"
+        );
+        assert!((sign_test_p(1010, 1090) - 0.0847).abs() < 0.002);
+        assert!(sign_test_p(700, 400) < 1e-10);
     }
 
     #[test]

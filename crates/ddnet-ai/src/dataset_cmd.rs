@@ -57,6 +57,19 @@ pub enum DatasetCommand {
         /// are unlinked on creation. Default: the system temporary directory.
         #[arg(long)]
         spill_dir: Option<PathBuf>,
+        /// Use the players' real inputs (`Sv_PreInput` messages the client recorded, task 3.24)
+        /// wherever a demo has them: replay and labels use them, the samples are flagged
+        /// `REAL_INPUT`. Off = the inputs are reconstructed from the snapshots, as before.
+        #[arg(long)]
+        real_inputs: bool,
+        /// Skip snapshots closer than this many ticks to the last one used (0 = use all; 2 makes a server that
+        /// sends a snapshot every tick look like the usual 25 Hz stream).
+        #[arg(long, default_value_t = 0)]
+        min_frame_spacing: i32,
+        /// Snapshots at most this many ticks apart (and at least one) still count as one step (0 = only exactly 2 ticks, the
+        /// old rule): a server that skips snapshots now and then no longer cuts every freeze run and hook episode.
+        #[arg(long, default_value_t = 0)]
+        max_frame_gap: i32,
     },
     /// Prints the report of a dataset; `--verify` also checks every chunk's sha256.
     Info {
@@ -134,6 +147,9 @@ fn run_inner(cmd: DatasetCommand) -> Result<(), String> {
             source,
             limit,
             spill_dir,
+            real_inputs,
+            min_frame_spacing,
+            max_frame_gap,
         } => {
             let opts = Options {
                 demos_dir: demos,
@@ -147,7 +163,17 @@ fn run_inner(cmd: DatasetCommand) -> Result<(), String> {
                 top_players: 20,
                 spill_dir,
             };
-            let rep = run::from_demos(&opts, &Config::default(), &|m| eprintln!("{m}")).map_err(|e| e.to_string())?;
+            let rep = run::from_demos(
+                &opts,
+                &Config {
+                    real_inputs,
+                    min_frame_spacing,
+                    max_frame_gap,
+                    ..Config::default()
+                },
+                &|m| eprintln!("{m}"),
+            )
+            .map_err(|e| e.to_string())?;
             println!("{}", report::render(&rep));
             Ok(())
         }

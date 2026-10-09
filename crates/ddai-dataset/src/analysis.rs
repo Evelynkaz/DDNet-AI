@@ -316,7 +316,7 @@ impl<'a> Timeline<'a> {
 
     /// Frames `k` and `k + 1` are one decision step apart.
     pub fn contiguous(&self, k: usize) -> bool {
-        k + 1 < self.len() && self.tick(k + 1) - self.tick(k) == self.cfg.decision_ticks
+        k + 1 < self.len() && self.cfg.is_step(self.tick(k + 1) - self.tick(k))
     }
 
     /// Label of the character with client id `id` in frame `k`.

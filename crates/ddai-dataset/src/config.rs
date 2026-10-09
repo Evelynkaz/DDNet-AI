@@ -109,6 +109,33 @@ pub struct Config {
     pub chunk_frames: usize,
     pub zstd_level: i32,
     pub technique: TechniqueConfig,
+    /// Replay and label with the players' real inputs (`Sv_PreInput`, task 3.24) wherever a demo
+    /// has them. Left out of the serialized config when off, so the hash (and every dataset) of
+    /// the reconstructed-input pipeline is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub real_inputs: bool,
+    /// Skip snapshots less than this many ticks after the last one used (`0` = use all; `2` makes a
+    /// server that sends a snapshot every tick look like the 25 Hz stream the pipeline expects).
+    /// Left out of the serialized config when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub min_frame_spacing: i32,
+    /// Two consecutive snapshots at most this many ticks apart (and at least one) still count as one step: the pipeline replays the interval
+    /// and the detectors treat the frames as contiguous (`0` = only exactly `decision_ticks`, the old rule; left out of the serialized config
+    /// when 0). A server that skips snapshots now and then (the owner's 50 Hz duel demos lose about a tenth of them) otherwise cuts every
+    /// freeze run and hook episode at each missing one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_frame_gap: i32,
+}
+
+fn is_zero(v: &i32) -> bool {
+    *v == 0
+}
+
+impl Config {
+    /// Whether two snapshots `diff` ticks apart are one step of the pipeline.
+    pub fn is_step(&self, diff: i32) -> bool {
+        diff == self.decision_ticks || (self.max_frame_gap > 0 && (1..=self.max_frame_gap).contains(&diff))
+    }
 }
 
 impl Default for Config {
@@ -129,6 +156,9 @@ impl Default for Config {
             chunk_frames: 2048,
             zstd_level: 3,
             technique: TechniqueConfig::default(),
+            real_inputs: false,
+            min_frame_spacing: 0,
+            max_frame_gap: 0,
         }
     }
 }
@@ -163,5 +193,28 @@ mod tests {
         assert_eq!(a.hash_hex().len(), 64);
         b.technique.hook_range += 1.0;
         assert_ne!(a.hash_hex(), b.hash_hex());
+    }
+
+    #[test]
+    fn real_inputs_off_leaves_the_serialized_config_and_its_hash_alone() {
+        let a = Config::default();
+        assert!(!serde_json::to_string(&a).unwrap().contains("real_inputs"));
+        assert!(!serde_json::to_string(&a).unwrap().contains("min_frame_spacing"));
+        assert!(!serde_json::to_string(&a).unwrap().contains("max_frame_gap"));
+        assert!(a.is_step(2) && !a.is_step(1) && !a.is_step(3));
+        let g = Config {
+            max_frame_gap: 4,
+            ..Config::default()
+        };
+        assert!(g.is_step(1) && g.is_step(2) && g.is_step(4) && !g.is_step(5) && !g.is_step(0));
+        let b = Config {
+            real_inputs: true,
+            ..Config::default()
+        };
+        assert!(serde_json::to_string(&b).unwrap().contains("\"real_inputs\":true"));
+        assert_ne!(a.hash_hex(), b.hash_hex());
+        // an old manifest (no such field) reads back as off
+        let old: Config = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert!(!old.real_inputs);
     }
 }

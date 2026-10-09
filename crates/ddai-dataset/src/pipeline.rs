@@ -38,6 +38,7 @@ use ddai_recorder::reconstruct::{CharacterSample, StreamReconstructor};
 use ddai_world::{LiveWorld, SnapshotInput, character_observation};
 
 use crate::config::Config;
+use crate::humaninput::{Track, TrueTable};
 use crate::ingest::{Ingested, LabelTracker};
 use crate::replay::{Channel, Diff, ReplayStats, diff};
 use crate::types::{ActionRec, CharRec, FrameRec, ReplayClass, char_flags};
@@ -55,6 +56,9 @@ pub struct StepInfo {
     pub active: bool,
     /// The wire core at the next snapshot was fresh (the inputs were observable).
     pub next_fresh: bool,
+    /// The action is the player's real input from the demo's `Sv_PreInput` messages
+    /// ([`crate::humaninput`]), not reconstructed from snapshots.
+    pub real: bool,
 }
 
 /// Output of [`build`]: the whole demo in memory (tests and small inputs; the pipeline streams
@@ -171,6 +175,15 @@ struct Derived {
     fresh: bool,
     /// For each step of the interval: the press applied in that step (`attack_tick == prev + step`).
     fire_at: Vec<bool>,
+    /// Real inputs (task 3.24): the input of each step with the press counter as sent, and the
+    /// counter in force at the start of the interval. `None` for reconstructed inputs.
+    real: Option<RealSteps>,
+}
+
+#[derive(Clone)]
+struct RealSteps {
+    steps: Vec<PlayerInput>,
+    fire_base: i32,
 }
 
 /// What the reconstructor knows about one character of a frame: its current sample and the fire
@@ -196,6 +209,7 @@ fn derive(rec: Option<Recon<'_>>, prev_tick: i32, tick: i32) -> Derived {
             input: to_input(&action),
             fresh: false,
             fire_at: vec![false; n],
+            real: None,
         };
     };
     let est = &r.sample.input;
@@ -227,7 +241,62 @@ fn derive(rec: Option<Recon<'_>>, prev_tick: i32, tick: i32) -> Derived {
         input: to_input(&action),
         fresh,
         fire_at,
+        real: None,
     }
+}
+
+/// The interval `[prev_tick, tick)` from a player's real inputs: step `s` (world tick
+/// `prev + s` to `prev + s + 1`) applies the input of tick `prev + s + 1`. `None` when the track
+/// has nothing in force yet at the first step (the caller falls back to the reconstruction).
+fn derive_real(track: &Track, shift: i32, prev_tick: i32, tick: i32) -> Option<Derived> {
+    let n = (tick - prev_tick).max(0) as usize;
+    track.at(prev_tick + 1 - shift)?;
+    let fire_base = track.at(prev_tick - shift).map_or(0, |e| e.fire);
+    let mut steps = Vec::with_capacity(n);
+    let mut fire_at = Vec::with_capacity(n);
+    let mut last_fire = fire_base;
+    for s in 0..n {
+        let e = track.at(prev_tick + 1 + s as i32 - shift)?;
+        fire_at.push(ddai_physics::world::count_input_presses(last_fire, e.fire) != 0);
+        last_fire = e.fire;
+        steps.push(PlayerInput {
+            direction: i32::from(e.direction),
+            target_x: e.aim[0],
+            target_y: e.aim[1],
+            jump: i32::from(e.jump),
+            fire: e.fire,
+            hook: i32::from(e.hook),
+            player_flags: 0,
+            wanted_weapon: 0,
+            next_weapon: 0,
+            prev_weapon: 0,
+        });
+    }
+    let last = steps.last().copied()?;
+    let aim = if last.target_x == 0 && last.target_y == 0 {
+        [0, -1]
+    } else {
+        [last.target_x, last.target_y]
+    };
+    let action = ActionRec {
+        direction: i8c(last.direction),
+        jump: steps.iter().any(|i| i.jump != 0),
+        hook: last.hook != 0,
+        fire: fire_at.iter().any(|&f| f),
+        aim,
+    };
+    // The union input the ablation looks at: a channel counts as active when it is at any step.
+    let mut input = last;
+    input.hook = i32::from(steps.iter().any(|i| i.hook != 0));
+    input.jump = i32::from(action.jump);
+    input.direction = steps.iter().map(|i| i.direction).find(|&d| d != 0).unwrap_or(0);
+    Some(Derived {
+        action,
+        input,
+        fresh: true,
+        fire_at,
+        real: Some(RealSteps { steps, fire_base }),
+    })
 }
 
 fn to_input(a: &ActionRec) -> PlayerInput {
@@ -290,6 +359,13 @@ fn interval_inputs(ids: &[u8], derived: &[Derived], ticks: usize) -> Vec<Vec<Tic
                 .zip(derived)
                 .zip(counters.iter_mut())
                 .map(|((&id, d), c)| {
+                    if let Some(input) = d.real.as_ref().and_then(|r| r.steps.get(t)) {
+                        return TickInput {
+                            id,
+                            input: *input,
+                            kill: false,
+                        };
+                    }
                     let press = d.fire_at.get(t).copied().unwrap_or(false);
                     if press {
                         *c += if *c % 2 == 0 { 1 } else { 2 };
@@ -307,8 +383,22 @@ fn interval_inputs(ids: &[u8], derived: &[Derived], ticks: usize) -> Vec<Vec<Tic
 
 /// Replays the interval from `start`, one tick at a time with that tick's inputs, and returns the
 /// outcome of each requested id.
-fn run(scratch: &mut World<f32>, start: &World<f32>, inputs: &[Vec<TickInput>], ids: &[u8]) -> Vec<Option<Outcome>> {
+fn run(
+    scratch: &mut World<f32>,
+    start: &World<f32>,
+    inputs: &[Vec<TickInput>],
+    ids: &[u8],
+    fire_bases: &[Option<i32>],
+) -> Vec<Option<Outcome>> {
     scratch.restore_from(start);
+    // Real inputs carry the press counter as sent: the character must start from the counter in
+    // force, or the first step would count the whole counter as presses.
+    for (&id, base) in ids.iter().zip(fire_bases) {
+        if let (Some(base), Some(c)) = (base, scratch.characters[id as usize].as_mut()) {
+            c.latest_input.fire = *base;
+            c.latest_prev_input.fire = *base;
+        }
+    }
     // The replay world starts without projectiles. Since task 2.4b `LiveWorld` itself holds none
     // unless its caller passes the snapshot's projectile items (`SnapshotInput::projectiles`); this
     // pipeline does not, on purpose: the recording client strips the DDNet extra info from legacy
@@ -494,9 +584,24 @@ pub fn build_stream<E>(
     map: &Arc<MapData>,
     table: &ReconTable,
     frames: impl Iterator<Item = (Frame, ddai_net::tuning::TuneParams)>,
+    sink: impl FnMut(FrameOut) -> Result<(), E>,
+) -> Result<BuildSummary, E> {
+    build_stream_real(cfg, map, table, None, frames, sink)
+}
+
+/// [`build_stream`] with the players' real inputs (`real`, task 3.24): wherever a player's
+/// `Sv_PreInput` track has an input in force the interval is replayed with it (and
+/// [`StepInfo::real`] is set); everywhere else the reconstructed input is used as before. With
+/// `real == None` this is exactly [`build_stream`].
+pub fn build_stream_real<E>(
+    cfg: &Config,
+    map: &Arc<MapData>,
+    table: &ReconTable,
+    real: Option<&TrueTable>,
+    frames: impl Iterator<Item = (Frame, ddai_net::tuning::TuneParams)>,
     mut sink: impl FnMut(FrameOut) -> Result<(), E>,
 ) -> Result<BuildSummary, E> {
-    let mut b = Builder::new(cfg, map);
+    let mut b = Builder::new(cfg, map, real);
     // Nothing older than the current fire is needed from the reconstructor here: the fire lists
     // come from the table.
     let mut recon = StreamReconstructor::new();
@@ -516,29 +621,91 @@ pub fn build_stream<E>(
     })
 }
 
+/// Turns the characters of a snapshot into the views `LiveWorld` takes, giving those without the
+/// `DDNetCharacter` extension a synthetic one (freeze inferred from the ninja convention, see
+/// [`infer_freeze`]). Remembers, per anonymous player, the last real weapon and when the freeze began.
+/// Public so that other tools can build the same worlds as this pipeline (task 3.24: opponent-model
+/// data from demos).
+#[derive(Debug, Default)]
+pub struct ViewBuilder {
+    last_weapon: HashMap<u16, i32>,
+    frozen_since: HashMap<u16, i32>,
+}
+
+impl ViewBuilder {
+    /// `labels` is aligned with `characters` (the `(client id, label)` row of [`LabelTracker::push`]).
+    pub fn views(
+        &mut self,
+        cfg: &Config,
+        tick: i32,
+        characters: &[ddai_recorder::format::CharacterRecord],
+        labels: &[(i32, u16)],
+    ) -> Vec<CharacterView> {
+        let mut views: Vec<CharacterView> = Vec::with_capacity(characters.len());
+        for (ci, c) in characters.iter().enumerate() {
+            let label = labels[ci].1;
+            let mut character = c.character;
+            let ddnet = match c.ddnet {
+                Some(d) => Some(d),
+                None => {
+                    let frozen = infer_freeze(character.weapon);
+                    let since = *self.frozen_since.entry(label).or_insert(tick);
+                    if !frozen {
+                        self.frozen_since.remove(&label);
+                    }
+                    let active = if frozen {
+                        *self.last_weapon.get(&label).unwrap_or(&WEAPON_HAMMER)
+                    } else {
+                        self.last_weapon.insert(label, character.weapon);
+                        character.weapon
+                    };
+                    character.weapon = active;
+                    let target = aim_from_angle(character.angle);
+                    Some(synth_ddnet(
+                        c.id,
+                        tick,
+                        frozen,
+                        if frozen { tick - since } else { 0 },
+                        active,
+                        target,
+                        cfg,
+                    ))
+                }
+            };
+            views.push(CharacterView {
+                id: c.id,
+                character,
+                ddnet,
+            });
+        }
+        views
+    }
+}
+
 /// The per-frame state of the pipeline.
 struct Builder<'a> {
     cfg: &'a Config,
+    /// Real inputs of the demo's players, if the caller has them.
+    real: Option<&'a TrueTable>,
     live: LiveWorld,
     /// Boxed: see `LiveWorld`'s fields (a by-value `World` blew the 2 MiB stack of test threads).
     scratch: Box<World<f32>>,
-    last_weapon: HashMap<u16, i32>,
-    frozen_since: HashMap<u16, i32>,
+    views: ViewBuilder,
     /// Tick and record of frame k-1 (its steps are completed when frame k is processed).
     prev: Option<(i32, FrameRec)>,
     out: BuildSummary,
 }
 
 impl<'a> Builder<'a> {
-    fn new(cfg: &'a Config, map: &Arc<MapData>) -> Self {
+    fn new(cfg: &'a Config, map: &Arc<MapData>, real: Option<&'a TrueTable>) -> Self {
         let live = LiveWorld::new(Arc::clone(map), -1, 0);
         let scratch = Box::new(live.base_world().clone());
         Builder {
             cfg,
+            real,
             live,
             scratch,
-            last_weapon: HashMap::new(),
-            frozen_since: HashMap::new(),
+            views: ViewBuilder::default(),
             prev: None,
             out: BuildSummary::default(),
         }
@@ -593,7 +760,7 @@ impl<'a> Builder<'a> {
         let mut replayed: Option<Replayed> = None;
         if let Some((prev_tick, prev_frame)) = &self.prev {
             let prev_tick = *prev_tick;
-            if tick - prev_tick == cfg.decision_ticks {
+            if cfg.is_step(tick - prev_tick) {
                 let mut both: Vec<(u8, usize)> = Vec::new();
                 for (slot, pc) in prev_frame.chars.iter().enumerate() {
                     if characters.iter().any(|c| c.id == i32::from(pc.id)) {
@@ -616,11 +783,20 @@ impl<'a> Builder<'a> {
                         .expect("present in both frames");
                     r.ids.push(id);
                     r.slots.push(slot);
-                    r.derived.push(derive(recon_of(ci), prev_tick, tick));
+                    let label = prev_frame.chars[slot].player;
+                    let shift = self.real.map_or(0, |t| t.tick_shift);
+                    let real_derived = self
+                        .real
+                        .and_then(|t| t.track(label))
+                        .and_then(|track| derive_real(track, shift, prev_tick, tick));
+                    r.derived
+                        .push(real_derived.unwrap_or_else(|| derive(recon_of(ci), prev_tick, tick)));
                 }
-                let ticks = cfg.decision_ticks.max(0) as usize;
+                let fire_bases: Vec<Option<i32>> =
+                    r.derived.iter().map(|d| d.real.as_ref().map(|x| x.fire_base)).collect();
+                let ticks = (tick - prev_tick).max(0) as usize;
                 let inputs = interval_inputs(&r.ids, &r.derived, ticks);
-                r.base = run(&mut self.scratch, self.live.base_world(), &inputs, &r.ids);
+                r.base = run(&mut self.scratch, self.live.base_world(), &inputs, &r.ids, &fire_bases);
                 for ch in Channel::ALL {
                     if !r.derived.iter().any(|d| channel_active(&d.input, ch)) {
                         continue;
@@ -638,7 +814,13 @@ impl<'a> Builder<'a> {
                                 .collect()
                         })
                         .collect();
-                    r.ablated[ch as usize] = Some(run(&mut self.scratch, self.live.base_world(), &alt, &r.ids));
+                    r.ablated[ch as usize] = Some(run(
+                        &mut self.scratch,
+                        self.live.base_world(),
+                        &alt,
+                        &r.ids,
+                        &fire_bases,
+                    ));
                 }
                 let starts: Vec<[f32; 2]> = r.slots.iter().map(|&s| prev_frame.chars[s].pos).collect();
                 r.neighbours = (0..starts.len())
@@ -657,43 +839,7 @@ impl<'a> Builder<'a> {
         }
 
         // --- advance the live world to snapshot k ---
-        let mut views: Vec<CharacterView> = Vec::with_capacity(characters.len());
-        for (ci, c) in characters.iter().enumerate() {
-            let label = labels[ci].1;
-            let mut character = c.character;
-            let ddnet = match c.ddnet {
-                Some(d) => Some(d),
-                None => {
-                    let frozen = infer_freeze(character.weapon);
-                    let since = *self.frozen_since.entry(label).or_insert(tick);
-                    if !frozen {
-                        self.frozen_since.remove(&label);
-                    }
-                    let active = if frozen {
-                        *self.last_weapon.get(&label).unwrap_or(&WEAPON_HAMMER)
-                    } else {
-                        self.last_weapon.insert(label, character.weapon);
-                        character.weapon
-                    };
-                    character.weapon = active;
-                    let target = aim_from_angle(character.angle);
-                    Some(synth_ddnet(
-                        c.id,
-                        tick,
-                        frozen,
-                        if frozen { tick - since } else { 0 },
-                        active,
-                        target,
-                        cfg,
-                    ))
-                }
-            };
-            views.push(CharacterView {
-                id: c.id,
-                character,
-                ddnet,
-            });
-        }
+        let views = self.views.views(cfg, tick, characters, labels);
         // No projectiles: the replay deliberately does not simulate them (see `docs/formats.md` §20.2).
         self.live.on_snapshot(SnapshotInput::new(tick, &views, tune));
         let world = self.live.base_world();
@@ -849,7 +995,15 @@ impl<'a> Builder<'a> {
                         replay: d.class,
                         pos_err: d.pos_err,
                         active,
-                        next_fresh: dv.fresh,
+                        // a real input is always observed; whether the *target* is a true server state is the next core's age
+                        next_fresh: if dv.real.is_some() {
+                            characters
+                                .iter()
+                                .any(|c| c.id == i32::from(r.ids[i]) && tick - c.character.tick <= 1)
+                        } else {
+                            dv.fresh
+                        },
+                        real: dv.real.is_some(),
                     });
                 }
                 // Characters of frame k-1 that are absent now.
@@ -1183,6 +1337,236 @@ mod tests {
         let stats = built.replay.get(&1).expect("player 1 has stats");
         let h = &stats.channels[Channel::Hook as usize];
         assert!(h.active >= 10 && h.confirmed > 0, "{h:?}");
+    }
+
+    /// The track a `Sv_PreInput` stream of the scripted run would give: one event per interval and
+    /// player, applied at the interval's first tick.
+    fn real_table(frames: &[Frame], script: &[[PlayerInput; 2]]) -> TrueTable {
+        let mut table = TrueTable::default();
+        for (k, iv) in script.iter().enumerate() {
+            let Frame::Snapshot { tick, .. } = &frames[k] else {
+                panic!("snapshot frames only")
+            };
+            for (player, i) in iv.iter().enumerate() {
+                table
+                    .tracks
+                    .entry(player as u16)
+                    .or_default()
+                    .events
+                    .push(crate::humaninput::InputEvent {
+                        intended: tick + 1,
+                        arrived: *tick,
+                        direction: i.direction as i8,
+                        jump: i.jump != 0,
+                        hook: i.hook != 0,
+                        fire: i.fire,
+                        aim: [i.target_x, i.target_y],
+                    });
+            }
+        }
+        table
+    }
+
+    fn build_real(ing: &Ingested, table: &TrueTable) -> Built {
+        build_real_cfg(&Config::default(), ing, table)
+    }
+
+    fn build_real_cfg(cfg: &Config, ing: &Ingested, table: &TrueTable) -> Built {
+        let mut out = Built::default();
+        let frames = || ing.frames_with_tunes();
+        let recon = recon_table(frames());
+        let summary = build_stream_real::<std::convert::Infallible>(cfg, &map(), &recon, Some(table), frames(), |fo| {
+            out.frames.push(fo.frame);
+            out.steps.push(fo.steps);
+            Ok(())
+        })
+        .unwrap_or_else(|e| match e {});
+        out.replay = summary.replay.clone();
+        out.summary = summary;
+        out
+    }
+
+    impl Built {
+        fn counters_gaps(&self) -> u64 {
+            self.summary.counters.gaps
+        }
+    }
+
+    fn move_jump_hook_script() -> Vec<[PlayerInput; 2]> {
+        let idle = input(0, false, false, (0, -1));
+        let mut script: Vec<[PlayerInput; 2]> = Vec::new();
+        for _ in 0..6 {
+            script.push([input(1, false, false, (100, -30)), idle]);
+        }
+        script.push([input(1, true, false, (100, -30)), idle]);
+        script.push([input(1, false, false, (100, -30)), idle]);
+        for _ in 0..6 {
+            script.push([input(-1, false, false, (-100, 20)), idle]);
+        }
+        script
+    }
+
+    #[test]
+    fn real_inputs_replay_the_perfect_server_run_exactly_and_are_flagged() {
+        let script = move_jump_hook_script();
+        let frames = scripted_run(&script);
+        let table = real_table(&frames, &script);
+        let built = build_real(&ingested(frames), &table);
+        let mut n = 0;
+        for (k, iv) in script.iter().enumerate() {
+            for (slot, c) in built.frames[k].chars.iter().enumerate() {
+                let st = built.steps[k][slot].expect("a step");
+                assert!(st.real, "frame {k}: the real input was used");
+                assert_eq!(st.replay, ReplayClass::Exact, "frame {k}: {st:?}");
+                let truth = &iv[c.id as usize];
+                assert_eq!(i32::from(st.action.direction), truth.direction);
+                assert_eq!(st.action.jump, truth.jump != 0);
+                n += 1;
+            }
+        }
+        assert_eq!(n, 2 * script.len());
+        // The default path is unchanged: nothing is flagged real.
+        let plain = build(&Config::default(), &map(), &ingested(scripted_run(&script)));
+        assert!(plain.steps.iter().flatten().flatten().all(|st| !st.real));
+    }
+
+    #[test]
+    fn a_missing_snapshot_is_bridged_with_the_real_inputs_only_when_the_gap_is_allowed() {
+        let script = move_jump_hook_script();
+        let mut frames = scripted_run(&script);
+        let table = real_table(&frames, &script);
+        frames.remove(4); // the snapshot between frames 3 and 5 never came: one 4-tick interval
+        let ing = ingested(frames);
+        let strict = build_real(&ing, &table);
+        assert_eq!(
+            strict.counters_gaps(),
+            1,
+            "the old rule counts a gap and replays nothing across it"
+        );
+        assert!(strict.steps[3].iter().all(Option::is_none));
+        let cfg = Config {
+            max_frame_gap: 4,
+            ..Config::default()
+        };
+        let lenient = build_real_cfg(&cfg, &ing, &table);
+        assert_eq!(lenient.counters_gaps(), 0);
+        let st = lenient.steps[3][0].expect("the 4-tick interval is replayed");
+        assert!(st.real);
+        assert_eq!(st.replay, ReplayClass::Exact, "{st:?}");
+        // every interval, bridged or not, replays exactly
+        assert!(
+            lenient
+                .steps
+                .iter()
+                .flatten()
+                .flatten()
+                .all(|s| s.replay == ReplayClass::Exact)
+        );
+    }
+
+    #[test]
+    fn a_wrong_real_input_shows_up_as_a_replay_mismatch() {
+        let script = move_jump_hook_script();
+        let frames = scripted_run(&script);
+        let mut table = real_table(&frames, &script);
+        // player 0 "really" pressed the other way
+        for e in &mut table.tracks.get_mut(&0).unwrap().events {
+            e.direction = -e.direction;
+        }
+        let built = build_real(&ingested(frames), &table);
+        let off = built
+            .steps
+            .iter()
+            .flat_map(|s| s.first().copied().flatten())
+            .filter(|st| st.real && st.replay != ReplayClass::Exact)
+            .count();
+        assert!(off >= 5, "the false input must not replay exactly ({off} mismatches)");
+    }
+
+    #[test]
+    fn real_hammer_presses_replay_on_the_exact_attack_tick() {
+        let idle = input(0, false, false, (0, -1));
+        let swing = |fire: i32| PlayerInput {
+            fire,
+            ..input(0, false, false, (100, 0))
+        };
+        let mut script: Vec<[PlayerInput; 2]> = Vec::new();
+        script.push([
+            PlayerInput {
+                wanted_weapon: 1,
+                ..idle
+            },
+            idle,
+        ]);
+        for _ in 0..3 {
+            script.push([idle, idle]);
+        }
+        script.push([swing(1), idle]);
+        script.push([swing(2), idle]);
+        for _ in 0..12 {
+            script.push([swing(2), idle]);
+        }
+        script.push([swing(3), idle]);
+        script.push([swing(4), idle]);
+        for _ in 0..4 {
+            script.push([swing(4), idle]);
+        }
+        let frames = scripted_run_at(&script, [(200.0, 338.0), (236.0, 338.0)]);
+        let table = real_table(&frames, &script);
+        let built = build_real(&ingested(frames), &table);
+        let stats = built.replay.get(&0).expect("player 0 has stats");
+        assert_eq!(stats.fire_events, 2, "the counter shows two presses");
+        assert_eq!(
+            stats.fire_tick_match, 2,
+            "both fire on the attack tick of the snapshots"
+        );
+        assert!(
+            built
+                .steps
+                .iter()
+                .flatten()
+                .flatten()
+                .all(|st| st.replay == ReplayClass::Exact)
+        );
+    }
+
+    #[test]
+    fn without_a_real_input_in_force_the_reconstruction_is_used() {
+        let script = move_jump_hook_script();
+        let frames = scripted_run(&script);
+        let ticks: Vec<i32> = frames
+            .iter()
+            .map(|f| match f {
+                Frame::Snapshot { tick, .. } => *tick,
+                _ => unreachable!(),
+            })
+            .collect();
+        let mut table = real_table(&frames, &script);
+        // Player 0: one event at the start, and it re-appears at frame 5: from then on nothing
+        // says what it did.
+        let restart = ticks[5];
+        let track = table.tracks.get_mut(&0).unwrap();
+        track.events.truncate(1);
+        track.restarts.push(restart);
+        let built = build_real(&ingested(frames), &table);
+        for (k, st) in built.steps.iter().enumerate() {
+            let Some(st) = st.first().copied().flatten() else {
+                continue;
+            };
+            // the step of frame k applies the inputs of ticks ticks[k] + 1 and + 2; the event is stale
+            // from the restart on, and one stale tick makes the whole step fall back
+            assert_eq!(st.real, ticks[k] + 2 < restart, "frame {k}");
+            assert_eq!(st.replay, ReplayClass::Exact, "frame {k}: the fallback replays too");
+        }
+        assert!(built.steps[0][0].unwrap().real && !built.steps[8][0].unwrap().real);
+        // player 1's track is untouched
+        assert!(
+            built
+                .steps
+                .iter()
+                .flat_map(|s| s.get(1).copied().flatten())
+                .all(|st| st.real)
+        );
     }
 
     fn ext_free_frame(tick: i32, weapon: i32, x: i32) -> Frame {
