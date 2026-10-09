@@ -1,6 +1,6 @@
 #!/bin/bash
 # Task 3.23 (E-038): the pre-registered confirmation runs of docs/research/duel-fixes-3.23.md §0, one after the other (3 threads, nice 15).
-# usage: tools/d121/run_confirm.sh   (from the repository root, after `cargo build --release -p ddai-env --examples -p ddnet-ai`)
+# usage: tools/d121/run_confirm.sh   (from the repository root, after `cargo build --release -p ddai-env -p ddnet-ai --bins --examples`)
 set -u
 E=${E:-$HOME/aiddnet/data/runs/E-038}
 CLIPS=$HOME/aiddnet/data/scratch/pm-1008/cfclips

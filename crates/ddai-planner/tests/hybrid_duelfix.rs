@@ -149,31 +149,32 @@ fn all_on() -> DuelFixConfig {
     }
 }
 
+/// Default identity against `main` rests on the goldens (`e010-golden`, `e020-golden-v2`, a live-view duel cell: bit-identical, E-038); this test is the
+/// other half: with every fix **on** but no duel detected (`duel_only`), the decisions are those of the default brain.
 #[test]
-fn outside_a_duel_and_switched_off_the_decisions_are_the_default_ones() {
+fn with_every_fix_on_but_no_duel_the_decisions_are_the_default_ones() {
     // A standing victim and a frozen one lying off the freeze: both situations of the fixes. Same seed, same world, the work clock: a pure function.
     let scenes = [scene(5.5, 8.5, 0), scene(5.5, 13.5, 150)];
+    let plan = |t: &DecisionTelemetry| {
+        t.chosen_plan
+            .iter()
+            .map(|s| (s.dir, s.jump, s.hook, s.fire))
+            .collect::<Vec<_>>()
+    };
+    let mut differs = false;
     for pw in &scenes {
         let (base_idle, base) = decisions(&mut brain(8.0, DuelFixConfig::default(), true), pw, 40);
-        // Switched off in a duel: the default (the field is untouched).
-        let (idle_off, off) = decisions(&mut brain(8.0, DuelFixConfig::default(), true), pw, 40);
-        assert_eq!((&idle_off, &off.chosen_plan), (&base_idle, &base.chosen_plan));
-        // On, but no duel is on (`duel_only`): the same decisions as the default.
         let (idle_nd, nd) = decisions(&mut brain(8.0, all_on(), false), pw, 40);
         assert_eq!(idle_nd, base_idle, "outside a duel nothing changes");
-        assert_eq!(nd.chosen_plan.len(), base.chosen_plan.len());
-        assert_eq!(
-            nd.chosen_plan
-                .iter()
-                .map(|s| (s.dir, s.jump, s.hook, s.fire))
-                .collect::<Vec<_>>(),
-            base.chosen_plan
-                .iter()
-                .map(|s| (s.dir, s.jump, s.hook, s.fire))
-                .collect::<Vec<_>>()
-        );
-        assert!(!nd.static_push);
+        assert_eq!(plan(&nd), plan(&base));
+        assert_eq!(nd.best_score.to_bits(), base.best_score.to_bits());
+        assert!(!nd.static_push && !nd.finish_push);
+        // In a duel the same fixes do change the decision (so the comparison above can fail).
+        let (idle_duel, duel) = decisions(&mut brain(8.0, all_on(), true), pw, 40);
+        assert!(duel.static_push || duel.finish_push, "the fixes act in a duel");
+        differs |= idle_duel != base_idle || plan(&duel) != plan(&base);
     }
+    assert!(differs, "in a duel the fixes change at least one of the two decisions");
 }
 
 #[test]
@@ -209,7 +210,7 @@ fn a_frozen_victim_off_the_freeze_is_finished_with_the_fix_and_one_in_the_freeze
     };
     // Frozen on the floor 3 tiles away, 150 ticks left, off the pit: the push is on at the first decision.
     let (idle, t) = decisions(&mut brain(8.0, on, true), &scene(5.5, 8.5, 150), 1);
-    assert!(t.static_push && !idle[0], "{:?}", t.chosen_plan);
+    assert!(t.finish_push && !t.static_push && !idle[0], "{:?}", t.chosen_plan);
     // In the pit (x 20..25): it stays frozen by itself, nothing is pushed.
     let mut pit = PhysicsWorld::new(hall(), 1);
     pit.add_tee(
@@ -228,10 +229,10 @@ fn a_frozen_victim_off_the_freeze_is_finished_with_the_fix_and_one_in_the_freeze
     );
     pit.inner_mut().characters[1].as_mut().expect("victim").freeze_time = 150;
     let (_, t) = decisions(&mut brain(8.0, on, true), &pit, 1);
-    assert!(!t.static_push, "a victim lying in the freeze is left alone");
+    assert!(!t.finish_push, "a victim lying in the freeze is left alone");
     // About to thaw: nothing we walk to arrives in time.
     let (_, t) = decisions(&mut brain(8.0, on, true), &scene(5.5, 8.5, 20), 1);
-    assert!(!t.static_push);
+    assert!(!t.finish_push);
 }
 
 #[test]

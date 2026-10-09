@@ -108,10 +108,15 @@ pub const RELEASE_BELOW_PX: f64 = 8.0;
 /// How fast (px/tick, upward) we must be rising for the release to matter (a rope pull that has not got us going yet is not the pattern).
 pub const RELEASE_RISE_VY: f64 = 4.0;
 
-/// The counter of the 2026-10-08 human: whether the victim, which holds its hook on us, lets go now -- it is below us (`y` grows downwards) and we rise
-/// at more than [`RELEASE_RISE_VY`]: the speed the rope gave us carries us up without his pull.
+/// The counter of the 2026-10-08 human: whether the victim, whose hook **holds us** (`hooked_player` is our id), lets go now -- it is below us (`y` grows
+/// downwards) and we rise at more than [`RELEASE_RISE_VY`]: the speed the rope gave us carries us up without his pull. A hook that is not on us (one he fires at
+/// us from below, one he holds on a wall) is never released by this rule (review 3.23 round 1, F1).
 pub fn counter_releases(me: &TeeState, victim: &TeeState) -> bool {
-    me.alive && !me.frozen && victim.pos.y > me.pos.y + RELEASE_BELOW_PX && me.vel.y < -RELEASE_RISE_VY
+    me.alive
+        && !me.frozen
+        && victim.hooked_player == me.id
+        && victim.pos.y > me.pos.y + RELEASE_BELOW_PX
+        && me.vel.y < -RELEASE_RISE_VY
 }
 
 /// The freeze a frozen victim must still have for the finishing to start (ticks): shorter than that nothing we walk to arrives in time.
@@ -302,9 +307,13 @@ mod tests {
     fn the_counter_lets_go_once_he_is_below_us_and_we_rise() {
         let mut me = tee(0, 100.0, 300.0);
         me.vel = Vec2 { x: 0.0, y: -12.0 };
-        let below = tee(1, 100.0, 330.0);
-        let above = tee(1, 100.0, 200.0);
-        let level = tee(1, 100.0, 304.0);
+        let hooking = |mut t: TeeState| {
+            t.hooked_player = 0;
+            t
+        };
+        let below = hooking(tee(1, 100.0, 330.0));
+        let above = hooking(tee(1, 100.0, 200.0));
+        let level = hooking(tee(1, 100.0, 304.0));
         assert!(counter_releases(&me, &below));
         assert!(
             !counter_releases(&me, &above),
@@ -320,6 +329,12 @@ mod tests {
         let mut frozen = me;
         frozen.frozen = true;
         assert!(!counter_releases(&frozen, &below));
+        // His hook is not on us (a hook he fires at us from below, one he holds on a wall): nothing to let go of.
+        for hooked in [-1, 2] {
+            let mut elsewhere = below;
+            elsewhere.hooked_player = hooked;
+            assert!(!counter_releases(&me, &elsewhere), "hooked_player {hooked}");
+        }
     }
 
     #[test]
@@ -385,5 +400,87 @@ mod tests {
             assert!(!drop_hammer_at_frozen(&on(), m, v, 0, &mut out));
             assert_eq!(out.fire, 1);
         }
+    }
+
+    /// A rollout of `steps` idle steps of ours against the reacting victim (`scripted_action`), the counter on or off; returns the victim's tee after it.
+    fn react_rollout(w: &mut crate::physics_adapter::PhysicsWorld, counter: bool, steps: usize) -> TeeState {
+        let saved = w.save_state();
+        let cfg = crate::config::PlannerConfig {
+            counter_release: counter,
+            ..crate::config::preset_normal()
+        };
+        let mut planner = crate::planner::Planner::<crate::physics_adapter::PhysicsWorld>::new(cfg);
+        planner.react_this_pass = true;
+        planner.keep_final = true;
+        let field = crate::fields::hazard_field(w.collision());
+        let unfreeze = crate::fields::unfreeze_field(w.collision());
+        let idle = PlanStep {
+            dir: 0,
+            jump: 0,
+            hook: 0,
+            fire: 0,
+            aim: 0.0,
+        };
+        let plan = vec![idle; steps];
+        let score = planner.evaluate_impl(w, 0, 1, empty_input(), &plan, empty_input(), &field, &unfreeze, None);
+        assert!(score.is_some());
+        let him = w.get_tee(1).expect("the victim");
+        w.restore_state(&saved);
+        him
+    }
+
+    /// Review 3.23 round 1, F1: the counter lets go only of a hook that **holds us**. A hook he fires at us from below is kept (the victim stands on the floor
+    /// 190 px under us and we rise): in the first three ticks the reacting victim throws it, counter on or off.
+    #[test]
+    fn a_hook_fired_at_us_from_below_is_kept_in_the_rollout() {
+        let mut world = box_world();
+        world.add_tee(0, Vec2 { x: 176.0, y: 400.0 });
+        world.add_tee(1, Vec2 { x: 176.0, y: 585.0 });
+        let mut me = world.get_tee(0).expect("us");
+        me.vel = Vec2 { x: 0.0, y: -12.0 };
+        world.apply_tee_state(0, &me);
+        for counter in [false, true] {
+            let him = react_rollout(&mut world, counter, 1);
+            assert!(
+                him.hook_state != 0,
+                "counter {counter}: his hook was dropped before it was even thrown ({him:?})"
+            );
+        }
+    }
+
+    /// ... and a hook he holds on us is let go once he is below us while we rise (he passed under us with the rope on and the speed it gave us carries us up):
+    /// with the counter off the rope is still on us after the first step of the rollout, with it on it is gone. Nothing differs while he is still above us.
+    #[test]
+    fn a_hook_held_on_us_is_released_once_he_has_passed_under_in_the_rollout() {
+        let held_by = |him_y: f64, counter: bool| {
+            let mut world = box_world();
+            world.add_tee(0, Vec2 { x: 176.0, y: 300.0 });
+            world.add_tee(1, Vec2 { x: 176.0, y: him_y });
+            let mut me = world.get_tee(0).expect("us");
+            me.vel = Vec2 { x: 0.0, y: -12.0 };
+            world.apply_tee_state(0, &me);
+            let mut him = world.get_tee(1).expect("him");
+            him.hooked_player = 0;
+            him.hook_state = crate::types::HOOK_GRABBED;
+            him.hook_pos = Vec2 { x: 176.0, y: 300.0 };
+            world.apply_tee_state(1, &him);
+            let start = world.get_tee(1).expect("him");
+            assert_eq!(
+                (start.hooked_player, start.hook_state),
+                (0, crate::types::HOOK_GRABBED),
+                "the rope holds us"
+            );
+            react_rollout(&mut world, counter, 1)
+        };
+        // He is below us (120 px) and we rise at 12 px/tick: the counter lets go, the plain model holds.
+        assert_eq!(
+            held_by(420.0, false).hooked_player,
+            0,
+            "the plain model keeps the rope on us"
+        );
+        assert_ne!(held_by(420.0, true).hooked_player, 0, "the counter lets go");
+        // He is still above us (the rope pulls us up toward him): both hold.
+        assert_eq!(held_by(180.0, false).hooked_player, 0);
+        assert_eq!(held_by(180.0, true).hooked_player, 0, "above us he holds");
     }
 }

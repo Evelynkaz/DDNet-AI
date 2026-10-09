@@ -22,7 +22,7 @@ use crate::hybrid::search::{DecisionInput, DecisionTelemetry, HybridSearch, SOUR
 use crate::hybrid::window::{PredictedInput, WindowCtx, WindowModel, input_from_prediction};
 use crate::physics_adapter::{PhysicsWorld, from_ddnet_input};
 use crate::plan_world::PlanWorld;
-use crate::types::{PlayerInput, empty_input};
+use crate::types::{PlayerInput, TeeState, empty_input};
 
 fn dist_f32(a: ddai_physics::vmath::Vec2<f32>, b: ddai_physics::vmath::Vec2<f32>) -> f64 {
     f64::from(a.x - b.x).hypot(f64::from(a.y - b.y))
@@ -215,11 +215,12 @@ pub struct HybridBrain {
     fixes: FixTotals,
 }
 
-/// Task 3.23: decisions that went through the choice among the plans that act (`pushed`: a static victim or a frozen one off the freeze) and
+/// Task 3.23: decisions that went through the choice among the plans that act (`static_pushed`: a static victim; `finish_pushed`: a frozen one off the freeze) and
 /// swings at a frozen victim dropped (`hammer_vetoes`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FixTotals {
-    pub pushed: u64,
+    pub static_pushed: u64,
+    pub finish_pushed: u64,
     pub hammer_vetoes: u64,
 }
 
@@ -230,6 +231,31 @@ pub struct ReflexTotals {
     pub aimed: u64,
     pub jump_vetoes: u64,
     pub hook_vetoes: u64,
+}
+
+/// Task 3.23 (fix 3): drops a fresh swing at a frozen victim within reach from the decided input `out` (a hit unfreezes it). Only in a duel (`duel_only`) and
+/// not when the shield has replaced the input (its escape comes first). Counts the vetoes in `fixes`.
+#[allow(clippy::too_many_arguments)]
+fn veto_hammer_at_frozen(
+    cfg: &HybridConfig,
+    live_duel: bool,
+    fixes: &mut FixTotals,
+    prev_fire: i32,
+    me: &TeeState,
+    victim: &TeeState,
+    out: &mut PlayerInput,
+    shielded: bool,
+) {
+    if shielded || !(live_duel || !cfg.duel_fixes.duel_only) {
+        return;
+    }
+    fixes.hammer_vetoes += u64::from(crate::hybrid::duelfix::drop_hammer_at_frozen(
+        &cfg.duel_fixes,
+        me,
+        victim,
+        prev_fire,
+        out,
+    ));
 }
 
 impl HybridBrain {
@@ -589,16 +615,17 @@ impl HybridBrain {
         );
         if let Some((me, victim, _)) = acting
             && fixes_on
-            && !tel.shielded
         {
-            let dropped = crate::hybrid::duelfix::drop_hammer_at_frozen(
-                &self.cfg.duel_fixes,
+            veto_hammer_at_frozen(
+                &self.cfg,
+                self.live_duel,
+                &mut self.fixes,
+                self.prev.fire,
                 &me,
                 &victim,
-                self.prev.fire,
                 &mut out,
+                tel.shielded,
             );
-            self.fixes.hammer_vetoes += u64::from(dropped);
         }
         if let Some((me, victim, now)) = acting
             && reflex_on
@@ -635,7 +662,8 @@ impl HybridBrain {
                 }
             }
         }
-        self.fixes.pushed += u64::from(tel.static_push);
+        self.fixes.static_pushed += u64::from(tel.static_push);
+        self.fixes.finish_pushed += u64::from(tel.finish_push);
         self.totals.add(&tel);
         self.stats.decisions += 1;
         self.stats.searched += 1;
@@ -803,8 +831,8 @@ impl Brain for HybridBrain {
             String::new()
         } else {
             format!(
-                ",\"duel_fixes\":{{\"pushed\":{},\"hammer_vetoes\":{}}}",
-                self.fixes.pushed, self.fixes.hammer_vetoes
+                ",\"duel_fixes\":{{\"static_pushed\":{},\"finish_pushed\":{},\"hammer_vetoes\":{}}}",
+                self.fixes.static_pushed, self.fixes.finish_pushed, self.fixes.hammer_vetoes
             )
         };
         Some(format!(
@@ -817,5 +845,156 @@ impl Brain for HybridBrain {
             reflex,
             fixes
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hybrid::duelfix::DuelFixConfig;
+    use crate::types::blank_tee_state;
+    use crate::vmath::Vec2;
+
+    fn tee(id: i32, x: f64) -> TeeState {
+        let mut t = blank_tee_state();
+        t.id = id;
+        t.alive = true;
+        t.pos = Vec2 { x, y: 100.0 };
+        t
+    }
+
+    fn brain(fixes: DuelFixConfig) -> HybridBrain {
+        let cfg = HybridConfig {
+            duel_fixes: fixes,
+            ..HybridConfig::fixed()
+        };
+        HybridBrain::new(cfg, ClockKind::Wall, Box::new(NoProposer)).expect("valid")
+    }
+
+    fn swing() -> PlayerInput {
+        let mut o = empty_input();
+        o.fire = 1;
+        o
+    }
+
+    /// Task 3.23 (review round 1, F3): the brain removes a fresh swing at a frozen victim within reach from the decided input -- in a duel, not when the
+    /// shield has replaced the input, never with the switch off -- and counts it.
+    #[test]
+    fn the_brain_drops_a_swing_at_a_frozen_victim_in_a_duel_and_counts_it() {
+        let on = DuelFixConfig {
+            no_hammer_frozen: true,
+            ..DuelFixConfig::default()
+        };
+        let me = tee(0, 100.0);
+        let mut frozen = tee(1, 150.0);
+        frozen.frozen = true;
+        let ctx = |duel| LiveContext {
+            duel,
+            ..LiveContext::default()
+        };
+        let mut b = brain(on);
+        b.set_live_context(&ctx(true));
+        let mut out = swing();
+        veto_hammer_at_frozen(
+            &b.cfg,
+            b.live_duel,
+            &mut b.fixes,
+            b.prev.fire,
+            &me,
+            &frozen,
+            &mut out,
+            false,
+        );
+        assert_eq!(out.fire, 0, "the swing is gone");
+        assert_eq!(b.fixes.hammer_vetoes, 1);
+        // The shield's input is left alone; so is a free victim; so is a swing out of reach.
+        let mut out = swing();
+        veto_hammer_at_frozen(
+            &b.cfg,
+            b.live_duel,
+            &mut b.fixes,
+            b.prev.fire,
+            &me,
+            &frozen,
+            &mut out,
+            true,
+        );
+        assert_eq!(out.fire, 1, "shielded");
+        let mut out = swing();
+        veto_hammer_at_frozen(
+            &b.cfg,
+            b.live_duel,
+            &mut b.fixes,
+            b.prev.fire,
+            &me,
+            &tee(1, 150.0),
+            &mut out,
+            false,
+        );
+        assert_eq!(out.fire, 1, "a free victim");
+        let mut far = frozen;
+        far.pos.x = 400.0;
+        let mut out = swing();
+        veto_hammer_at_frozen(
+            &b.cfg,
+            b.live_duel,
+            &mut b.fixes,
+            b.prev.fire,
+            &me,
+            &far,
+            &mut out,
+            false,
+        );
+        assert_eq!(out.fire, 1, "out of reach");
+        assert_eq!(b.fixes.hammer_vetoes, 1);
+        // No duel (`duel_only`): nothing.
+        let mut b = brain(on);
+        b.set_live_context(&ctx(false));
+        let mut out = swing();
+        veto_hammer_at_frozen(
+            &b.cfg,
+            b.live_duel,
+            &mut b.fixes,
+            b.prev.fire,
+            &me,
+            &frozen,
+            &mut out,
+            false,
+        );
+        assert_eq!(out.fire, 1, "outside a duel");
+        // Switched off: nothing, in a duel too.
+        let mut b = brain(DuelFixConfig::default());
+        b.set_live_context(&ctx(true));
+        let mut out = swing();
+        veto_hammer_at_frozen(
+            &b.cfg,
+            b.live_duel,
+            &mut b.fixes,
+            b.prev.fire,
+            &me,
+            &frozen,
+            &mut out,
+            false,
+        );
+        assert_eq!(out.fire, 1, "switched off");
+        assert_eq!(b.fixes.hammer_vetoes, 0);
+    }
+
+    /// The telemetry carries the fixes' counters only when a fix is on, and tells the two pushes apart.
+    #[test]
+    fn the_telemetry_has_the_fixes_key_only_with_a_fix_on() {
+        let off = brain(DuelFixConfig::default()).telemetry().expect("telemetry");
+        assert!(!off.contains("duel_fixes"), "{off}");
+        let on = brain(DuelFixConfig {
+            static_push: true,
+            ..DuelFixConfig::default()
+        })
+        .telemetry()
+        .expect("telemetry");
+        assert!(
+            on.contains("\"duel_fixes\":{\"static_pushed\":0,\"finish_pushed\":0,\"hammer_vetoes\":0}"),
+            "{on}"
+        );
+        serde_json::from_str::<serde_json::Value>(&on).expect("valid json");
     }
 }

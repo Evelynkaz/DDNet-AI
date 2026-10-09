@@ -279,8 +279,10 @@ pub struct DecisionTelemetry {
     /// Time the opponent model took (ms on the decision's clock; 0 when it did not run) and whether its deadline cut it short.
     pub mirror_ms: f64,
     pub mirror_cut: bool,
-    /// Task 3.23: the decision chose among the plans that act, against a static victim.
+    /// Task 3.23 (fix 1): the decision chose among the plans that act, against a static victim.
     pub static_push: bool,
+    /// Task 3.23 (fix 3): the same for a frozen victim lying off the freeze.
+    pub finish_push: bool,
     /// Task 3.9 fire counters of the opt-in switches (so an inert one is visible): polish variants and wall-throw candidates put in
     /// the pool (they are counted under `generated` as `cem` / `throw`, too). JSON: `generated.polish` / `generated.wall`, only when non-zero.
     pub polished: u32,
@@ -1680,15 +1682,16 @@ impl HybridSearch {
         let fixes_on = !cfg.duel_fixes.duel_only || inp.duel;
         let finishing =
             fixes_on && crate::hybrid::duelfix::finish_push(&cfg.duel_fixes, self.world.collision(), &me, &victim);
-        self.push_static = finishing
-            || (fixes_on
-                && crate::hybrid::duelfix::static_push(
-                    &cfg.duel_fixes,
-                    &me,
-                    &victim,
-                    if self.passive.0 == victim_id { self.passive.1 } else { 0 },
-                ));
-        tel.static_push = self.push_static;
+        let standing = fixes_on
+            && crate::hybrid::duelfix::static_push(
+                &cfg.duel_fixes,
+                &me,
+                &victim,
+                if self.passive.0 == victim_id { self.passive.1 } else { 0 },
+            );
+        self.push_static = finishing || standing;
+        tel.static_push = standing;
+        tel.finish_push = finishing;
         self.mirror_inputs.clear();
         // The clock is read only when the model runs: a step clock (tests) advances on every read.
         let (mut t_mirror, mut mirror_ms) = (0.0, 0.0);
