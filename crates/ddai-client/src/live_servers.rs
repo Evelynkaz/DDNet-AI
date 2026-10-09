@@ -1,7 +1,7 @@
 //! `~/aiddnet/data/live-servers.toml` (task 8.4a acceptance criterion 5; D-027/D-038): the
 //! owner-curated allow-list of the *non-loopback* servers this project may ever connect to for
-//! live play or observer recording, each pinned to the one nick approved for it (D-027: Swarfey
-//! `93.184.216.35:8308`, nick "Muha"). The file lives outside this git repository (`CLAUDE.md`'s
+//! live play or observer recording, each pinned to the one nick approved for it (D-027: Swarfey,
+//! nick "Muha"). The file lives outside this git repository (`CLAUDE.md`'s
 //! "never commit ... addresses of the owner's servers" is not violated by code that only *reads*
 //! a path under `~/aiddnet/data`) and is loaded at runtime, never baked into a binary.
 //!

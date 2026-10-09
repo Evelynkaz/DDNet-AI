@@ -370,6 +370,7 @@ These rules are written down as decisions ([docs/DECISIONS.md](docs/DECISIONS.md
 - **We do not evade kicks or bans** (D-016). If kicked or banned the bot stops (exit code 3, the unit is not restarted), the case is written down and the owner decides.
   The server (and every port on its IP) stays closed until the owner presses «Открыть снова» himself (D-099). No changing of nicknames or addresses,
   no VPN or proxy to get around it.
+- **Addresses in examples and tests are made up.** Examples, tests and fixtures name no third-party servers: they use documentation addresses (RFC 5737, 192.0.2.0/24 and the like), or a neutral example (`93.184.216.0/24`, the former example.com address, not a game server) where the check requires a public IP.
 - **One bot per server**, at most 5 connections per 20 s to one server, at most two join attempts before entering the game (D-037, D-050, D-058).
 - **The owner chooses the servers.** Before every connection the client checks the address: apart from the local one, a connection is possible only to a
   server in the owner's favourites (marked as "the admin allows the bot") or to an entry of `live-servers.toml` with `ready = true` (D-099); `--server auto`
