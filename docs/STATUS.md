@@ -38,7 +38,7 @@ clippy, все тесты, `ddai-libm` с программным `fma`, release-
 SOCKS5-сервер (неблокирующий сокет после `accept` на Windows; продуктовый клиент был верен); пути в TOML тестов;
 Unix-only тесты; тесты дуэли на потоке 64 МиБ. Ревью Opus этих правок не было (владелец остановил, у ревьюеров кончился
 недельный лимит до 14.10) — лид проверил локально (clippy, 4035 тестов) и по CI. **Релиз v0.2.0** — Linux-архив и
-`ddnet-ai.exe` из CI. Задача 4.13b начата и остановлена по слову владельца (спека `data/specs/4.13b-mirror-speed.md`).
+`ddnet-ai.exe` из CI — **опубликован** (https://github.com/Evelynkaz/DDNet-AI/releases/tag/v0.2.0). Задача 4.13b начата и остановлена по слову владельца (спека `data/specs/4.13b-mirror-speed.md`).
 
 **Слито и выкачено 09.10:** 5.19 (`install.sh` не ходит в apt, если Caddy уже стоит; ждёт блокировки apt, `--skip-apt`;
 D-130) — проверено настоящей выкаткой; 5.18 (переключатель «Исправления дуэли» на сайте, D-129); 3.24 (ходы людей из
@@ -63,6 +63,7 @@ D-130) — проверено настоящей выкаткой; 5.18 (пер�
 
 ## Долги и отложенное
 
+- Нестабильные на Windows CI тесты по времени (упали на `581008e`, прошли на `25a5751` и при перезапуске): `ddai-planner` `hybrid::engine::pool_tests::a_stalled_helper_*` («the helper never took a job») и `ddai-client` `tests/reconnect_flood.rs` `handshake_watchdog_stops_a_join_that_never_progresses` («must CLOSE gracefully»). Сделать устойчивыми (ждать события, а не времени), не ослабляя проверку.
 - 4.13 (ревью, NIT): `e2e_live_timing.rs:276` — не-фокальным ботам `search_threads` = `None` (auto), а комментарий говорит «по умолчанию, один поток»; `World::step_bounded`/`restore_from_bounded` публичные, а предусловие `id_hi` проверяется только в debug.
 
 - Провенанс наборов данных (найдено 2026-10-01). `dataset from-demos` пишет в манифест текущий HEAD git, а не
